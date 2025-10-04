@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    cloud_sub_topic: "/livox/lidar/pointcloud"
+    global_costmap_pub_topic: "/global_costmap"
+    num_threads: 8
+    cloud_queue_size: 1
+    num_neighbors: 10
+    map_x_size: 560
+    map_y_size: 200
+    close_kernel_size: 5
+    dilate_kernel_size: 5
+    gaussian_blur_size: 17
+    voxel_leaf_size: 0.05
+    max_radius: 100.0
+    max_relative_z: 0.5
+    min_relative_z: 0.0
