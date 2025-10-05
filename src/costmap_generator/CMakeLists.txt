@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(terrain_analysis)
+project(costmap_generator)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")
@@ -20,7 +20,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
 
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN terrain_analysis::TerrainAnalysisNode
+  PLUGIN costmap_generator::CostmapGeneratorNode
   EXECUTABLE ${PROJECT_NAME}_node
 )
 

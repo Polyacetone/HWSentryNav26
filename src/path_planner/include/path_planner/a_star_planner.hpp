@@ -2,8 +2,6 @@
 
 #include <memory>
 #include <Eigen/Core>
-#include <nav_msgs/msg/occupancy_grid.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <path_planner/costmap_2d.hpp>
 
 namespace path_planner {
@@ -19,13 +17,13 @@ struct Node {
 class AStarPlanner {
 public:
     explicit AStarPlanner(
-        const int downsampled_waypoint_max_interval = 20,
-        const int occupied_threshold = 60
+        const int downsampled_waypoint_max_interval,
+        const int occupied_threshold
     );
     std::vector<Eigen::Vector2i> search_path(
         const Costmap2D& costmap,
-        const geometry_msgs::msg::PoseStamped& start,
-        const geometry_msgs::msg::PoseStamped& goal
+        const Eigen::Vector2i& start_grid,
+        const Eigen::Vector2i& goal_grid
     ) const;
 
 private:

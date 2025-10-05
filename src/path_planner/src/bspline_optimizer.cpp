@@ -11,6 +11,7 @@ using Spline = ubs::UniformBSpline<double, 2, double, Eigen::Vector2d, std::vect
 
 // 残差函数类的定义和实现
 namespace path_planner {
+// 障碍物代价涉及离散的代价地图，需要手动求导
 class ObstacleCostFunction : public ceres::CostFunction {
 public:
     explicit ObstacleCostFunction(
@@ -51,6 +52,7 @@ private:
     const double weight_;
 };
 
+// 长度代价使用自动求导
 class LengthCostFunction {
 public:
     explicit LengthCostFunction(double weight): weight_(weight) {}

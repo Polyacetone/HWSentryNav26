@@ -7,10 +7,10 @@ namespace path_planner {
 class BSplineOptimizer {
 public:
     explicit BSplineOptimizer(
-        const double num_samples_per_length = 0.4,
-        const double obstable_weight = 1e-0,
-        const double length_weight = 1e-3,
-        const double smooth_weight = 1e-5
+        const double num_samples_per_length,
+        const double obstable_weight,
+        const double length_weight,
+        const double smooth_weight
     );
     std::vector<Eigen::Vector2d> optimize(
         const Costmap2D& costmap,

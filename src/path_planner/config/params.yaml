@@ -1,11 +1,17 @@
 /**:
   ros__parameters:
-    a_star:
+    global_costmap_sub_topic: "costmap"
+    start_sub_topic: "start"
+    goal_sub_topic: "goal"
+    path_pub_topic: "path"
+    plan_freq: 10
+
+    a_star_planner:
       downsampled_waypoint_max_interval: 20 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
       occupied_threshold: 60 # OccupancyGrid中占据值达到多少认为是障碍物
 
-    path_optimizer:
+    bspline_optimizer:
       num_samples_per_length: 0.4 # B样条的每长度采样点个数，用于计算障碍物代价等（长度以格子为单位）
       obstable_weight: 1e-0
-      length_weight: 1e-3
-      smooth_weight: 1e-5
+      length_weight: 1e-5
+      smooth_weight: 5e-6

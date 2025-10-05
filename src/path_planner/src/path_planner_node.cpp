@@ -24,6 +24,8 @@ private:
 
     nav_msgs::msg::OccupancyGrid::SharedPtr map_;
     geometry_msgs::msg::PoseStamped::SharedPtr goal_, start_;
+    std::shared_ptr<AStarPlanner> a_star_planner_;
+    std::shared_ptr<BSplineOptimizer> bspline_optimizer_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     std::vector<Eigen::Vector2d> vv2i_to_vv2d(const std::vector<Eigen::Vector2i>& path) const;
@@ -34,38 +36,54 @@ private:
 };
 
 PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner_node") {
+    int downsampled_waypoint_max_interval = declare_parameter<int>("a_star_planner.downsampled_waypoint_max_interval");
+    int occupied_threshold = declare_parameter<int>("a_star_planner.occupied_threshold");
+    a_star_planner_ = std::make_shared<AStarPlanner>(downsampled_waypoint_max_interval, occupied_threshold);
+    double num_samples_per_length = declare_parameter<double>("bspline_optimizer.num_samples_per_length");
+    double obstable_weight = declare_parameter<double>("bspline_optimizer.obstable_weight");
+    double length_weight = declare_parameter<double>("bspline_optimizer.length_weight");
+    double smooth_weight = declare_parameter<double>("bspline_optimizer.smooth_weight");
+    bspline_optimizer_ = std::make_shared<BSplineOptimizer>(num_samples_per_length, obstable_weight, length_weight, smooth_weight);
+    std::string global_costmap_sub_topic = declare_parameter<std::string>("global_costmap_sub_topic");
     map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "global_costmap", rclcpp::QoS(1),
+        global_costmap_sub_topic, rclcpp::QoS(1),
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { map_callback(msg); }
     );
-    goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        "goal", rclcpp::QoS(1),
-        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { goal_callback(msg); }
-    );
+    std::string start_sub_topic = declare_parameter<std::string>("start_sub_topic");
     start_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        "start", rclcpp::QoS(1),
+        start_sub_topic, rclcpp::QoS(1),
         [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { start_callback(msg); }
     );
-    path_pub_ = create_publisher<nav_msgs::msg::Path>("path", 1);
-    timer_ = create_wall_timer(std::chrono::milliseconds(1000), [this]() { timer_callback(); });
+    std::string goal_sub_topic = declare_parameter<std::string>("goal_sub_topic");
+    goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+        goal_sub_topic, rclcpp::QoS(1),
+        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { goal_callback(msg); }
+    );
+    std::string path_pub_topic = declare_parameter<std::string>("path_pub_topic");
+    path_pub_ = create_publisher<nav_msgs::msg::Path>(path_pub_topic, 1);
+    int plan_freq = declare_parameter<int>("plan_freq");
+    timer_ = create_wall_timer(std::chrono::milliseconds(1000 / plan_freq), [this]() { timer_callback(); });
 }
 
 void PathPlannerNode::timer_callback() {
     if (!map_ || !start_ || !goal_) return;
     Costmap2D costmap(*map_);
+    const Eigen::Vector2i start_grid(costmap.map_coord_to_grid({start_->pose.position.x, start_->pose.position.y}).cast<int>());
+    const Eigen::Vector2i goal_grid(costmap.map_coord_to_grid({goal_->pose.position.x, goal_->pose.position.y}).cast<int>());
 
     auto start = std::chrono::high_resolution_clock::now();
-    AStarPlanner a_star;
-    auto path = a_star.search_path(costmap, *start_, *goal_);
+    // 在costmap的格点坐标系下搜索，返回的路径也是基于格点坐标系的
+    auto rough = a_star_planner_->search_path(costmap, start_grid, goal_grid);
     auto end = std::chrono::high_resolution_clock::now();
     RCLCPP_INFO(get_logger(), "Astar plan: %.2fms", (end - start).count() / 1e6);
 
     start = std::chrono::high_resolution_clock::now();
-    BSplineOptimizer optimizer;
-    auto optimized = optimizer.optimize(costmap, vv2i_to_vv2d(path));
+    // 在格点坐标系下进行路径优化
+    auto optimized = bspline_optimizer_->optimize(costmap, vv2i_to_vv2d(rough));
     end = std::chrono::high_resolution_clock::now();
     RCLCPP_INFO(get_logger(), "Bspline opt: %.2fms", (end - start).count() / 1e6);
     
+    // 最后再转换成map坐标系
     for (auto& pt: optimized) pt = costmap.grid_coord_to_map(pt);
     path_pub_->publish(path_to_nav_msg(optimized));
 }

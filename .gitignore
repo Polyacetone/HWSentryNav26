@@ -4,3 +4,5 @@ build/
 install/
 log/
 *.pcd
+*.pgm
+*.png

@@ -55,11 +55,9 @@ bool AStarPlanner::is_line_safe(
 
 std::vector<Eigen::Vector2i> AStarPlanner::search_path(
     const Costmap2D& costmap,
-    const geometry_msgs::msg::PoseStamped& start,
-    const geometry_msgs::msg::PoseStamped& goal
+    const Eigen::Vector2i& start_grid,
+    const Eigen::Vector2i& goal_grid
 ) const {
-    const Eigen::Vector2i start_grid = costmap.map_coord_to_grid({start.pose.position.x, start.pose.position.y}).cast<int>();
-    const Eigen::Vector2i goal_grid = costmap.map_coord_to_grid({goal.pose.position.x, goal.pose.position.y}).cast<int>();
     if ((start_grid - goal_grid).norm() < 2) {
         RCLCPP_WARN(rclcpp::get_logger("a_star_planner"), "Start and goal too close!");
         return {};
