@@ -17,7 +17,7 @@ public:
     explicit ObstacleCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& evaluator,
         const Costmap2D& cost_map,
-        double weight = 1.0
+        const double weight = 1.0
     ): evaluator_(evaluator), cost_map_(cost_map), weight_(weight) {
         // 设置参数块，每个控制点是2维向量
         mutable_parameter_block_sizes()->clear();
@@ -55,7 +55,7 @@ private:
 // 长度代价使用自动求导
 class LengthCostFunction {
 public:
-    explicit LengthCostFunction(double weight): weight_(weight) {}
+    explicit LengthCostFunction(const double weight): weight_(weight) {}
     template<typename T> bool operator()(const T* const p0, const T* const p1, T* residual) const {
         const T dx = p1[0] - p0[0];
         const T dy = p1[1] - p0[1];
@@ -65,6 +65,25 @@ public:
     }
 
 private:
+    const double weight_;
+};
+
+// 起始点速度方向代价使用自动求导
+class StartVelocityCostFunction {
+public:
+    explicit StartVelocityCostFunction(const Eigen::Vector2d& start_velocity, const double weight):
+        start_velocity_(start_velocity), weight_(weight) {}
+    template<typename T> bool operator()(const T* const p0, const T* const p1, T* residual) const {
+        const T px = p1[0] - p0[0];
+        const T py = p1[1] - p0[1];
+        const T pnorm = ceres::sqrt(px * px + py * py + T(1e-6));
+        const T dot = px * T(start_velocity_.x()) + py * T(start_velocity_.y());
+        residual[0] = T(weight_) * (T(start_velocity_.norm()) - dot / pnorm);
+        return true;
+    }
+
+private:
+    const Eigen::Vector2d start_velocity_;
     const double weight_;
 };
 }
@@ -82,8 +101,10 @@ BSplineOptimizer::BSplineOptimizer(
     length_weight_(length_weight),
     smooth_weight_(smooth_weight) {}
 
-std::vector<Eigen::Vector2d>
-BSplineOptimizer::optimize(const Costmap2D& costmap, const std::vector<Eigen::Vector2d>& path) const {
+std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
+    const Costmap2D& costmap,
+    const std::vector<Eigen::Vector2d>& path
+) const {
     if (path.size() <= 2) {
         RCLCPP_WARN(rclcpp::get_logger("bspline_optimizer"), "Path too short to optimize!");
         return path;

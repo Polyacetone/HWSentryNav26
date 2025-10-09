@@ -19,7 +19,7 @@ public:
 
 private:
     const double num_samples_per_length_;
-    const double obstable_weight_, smooth_weight_, length_weight_;
+    const double obstable_weight_, length_weight_, smooth_weight_;
 
     std::vector<Eigen::Vector2d> pad_control_points(const std::vector<Eigen::Vector2d>& path) const;
     double estimate_path_length(const std::vector<Eigen::Vector2d>& path) const;

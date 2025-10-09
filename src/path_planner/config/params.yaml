@@ -1,7 +1,6 @@
 /**:
   ros__parameters:
-    global_costmap_sub_topic: "costmap"
-    start_sub_topic: "start"
+    costmap_sub_topic: "costmap"
     goal_sub_topic: "goal"
     path_pub_topic: "path"
     plan_freq: 10

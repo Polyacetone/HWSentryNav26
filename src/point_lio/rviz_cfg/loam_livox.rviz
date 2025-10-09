@@ -67,7 +67,7 @@ Visualization Manager:
       Length: 0.699999988079071
       Name: Axes
       Radius: 0.05999999865889549
-      Reference Frame: body
+      Reference Frame: base
       Show Trail: false
       Value: true
     - Class: rviz/Group
@@ -300,7 +300,7 @@ Visualization Manager:
   Global Options:
     Background Color: 0; 0; 0
     Default Light: true
-    Fixed Frame: camera_init
+    Fixed Frame: odom
     Frame Rate: 10
   Name: root
   Tools:

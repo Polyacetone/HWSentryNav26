@@ -1,15 +1,19 @@
 #include <Eigen/Dense>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2_ros/transform_listener.hpp>
+#include <tf2_ros/buffer.hpp>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 
 #include <path_planner/costmap_2d.hpp>
 #include <path_planner/a_star_planner.hpp>
 #include <path_planner/bspline_optimizer.hpp>
+#include <common_utils/tf_utils.hpp>
 
 namespace path_planner {
 class PathPlannerNode: public rclcpp::Node {
@@ -17,25 +21,26 @@ public:
     explicit PathPlannerNode(const rclcpp::NodeOptions& options);
 
 private:
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr start_sub_, goal_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
 
     nav_msgs::msg::OccupancyGrid::SharedPtr map_;
-    geometry_msgs::msg::PoseStamped::SharedPtr goal_, start_;
+    geometry_msgs::msg::PoseStamped::SharedPtr goal_;
     std::shared_ptr<AStarPlanner> a_star_planner_;
     std::shared_ptr<BSplineOptimizer> bspline_optimizer_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     std::vector<Eigen::Vector2d> vv2i_to_vv2d(const std::vector<Eigen::Vector2i>& path) const;
-    void map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { map_ = msg; }
-    void goal_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) { goal_ = msg; }
-    void start_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) { start_ = msg; }
     void timer_callback();
 };
 
 PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner_node") {
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     int downsampled_waypoint_max_interval = declare_parameter<int>("a_star_planner.downsampled_waypoint_max_interval");
     int occupied_threshold = declare_parameter<int>("a_star_planner.occupied_threshold");
     a_star_planner_ = std::make_shared<AStarPlanner>(downsampled_waypoint_max_interval, occupied_threshold);
@@ -44,20 +49,15 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     double length_weight = declare_parameter<double>("bspline_optimizer.length_weight");
     double smooth_weight = declare_parameter<double>("bspline_optimizer.smooth_weight");
     bspline_optimizer_ = std::make_shared<BSplineOptimizer>(num_samples_per_length, obstable_weight, length_weight, smooth_weight);
-    std::string global_costmap_sub_topic = declare_parameter<std::string>("global_costmap_sub_topic");
-    map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-        global_costmap_sub_topic, rclcpp::QoS(1),
-        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { map_callback(msg); }
-    );
-    std::string start_sub_topic = declare_parameter<std::string>("start_sub_topic");
-    start_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        start_sub_topic, rclcpp::QoS(1),
-        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { start_callback(msg); }
+    std::string costmap_sub_topic = declare_parameter<std::string>("costmap_sub_topic");
+    costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        costmap_sub_topic, rclcpp::QoS(1),
+        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { map_ = msg; }
     );
     std::string goal_sub_topic = declare_parameter<std::string>("goal_sub_topic");
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
         goal_sub_topic, rclcpp::QoS(1),
-        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { goal_callback(msg); }
+        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { goal_ = msg; }
     );
     std::string path_pub_topic = declare_parameter<std::string>("path_pub_topic");
     path_pub_ = create_publisher<nav_msgs::msg::Path>(path_pub_topic, 1);
@@ -66,9 +66,16 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
 }
 
 void PathPlannerNode::timer_callback() {
-    if (!map_ || !start_ || !goal_) return;
+    if (!map_ || !goal_) return;
+
+    tf2::Transform base_to_map;
+    if (!utils::try_lookup_tf(
+        tf_buffer_, "map", "base", {}, base_to_map,
+        [&](const std::string& err) { RCLCPP_WARN(get_logger(), "Failed to lookup base to map: %s", err.c_str()); }
+    )) return;
+    
     Costmap2D costmap(*map_);
-    const Eigen::Vector2i start_grid(costmap.map_coord_to_grid({start_->pose.position.x, start_->pose.position.y}).cast<int>());
+    const Eigen::Vector2i start_grid(costmap.map_coord_to_grid({base_to_map.getOrigin().x(), base_to_map.getOrigin().y()}).cast<int>());
     const Eigen::Vector2i goal_grid(costmap.map_coord_to_grid({goal_->pose.position.x, goal_->pose.position.y}).cast<int>());
 
     auto start = std::chrono::high_resolution_clock::now();
