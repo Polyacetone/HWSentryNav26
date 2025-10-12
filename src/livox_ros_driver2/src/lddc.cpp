@@ -55,8 +55,6 @@ Lddc::Lddc(
 Lddc::~Lddc()
 {
   PrepareExit();
-
-  std::cout << "lddc destory!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
 }
 
 int Lddc::RegisterLds(Lds * lds)

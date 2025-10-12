@@ -42,7 +42,7 @@ namespace small_point_lio {
         preprocess.on_imu_callback(imu_msg);
     }
 
-    void SmallPointLio::handle_once() {
+    void SmallPointLio::handle_once(const bool pub_en) {
         // we need init map and fix gravity direction
         if (!is_init) {
             if (preprocess.point_deque.size() >= parameters.init_map_size && (!parameters.fix_gravity_direction || preprocess.imu_deque.size() >= 200)) {
@@ -166,12 +166,14 @@ namespace small_point_lio {
             return;
         }
 
-        // publish odometry and pointcloud
-        if (!parameters.publish_odometry_without_downsample) {
-            publish_odometry(time_current);
-        }
-        if (pointcloud_callback && !pointcloud_odom_frame.empty()) {
-            pointcloud_callback(pointcloud_odom_frame);
+        if (pub_en) {
+            // publish odometry and pointcloud
+            if (!parameters.publish_odometry_without_downsample) {
+                publish_odometry(time_current);
+            }
+            if (pointcloud_callback && !pointcloud_odom_frame.empty()) {
+                pointcloud_callback(pointcloud_odom_frame);
+            }
         }
     }
 

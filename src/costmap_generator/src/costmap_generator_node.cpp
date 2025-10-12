@@ -12,7 +12,7 @@
 #include <small_gicp/util/downsampling_omp.hpp>
 #include <small_gicp/ann/kdtree_omp.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
-#include <common_utils/tf_utils.hpp>
+#include <common_utils/convert_utils.hpp>
 
 namespace costmap_generator {
 using Point = pcl::PointXYZ;

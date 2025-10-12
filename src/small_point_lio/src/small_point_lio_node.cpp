@@ -18,35 +18,33 @@ namespace small_point_lio {
         std::string imu_topic = declare_parameter<std::string>("imu_topic");
         bool save_pcd = declare_parameter<bool>("save_pcd");
         small_point_lio = std::make_unique<small_point_lio::SmallPointLio>(*this);
-        odometry_publisher = create_publisher<nav_msgs::msg::Odometry>("/Odometry", 1000);
-        pointcloud_publisher = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 1000);
+        odometry_publisher = create_publisher<nav_msgs::msg::Odometry>("odometry", 1);
+        pointcloud_publisher = create_publisher<sensor_msgs::msg::PointCloud2>("cloud_registered", 1);
         tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
         tf_buffer = std::make_unique<tf2_ros::Buffer>(get_clock());
         tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
 
         map_save_trigger = create_service<std_srvs::srv::Trigger>(
-                "map_save",
-                [this, save_pcd](const std_srvs::srv::Trigger::Request::SharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res) {
-                    if (!save_pcd) {
-                        RCLCPP_ERROR(rclcpp::get_logger("small_point_lio"), "pcd save is disabled");
-                        return;
-                    }
-                    voxelgrid_sampling::VoxelgridSampling downsampler;
-                    std::vector<Eigen::Vector3f> downsampled;
-                    downsampler.voxelgrid_sampling_omp(pointcloud_to_save, downsampled, 0.02);
-                    pcl::PointCloud<pcl::PointXYZI> pcl_pointcloud;
-                    pcl_pointcloud.reserve(downsampled.size());
-                    for (const auto &point: downsampled) {
-                        pcl::PointXYZI new_point;
-                        new_point.x = point.x();
-                        new_point.y = point.y();
-                        new_point.z = point.z();
-                        pcl_pointcloud.push_back(new_point);
-                    }
-                    pcl::PCDWriter writer;
-                    writer.writeBinary(ROOT_DIR + "/pcd/scan.pcd", pcl_pointcloud);
-                    RCLCPP_INFO(rclcpp::get_logger("small_point_lio"), "save pcd success");
-                });
+            "map_save",
+            [this, save_pcd](const std_srvs::srv::Trigger::Request::SharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res) {
+                if (!save_pcd) {
+                    RCLCPP_ERROR(rclcpp::get_logger("small_point_lio"), "pcd save is disabled");
+                    return;
+                }
+                voxelgrid_sampling::VoxelgridSampling downsampler;
+                std::vector<Eigen::Vector3f> downsampled;
+                downsampler.voxelgrid_sampling_omp(pointcloud_to_save, downsampled, 0.02);
+                pcl::PointCloud<pcl::PointXYZI> pcl_pointcloud;
+                pcl_pointcloud.reserve(downsampled.size());
+                for (const auto &point: downsampled) {
+                    pcl::PointXYZI new_point(point.x(), point.y(), point.z());
+                    pcl_pointcloud.push_back(new_point);
+                }
+                pcl::PCDWriter writer;
+                writer.writeBinary(ROOT_DIR + "/pcd/scan.pcd", pcl_pointcloud);
+                RCLCPP_INFO(rclcpp::get_logger("small_point_lio"), "save pcd success");
+            }
+        );
         small_point_lio->set_odometry_callback([this](const common::Odometry &odometry) {
             last_odometry = odometry;
 
@@ -92,56 +90,53 @@ namespace small_point_lio {
             odometry_publisher->publish(odometry_msg);
         });
         small_point_lio->set_pointcloud_callback([this, save_pcd](const std::vector<Eigen::Vector3f> &pointcloud) {
-            if (pointcloud_publisher->get_subscription_count() > 0) {
-                pcl::PointCloud<pcl::PointXYZI> pcl_pointcloud;
-                pcl_pointcloud.reserve(pointcloud.size());
-                for (const auto &point: pointcloud) {
-                    pcl::PointXYZI new_point;
-                    new_point.x = point.x();
-                    new_point.y = point.y();
-                    new_point.z = point.z();
-                    pcl_pointcloud.push_back(new_point);
-                }
-                sensor_msgs::msg::PointCloud2 msg;
-                pcl::toROSMsg(pcl_pointcloud, msg);
-                msg.header.stamp.sec = std::floor(last_odometry.timestamp);
-                msg.header.stamp.nanosec = static_cast<uint32_t>((last_odometry.timestamp - msg.header.stamp.sec) * 1e9);
-                msg.header.frame_id = "odom";
-                pointcloud_publisher->publish(msg);
+            pcl::PointCloud<pcl::PointXYZI> pcl_pointcloud;
+            pcl_pointcloud.reserve(pointcloud.size());
+            for (const auto &point: pointcloud) {
+                pcl::PointXYZI new_point(point.x(), point.y(), point.z());
+                pcl_pointcloud.push_back(new_point);
             }
+            sensor_msgs::msg::PointCloud2 msg;
+            pcl::toROSMsg(pcl_pointcloud, msg);
+            msg.header.stamp.sec = std::floor(last_odometry.timestamp);
+            msg.header.stamp.nanosec = static_cast<uint32_t>((last_odometry.timestamp - msg.header.stamp.sec) * 1e9);
+            msg.header.frame_id = "odom";
+            pointcloud_publisher->publish(msg);
             if (save_pcd) {
                 pointcloud_to_save.insert(pointcloud_to_save.end(), pointcloud.begin(), pointcloud.end());
             }
         });
         pointcloud_subsciber = create_subscription<livox_ros_driver2::msg::CustomMsg>(
-                lidar_topic,
-                rclcpp::SensorDataQoS(),
-                [this](const livox_ros_driver2::msg::CustomMsg &msg) {
-                    pointcloud.clear();
-                    pointcloud.reserve(msg.points.size());
-                    common::Point new_point;
-                    for (const auto &point: msg.points) {
-                        if ((point.tag & 0b010000) != 0b00000000 || (point.tag & 0b00001100) != 0b00000000 || (point.tag & 0b00000011) != 0b00000000) {
-                            continue;
-                        }
-                        new_point.position << point.x, point.y, point.z;
-                        new_point.timestamp = static_cast<double>(msg.timebase + point.offset_time) * 1e-9;
-                        pointcloud.push_back(new_point);
+            lidar_topic,
+            rclcpp::QoS(1),
+            [this](const livox_ros_driver2::msg::CustomMsg &msg) {
+                pointcloud.clear();
+                pointcloud.reserve(msg.points.size());
+                common::Point new_point;
+                for (const auto &point: msg.points) {
+                    if ((point.tag & 0b010000) != 0b00000000 || (point.tag & 0b00001100) != 0b00000000 || (point.tag & 0b00000011) != 0b00000000) {
+                        continue;
                     }
-                    small_point_lio->on_point_cloud_callback(pointcloud);
-                    small_point_lio->handle_once();
-                });
+                    new_point.position << point.x, point.y, point.z;
+                    new_point.timestamp = static_cast<double>(msg.timebase + point.offset_time) * 1e-9;
+                    pointcloud.push_back(new_point);
+                }
+                small_point_lio->on_point_cloud_callback(pointcloud);
+                small_point_lio->handle_once(true);
+            }
+        );
         imu_subsciber = create_subscription<sensor_msgs::msg::Imu>(
-                imu_topic,
-                rclcpp::SensorDataQoS(),
-                [this](const sensor_msgs::msg::Imu &msg) {
-                    common::ImuMsg imu_msg;
-                    imu_msg.angular_velocity = Eigen::Vector3d(msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z);
-                    imu_msg.linear_acceleration = Eigen::Vector3d(msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z);
-                    imu_msg.timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9;
-                    small_point_lio->on_imu_callback(imu_msg);
-                    small_point_lio->handle_once();
-                });
+            imu_topic,
+            rclcpp::QoS(1),
+            [this](const sensor_msgs::msg::Imu &msg) {
+                common::ImuMsg imu_msg;
+                imu_msg.angular_velocity = Eigen::Vector3d(msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z);
+                imu_msg.linear_acceleration = Eigen::Vector3d(msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z);
+                imu_msg.timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9;
+                small_point_lio->on_imu_callback(imu_msg);
+                small_point_lio->handle_once(false);
+            }
+        );
     }
 
 }// namespace small_point_lio

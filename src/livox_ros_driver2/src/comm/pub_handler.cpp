@@ -29,6 +29,8 @@
 #include <iostream>
 #include <limits>
 
+#include <rclcpp/logging.hpp>
+
 namespace livox_ros
 {
 
@@ -111,8 +113,10 @@ void PubHandler::OnLivoxLidarPointCloudCallback(
 
   if (data->time_type != kTimestampTypeNoSync) {
     is_timestamp_sync_.store(true);
+    RCLCPP_INFO_ONCE(rclcpp::get_logger("livox_ros_driver2"), "Timestamp synchronized.");
   } else {
     is_timestamp_sync_.store(false);
+    RCLCPP_WARN_ONCE(rclcpp::get_logger("livox_ros_driver2"), "Timestamp not synchronized!");
   }
 
   if (data->data_type == kLivoxLidarImuData) {
