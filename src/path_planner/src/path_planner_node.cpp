@@ -69,11 +69,15 @@ void PathPlannerNode::timer_callback() {
     if (!map_ || !goal_) return;
 
     tf2::Transform base_to_map;
-    if (!utils::try_lookup_tf(
-        tf_buffer_, "map", "base", {}, base_to_map,
-        [&](const std::string& err) { RCLCPP_WARN(get_logger(), "Failed to lookup base to map: %s", err.c_str()); }
-    )) return;
-    
+    try {
+        base_to_map = utils::convert_to<tf2::Transform>(
+            tf_buffer_->lookupTransform("map", "base", tf2::TimePointZero).transform
+        );
+    } catch (const std::exception& ex) {
+        RCLCPP_WARN(get_logger(), "Failed to lookup base to map: %s", ex.what());
+        return;
+    }
+
     Costmap2D costmap(*map_);
     const Eigen::Vector2i start_grid(costmap.map_coord_to_grid({base_to_map.getOrigin().x(), base_to_map.getOrigin().y()}).cast<int>());
     const Eigen::Vector2i goal_grid(costmap.map_coord_to_grid({goal_->pose.position.x, goal_->pose.position.y}).cast<int>());
@@ -89,7 +93,7 @@ void PathPlannerNode::timer_callback() {
     auto optimized = bspline_optimizer_->optimize(costmap, vv2i_to_vv2d(rough));
     end = std::chrono::high_resolution_clock::now();
     RCLCPP_INFO(get_logger(), "Bspline opt: %.2fms", (end - start).count() / 1e6);
-    
+
     // 最后再转换成map坐标系
     for (auto& pt: optimized) pt = costmap.grid_coord_to_map(pt);
     path_pub_->publish(path_to_nav_msg(optimized));

@@ -20,7 +20,7 @@
       # 图像超过大小会裁切，不够则会以最大值100填充。图片应当为灰度图，值会被clamp到[0,100]
 
     local_costmap: # 局部地图配置
-      cloud_sub_topic: "registered_cloud" # 用于生成局部地图的点云，应当在tf的"base"系下
+      cloud_sub_topic: "cloud_reistered" # 用于生成局部地图的点云
       cloud_queue_size: 1 # 对输入点云进行累积的帧数
       max_radius: 4.0 # 局部地图关心的xy范围，以tf的"base"的xy为参考点
       max_relative_z: 0.5 # 局部地图关心的z相对范围，以tf的"base"的z为参考点

@@ -1,20 +1,39 @@
 #pragma once
 
+#if __has_include(<opencv2/core/types.hpp>)
 #include <opencv2/core/types.hpp>
-#include <eigen3/Eigen/Dense>
+#define HAVE_OPENCV
+#endif
 
+#if __has_include(<eigen3/Eigen/Dense>)
+#include <eigen3/Eigen/Dense>
+#define HAVE_EIGEN
+#endif
+
+#if __has_include(<tf2_geometry_msgs/tf2_geometry_msgs.hpp>)
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/LinearMath/Vector3.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
+#define HAVE_TF2_MSGS
+#endif
+
+#if __has_include(<geometry_msgs/msg/point.hpp>)
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/point32.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#define HAVE_GEOMETRY_MSGS
+#endif
+
+#if __has_include(<pcl/point_types.h>)
+#include <pcl/point_types.h>
+#define HAVE_PCL
+#endif
 
 namespace utils {
-
 template<typename Point> struct PointTraits;
+#ifdef HAVE_OPENCV
 template<> struct PointTraits<cv::Point3f> {
     static auto x(const cv::Point3f& p) { return p.x; }
     static auto y(const cv::Point3f& p) { return p.y; }
@@ -31,6 +50,8 @@ template<> struct PointTraits<cv::Point3d> {
         return cv::Point3d(x, y, z);
     }
 };
+#endif
+#ifdef HAVE_GEOMETRY_MSGS
 template<> struct PointTraits<geometry_msgs::msg::Point> {
     static auto x(const geometry_msgs::msg::Point& p) { return p.x; }
     static auto y(const geometry_msgs::msg::Point& p) { return p.y; }
@@ -67,6 +88,8 @@ template<> struct PointTraits<geometry_msgs::msg::Vector3> {
         return p;
     }
 };
+#endif
+#ifdef HAVE_TF2_MSGS
 template<> struct PointTraits<tf2::Vector3> {
     static auto x(const tf2::Vector3& p) { return p.x(); }
     static auto y(const tf2::Vector3& p) { return p.y(); }
@@ -75,6 +98,8 @@ template<> struct PointTraits<tf2::Vector3> {
         return tf2::Vector3(x, y, z);
     }
 };
+#endif
+#ifdef HAVE_EIGEN
 template<> struct PointTraits<Eigen::Vector3d> {
     static auto x(const Eigen::Vector3d& p) { return p.x(); }
     static auto y(const Eigen::Vector3d& p) { return p.y(); }
@@ -91,6 +116,17 @@ template<> struct PointTraits<Eigen::Vector3f> {
         return Eigen::Vector3f(x, y, z);
     }
 };
+#endif
+#ifdef HAVE_PCL
+template<> struct PointTraits<pcl::PointXYZ> {
+    static auto x(const pcl::PointXYZ& p) { return p.x; }
+    static auto y(const pcl::PointXYZ& p) { return p.y; }
+    static auto z(const pcl::PointXYZ& p) { return p.z; }
+    template<std::convertible_to<float> T> static pcl::PointXYZ create(T x, T y, T z) {
+        return pcl::PointXYZ(x, y, z);
+    }
+};
+#endif
 template<typename T>
 concept PointLike = requires(const T& p) {
     { PointTraits<T>::x(p) } -> std::floating_point;
@@ -113,8 +149,11 @@ static constexpr void convert_to(const From& src, To& dst) {
         PointTraits<From>::z(src)
     );
 }
+}
 
+namespace utils {
 template<typename Quaternion> struct QuaternionTraits;
+#ifdef HAVE_GEOMETRY_MSGS
 template<> struct QuaternionTraits<geometry_msgs::msg::Quaternion> {
     static auto x(const geometry_msgs::msg::Quaternion& p) { return p.x; }
     static auto y(const geometry_msgs::msg::Quaternion& p) { return p.y; }
@@ -129,6 +168,8 @@ template<> struct QuaternionTraits<geometry_msgs::msg::Quaternion> {
         return p;
     }
 };
+#endif
+#ifdef HAVE_TF2_MSGS
 template<> struct QuaternionTraits<tf2::Quaternion> {
     static auto x(const tf2::Quaternion& p) { return p.x(); }
     static auto y(const tf2::Quaternion& p) { return p.y(); }
@@ -138,6 +179,8 @@ template<> struct QuaternionTraits<tf2::Quaternion> {
         return tf2::Quaternion(x, y, z, w);
     }
 };
+#endif
+#ifdef HAVE_EIGEN
 template<> struct QuaternionTraits<Eigen::Quaterniond> {
     static auto x(const Eigen::Quaterniond& p) { return p.x(); }
     static auto y(const Eigen::Quaterniond& p) { return p.y(); }
@@ -156,6 +199,7 @@ template<> struct QuaternionTraits<Eigen::Quaternionf> {
         return Eigen::Quaternionf(w, x, y, z);
     }
 };
+#endif
 template<typename T>
 concept QuaternionLike = requires(const T& p) {
     { QuaternionTraits<T>::x(p) } -> std::floating_point;
@@ -181,8 +225,11 @@ static constexpr void convert_to(const From& src, To& dst) {
         QuaternionTraits<From>::w(src)
     );
 }
+}
 
+namespace utils {
 template<typename Pose> struct PoseTraits;
+#ifdef HAVE_TF2_MSGS
 template<> struct PoseTraits<tf2::Transform> {
     static auto translation(const tf2::Transform& t) { return t.getOrigin(); }
     static auto rotation(const tf2::Transform& t) { return t.getRotation(); }
@@ -194,6 +241,8 @@ template<> struct PoseTraits<tf2::Transform> {
         );
     }
 };
+#endif
+#ifdef HAVE_GEOMETRY_MSGS
 template<> struct PoseTraits<geometry_msgs::msg::Transform> {
     static auto translation(const geometry_msgs::msg::Transform& t) { return t.translation; }
     static auto rotation(const geometry_msgs::msg::Transform& t) { return t.rotation; }
@@ -216,6 +265,7 @@ template<> struct PoseTraits<geometry_msgs::msg::Pose> {
         return t;
     }
 };
+#endif
 template<typename T>
 concept PoseLike = requires(const T& p) {
     { PoseTraits<T>::translation(p) } -> PointLike;
@@ -235,5 +285,4 @@ static constexpr void convert_to(const From& src, To& dst) {
         PoseTraits<From>::rotation(src)
     );
 }
-
 }

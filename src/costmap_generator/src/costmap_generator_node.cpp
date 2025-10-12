@@ -1,7 +1,8 @@
 #include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <tf2_ros/transform_broadcaster.hpp>
+#include <tf2_ros/transform_listener.hpp>
+#include <tf2_ros/buffer.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -35,15 +36,17 @@ private:
     cv::Size gaussian_blur_size_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
-    
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-    cv::Mat cost_analysis(
-        const PointCloud::Ptr cloud,
-        const Eigen::Vector3f& base_to_odom,
-        const double max_relative_z,
-        const double min_relative_z,
-        const double max_radius = std::numeric_limits<double>::max()
+    void transform_cloud(PointCloud& cloud, const std::string& cloud_frame, const std::string& target_frame) const;
+    void select_cloud(PointCloud& cloud, const double max_z, const double min_z) const;
+    void select_cloud(
+        PointCloud& cloud, const double max_relative_z, const double min_relative_z, const double radius,
+        const std::string& center_frame, const std::string& cloud_frame
     ) const;
+    cv::Mat cost_analysis(const PointCloud& cloud) const;
     void postprocess_costmap(cv::Mat& costmap) const;
     nav_msgs::msg::OccupancyGrid to_occupancy_grid_msg(
         const cv::Mat& costmap,
@@ -52,6 +55,8 @@ private:
 };
 
 CostmapGeneratorNode::CostmapGeneratorNode(const rclcpp::NodeOptions& options): Node("costmap_generator_node", options) {
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     const std::string pub_topic = declare_parameter<std::string>("pub_topic");
     num_threads_ = declare_parameter<int>("num_threads");
     num_neighbors_ = declare_parameter<int>("num_neighbors");
@@ -69,13 +74,14 @@ CostmapGeneratorNode::CostmapGeneratorNode(const rclcpp::NodeOptions& options): 
     max_relative_z_ = declare_parameter<double>("local_costmap.max_relative_z");
     min_relative_z_ = declare_parameter<double>("local_costmap.min_relative_z");
     const std::string filepath = declare_parameter<std::string>("global_costmap.filepath");
-    
+
     if (filepath.ends_with("pcd")) {
-        PointCloud::Ptr global_cloud = std::make_shared<PointCloud>();
-        pcl::io::loadPCDFile(filepath, *global_cloud);
+        PointCloud global_cloud;
+        pcl::io::loadPCDFile(filepath, global_cloud);
         const double max_z = declare_parameter<double>("global_costmap.file_type_pcd.max_z");
         const double min_z = declare_parameter<double>("global_costmap.file_type_pcd.min_z");
-        global_costmap_ = cost_analysis(global_cloud, {0, 0, 0}, max_z, min_z);
+        select_cloud(global_cloud, max_z, min_z);
+        global_costmap_ = cost_analysis(global_cloud);
     } else {
         global_costmap_ = cv::Mat::zeros(cv::Size(map_x_size_, map_y_size_), CV_8U);
         cv::Mat img = cv::imread(filepath, cv::IMREAD_GRAYSCALE);
@@ -84,8 +90,8 @@ CostmapGeneratorNode::CostmapGeneratorNode(const rclcpp::NodeOptions& options): 
         #pragma omp parallel for num_threads(num_threads_) schedule(guided, 16)
         for (int row = 0; row < map_y_size_; row++) {
             for (int col = 0; col < map_x_size_; col++) {
-                if (col >= img.cols || row >= img.rows) global_costmap_.at<int8_t>(row, col) = 100;
-                else global_costmap_.at<int8_t>(row, col) = std::clamp<uint8_t>(
+                if (col >= img.cols || row >= img.rows) global_costmap_.at<uint8_t>(row, col) = 100;
+                else global_costmap_.at<uint8_t>(row, col) = std::clamp<uint8_t>(
                     img.at<uint8_t>(row, col),
                     0, 100
                 );
@@ -102,44 +108,106 @@ CostmapGeneratorNode::CostmapGeneratorNode(const rclcpp::NodeOptions& options): 
         pub_topic,
         rclcpp::QoS(1)
     );
-
-    while (rclcpp::ok()) {
-        costmap_pub_->publish(to_occupancy_grid_msg(global_costmap_, now()));
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
 }
 
 void CostmapGeneratorNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-    auto cloud = std::make_shared<PointCloud>();
+    const auto cloud = std::make_shared<PointCloud>();
     pcl::fromROSMsg(*msg, *cloud);
+    transform_cloud(*cloud, "odom", "map");
+    select_cloud(*cloud, max_relative_z_, min_relative_z_, max_radius_, "base", "map");
     cloud_queue_.push_front(cloud);
     if (cloud_queue_.size() < cloud_queue_size_) return;
-    auto cloud_sum = std::make_shared<PointCloud>();
-    std::for_each(cloud_queue_.begin(), cloud_queue_.end(), [&](auto& c) { *cloud_sum += *c; });
+    PointCloud cloud_sum;
+    std::for_each(cloud_queue_.begin(), cloud_queue_.end(), [&](auto& c) { cloud_sum += *c; });
     cloud_queue_.pop_back();
 
-    // ...
+    cv::Mat costmap = cost_analysis(cloud_sum);
+    #pragma omp parallel for num_threads(num_threads_) schedule(guided, 16)
+    for (int row = 0; row < map_y_size_; row++) {
+        for (int col = 0; col < map_x_size_; col++) {
+            costmap.at<uint8_t>(row, col) = std::max(
+                costmap.at<uint8_t>(row, col),
+                global_costmap_.at<uint8_t>(row, col)
+            );
+        }
+    }
+    postprocess_costmap(costmap);
+    costmap_pub_->publish(to_occupancy_grid_msg(costmap, now()));
 }
 
-cv::Mat CostmapGeneratorNode::cost_analysis(
-    const PointCloud::Ptr cloud,
-    const Eigen::Vector3f& base_to_odom,
-    const double max_relative_z,
-    const double min_relative_z,
-    const double max_radius
+void CostmapGeneratorNode::transform_cloud(
+    PointCloud& cloud,
+    const std::string& cloud_frame,
+    const std::string& target_frame
 ) const {
+    tf2::Transform cloud_to_target;
+    try {
+        cloud_to_target = utils::convert_to<tf2::Transform>(
+            tf_buffer_->lookupTransform(target_frame, cloud_frame, tf2::TimePointZero).transform
+        );
+    } catch (const std::exception& ex) {
+        RCLCPP_WARN(get_logger(), "Failed to lookup %s to %s: %s", cloud_frame.c_str(), target_frame.c_str(), ex.what());
+        cloud = PointCloud();
+        return;
+    }
+    #pragma omp parallel for num_threads(num_threads_) schedule(guided, 64)
+    for (int i = 0; i < cloud.size(); i++) {
+        auto& point = cloud.points[i];
+        const tf2::Vector3 transformed = cloud_to_target * tf2::Vector3(point.x, point.y, point.z);
+        point.x = transformed.x(), point.y = transformed.y(), point.z = transformed.z();
+    }
+}
+
+void CostmapGeneratorNode::select_cloud(
+    PointCloud& cloud,
+    const double max_z,
+    const double min_z
+) const {
+    PointCloud cropped;
+    for (int i = 0; i < cloud.size(); i++) {
+        const auto& point = cloud.points[i];
+        if (point.z > max_z || point.z < min_z) continue;
+        cropped.points.emplace_back(point);
+    }
+    cloud = cropped;
+}
+
+void CostmapGeneratorNode::select_cloud(
+    PointCloud& cloud, const double max_relative_z, const double min_relative_z, const double radius,
+    const std::string& center_frame, const std::string& cloud_frame
+) const {
+    tf2::Transform center_to_cloud;
+    try {
+        center_to_cloud = utils::convert_to<tf2::Transform>(
+            tf_buffer_->lookupTransform(cloud_frame, center_frame, tf2::TimePointZero).transform
+        );
+    } catch (const std::exception& ex) {
+        RCLCPP_WARN(get_logger(), "Failed to lookup %s to %s: %s", center_frame.c_str(), cloud_frame.c_str(), ex.what());
+        cloud = PointCloud();
+        return;
+    }
+    const Eigen::Vector3d center = utils::convert_to<Eigen::Vector3d>(center_to_cloud.getOrigin());
+    PointCloud cropped;
+    for (int i = 0; i < cloud.size(); i++) {
+        const auto& point = cloud.points[i];
+        const Eigen::Vector3d point_to_center = utils::convert_to<Eigen::Vector3d>(point) - center;
+        if (point_to_center.z() > max_relative_z || point_to_center.z() < min_relative_z) continue;
+        if (point_to_center(Eigen::seq(0, 1)).norm() > radius) continue;
+        cropped.points.emplace_back(point);
+    }
+    cloud = cropped;
+}
+
+cv::Mat CostmapGeneratorNode::cost_analysis(const PointCloud& cloud) const {
     using namespace small_gicp;
-    auto cloud_down = voxelgrid_sampling_omp<PointCloud, PointNorCloud>(*cloud, map_resolution_, num_threads_);
+    auto cloud_down = voxelgrid_sampling_omp<PointCloud, PointNorCloud>(cloud, map_resolution_, num_threads_);
     estimate_local_features<NormalSetter<PointNorCloud>>(*cloud_down, num_neighbors_);
     cv::Mat costmap = cv::Mat::zeros(cv::Size(map_x_size_, map_y_size_), CV_8U);
     const double inv_leaf_size = 1.0 / map_resolution_;
-    #pragma omp parallel for num_threads(num_threads_) schedule(guided, 64)
     for (int i = 0; i < cloud_down->size(); i++) {
-        const auto point = cloud_down->points[i];
-        if (std::hypot(point.x - base_to_odom.x(), point.y - base_to_odom.y()) > max_radius) continue;
-        if (point.z > base_to_odom.z() + max_relative_z || point.z < base_to_odom.z() + min_relative_z) continue;
-        int x = point.x * inv_leaf_size;
-        int y = point.y * inv_leaf_size;
+        const auto& point = cloud_down->points[i];
+        const int x = point.x * inv_leaf_size;
+        const int y = point.y * inv_leaf_size;
         if (x >= map_x_size_ || x < 0) continue;
         if (y >= map_y_size_ || y < 0) continue;
         costmap.at<uint8_t>(y, x) = std::max(
