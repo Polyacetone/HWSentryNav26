@@ -229,6 +229,30 @@ static constexpr void convert_to(const From& src, To& dst) {
 
 namespace utils {
 template<typename Pose> struct PoseTraits;
+#ifdef HAVE_EIGEN
+template<> struct PoseTraits<Eigen::Isometry3d> {
+    static auto translation(const Eigen::Isometry3d& t) { return Eigen::Vector3d(t.translation()); }
+    static auto rotation(const Eigen::Isometry3d& t) { return Eigen::Quaterniond(t.rotation()); }
+    template<PointLike T, QuaternionLike R>
+    static Eigen::Isometry3d create(T translation, R rotation) {
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translate(utils::convert_to<Eigen::Vector3d>(translation));
+        pose.rotate(utils::convert_to<Eigen::Quaterniond>(rotation));
+        return pose;
+    }
+};
+template<> struct PoseTraits<Eigen::Isometry3f> {
+    static auto translation(const Eigen::Isometry3f& t) { return Eigen::Vector3f(t.translation()); }
+    static auto rotation(const Eigen::Isometry3f& t) { return Eigen::Quaternionf(t.rotation()); }
+    template<PointLike T, QuaternionLike R>
+    static Eigen::Isometry3f create(T translation, R rotation) {
+        Eigen::Isometry3f pose = Eigen::Isometry3f::Identity();
+        pose.translate(utils::convert_to<Eigen::Vector3f>(translation));
+        pose.rotate(utils::convert_to<Eigen::Quaternionf>(rotation));
+        return pose;
+    }
+};
+#endif
 #ifdef HAVE_TF2_MSGS
 template<> struct PoseTraits<tf2::Transform> {
     static auto translation(const tf2::Transform& t) { return t.getOrigin(); }

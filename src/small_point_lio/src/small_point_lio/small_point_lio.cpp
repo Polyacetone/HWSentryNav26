@@ -19,6 +19,8 @@ namespace small_point_lio {
             estimator.kf.x.offset_T_L_I = parameters.extrinsic_T;
             estimator.kf.x.offset_R_L_I = parameters.extrinsic_R;
         }
+        Q = estimator.process_noise_cov();
+        estimator.G_m_s2 = parameters.gravity.norm();
 
         // init data
         reset();
@@ -27,11 +29,7 @@ namespace small_point_lio {
     void SmallPointLio::reset() {
         preprocess.reset();
         estimator.reset();
-        Q = estimator.process_noise_cov();
-        estimator.kf.x.gravity = parameters.gravity;
-        estimator.G_m_s2 = parameters.gravity.norm();
         is_init = false;
-        is_time_init = false;
     }
 
     void SmallPointLio::on_point_cloud_callback(const std::vector<common::Point> &pointcloud) {
@@ -43,13 +41,25 @@ namespace small_point_lio {
     }
 
     void SmallPointLio::handle_once(const bool pub_en) {
-        // we need init map and fix gravity direction
+        // we need to init small point lio
         if (!is_init) {
-            if (preprocess.point_deque.size() >= parameters.init_map_size && (!parameters.fix_gravity_direction || preprocess.imu_deque.size() >= 200)) {
+            if ((!preprocess.point_deque.empty() || !preprocess.imu_deque.empty()) &&
+                preprocess.point_deque.size() >= parameters.init_map_size &&
+                (!parameters.fix_gravity_direction || preprocess.imu_deque.size() >= 200)) {
                 // init map
                 for (const auto &point: preprocess.point_deque) {
                     estimator.ivox->add_point(point.position);
                 }
+                // init time
+                if (preprocess.point_deque.empty()) {
+                    time_current = preprocess.imu_deque.back().timestamp;
+                } else if (preprocess.imu_deque.empty()) {
+                    time_current = preprocess.point_deque.back().timestamp;
+                } else {
+                    time_current = std::max(preprocess.point_deque.back().timestamp, preprocess.imu_deque.back().timestamp);
+                }
+                time_predict_last = time_current;
+                time_update_last = time_current;
                 // fix gravity direction
                 if (parameters.fix_gravity_direction) {
                     estimator.kf.x.gravity = Eigen::Vector3d::Zero();
@@ -68,20 +78,19 @@ namespace small_point_lio {
             return;
         }
 
+        // judge if we should publish odometry, because we want a normal odometry frequency
+        bool is_publish_odometry =
+            !preprocess.imu_deque.empty() &&
+            !preprocess.point_deque.empty() &&
+            preprocess.point_deque.front().timestamp < preprocess.imu_deque.back().timestamp &&
+            preprocess.point_deque.back().timestamp > preprocess.imu_deque.front().timestamp;
+
         // judge we should do point update or imu update
-        bool has_update = false;
-        pointcloud_odom_frame.clear();
         while (!preprocess.imu_deque.empty() && !preprocess.dense_point_deque.empty() && !preprocess.point_deque.empty()) {
             const common::Point &point_lidar_frame = preprocess.point_deque.front();
             const common::Point &dense_point_lidar_frame = preprocess.dense_point_deque.front();
             const common::ImuMsg &imu_msg = preprocess.imu_deque.front();
             if (dense_point_lidar_frame.timestamp < point_lidar_frame.timestamp && dense_point_lidar_frame.timestamp < imu_msg.timestamp) {
-                // make sure time init
-                if (!is_time_init) {
-                    preprocess.dense_point_deque.pop_front();
-                    continue;
-                }
-
                 // collect odom frame pointcloud
                 Eigen::Vector3d dense_point_imu_frame;
                 if (parameters.extrinsic_est_en) {
@@ -95,15 +104,6 @@ namespace small_point_lio {
             } else if (point_lidar_frame.timestamp < imu_msg.timestamp) {
                 // point update
                 time_current = point_lidar_frame.timestamp;
-
-                // make sure time init
-                if (!is_time_init) {
-                    time_predict_last = time_current;
-                    time_update_last = time_current;
-                    preprocess.point_deque.pop_front();
-                    is_time_init = true;
-                    continue;
-                }
 
                 // predict
                 double dt = time_current - time_predict_last;
@@ -125,20 +125,10 @@ namespace small_point_lio {
                 // map incremental
                 estimator.ivox->add_point(estimator.point_odom_frame);
 
-                has_update = true;
                 preprocess.point_deque.pop_front();
             } else {
                 // imu update
                 time_current = imu_msg.timestamp;
-
-                // make sure time init
-                if (!is_time_init) {
-                    time_predict_last = time_current;
-                    time_update_last = time_current;
-                    preprocess.imu_deque.pop_front();
-                    is_time_init = true;
-                    continue;
-                }
 
                 // predict
                 double dt = time_current - time_predict_last;
@@ -162,18 +152,19 @@ namespace small_point_lio {
             }
         }
 
-        if (!has_update) {
+        if (!is_publish_odometry) {
             return;
         }
 
-        if (pub_en) {
-            // publish odometry and pointcloud
-            if (!parameters.publish_odometry_without_downsample) {
-                publish_odometry(time_current);
-            }
-            if (pointcloud_callback && !pointcloud_odom_frame.empty()) {
+        // publish odometry and pointcloud
+        if (!parameters.publish_odometry_without_downsample) {
+            publish_odometry(time_current);
+        }
+        if (!pointcloud_odom_frame.empty()) {
+            if (pointcloud_callback) {
                 pointcloud_callback(pointcloud_odom_frame);
             }
+            pointcloud_odom_frame.clear();
         }
     }
 

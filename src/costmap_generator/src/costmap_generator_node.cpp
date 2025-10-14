@@ -73,18 +73,18 @@ CostmapGeneratorNode::CostmapGeneratorNode(const rclcpp::NodeOptions& options): 
     max_radius_ = declare_parameter<double>("local_costmap.max_radius");
     max_relative_z_ = declare_parameter<double>("local_costmap.max_relative_z");
     min_relative_z_ = declare_parameter<double>("local_costmap.min_relative_z");
-    const std::string filepath = declare_parameter<std::string>("global_costmap.filepath");
+    const std::string file_path = declare_parameter<std::string>("global_costmap.file_path");
 
-    if (filepath.ends_with("pcd")) {
+    if (file_path.ends_with("pcd")) {
         PointCloud global_cloud;
-        pcl::io::loadPCDFile(filepath, global_cloud);
+        pcl::io::loadPCDFile(file_path, global_cloud);
         const double max_z = declare_parameter<double>("global_costmap.file_type_pcd.max_z");
         const double min_z = declare_parameter<double>("global_costmap.file_type_pcd.min_z");
         select_cloud(global_cloud, max_z, min_z);
         global_costmap_ = cost_analysis(global_cloud);
     } else {
         global_costmap_ = cv::Mat::zeros(cv::Size(map_x_size_, map_y_size_), CV_8U);
-        cv::Mat img = cv::imread(filepath, cv::IMREAD_GRAYSCALE);
+        cv::Mat img = cv::imread(file_path, cv::IMREAD_GRAYSCALE);
         cv::flip(img, img, 0);
         cv::rotate(img, img, cv::ROTATE_90_COUNTERCLOCKWISE);
         #pragma omp parallel for num_threads(num_threads_) schedule(guided, 16)

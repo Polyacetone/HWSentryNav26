@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(localizer)
+project(odom_localizer)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")
@@ -16,7 +16,7 @@ file(GLOB sources "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN localizer::LocalizerNode
+  PLUGIN odom_localizer::OdomLocalizerNode
   EXECUTABLE ${PROJECT_NAME}_node
 )
 

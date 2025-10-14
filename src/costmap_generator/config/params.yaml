@@ -11,7 +11,7 @@
     gaussian_blur_sigma: 2.0 # 对代价地图进行高斯模糊的标准差
 
     global_costmap: # 全局先验地图配置
-      filepath: "RMUC.png" # 可以为图片格式或pcd，如果是图片就直接作为全局地图，pcd就进行点云分析
+      file_path: "RMUC.png" # 可以为图片格式或pcd，如果是图片就直接作为全局地图，pcd就进行点云分析
       file_type_pcd: # 如果以pcd格式读取
         # 如果以pcd格式读取，坐标系xy方向和原点均与点云坐标系一致
         max_z: 0.5 # 关心的z范围

@@ -55,8 +55,8 @@ namespace small_point_lio {
 
     struct point_measurement_result {
         bool valid;
-        state::value_type laser_point_cov;
         state::value_type z;
+        state::value_type laser_point_cov;
         Eigen::Matrix<state::value_type, 1, 12> h_x;
     };
 
@@ -118,7 +118,7 @@ namespace small_point_lio {
             df_dx_.template block<3, 3>(state::offset_R_L_I_index, 0) = res_temp_SO3 * (df_dx_.template block<3, 3>(state::offset_R_L_I_index, 0));
 
             f_x1 += df_dx_ * dt;
-            P = f_x1 * P * (f_x1).transpose() + Q * (dt * dt);
+            P = f_x1 * P * f_x1.transpose() + Q * (dt * dt);
         }
 
         inline bool update_iterated_point() {
