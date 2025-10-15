@@ -15,11 +15,15 @@ ament_auto_find_build_dependencies()
 file(GLOB sources "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 
+find_package(Eigen3 REQUIRED)
+target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
+
 find_package(OpenCV REQUIRED)
-find_package(Ceres REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_include_directories(${PROJECT_NAME} PRIVATE ${CERES_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
+
+find_package(Ceres REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${CERES_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${CERES_LIBRARIES})
 
 rclcpp_components_register_node(${PROJECT_NAME}

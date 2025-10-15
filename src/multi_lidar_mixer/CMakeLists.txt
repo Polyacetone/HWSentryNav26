@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(costmap_generator)
+project(multi_lidar_mixer)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")
@@ -18,16 +18,8 @@ ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 find_package(Eigen3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 
-find_package(OpenCV REQUIRED)
-target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
-
-find_package(PCL REQUIRED)
-target_include_directories(${PROJECT_NAME} PRIVATE ${PCL_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARY_DIRS})
-
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN costmap_generator::CostmapGeneratorNode
+  PLUGIN multi_lidar_mixer::MultiLidarMixerNode
   EXECUTABLE ${PROJECT_NAME}_node
 )
 

@@ -1,26 +1,26 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>small_point_lio</name>
-  <version>1.0.0</version>
-  <description>an advanced Point-LIO algorithm implementation</description>
-  <maintainer email="1709185482@qq.com">Yingjie Huang</maintainer>
+  <name>multi_lidar_mixer</name>
+  <version>0.0.0</version>
+  <description>Multi Lidar Mixer</description>
+  <maintainer email="mitsuha.2213@gmail.com">@Polyacetone</maintainer>
   <license>MIT</license>
-  <author email="1709185482@qq.com">Yingjie Huang</author>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
-  <depend>rclpy</depend>
-  <depend>sensor_msgs</depend>
-  <depend>geometry_msgs</depend>
-  <depend>nav_msgs</depend>
+  <depend>rclcpp_components</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>pcl_ros</depend>
   <depend>pcl_conversions</depend>
-  <depend>livox_ros_driver2</depend>
-  <depend>std_srvs</depend>
 
+  <depend>tf2_geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <depend>livox_ros_driver2</depend>
   <depend>common_libs</depend>
 
   <export>

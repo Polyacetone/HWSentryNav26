@@ -40,7 +40,7 @@ namespace small_point_lio {
         preprocess.on_imu_callback(imu_msg);
     }
 
-    void SmallPointLio::handle_once(const bool pub_en) {
+    void SmallPointLio::handle_once() {
         // we need to init small point lio
         if (!is_init) {
             if ((!preprocess.point_deque.empty() || !preprocess.imu_deque.empty()) &&

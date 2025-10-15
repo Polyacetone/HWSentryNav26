@@ -15,6 +15,13 @@ ament_auto_find_build_dependencies()
 file(GLOB sources "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 
+find_package(Eigen3 REQUIRED)
+target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
+
+find_package(PCL REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARY_DIRS})
+
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN odom_localizer::OdomLocalizerNode
   EXECUTABLE ${PROJECT_NAME}_node

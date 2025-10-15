@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(small_point_lio)
 
-## use c++17
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # enable color output
@@ -26,9 +25,7 @@ endif()
 
 # optimize performance
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    add_compile_options("-march=native")
-    add_compile_options("-ffast-math")
-    add_compile_options("-fno-math-errno")
+    add_compile_options(-O3 -march=native -flto=auto)
 endif()
 
 #######################

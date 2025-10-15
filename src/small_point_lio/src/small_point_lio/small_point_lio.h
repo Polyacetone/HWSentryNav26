@@ -36,7 +36,7 @@ namespace small_point_lio {
 
         void on_imu_callback(const common::ImuMsg &imu_msg);
 
-        void handle_once(const bool pub_en);
+        void handle_once();
 
         void set_pointcloud_callback(const std::function<void(const std::vector<Eigen::Vector3f> &pointcloud)> &pointcloud_callback);
 

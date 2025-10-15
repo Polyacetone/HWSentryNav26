@@ -11,11 +11,11 @@
     gaussian_blur_sigma: 2.0 # 对代价地图进行高斯模糊的标准差
 
     global_costmap: # 全局先验地图配置
-      file_path: "RMUC.png" # 可以为图片格式或pcd，如果是图片就直接作为全局地图，pcd就进行点云分析
+      file_path: "1897translated.pcd" # 可以为图片格式或pcd，如果是图片就直接作为全局地图，pcd就进行点云分析
       file_type_pcd: # 如果以pcd格式读取
         # 如果以pcd格式读取，坐标系xy方向和原点均与点云坐标系一致
         max_z: 0.5 # 关心的z范围
-        min_z: 0.0 # 关心的z范围
+        min_z: 0.05 # 关心的z范围
       # 如果以图片格式读取，坐标系原点为图像右下角，向上为x,向左为y
       # 图像超过大小会裁切，不够则会以最大值100填充。图片应当为灰度图，值会被clamp到[0,100]
 
@@ -24,4 +24,4 @@
       cloud_queue_size: 3 # 对输入点云进行累积的帧数
       max_radius: 4.0 # 局部地图关心的xy范围，以tf的"base"的xy为参考点
       max_relative_z: 0.5 # 局部地图关心的z相对范围，以tf的"base"的z为参考点
-      min_relative_z: 0.0 # 局部地图关心的z相对范围，以tf的"base"的z为参考点
+      min_relative_z: 0.05 # 局部地图关心的z相对范围，以tf的"base"的z为参考点

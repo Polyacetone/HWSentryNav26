@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    lidar_names: ["lidar_left"]
+    imu_pub_topic: "imu_base"
+    livox_cloud_pub_topic: "livox_cloud_base"
+    cloud_pub_freq: 10
+
+    lidar_left:
+      cloud_topic: "/livox/lidar_192_168_1_195"
+      imu_topic: "/livox/imu_192_168_1_195"
+      transform_to_base:
+        translation:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        rotation:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+          w: 1.0

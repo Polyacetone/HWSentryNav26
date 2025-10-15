@@ -1,5 +1,7 @@
 #pragma once
 
+#include <concepts>
+
 #if __has_include(<opencv2/core/types.hpp>)
 #include <opencv2/core/types.hpp>
 #define HAVE_OPENCV
