@@ -12,7 +12,7 @@
 #include <small_gicp/util/downsampling_omp.hpp>
 #include <small_gicp/ann/kdtree_omp.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
-#include <common_utils/convert_utils.hpp>
+#include <common_utils/convert.hpp>
 
 namespace costmap_generator {
 using Point = pcl::PointXYZ;
@@ -46,8 +46,7 @@ private:
         PointCloud& cloud, const double max_relative_z, const double min_relative_z, const double radius,
         const std::string& center_frame, const std::string& cloud_frame
     ) const;
-    cv::Mat cost_analysis(const PointCloud& cloud) const;
-    void postprocess_costmap(cv::Mat& costmap) const;
+    cv::Mat cost_analysis_normal(const PointCloud& cloud) const;
     nav_msgs::msg::OccupancyGrid to_occupancy_grid_msg(
         const cv::Mat& costmap,
         const rclcpp::Time& stamp
@@ -81,7 +80,7 @@ CostmapGeneratorNode::CostmapGeneratorNode(const rclcpp::NodeOptions& options): 
         const double max_z = declare_parameter<double>("global_costmap.file_type_pcd.max_z");
         const double min_z = declare_parameter<double>("global_costmap.file_type_pcd.min_z");
         select_cloud(global_cloud, max_z, min_z);
-        global_costmap_ = cost_analysis(global_cloud);
+        global_costmap_ = cost_analysis_normal(global_cloud);
     } else {
         global_costmap_ = cv::Mat::zeros(cv::Size(map_x_size_, map_y_size_), CV_8U);
         cv::Mat img = cv::imread(file_path, cv::IMREAD_GRAYSCALE);
@@ -97,7 +96,6 @@ CostmapGeneratorNode::CostmapGeneratorNode(const rclcpp::NodeOptions& options): 
                 );
             }
         }
-        postprocess_costmap(global_costmap_);
     }
 
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -118,10 +116,10 @@ void CostmapGeneratorNode::cloud_callback(const sensor_msgs::msg::PointCloud2::S
     cloud_queue_.push_front(cloud);
     if (cloud_queue_.size() < cloud_queue_size_) return;
     PointCloud cloud_sum;
-    std::for_each(cloud_queue_.begin(), cloud_queue_.end(), [&](auto& c) { cloud_sum += *c; });
+    std::for_each(cloud_queue_.begin(), cloud_queue_.end(), [&](const auto& c) { cloud_sum += *c; });
     cloud_queue_.pop_back();
 
-    cv::Mat costmap = cost_analysis(cloud_sum);
+    cv::Mat costmap = cost_analysis_normal(cloud_sum);
     #pragma omp parallel for num_threads(num_threads_) schedule(guided, 16)
     for (int row = 0; row < map_y_size_; row++) {
         for (int col = 0; col < map_x_size_; col++) {
@@ -131,8 +129,9 @@ void CostmapGeneratorNode::cloud_callback(const sensor_msgs::msg::PointCloud2::S
             );
         }
     }
-    postprocess_costmap(costmap);
-    costmap_pub_->publish(to_occupancy_grid_msg(costmap, now()));
+    cv::dilate(costmap, costmap, dilate_kernel_);
+    cv::GaussianBlur(costmap, costmap, gaussian_blur_size_, gaussian_blur_sigma_);
+    costmap_pub_->publish(to_occupancy_grid_msg(costmap, msg->header.stamp));
 }
 
 void CostmapGeneratorNode::transform_cloud(
@@ -198,7 +197,7 @@ void CostmapGeneratorNode::select_cloud(
     cloud = cropped;
 }
 
-cv::Mat CostmapGeneratorNode::cost_analysis(const PointCloud& cloud) const {
+cv::Mat CostmapGeneratorNode::cost_analysis_normal(const PointCloud& cloud) const {
     using namespace small_gicp;
     auto cloud_down = voxelgrid_sampling_omp<PointCloud, PointNorCloud>(cloud, map_resolution_, num_threads_);
     estimate_local_features<NormalSetter<PointNorCloud>>(*cloud_down, num_neighbors_);
@@ -215,13 +214,7 @@ cv::Mat CostmapGeneratorNode::cost_analysis(const PointCloud& cloud) const {
             std::clamp<uint8_t>((1 - point.normal_z) * 100, 0, 100)
         );
     }
-    postprocess_costmap(costmap);
     return costmap;
-}
-
-void CostmapGeneratorNode::postprocess_costmap(cv::Mat& costmap) const {
-    cv::dilate(costmap, costmap, dilate_kernel_);
-    cv::GaussianBlur(costmap, costmap, gaussian_blur_size_, gaussian_blur_sigma_);
 }
 
 nav_msgs::msg::OccupancyGrid CostmapGeneratorNode::to_occupancy_grid_msg(

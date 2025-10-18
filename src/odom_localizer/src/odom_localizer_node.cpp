@@ -15,7 +15,7 @@
 #include <small_gicp/registration/reduction_omp.hpp>
 #include <small_gicp/registration/registration.hpp>
 
-#include <common_utils/convert_utils.hpp>
+#include <common_utils/convert.hpp>
 
 namespace odom_localizer {
 using namespace small_gicp;
@@ -101,7 +101,7 @@ void OdomLocalizerNode::cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr 
     if (result.converged) {
         const float fitness_score = calc_fitness_score(source_down, result.T_target_source);
         if (fitness_score < fitness_score_threshold_) {
-            publish_tf(result.T_target_source, now());
+            publish_tf(result.T_target_source, msg->header.stamp);
             last_successful_odom_to_map_ = result.T_target_source;
             return;
         }

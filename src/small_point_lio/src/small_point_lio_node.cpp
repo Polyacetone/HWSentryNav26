@@ -10,7 +10,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
-#include <common_utils/convert_utils.hpp>
+#include <common_utils/convert.hpp>
 
 namespace small_point_lio {
 SmallPointLioNode::SmallPointLioNode(const rclcpp::NodeOptions &options): Node("small_point_lio", options) {

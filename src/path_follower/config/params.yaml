@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    path_sub_topic: "path"
+    cmd_vel_pub_topic: "cmd_vel"
+    control_freq: 10
+    max_velocity: 4.0
+    stop_distance: 0.1
+    nearest_point_threshold: 0.3
+    ema_filter_ratio: 0.5
+    lookahead_distance_basic: 0.1

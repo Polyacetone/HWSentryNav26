@@ -13,7 +13,7 @@
 #include <path_planner/costmap_2d.hpp>
 #include <path_planner/a_star_planner.hpp>
 #include <path_planner/bspline_optimizer.hpp>
-#include <common_utils/convert_utils.hpp>
+#include <common_utils/convert.hpp>
 
 namespace path_planner {
 class PathPlannerNode: public rclcpp::Node {
