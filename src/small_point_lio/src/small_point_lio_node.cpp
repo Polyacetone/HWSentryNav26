@@ -34,14 +34,16 @@ SmallPointLioNode::SmallPointLioNode(const rclcpp::NodeOptions &options): Node("
             voxelgrid_sampling::VoxelgridSampling downsampler;
             std::vector<Eigen::Vector3f> downsampled;
             downsampler.voxelgrid_sampling_omp(pointcloud_to_save, downsampled, 0.02);
-            pcl::PointCloud<pcl::PointXYZI> pcl_pointcloud;
+            pcl::PointCloud<pcl::PointXYZ> pcl_pointcloud;
             pcl_pointcloud.reserve(downsampled.size());
             for (const auto &point: downsampled) {
-                pcl::PointXYZI new_point(point.x(), point.y(), point.z());
+                pcl::PointXYZ new_point(point.x(), point.y(), point.z());
                 pcl_pointcloud.push_back(new_point);
             }
             pcl::PCDWriter writer;
             writer.writeBinary(ROOT_DIR + "/pcd/scan.pcd", pcl_pointcloud);
+            res->success = true;
+            res->message = "pcd saved with " + std::to_string(pcl_pointcloud.size()) + " points";
             RCLCPP_INFO(rclcpp::get_logger("small_point_lio"), "save pcd success");
         }
     );
@@ -69,10 +71,10 @@ SmallPointLioNode::SmallPointLioNode(const rclcpp::NodeOptions &options): Node("
         odometry_publisher->publish(odometry_msg);
     });
     small_point_lio->set_pointcloud_callback([this, save_pcd](const std::vector<Eigen::Vector3f> &pointcloud) {
-        pcl::PointCloud<pcl::PointXYZI> pcl_pointcloud;
+        pcl::PointCloud<pcl::PointXYZ> pcl_pointcloud;
         pcl_pointcloud.reserve(pointcloud.size());
         for (const auto &point: pointcloud) {
-            pcl::PointXYZI new_point(point.x(), point.y(), point.z());
+            pcl::PointXYZ new_point(point.x(), point.y(), point.z());
             pcl_pointcloud.push_back(new_point);
         }
         sensor_msgs::msg::PointCloud2 msg;

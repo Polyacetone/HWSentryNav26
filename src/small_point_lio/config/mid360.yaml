@@ -1,7 +1,7 @@
 small_point_lio:
     ros__parameters:
-        lidar_topic: /livox/lidar                  # 点云话题名
-        imu_topic: /livox/imu                      # IMU话题名
+        lidar_topic: livox_cloud_base              # 点云话题名
+        imu_topic: imu_base                        # IMU话题名
         save_pcd: false                            # 是否保存点云
 
         # 点云过滤

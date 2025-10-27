@@ -1,20 +1,34 @@
 /**:
   ros__parameters:
-    lidar_names: ["lidar_left"]
+    lidar_names: ["lidar_left", "lidar_right"]
     imu_pub_topic: "imu_base"
     livox_cloud_pub_topic: "livox_cloud_base"
-    cloud_pub_freq: 10
+    cloud_pub_freq: 20
 
     lidar_left:
-      cloud_topic: "/livox/lidar_192_168_1_195"
-      imu_topic: "/livox/imu_192_168_1_195"
+      cloud_topic: "/livox/lidar_192_168_1_198"
+      imu_topic: "/livox/imu_192_168_1_198"
       transform_to_base:
         translation:
-          x: 0.0
-          y: 0.0
-          z: 0.0
+          x: -0.043126
+          y: 0.22332
+          z: 0.3877
         rotation:
-          x: 0.0
-          y: 0.0
-          z: 0.0
-          w: 1.0
+          x: -0.44018233443040855
+          y: 0.10452171839056341
+          z: 0.5533796785605899
+          w: 0.6993465908948566
+
+    lidar_right:
+      cloud_topic: "/livox/lidar_192_168_1_132"
+      imu_topic: "/livox/imu_192_168_1_132"
+      transform_to_base:
+        translation:
+          x: -0.011549
+          y: -0.20774
+          z: 0.36352
+        rotation:
+          x: 0.10452333526985552
+          y: 0.4401819504977296
+          z: -0.6993486235671981
+          w: 0.5533771097133899

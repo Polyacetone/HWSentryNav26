@@ -43,14 +43,14 @@ namespace small_point_lio {
         } else {
             processed_pointcloud = std::move(filtered_points);
         }
-        sort(dense_points.begin(), dense_points.end(),
-             [](const auto &x, const auto &y) {
-                 return x.timestamp < y.timestamp;
-             });
-        sort(processed_pointcloud.begin(), processed_pointcloud.end(),
-             [](const auto &x, const auto &y) {
-                 return x.timestamp < y.timestamp;
-             });
+        sort(
+            dense_points.begin(), dense_points.end(),
+            [](const auto &x, const auto &y) { return x.timestamp < y.timestamp; }
+        );
+        sort(
+            processed_pointcloud.begin(), processed_pointcloud.end(),
+            [](const auto &x, const auto &y) { return x.timestamp < y.timestamp; }
+        );
         if (!dense_points.empty()) {
             last_timestamp_dense_point = dense_points.back().timestamp;
             dense_point_deque.insert(dense_point_deque.end(), dense_points.begin(), dense_points.end());
