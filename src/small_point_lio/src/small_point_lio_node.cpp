@@ -94,12 +94,10 @@ SmallPointLioNode::SmallPointLioNode(const rclcpp::NodeOptions &options): Node("
             pointcloud.clear();
             pointcloud.reserve(msg.points.size());
             common::Point new_point;
-            for (const auto &point: msg.points) {
-                if ((point.tag & 0b010000) != 0b00000000 || (point.tag & 0b00001100) != 0b00000000 || (point.tag & 0b00000011) != 0b00000000) {
-                    continue;
-                }
-                new_point.position << point.x, point.y, point.z;
-                new_point.timestamp = static_cast<double>(msg.timebase + point.offset_time) * 1e-9;
+            for (const auto &pt: msg.points) {
+                if ((pt.tag & 0b00110000) || (pt.tag & 0b00001100) || (pt.tag & 0b00000011)) continue;
+                new_point.position << pt.x, pt.y, pt.z;
+                new_point.timestamp = static_cast<double>(msg.timebase + pt.offset_time) * 1e-9;
                 pointcloud.push_back(new_point);
             }
             small_point_lio->on_point_cloud_callback(pointcloud);
