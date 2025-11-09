@@ -1,0 +1,33 @@
+/**:
+  ros__parameters:
+    odometry_estimation:
+      # Initialization
+      use_init_world_imu: false # If true, parameter init_T_world_imu and init_v_world_imu should be given instead of estimated
+      init_pose_damping_scale: 1e10 # Damping scale for the initial pose (to fix the gauge freedom)
+      initialization_window_size: 3.0 # Initialization window size for the "LOOSE" initialization mode [sec]
+      
+      # Optimization
+      smoother_lag: 5.0 # Fixed-lag smoothing window size [sec]
+      use_isam2_dogleg: true # Use the dogleg optimizer as the backend of ISAM2 that is slow but more robust
+      isam2_relinearize_skip: 1 # Relinearization is performed every $isam2_relinearize_skip optimization calls
+      isam2_relinearize_thresh: 0.1 # Relinearization is performed only when linear delta gets larger than this
+      fix_imu_bias: false # If true, disable IMU bias estimation and use the initial IMU bias
+
+      # Registration
+      registration_type: "GICP" # Registration type (GICP or VGICP)
+      max_iterations: 8 # Maximum number of iterations
+      lru_thresh: 100 # LRU cache threshold
+      target_downsampling_rate: 0.1 # Downsampling rate for points to be inserted into the target
+
+      # GICP + iVox
+      ivox_resolution: 1.0 # iVox resolution
+      ivox_min_dist: 0.1 # Minimum distance between points in an iVox cell
+
+      # VGICP
+      vgicp_resolution: 0.5 # Voxelmap resolution (for VGICP)
+      vgicp_voxelmap_levels: 1 # Multi-resolution voxelmap levesl (for VGICP)
+      vgicp_voxelmap_scaling_factor: 2.0 # Multi-resolution voxelmap scaling factor (for VGICP)
+
+      # MISC
+      save_imu_rate_trajectory: true # If true, save the IMU rate trajectory
+      num_threads: 4 # Number of threads for odometry estimation

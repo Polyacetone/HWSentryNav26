@@ -1,0 +1,17 @@
+/**:
+  ros__parameters:
+    sensors:
+      # IMU
+      imu_upright: true # True for ENU, false for NED
+      imu_acc_noise: 0.05 # Accelerometer noise
+      imu_gyro_noise: 0.02 # Gyroscope noise
+      imu_int_noise: 0.001 # Integration noise
+      imu_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # IMU bias
+      imu_bias_noise: 1e-5 # Bias randomwalk noise
+      
+      # LiDAR
+      global_shutter_lidar: false # If true, fill per-point timestamps with zero and disable points deskewing
+      T_lidar_imu: [0.006, -0.012, 0.008, 0.0, 0.0, 0.0, 1.0] # LiDAR-IMU transformation (See below for the format)
+      intensity_field: "intensity" # Field name used for extracting point intensity from PointCloud2 message
+      ring_field: "" # Field name used for extracting ring number (laser ID) from PointCloud2 message
+      autoconf_perpoint_times: true # If true, automatically configure per-point timestamps. If false, use the following settings.

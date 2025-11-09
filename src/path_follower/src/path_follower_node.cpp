@@ -33,7 +33,7 @@ private:
     std::unique_ptr<utils::EMAFilter<2>> velocity_;
 };
 
-PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower_node") {
+PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower_node", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 

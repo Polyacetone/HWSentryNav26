@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(path_planner)
+project(small_glim)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")
@@ -12,22 +12,24 @@ add_compile_options(-O3)
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-file(GLOB sources "src/*.cpp")
+file(GLOB_RECURSE sources "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 
 find_package(Eigen3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 
-find_package(OpenCV REQUIRED)
-target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
+find_package(PCL REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARY_DIRS})
 
-find_package(Ceres REQUIRED)
-target_include_directories(${PROJECT_NAME} PRIVATE ${CERES_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${CERES_LIBRARIES})
+find_package(GTSAM 4.3 REQUIRED)
+target_link_libraries(${PROJECT_NAME} gtsam)
+
+find_package(gtsam_points 1.2.0 REQUIRED)
+target_link_libraries(${PROJECT_NAME} gtsam_points::gtsam_points)
 
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN path_planner::PathPlannerNode
+  PLUGIN small_glim::SmallGlimNode
   EXECUTABLE ${PROJECT_NAME}_node
 )
 

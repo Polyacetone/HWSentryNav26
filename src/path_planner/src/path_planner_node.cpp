@@ -38,7 +38,7 @@ private:
     void timer_callback();
 };
 
-PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner_node") {
+PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner_node", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     int downsampled_waypoint_max_interval = declare_parameter<int>("a_star_planner.downsampled_waypoint_max_interval");
