@@ -8,7 +8,7 @@
 
       # Relative pose factors
       create_between_factors: true # If true, create SE3 relative pose factors between consecutive frames (i.e., odom_factor)
-      between_registration_type: "GICP" # Registration factor type for information matrix evaluation of relative pose factors ("NONE" / "GICP")
+      between_registration_type: "NONE" # Registration factor type for information matrix evaluation of relative pose factors ("NONE" / "GICP")
 
       # Registration error factors
       registration_error_factor_type: "VGICP" # Registration factor type for matching cost minimization (Only VGICP supported)

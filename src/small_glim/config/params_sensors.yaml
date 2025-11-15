@@ -13,5 +13,5 @@
       global_shutter_lidar: false # If true, fill per-point timestamps with zero and disable points deskewing
       T_lidar_imu: [0.006, -0.012, 0.008, 0.0, 0.0, 0.0, 1.0] # LiDAR-IMU transformation (See below for the format)
       intensity_field: "intensity" # Field name used for extracting point intensity from PointCloud2 message
-      ring_field: "" # Field name used for extracting ring number (laser ID) from PointCloud2 message
+      ring_field: "line" # Field name used for extracting ring number (laser ID) from PointCloud2 message
       autoconf_perpoint_times: true # If true, automatically configure per-point timestamps. If false, use the following settings.

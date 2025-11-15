@@ -67,10 +67,10 @@ private:
     std::atomic_bool end_of_sequence; // Flag to stop the thread when the input queues become empty (Soft kill switch)
     std::thread thread;
 
-    ConcurrentVector<Eigen::Matrix<double, 7, 1>> input_imu_queue;
-    ConcurrentVector<EstimationFrame::ConstPtr> input_frame_queue;
+    ConcurrentVector<Eigen::Matrix<double, 7, 1>> input_imu_queue {DataStorePolicy::UPTO(100)};
+    ConcurrentVector<EstimationFrame::ConstPtr> input_frame_queue {DataStorePolicy::UPTO(100)};
 
-    ConcurrentVector<SubMap::Ptr> output_submap_queue;
+    ConcurrentVector<SubMap::Ptr> output_submap_queue {DataStorePolicy::UPTO(10)};
 
     std::shared_ptr<SubMapping> sub_mapping;
 };

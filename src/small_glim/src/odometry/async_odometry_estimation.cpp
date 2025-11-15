@@ -63,7 +63,6 @@ void AsyncOdometryEstimation::run() {
             if (end_of_sequence) {
                 break;
             }
-
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
@@ -73,7 +72,6 @@ void AsyncOdometryEstimation::run() {
             const Eigen::Vector3d linear_acc = imu.block<3, 1>(1, 0);
             const Eigen::Vector3d angular_vel = imu.block<3, 1>(4, 0);
             odometry_estimation->insert_imu(stamp, linear_acc, angular_vel);
-
             last_imu_time = stamp;
         }
 

@@ -75,7 +75,7 @@ SubMap::Ptr SubMap::load(const std::string& path) {
         return nullptr;
     }
 
-    SubMap::Ptr submap(new SubMap);
+    SubMap::Ptr submap = std::make_shared<SubMap>();
 
     std::string token;
     ifs >> token >> submap->id;
@@ -113,7 +113,7 @@ SubMap::Ptr SubMap::load(const std::string& path) {
         ifs >> token;
         Eigen::Vector3d v_world_imu = read_matrix<3, 1>(ifs);
 
-        EstimationFrame::Ptr frame(new EstimationFrame);
+        EstimationFrame::Ptr frame = std::make_shared<EstimationFrame>();
         frame->id = id;
         frame->stamp = stamp;
         frame->T_lidar_imu = T_lidar_imu;
@@ -124,7 +124,7 @@ SubMap::Ptr SubMap::load(const std::string& path) {
         frame->imu_bias = imu_bias;
         frame->frame_id = static_cast<FrameID>(frame_id);
 
-        EstimationFrame::Ptr odom_frame(new EstimationFrame);
+        EstimationFrame::Ptr odom_frame = std::make_shared<EstimationFrame>();
         *odom_frame = *frame;
         odom_frame->T_world_lidar = T_odom_lidar;
         odom_frame->T_world_imu = T_odom_lidar * T_lidar_imu;

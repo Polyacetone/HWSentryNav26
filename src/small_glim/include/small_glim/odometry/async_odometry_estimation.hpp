@@ -53,7 +53,10 @@ public:
     * @param estimation_results    Estimation results
     * @param marginalized_frames   Marginalized frames
     */
-    void get_results(std::vector<EstimationFrame::ConstPtr>& estimation_results, std::vector<EstimationFrame::ConstPtr>& marginalized_frames);
+    void get_results(
+        std::vector<EstimationFrame::ConstPtr>& estimation_results,
+        std::vector<EstimationFrame::ConstPtr>& marginalized_frames
+    );
 
 private:
     void run();
@@ -63,12 +66,12 @@ private:
     std::atomic_bool end_of_sequence;  // Flag to stop the thread when the input queues become empty (Soft kill switch)
     std::thread thread;
 
-    ConcurrentVector<Eigen::Matrix<double, 7, 1>> input_imu_queue;
-    ConcurrentVector<PreprocessedFrame::Ptr> input_frame_queue;
+    ConcurrentVector<Eigen::Matrix<double, 7, 1>> input_imu_queue {DataStorePolicy::UPTO(100)};
+    ConcurrentVector<PreprocessedFrame::Ptr> input_frame_queue {DataStorePolicy::UPTO(100)};
 
     // Output queues
-    ConcurrentVector<EstimationFrame::ConstPtr> output_estimation_results;
-    ConcurrentVector<EstimationFrame::ConstPtr> output_marginalized_frames;
+    ConcurrentVector<EstimationFrame::ConstPtr> output_estimation_results {DataStorePolicy::UPTO(10)};
+    ConcurrentVector<EstimationFrame::ConstPtr> output_marginalized_frames {DataStorePolicy::UPTO(10)};
 
     std::atomic_int internal_frame_queue_size;
     std::shared_ptr<OdometryEstimationCPU> odometry_estimation;

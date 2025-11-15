@@ -14,7 +14,7 @@
       fix_imu_bias: false # If true, disable IMU bias estimation and use the initial IMU bias
 
       # Registration
-      registration_type: "GICP" # Registration type (GICP or VGICP)
+      registration_type: "VGICP" # Registration type (GICP or VGICP)
       max_iterations: 8 # Maximum number of iterations
       lru_thresh: 100 # LRU cache threshold
       target_downsampling_rate: 0.1 # Downsampling rate for points to be inserted into the target

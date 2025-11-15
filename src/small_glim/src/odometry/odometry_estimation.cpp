@@ -289,7 +289,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         logger::info("odom_estimation", "imu_bias={}", convert_to_string(init_state->imu_bias));
 
         // Initialize the first frame
-        EstimationFrame::Ptr new_frame(new EstimationFrame);
+        EstimationFrame::Ptr new_frame = std::make_shared<EstimationFrame>();
         new_frame->id = current;
         new_frame->stamp = raw_frame->stamp;
 
@@ -363,30 +363,25 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
     const double last_stamp = frames[last]->stamp;
     const auto last_T_world_imu_ = smoother->calculateEstimate<gtsam::Pose3>(X(last));
-    const auto last_T_world_imu =
-        gtsam::Pose3(last_T_world_imu_.rotation().normalized(), last_T_world_imu_.translation());
+    const auto last_T_world_imu = gtsam::Pose3(last_T_world_imu_.rotation().normalized(), last_T_world_imu_.translation());
     const auto last_v_world_imu = smoother->calculateEstimate<gtsam::Vector3>(V(last));
     const auto last_imu_bias = smoother->calculateEstimate<gtsam::imuBias::ConstantBias>(B(last));
     const gtsam::NavState last_nav_world_imu(last_T_world_imu, last_v_world_imu);
 
     // IMU integration between LiDAR scans (inter-scan)
     int num_imu_integrated = 0;
-    const int imu_read_cursor =
-        imu_integration
-            ->integrate_imu(last_stamp, raw_frame->stamp, last_imu_bias, &num_imu_integrated);
+    const int imu_read_cursor = imu_integration->integrate_imu(last_stamp, raw_frame->stamp, last_imu_bias, &num_imu_integrated);
     imu_integration->erase_imu_data(imu_read_cursor);
     logger::debug("odom_estimation", "num_imu_integrated={}", num_imu_integrated);
 
     // IMU state prediction
-    const gtsam::NavState predicted_nav_world_imu =
-        imu_integration->integrated_measurements().predict(last_nav_world_imu, last_imu_bias);
+    const gtsam::NavState predicted_nav_world_imu = imu_integration->integrated_measurements().predict(last_nav_world_imu, last_imu_bias);
     gtsam::Pose3 predicted_T_world_imu = predicted_nav_world_imu.pose();
     gtsam::Vector3 predicted_v_world_imu = predicted_nav_world_imu.velocity();
 
     // Overwrite the predicted state with the last states if no IMU data is available
     if (num_imu_integrated < 2 && last > 1) {
-        const Eigen::Isometry3d T_delta =
-            frames[last - 1]->T_lidar_imu.inverse() * frames[last]->T_lidar_imu;
+        const Eigen::Isometry3d T_delta = frames[last - 1]->T_lidar_imu.inverse() * frames[last]->T_lidar_imu;
         predicted_T_world_imu = gtsam::Pose3((frames[last]->T_world_imu * T_delta).matrix());
         predicted_v_world_imu = frames[last]->v_world_imu;
     }
@@ -462,7 +457,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     );
 
     // Create EstimationFrame
-    EstimationFrame::Ptr new_frame(new EstimationFrame);
+    EstimationFrame::Ptr new_frame = std::make_shared<EstimationFrame>();
     new_frame->id = current;
     new_frame->stamp = raw_frame->stamp;
 
@@ -479,8 +474,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         for (int i = 0; i < pred_imu_times.size(); i++) {
             const Eigen::Vector3d trans = pred_imu_poses[i].translation();
             const Eigen::Quaterniond quat(pred_imu_poses[i].linear());
-            new_frame->imu_rate_trajectory.col(i) << pred_imu_times[i], trans, quat.x(), quat.y(),
-                quat.z(), quat.w();
+            new_frame->imu_rate_trajectory.col(i) << pred_imu_times[i], trans, quat.x(), quat.y(), quat.z(), quat.w();
         }
     }
 
@@ -530,11 +524,6 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
     // Update frames
     update_frames(current, new_factors);
-
-    std::vector<EstimationFrame::ConstPtr> active_frames(
-        frames.begin() + marginalized_cursor,
-        frames.end()
-    );
     logger::debug("odom_estimation", "frames updated");
 
     if (smoother->fallbackHappened()) {

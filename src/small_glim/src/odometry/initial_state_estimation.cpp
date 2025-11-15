@@ -169,7 +169,7 @@ EstimationFrame::ConstPtr InitialStateEstimation::initial_pose() {
     gtsam::Pose3 T_odom_imu0 = values.at<gtsam::Pose3>(X(0));
     gtsam::Pose3 T_odom_lidar0 = T_odom_imu0 * gtsam::Pose3(T_lidar_imu.inverse().matrix());
 
-    EstimationFrame::Ptr estimated(new EstimationFrame);
+    EstimationFrame::Ptr estimated = std::make_shared<EstimationFrame>();
     estimated->id = -1;
     estimated->stamp = T_odom_lidar.back().first;
     estimated->T_lidar_imu = T_lidar_imu;

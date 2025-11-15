@@ -403,53 +403,60 @@ GlobalMapping::create_between_factors(int current) const {
             )
         );
         return factors;
+    } else if (params->between_registration_type == "GICP") {
+        gtsam::Values values;
+        values.insert(X(0), gtsam::Pose3::Identity());
+        values.insert(X(1), init_delta);
+
+        gtsam::NonlinearFactorGraph graph;
+        graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
+            X(0),
+            gtsam::Pose3::Identity(),
+            gtsam::noiseModel::Isotropic::Precision(6, 1e6)
+        );
+
+        auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
+            X(0),
+            X(1),
+            submaps[last]->frame,
+            submaps[current]->frame
+        );
+        factor->set_max_correspondence_distance(0.5);
+        factor->set_num_threads(2);
+        graph.add(factor);
+
+        logger::debug("global_mapping", "--- LM optimization ---");
+        gtsam_points::LevenbergMarquardtExtParams lm_params;
+        lm_params.setlambdaInitial(1e-12);
+        lm_params.setMaxIterations(10);
+        lm_params.callback = [this](const auto& status, const auto& values) {
+            logger::debug("global_mapping", "{}", status.to_string());
+        };
+
+        gtsam_points::LevenbergMarquardtOptimizerExt optimizer(graph, values, lm_params);
+        values = optimizer.optimize();
+
+        const gtsam::Pose3 estimated_delta = values.at<gtsam::Pose3>(X(1));
+        const auto linearized = factor->linearize(values);
+        const auto H = linearized->hessianBlockDiagonal()[X(1)] + 1e6 * gtsam::Matrix6::Identity();
+
+        factors->add(
+            gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+                X(last),
+                X(current),
+                estimated_delta,
+                gtsam::noiseModel::Gaussian::Information(H)
+            )
+        );
+        return factors;
+    } else {
+        logger::fatal(
+            "global_mapping",
+            "unknown between registration type ({})",
+            params->between_registration_type
+        );
+        abort();
     }
-
-    gtsam::Values values;
-    values.insert(X(0), gtsam::Pose3::Identity());
-    values.insert(X(1), init_delta);
-
-    gtsam::NonlinearFactorGraph graph;
-    graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
-        X(0),
-        gtsam::Pose3::Identity(),
-        gtsam::noiseModel::Isotropic::Precision(6, 1e6)
-    );
-
-    auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
-        X(0),
-        X(1),
-        submaps[last]->frame,
-        submaps[current]->frame
-    );
-    factor->set_max_correspondence_distance(0.5);
-    factor->set_num_threads(2);
-    graph.add(factor);
-
-    logger::debug("global_mapping", "--- LM optimization ---");
-    gtsam_points::LevenbergMarquardtExtParams lm_params;
-    lm_params.setlambdaInitial(1e-12);
-    lm_params.setMaxIterations(10);
-    lm_params.callback = [this](const auto& status, const auto& values) {
-        logger::debug("global_mapping", "{}", status.to_string());
-    };
-
-    gtsam_points::LevenbergMarquardtOptimizerExt optimizer(graph, values, lm_params);
-    values = optimizer.optimize();
-
-    const gtsam::Pose3 estimated_delta = values.at<gtsam::Pose3>(X(1));
-    const auto linearized = factor->linearize(values);
-    const auto H = linearized->hessianBlockDiagonal()[X(1)] + 1e6 * gtsam::Matrix6::Identity();
-
-    factors->add(
-        gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-            X(last),
-            X(current),
-            estimated_delta,
-            gtsam::noiseModel::Gaussian::Information(H)
-        )
-    );
-    return factors;
 }
 
 std::shared_ptr<gtsam::NonlinearFactorGraph>
@@ -488,11 +495,12 @@ GlobalMapping::create_matching_cost_factors(int current) const {
                 );
             }
         } else {
-            logger::warn(
+            logger::fatal(
                 "global_mapping",
                 "unknown registration error type ({})",
                 params->registration_error_factor_type
             );
+            abort();
         }
     }
 

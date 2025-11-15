@@ -216,11 +216,12 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
                 gtsam::noiseModel::Isotropic::Precision(6, 1e3)
             );
         } else {
-            logger::warn(
+            logger::fatal(
                 "sub_mapping",
                 "unknown between registration type ({})",
                 params->between_registration_type
             );
+            abort();
         }
     }
 
@@ -284,8 +285,7 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
     if (!insert_as_keyframe && odom_frame->frame
         && odom_frame->frame->size() > params->keyframe_update_min_points)
     {
-        // Overlap-based keyframe update
-        if (params->keyframe_update_strategy == "OVERLAP") {
+        if (params->keyframe_update_strategy == "OVERLAP") { // Overlap-based keyframe update
             if (keyframes.back()->voxelmaps.empty() || odom_frame->frame->size() < 10) {
                 logger::warn(
                     "sub_mapping",
@@ -301,10 +301,7 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
                 );
                 insert_as_keyframe = overlap < params->max_keyframe_overlap;
             }
-        }
-        // Displacement-based keyframe update
-        else if (params->keyframe_update_strategy == "DISPLACEMENT")
-        {
+        } else if (params->keyframe_update_strategy == "DISPLACEMENT") { // Displacement-based keyframe update
             const Eigen::Isometry3d delta_from_keyframe =
                 keyframes.back()->T_world_sensor().inverse() * odom_frame->T_world_sensor();
             const double delta_trans = delta_from_keyframe.translation().norm();
@@ -313,7 +310,8 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
             insert_as_keyframe = delta_trans > params->keyframe_update_interval_trans
                 || delta_angle > params->keyframe_update_interval_rot;
         } else {
-            logger::warn("sub_mapping", "unknown keyframe update strategy ({})", params->keyframe_update_strategy);
+            logger::fatal("sub_mapping", "unknown keyframe update strategy ({})", params->keyframe_update_strategy);
+            abort();
         }
     }
 
@@ -348,11 +346,12 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
                     );
                 }
             } else {
-                logger::warn(
+                logger::fatal(
                     "sub_mapping",
                     "unknown registration error factor type ({})",
                     params->registration_error_factor_type
                 );
+                abort();
             }
         }
     }
@@ -437,7 +436,7 @@ void SubMapping::insert_keyframe(const int current, const EstimationFrame::Const
     gtsam_points::PointCloud::Ptr subsampled_frame =
         gtsam_points::random_sampling(deskewed_frame, params->keyframe_randomsampling_rate, mt);
 
-    EstimationFrame::Ptr keyframe(new EstimationFrame);
+    EstimationFrame::Ptr keyframe = std::make_shared<EstimationFrame>();
     *keyframe = *odom_frame;
 
     keyframe->voxelmaps.clear();
@@ -476,7 +475,7 @@ SubMap::Ptr SubMapping::create_submap(bool force_create) const {
     }
 
     // Create a submap by merging optimized frames
-    SubMap::Ptr submap(new SubMap);
+    SubMap::Ptr submap = std::make_shared<SubMap>();
     submap->id = 0;
 
     const int center = odom_frames.size() / 2;
@@ -487,7 +486,7 @@ SubMap::Ptr SubMapping::create_submap(bool force_create) const {
     submap->odom_frames = odom_frames;
     submap->frames.resize(odom_frames.size());
     for (int i = 0; i < odom_frames.size(); i++) {
-        EstimationFrame::Ptr frame(new EstimationFrame);
+        EstimationFrame::Ptr frame = std::make_shared<EstimationFrame>();
         *frame = *odom_frames[i];
 
         const Eigen::Isometry3d T_world_sensor(values->at<gtsam::Pose3>(X(i)).matrix());

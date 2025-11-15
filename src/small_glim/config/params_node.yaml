@@ -1,13 +1,14 @@
 /**:
   ros__parameters:
-    ros:
+    node:
       debug: false
       dump_on_unload: true
       keep_raw_points: true
       imu_time_offset: 0.0
       points_time_offset: 0.0
       acc_scale: 9.80665
-      enable_local_mapping: true
-      enable_global_mapping: true
+      enable_local_mapping: false
+      enable_global_mapping: false
       imu_topic: "/livox/imu"
-      points_topic: "/livox/lidar/pointcloud"
+      points_topic: "/livox/lidar"
+      odometry_topic: "/odometry"
