@@ -78,6 +78,7 @@ public:
     void insert_imu(const double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel);
     EstimationFrame::ConstPtr insert_frame(const PreprocessedFrame::Ptr& frame, std::vector<EstimationFrame::ConstPtr>& marginalized_frames);
     std::vector<EstimationFrame::ConstPtr> get_remaining_frames();
+    EstimationFrame::ConstPtr get_target_ivox_frame();
 
 private:
     gtsam::NonlinearFactorGraph create_factors(
@@ -117,7 +118,7 @@ private:
     Eigen::Isometry3d last_T_target_imu; ///< Last IMU pose w.r.t. target model
     std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapCPU>> target_voxelmaps; ///< VGICP target voxelmap
     std::shared_ptr<gtsam_points::iVox> target_ivox; ///< GICP target iVox
-    EstimationFrame::ConstPtr target_ivox_frame; ///< Target points (just for visualization)
+    EstimationFrame::ConstPtr target_ivox_frame; ///< Target points
 };
 
 }

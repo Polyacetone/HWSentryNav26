@@ -7,15 +7,10 @@
 
 #include <gtsam_points/config.hpp>
 #include <gtsam_points/types/point_cloud_cpu.hpp>
-#include <gtsam_points/types/point_cloud_gpu.hpp>
 #include <gtsam_points/types/gaussian_voxelmap_cpu.hpp>
-#include <gtsam_points/types/gaussian_voxelmap_gpu.hpp>
 #include <gtsam_points/factors/integrated_gicp_factor.hpp>
 #include <gtsam_points/factors/integrated_vgicp_factor.hpp>
-#include <gtsam_points/factors/integrated_vgicp_factor_gpu.hpp>
 #include <gtsam_points/optimizers/levenberg_marquardt_ext.hpp>
-#include <gtsam_points/cuda/cuda_stream.hpp>
-#include <gtsam_points/cuda/stream_temp_buffer_roundrobin.hpp>
 
 #include <small_glim/common/config.hpp>
 #include <small_glim/common/logger.hpp>
@@ -169,8 +164,7 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
         );
     }
     // Create a relative pose factor between consecutive frames
-    else if (params->create_between_factors)
-    {
+    else if (params->create_between_factors) {
         logger::debug("sub_mapping", "create between factors");
         const Eigen::Isometry3d delta =
             odom_frames[last]->T_world_sensor().inverse() * odom_frame->T_world_sensor();

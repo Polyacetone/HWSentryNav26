@@ -175,31 +175,31 @@ void TimeKeeper::replace_points_stamp(const small_glim::RawPoints::Ptr& points) 
             settings->relative_time = true;
         } else {
             settings->relative_time = false;
-            logger::warn("time_keeper", 
-                "large point timestamp (min={:.6f} max={:.6f} > 1.0) found!!",
+            logger::info("time_keeper", 
+                "large point timestamp (min={:.6f} max={:.6f} > 1.0) found",
                 min_time,
                 max_time
             );
-            logger::warn("time_keeper", "assume that point times are absolute and convert them to relative");
+            logger::info("time_keeper", "assume that point times are absolute and convert them to relative");
 
             if (min_time > 1e16) {
-                logger::warn("time_keeper", 
-                    "too large point timestamp (min={:.6f} max={:.6f} > 1e16) found!!",
+                logger::info("time_keeper", 
+                    "too large point timestamp (min={:.6f} max={:.6f} > 1e16) found",
                     min_time,
                     max_time
                 );
-                logger::warn("time_keeper", 
+                logger::info("time_keeper", 
                     "maybe using a Livox LiDAR that use FLOAT64 nanosec per-point timestamps"
                 );
                 settings->point_time_scale = 1e-9;
             }
 
             if (settings->prefer_frame_time) {
-                logger::warn("time_keeper", 
-                    "frame timestamp will be prioritized over the first point timestamp!!"
+                logger::info("time_keeper", 
+                    "frame timestamp will be prioritized over the first point timestamp"
                 );
             } else {
-                logger::warn("time_keeper", "frame timestamp will be overwritten by the first point timestamp!!");
+                logger::info("time_keeper", "frame timestamp will be overwritten by the first point timestamp");
             }
         }
     }

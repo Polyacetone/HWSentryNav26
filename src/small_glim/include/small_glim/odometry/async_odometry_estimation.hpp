@@ -55,6 +55,7 @@ public:
     */
     void get_results(
         std::vector<EstimationFrame::ConstPtr>& estimation_results,
+        std::vector<EstimationFrame::ConstPtr>& target_ivox_frames,
         std::vector<EstimationFrame::ConstPtr>& marginalized_frames
     );
 
@@ -71,6 +72,7 @@ private:
 
     // Output queues
     ConcurrentVector<EstimationFrame::ConstPtr> output_estimation_results {DataStorePolicy::UPTO(10)};
+    ConcurrentVector<EstimationFrame::ConstPtr> output_target_ivox_frames {DataStorePolicy::UPTO(10)};
     ConcurrentVector<EstimationFrame::ConstPtr> output_marginalized_frames {DataStorePolicy::UPTO(10)};
 
     std::atomic_int internal_frame_queue_size;

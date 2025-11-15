@@ -12,18 +12,14 @@
 
 #include <gtsam_points/config.hpp>
 #include <gtsam_points/types/point_cloud_cpu.hpp>
-#include <gtsam_points/types/point_cloud_gpu.hpp>
 #include <gtsam_points/types/gaussian_voxelmap_cpu.hpp>
-#include <gtsam_points/types/gaussian_voxelmap_gpu.hpp>
 #include <gtsam_points/factors/linear_damping_factor.hpp>
 #include <gtsam_points/factors/rotate_vector3_factor.hpp>
 #include <gtsam_points/factors/integrated_gicp_factor.hpp>
 #include <gtsam_points/factors/integrated_vgicp_factor.hpp>
-#include <gtsam_points/factors/integrated_vgicp_factor_gpu.hpp>
 #include <gtsam_points/optimizers/isam2_ext.hpp>
 #include <gtsam_points/optimizers/isam2_ext_dummy.hpp>
 #include <gtsam_points/optimizers/levenberg_marquardt_ext.hpp>
-#include <gtsam_points/cuda/stream_temp_buffer_roundrobin.hpp>
 
 #include <small_glim/common/config.hpp>
 #include <small_glim/common/logger.hpp>
@@ -851,7 +847,7 @@ bool GlobalMapping::load(const std::string& path) {
         const auto first = std::get<1>(factor) + start_from_frame_id;
         const auto second = std::get<2>(factor) + start_from_frame_id;
 
-        if (type == "vgicp" || type == "vgicp_gpu") {
+        if (type == "vgicp") {
             for (const auto& voxelmap: submaps[first]->voxelmaps) {
                 graph.emplace_shared<gtsam_points::IntegratedVGICPFactor>(
                     X(first),
@@ -861,7 +857,8 @@ bool GlobalMapping::load(const std::string& path) {
                 );
             }
         } else {
-            logger::warn("global_mapping", "unsupported matching cost factor type ({})", type);
+            logger::fatal("global_mapping", "unsupported matching cost factor type ({})", type);
+            abort();
         }
     }
 

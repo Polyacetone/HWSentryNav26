@@ -43,9 +43,11 @@ int AsyncOdometryEstimation::workload() const {
 
 void AsyncOdometryEstimation::get_results(
     std::vector<EstimationFrame::ConstPtr>& estimation_results,
+    std::vector<EstimationFrame::ConstPtr>& target_ivox_frames,
     std::vector<EstimationFrame::ConstPtr>& marginalized_frames
 ) {
     estimation_results = output_estimation_results.get_all_and_clear();
+    target_ivox_frames = output_target_ivox_frames.get_all_and_clear();
     marginalized_frames = output_marginalized_frames.get_all_and_clear();
 }
 
@@ -101,9 +103,11 @@ void AsyncOdometryEstimation::run() {
 
             const auto& frame = raw_frames.front();
             std::vector<EstimationFrame::ConstPtr> marginalized;
-            auto state = odometry_estimation->insert_frame(frame, marginalized);
+            auto estimation_frame = odometry_estimation->insert_frame(frame, marginalized);
+            auto target_ivox_frame = odometry_estimation->get_target_ivox_frame();
 
-            output_estimation_results.push_back(state);
+            output_estimation_results.push_back(estimation_frame);
+            output_target_ivox_frames.push_back(target_ivox_frame);
             output_marginalized_frames.insert(marginalized);
             raw_frames.pop_front();
             internal_frame_queue_size = raw_frames.size();

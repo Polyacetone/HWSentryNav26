@@ -28,7 +28,8 @@ public:
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
     size_t points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
 
-    void send_odometry(const EstimationFrame::ConstPtr frame);
+    void pub_odometry(const EstimationFrame::ConstPtr frame);
+    void pub_odom_ivox(const EstimationFrame::ConstPtr frame);
     void wait(bool auto_quit = false);
     void save(const std::string& path);
 
@@ -56,6 +57,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_sub;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_pub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr odom_ivox_pub;
 };
 
 }
@@ -97,7 +99,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     odometry_estimation = std::make_unique<AsyncOdometryEstimation>(odom);
 
     // Sub mapping
-    if (config->param<bool>("node.enable_local_mapping")) {
+    if (config->param<bool>("node.enable_sub_mapping")) {
         auto sub = std::make_shared<SubMapping>(config);
         sub_mapping = std::make_unique<AsyncSubMapping>(sub);
     }
@@ -109,22 +111,24 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     }
 
     // ROS-related
-    const std::string imu_topic = config->param<std::string>("node.imu_topic");
-    const std::string points_topic = config->param<std::string>("node.points_topic");
-    const std::string odometry_topic = config->param<std::string>("node.odometry_topic");
+    const std::string imu_sub_topic = config->param<std::string>("node.imu_sub_topic");
+    const std::string points_sub_topic = config->param<std::string>("node.points_sub_topic");
+    const std::string odometry_pub_topic = config->param<std::string>("node.odometry_pub_topic");
+    const std::string odom_ivox_pub_topic = config->param<std::string>("node.odom_ivox_pub_topic");
 
     // Subscribers
     imu_sub = create_subscription<sensor_msgs::msg::Imu>(
-        imu_topic,
+        imu_sub_topic,
         rclcpp::QoS(1),
         [this](const sensor_msgs::msg::Imu::SharedPtr msg) { imu_callback(msg); }
     );
     points_sub = create_subscription<sensor_msgs::msg::PointCloud2>(
-        points_topic,
+        points_sub_topic,
         rclcpp::QoS(1),
         [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { points_callback(msg); }
     );
-    odometry_pub = create_publisher<nav_msgs::msg::Odometry>(odometry_topic, rclcpp::QoS(1));
+    odometry_pub = create_publisher<nav_msgs::msg::Odometry>(odometry_pub_topic, rclcpp::QoS(1));
+    odom_ivox_pub = create_publisher<sensor_msgs::msg::PointCloud2>(odom_ivox_pub_topic, rclcpp::QoS(1));
 
     // Start timer
     timer = create_wall_timer(std::chrono::milliseconds(1), [this]() { timer_callback(); });
@@ -185,11 +189,11 @@ size_t SmallGlimNode::points_callback(const sensor_msgs::msg::PointCloud2::Const
 
 void SmallGlimNode::timer_callback() {
     std::vector<EstimationFrame::ConstPtr> estimation_frames;
+    std::vector<EstimationFrame::ConstPtr> target_ivox_frames;
     std::vector<EstimationFrame::ConstPtr> marginalized_frames;
-    odometry_estimation->get_results(estimation_frames, marginalized_frames);
-    if (!estimation_frames.empty()) {
-        send_odometry(estimation_frames.back());
-    }
+    odometry_estimation->get_results(estimation_frames, target_ivox_frames, marginalized_frames);
+    if (!estimation_frames.empty()) pub_odometry(estimation_frames.back());
+    if (!target_ivox_frames.empty()) pub_odom_ivox(target_ivox_frames.back());
 
     if (sub_mapping) {
         for (const auto& frame: marginalized_frames) {
@@ -204,7 +208,7 @@ void SmallGlimNode::timer_callback() {
     }
 }
 
-void SmallGlimNode::send_odometry(const EstimationFrame::ConstPtr frame) {
+void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
     if (!frame) return;
     const rclcpp::Time stamp(frame->stamp * 1e9);
     const Eigen::Isometry3d T_odom_imu = frame->T_world_imu;
@@ -229,14 +233,51 @@ void SmallGlimNode::send_odometry(const EstimationFrame::ConstPtr frame) {
     odometry_pub->publish(odom);
 }
 
+void SmallGlimNode::pub_odom_ivox(const EstimationFrame::ConstPtr frame) {
+    if (!frame) return;
+    const size_t num_points = frame->frame->num_points;
+    const auto& points = frame->frame->points;
+    sensor_msgs::msg::PointCloud2 msg;
+    msg.header.frame_id = "odom";
+    msg.header.stamp = rclcpp::Time(frame->stamp * 1e9);
+    msg.height = 1;
+    msg.width = num_points;
+    msg.is_dense = true;
+    msg.point_step = 12;
+    msg.row_step = 12 * num_points;
+    sensor_msgs::msg::PointField field_x;
+    field_x.name = "x";
+    field_x.offset = 0;
+    field_x.datatype = sensor_msgs::msg::PointField::FLOAT32;
+    field_x.count = 1;
+    sensor_msgs::msg::PointField field_y;
+    field_y.name = "y";
+    field_y.offset = 4;
+    field_y.datatype = sensor_msgs::msg::PointField::FLOAT32;
+    field_y.count = 1;
+    sensor_msgs::msg::PointField field_z;
+    field_z.name = "z";
+    field_z.offset = 8;
+    field_z.datatype = sensor_msgs::msg::PointField::FLOAT32;
+    field_z.count = 1;
+    msg.fields = {field_x, field_y, field_z};
+    msg.data.resize(msg.row_step * msg.height);
+    for (int i = 0; i < num_points; i++) {
+        const Eigen::Vector3f pt = points[i](Eigen::seq(0, 2)).cast<float>();
+        std::memcpy(msg.data.data() + i * 12, pt.data(), sizeof(pt));
+    }
+    odom_ivox_pub->publish(msg);
+}
+
 void SmallGlimNode::wait(bool auto_quit) {
     logger::info("node", "waiting for odometry estimation");
     odometry_estimation->join();
 
     if (sub_mapping) {
         std::vector<EstimationFrame::ConstPtr> estimation_results;
+        std::vector<EstimationFrame::ConstPtr> target_ivox_frames;
         std::vector<EstimationFrame::ConstPtr> marginalized_frames;
-        odometry_estimation->get_results(estimation_results, marginalized_frames);
+        odometry_estimation->get_results(estimation_results, target_ivox_frames, marginalized_frames);
         for (const auto& marginalized_frame: marginalized_frames) {
             sub_mapping->insert_frame(marginalized_frame);
         }

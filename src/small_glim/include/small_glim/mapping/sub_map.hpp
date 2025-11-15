@@ -16,8 +16,6 @@ public:
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    SubMap(): id(-1), session_id(0) {}
-
     /**
     * @brief Remove point clouds of the odometry estimation frames (to save memory)
     */
@@ -48,8 +46,8 @@ public:
     static SubMap::Ptr load(const std::string& path);
 
 public:
-    int id; ///< submap ID
-    int session_id; ///< session ID (Used for only offline mapping)
+    int id = -1; ///< submap ID
+    int session_id = 0; ///< session ID (Used for only offline mapping)
 
     Eigen::Isometry3d T_world_origin; ///< frame[frame.size() / 2] pose w.r.t. the world
     Eigen::Isometry3d T_origin_endpoint_L; ///< frame.front() pose w.r.t. the origin

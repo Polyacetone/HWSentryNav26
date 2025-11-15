@@ -101,7 +101,7 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
             target_voxelmaps[i]->set_lru_horizon(params->lru_thresh);
         }
     } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation_cpu: {}", params->registration_type);
+        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
         abort();
     }
 }
@@ -119,8 +119,7 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
         return gtsam::NonlinearFactorGraph();
     }
 
-    const Eigen::Isometry3d pred_T_last_current =
-        frames[last]->T_world_imu.inverse() * frames[current]->T_world_imu;
+    const Eigen::Isometry3d pred_T_last_current = frames[last]->T_world_imu.inverse() * frames[current]->T_world_imu;
     const Eigen::Isometry3d pred_T_target_imu = last_T_target_imu * pred_T_last_current;
 
     gtsam::Values values;
@@ -129,8 +128,7 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
     // Create frame-to-model matching factor
     gtsam::NonlinearFactorGraph matching_cost_factors;
     if (params->registration_type == "GICP") {
-        auto gicp_factor = gtsam::make_shared<
-            gtsam_points::IntegratedGICPFactor_<gtsam_points::iVox, gtsam_points::PointCloud>>(
+        auto gicp_factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor_<gtsam_points::iVox, gtsam_points::PointCloud>>(
             gtsam::Pose3(),
             X(current),
             target_ivox,
@@ -151,6 +149,9 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
             vgicp_factor->set_num_threads(params->num_threads);
             matching_cost_factors.add(vgicp_factor);
         }
+    } else {
+        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
+        abort();
     }
 
     gtsam::NonlinearFactorGraph graph;
@@ -238,7 +239,30 @@ void OdometryEstimationCPU::update_target(
         for (auto& target_voxelmap: target_voxelmaps) {
             target_voxelmap->insert(*transformed);
         }
+    } else {
+        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
+        abort();
     }
+
+    // Update target point cloud (published as cloud_registered)
+    EstimationFrame::Ptr target_frame = std::make_shared<EstimationFrame>();
+    target_frame->id = frames.size() - 1;
+    target_frame->stamp = frames.back()->stamp;
+    target_frame->T_lidar_imu = frames.back()->T_lidar_imu;
+    target_frame->T_world_lidar = target_frame->T_lidar_imu.inverse();
+    target_frame->T_world_imu.setIdentity();
+    target_frame->v_world_imu.setZero();
+    target_frame->imu_bias.setZero();
+    target_frame->frame_id = FrameID::IMU;
+    if (params->registration_type == "GICP") {
+        target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_ivox->voxel_points());
+    } else if (params->registration_type == "VGICP") {
+        target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_voxelmaps[0]->voxel_points());
+    } else {
+        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
+        abort();
+    }
+    target_ivox_frame = target_frame;
 }
 
 void OdometryEstimationCPU::insert_imu(
@@ -546,6 +570,10 @@ std::vector<EstimationFrame::ConstPtr> OdometryEstimationCPU::get_remaining_fram
     }
 
     return marginalized_frames;
+}
+
+EstimationFrame::ConstPtr OdometryEstimationCPU::get_target_ivox_frame() {
+    return target_ivox_frame;
 }
 
 void OdometryEstimationCPU::update_frames(
