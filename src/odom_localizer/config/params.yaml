@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    map_cloud_path: "1897translated.pcd"
+    odom_cloud_sub_topic: "odom_ivox"
+    num_threads: 4 # 用于gicp对齐的线程数
+    cov_num_neighbors: 100 # 计算点的协方差矩阵时采用多少个点作为邻居
+    downsample_resolution_map: 0.1 # 给先验地图降采样的voxel大小，小于0则不进行降采样
+    downsample_resolution_lidar: -1.0 # 给输入点云降采样的voxel大小，小于0则不进行降采样
+    gicp_max_correspondence_distance: 3.0 # gicp最大匹配距离
+    gicp_max_iterations: 16 # gicp最大迭代次数
+    fitness_score_max_dist: 0.3 # 若与最近邻居的距离超过这个值，该点不计入fitness score
+    fitness_score_threshold: 0.01 # 认为gicp结果合理的fitness score阈值
+    odom_to_map_filter_ratio: 0.9 # odom->map的惯性滤波系数（0~1），越大越稳定
+    odom_to_map_no_filter_distance: 1.0 # 若odom->map的变化距离超过这个值，就直接更新，不进行滤波
+    odom_to_map_no_filter_angle: 0.6 # 若odom->map的变化角度超过这个值，就直接更新，不进行滤波
+    initial_transform: [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0] # 初始位姿，((x,y,z),(x,y,z,w))

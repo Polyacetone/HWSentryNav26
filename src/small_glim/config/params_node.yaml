@@ -7,7 +7,7 @@
       imu_time_offset: 0.0
       points_time_offset: 0.0
       acc_scale: 9.80665
-      enable_sub_mapping: true
+      enable_sub_mapping: false
       enable_global_mapping: false
       imu_sub_topic: "/livox/imu"
       points_sub_topic: "/livox/lidar/pointcloud"

@@ -30,7 +30,7 @@ private:
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
     nav_msgs::msg::Path path_;
-    std::unique_ptr<utils::EMAFilter<2>> velocity_;
+    std::unique_ptr<utils::EMAFilter<Eigen::Vector2d>> velocity_;
 };
 
 PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower_node", options) {
@@ -43,7 +43,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     nearest_point_threshold_ = declare_parameter<double>("nearest_point_threshold");
     lookahead_distance_basic_ = declare_parameter<double>("lookahead_distance_basic");
     double ema_filter_ratio = declare_parameter<double>("ema_filter_ratio");
-    velocity_ = std::make_unique<utils::EMAFilter<2>>(ema_filter_ratio);
+    velocity_ = std::make_unique<utils::EMAFilter<Eigen::Vector2d>>(ema_filter_ratio);
 
     std::string path_sub_topic = declare_parameter<std::string>("path_sub_topic");
     path_sub_ = create_subscription<nav_msgs::msg::Path>(
