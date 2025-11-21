@@ -1,0 +1,9 @@
+/**:
+  ros__parameters:
+    lidar_topic: /livox/lidar
+    lidar_frame: lidar
+    imu_topic: /livox/imu
+    imu_frame: lidar_imu
+    lidar_publish_time_interval: 0.1
+    host_ip: 192.168.1.50
+    is_topic_name_with_lidar_ip: false # 是否在话题名后面加雷达ip，可以用于区分多个雷达

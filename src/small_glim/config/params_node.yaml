@@ -10,6 +10,6 @@
       enable_sub_mapping: false
       enable_global_mapping: false
       imu_sub_topic: "/livox/imu"
-      points_sub_topic: "/livox/lidar/pointcloud"
+      points_sub_topic: "/livox/lidar"
       odometry_pub_topic: "/odometry"
       odom_ivox_pub_topic: "/odom_ivox"
