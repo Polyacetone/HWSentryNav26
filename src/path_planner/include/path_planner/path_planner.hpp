@@ -2,26 +2,21 @@
 
 #include <memory>
 #include <Eigen/Core>
-#include <path_planner/costmap_2d.hpp>
+#include <path_planner/nav_map.hpp>
 
 namespace path_planner {
-
-struct Node {
-    using Ptr = std::shared_ptr<Node>;
-    Eigen::Vector2i coord;
-    double g, h;
-    Node::Ptr parent;
-    double f() const { return g + h; }
-};
-
-class AStarPlanner {
+class PathPlanner {
 public:
-    explicit AStarPlanner(
+    using Ptr = std::shared_ptr<PathPlanner>;
+    explicit PathPlanner(
+        const double direction_weight,
+        const double obstacle_weight,
         const int downsampled_waypoint_max_interval,
         const int occupied_threshold
     );
     std::vector<Eigen::Vector2i> search_path(
-        const Costmap2D& costmap,
+        const CostMap& cost_map,
+        const DirectionMap& direction_map,
         const Eigen::Vector2i& start_grid,
         const Eigen::Vector2i& goal_grid
     ) const;
@@ -29,12 +24,12 @@ public:
 private:
     double heuristic(const Eigen::Vector2i& s, const Eigen::Vector2i& t) const;
     bool is_line_safe(
-        const Costmap2D& costmap,
+        const CostMap& cost_map,
         const Eigen::Vector2i& s,
         const Eigen::Vector2i& t
     ) const;
     bool is_valid(
-        const Costmap2D& costmap,
+        const CostMap& cost_map,
         const Eigen::Vector2i& coord
     ) const;
     std::vector<Eigen::Vector2i> downsample_path(
@@ -45,7 +40,7 @@ private:
     const std::vector<Eigen::Vector2i> directions_ = {
         {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
     };
+    const double direction_weight_, obstacle_weight_;
     const int downsampled_waypoint_max_interval_, occupied_threshold_;
 };
-
 } // namespace path_planner

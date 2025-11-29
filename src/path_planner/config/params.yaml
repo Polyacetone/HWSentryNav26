@@ -1,16 +1,20 @@
 /**:
   ros__parameters:
-    costmap_sub_topic: "costmap"
+    direction_map_sub_topic: "direction_map"
+    cost_map_sub_topic: "cost_map"
     goal_sub_topic: "goal"
     path_pub_topic: "path"
     plan_freq: 10 # 规划路径的频率，单位Hz
 
-    a_star_planner:
-      downsampled_waypoint_max_interval: 20 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
-      occupied_threshold: 60 # OccupancyGrid中占据值达到多少认为是障碍物
+    path_planner:
+      direction_weight: 2.0 # 方向代价权重
+      obstacle_weight: 1.0 # 障碍物代价权重
+      downsampled_waypoint_max_interval: 2 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
+      occupied_threshold: 200 # 超过该阈值的格子被视为不可通行
 
-    bspline_optimizer:
-      num_samples_per_length: 0.4 # B样条的每长度采样点个数，用于计算障碍物代价等（长度以格子为单位）
-      obstable_weight: 1e-0 # 障碍物代价
-      length_weight: 1e-5 # 轨迹长度代价
-      smooth_weight: 5e-6 # 轨迹光滑度代价
+    path_optimizer:
+      smoothness_weight: 1.0 # 平滑代价权重
+      length_weight: 1.0 # 路径长度代价权重
+      obstacle_weight: 1.0 # 障碍物代价权重
+      direction_weight: 1.0 # 方向代价权重
+      max_iterations: 100 # 优化的最大迭代次数

@@ -1,18 +1,18 @@
 #include <Eigen/Dense>
 #include <rclcpp/rclcpp.hpp>
+#include <cv_bridge/cv_bridge.hpp>
 #include <tf2_ros/transform_listener.hpp>
 #include <tf2_ros/buffer.hpp>
 
-#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/point_stamped.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
-#include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 
-#include <path_planner/costmap_2d.hpp>
-#include <path_planner/a_star_planner.hpp>
-#include <path_planner/bspline_optimizer.hpp>
+#include <path_planner/nav_map.hpp>
+#include <path_planner/path_planner.hpp>
+#include <path_planner/path_optimizer.hpp>
 #include <common_utils/convert.hpp>
 
 namespace path_planner {
@@ -21,17 +21,19 @@ public:
     explicit PathPlannerNode(const rclcpp::NodeOptions& options);
 
 private:
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr cost_map_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr direction_map_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
 
-    nav_msgs::msg::OccupancyGrid::SharedPtr map_;
-    geometry_msgs::msg::PoseStamped::SharedPtr goal_;
-    std::shared_ptr<AStarPlanner> a_star_planner_;
-    std::shared_ptr<BSplineOptimizer> bspline_optimizer_;
+    CostMap::Ptr cost_map_;
+    DirectionMap::Ptr direction_map_;
+    geometry_msgs::msg::PointStamped::SharedPtr goal_;
+    PathPlanner::Ptr path_planner_;
+    PathOptimizer::Ptr path_optimizer_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     std::vector<Eigen::Vector2d> vv2i_to_vv2d(const std::vector<Eigen::Vector2i>& path) const;
@@ -41,23 +43,42 @@ private:
 PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner_node", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
-    int downsampled_waypoint_max_interval = declare_parameter<int>("a_star_planner.downsampled_waypoint_max_interval");
-    int occupied_threshold = declare_parameter<int>("a_star_planner.occupied_threshold");
-    a_star_planner_ = std::make_shared<AStarPlanner>(downsampled_waypoint_max_interval, occupied_threshold);
-    double num_samples_per_length = declare_parameter<double>("bspline_optimizer.num_samples_per_length");
-    double obstable_weight = declare_parameter<double>("bspline_optimizer.obstable_weight");
-    double length_weight = declare_parameter<double>("bspline_optimizer.length_weight");
-    double smooth_weight = declare_parameter<double>("bspline_optimizer.smooth_weight");
-    bspline_optimizer_ = std::make_shared<BSplineOptimizer>(num_samples_per_length, obstable_weight, length_weight, smooth_weight);
-    std::string costmap_sub_topic = declare_parameter<std::string>("costmap_sub_topic");
-    costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-        costmap_sub_topic, rclcpp::QoS(1),
-        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { map_ = msg; }
+    path_planner_ = std::make_shared<PathPlanner>(
+        declare_parameter<double>("path_planner.direction_weight"),
+        declare_parameter<double>("path_planner.obstacle_weight"),
+        declare_parameter<int>("path_planner.downsampled_waypoint_max_interval"),
+        declare_parameter<int>("path_planner.occupied_threshold")
+    );
+    path_optimizer_ = std::make_shared<PathOptimizer>(
+        declare_parameter<double>("path_optimizer.smoothness_weight"),
+        declare_parameter<double>("path_optimizer.length_weight"),
+        declare_parameter<double>("path_optimizer.obstacle_weight"),
+        declare_parameter<double>("path_optimizer.direction_weight"),
+        declare_parameter<int>("path_optimizer.max_iterations")
+    );
+    std::string cost_map_sub_topic = declare_parameter<std::string>("cost_map_sub_topic");
+    cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        cost_map_sub_topic, rclcpp::QoS(1),
+        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+            cost_map_ = std::make_shared<CostMap>(*msg);
+        }
+    );
+    std::string direction_map_sub_topic = declare_parameter<std::string>("direction_map_sub_topic");
+    direction_map_sub_ = create_subscription<sensor_msgs::msg::Image>(
+        direction_map_sub_topic, rclcpp::QoS(1),
+        [this](const sensor_msgs::msg::Image::SharedPtr msg) {
+            cv::Mat img = cv_bridge::toCvShare(msg, "8UC2")->image;
+            if (!cost_map_) {
+                RCLCPP_WARN(get_logger(), "Received direction map but cost map is not ready yet!");
+                return;
+            }
+            direction_map_ = std::make_shared<DirectionMap>(img, cost_map_->resolution, cost_map_->origin_x, cost_map_->origin_y);
+        }
     );
     std::string goal_sub_topic = declare_parameter<std::string>("goal_sub_topic");
-    goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+    goal_sub_ = create_subscription<geometry_msgs::msg::PointStamped>(
         goal_sub_topic, rclcpp::QoS(1),
-        [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { goal_ = msg; }
+        [this](const geometry_msgs::msg::PointStamped::SharedPtr msg) { goal_ = msg; }
     );
     std::string path_pub_topic = declare_parameter<std::string>("path_pub_topic");
     path_pub_ = create_publisher<nav_msgs::msg::Path>(path_pub_topic, 1);
@@ -66,7 +87,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
 }
 
 void PathPlannerNode::timer_callback() {
-    if (!map_ || !goal_) return;
+    if (!cost_map_ || !goal_ || !direction_map_) return;
 
     tf2::Transform base_to_map;
     try {
@@ -78,25 +99,28 @@ void PathPlannerNode::timer_callback() {
         return;
     }
 
-    Costmap2D costmap(*map_);
-    const Eigen::Vector2i start_grid(costmap.map_coord_to_grid({base_to_map.getOrigin().x(), base_to_map.getOrigin().y()}).cast<int>());
-    const Eigen::Vector2i goal_grid(costmap.map_coord_to_grid({goal_->pose.position.x, goal_->pose.position.y}).cast<int>());
+    const Eigen::Vector2i start_grid(cost_map_->map_coord_to_grid({base_to_map.getOrigin().x(), base_to_map.getOrigin().y()}).cast<int>());
+    const Eigen::Vector2i goal_grid(cost_map_->map_coord_to_grid({goal_->point.x, goal_->point.y}).cast<int>());
 
     auto start = std::chrono::high_resolution_clock::now();
-    // 在costmap的格点坐标系下搜索，返回的路径也是基于格点坐标系的
-    auto rough = a_star_planner_->search_path(costmap, start_grid, goal_grid);
+    // A*搜索得到初始路径，输入输出均为格点坐标系
+    auto rough = path_planner_->search_path(*cost_map_, *direction_map_, start_grid, goal_grid);
     auto end = std::chrono::high_resolution_clock::now();
-    RCLCPP_INFO(get_logger(), "Astar plan: %.2fms", (end - start).count() / 1e6);
+    RCLCPP_INFO(get_logger(), "Plan: %.2fms", (end - start).count() / 1e6);
 
     start = std::chrono::high_resolution_clock::now();
-    // 在格点坐标系下进行路径优化
-    auto optimized = bspline_optimizer_->optimize(costmap, vv2i_to_vv2d(rough));
+    auto rough_f64 = vv2i_to_vv2d(rough);
+    // 优化路径，输入输出均为格点坐标系
+    auto optimized = path_optimizer_->optimize(*cost_map_, *direction_map_, rough_f64);
     end = std::chrono::high_resolution_clock::now();
-    RCLCPP_INFO(get_logger(), "Bspline opt: %.2fms", (end - start).count() / 1e6);
+    RCLCPP_INFO(get_logger(), "Optimize: %.2fms", (end - start).count() / 1e6);
 
     // 最后再转换成map坐标系
-    for (auto& pt: optimized) pt = costmap.grid_coord_to_map(pt);
-    path_pub_->publish(path_to_nav_msg(optimized));
+    std::vector<Eigen::Vector2d> optimized_map;
+    for (auto& pt: optimized) {
+        optimized_map.push_back(cost_map_->grid_coord_to_map(pt));
+    }
+    path_pub_->publish(path_to_nav_msg(optimized_map));
 }
 
 std::vector<Eigen::Vector2d> PathPlannerNode::vv2i_to_vv2d(const std::vector<Eigen::Vector2i>& path) const {

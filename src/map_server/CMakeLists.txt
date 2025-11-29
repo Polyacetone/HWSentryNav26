@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(costmap_generator)
+project(map_server)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")
@@ -30,7 +30,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARY_DIRS})
 
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN costmap_generator::CostmapGeneratorNode
+  PLUGIN map_server::MapServerNode
   EXECUTABLE ${PROJECT_NAME}_node
 )
 

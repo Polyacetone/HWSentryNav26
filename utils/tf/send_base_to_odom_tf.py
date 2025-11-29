@@ -18,7 +18,7 @@ class BaseToOdomTFPublisher(Node):
         t.child_frame_id = 'base'
       
         t.transform.translation.x = 3.0
-        t.transform.translation.y = 1.0
+        t.transform.translation.y = 4.0
         t.transform.translation.z = 0.0
         t.transform.rotation.x = 0.0
         t.transform.rotation.y = 0.0

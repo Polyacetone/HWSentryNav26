@@ -4,19 +4,25 @@ from scipy.spatial import cKDTree
 from scipy import ndimage
 import cv2
 
-def crop_cloud_by_height(cloud, min_height, max_height):
+def crop_cloud_by_bounds(cloud, min_bound, max_bound):
     points = np.asarray(cloud.points)
-    mask = (points[:, 2] >= min_height) & (points[:, 2] <= max_height)
+    mask = (
+        (points[:, 0] >= min_bound[0]) & (points[:, 0] <= max_bound[0]) &
+        (points[:, 1] >= min_bound[1]) & (points[:, 1] <= max_bound[1]) &
+        (points[:, 2] >= min_bound[2]) & (points[:, 2] <= max_bound[2])
+    )
     cropped_pcd = cloud.select_by_index(np.where(mask)[0])
     return cropped_pcd
 
-def cloud_to_height_map(cloud, resolution=0.05, fill_radius=0.15, hole_area_threshold=30, bilateral_d=5, bilateral_sigma_color=0.15, bilateral_sigma_space=5):
+def cloud_to_height_map(cloud, min_bound, max_bound, resolution, fill_radius, hole_area_threshold, bilateral_d, bilateral_sigma_color, bilateral_sigma_space):
     # 1. 提取点云数据
     points = np.asarray(cloud.points)
     
     # 2. 计算边界
-    min_bound = points.min(axis=0)
-    max_bound = points.max(axis=0)
+    if min_bound is None:
+        min_bound = points.min(axis=0)
+    if max_bound is None:
+        max_bound = points.max(axis=0)
     min_x, min_y = min_bound[0], min_bound[1]
     max_x, max_y = max_bound[0], max_bound[1]
 
@@ -141,10 +147,12 @@ def save_height_map_cv(height_map, output_path):
 if __name__ == "__main__":
     pcd_path="RMUC2026_aligned.pcd"
     cloud = o3d.io.read_point_cloud(pcd_path)
-    cloud = crop_cloud_by_height(cloud, min_height=0.0, max_height=1.5)
+    cloud = crop_cloud_by_bounds(cloud, min_bound=(0, 0, 0), max_bound=(1e3, 1e3, 1.5))
 
     height_map, origin = cloud_to_height_map(
         cloud=cloud,
+        min_bound=(0, 0),
+        max_bound=None,
         resolution=0.2,
         fill_radius=0.25,
         hole_area_threshold=30,

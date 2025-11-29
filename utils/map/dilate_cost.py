@@ -17,7 +17,7 @@ def process_image(image_path, output_path):
     dilated_channel = cv2.dilate(third_channel, kernel, iterations=1)
 
     # 对膨胀后的通道进行高斯模糊
-    blurred_channel = cv2.GaussianBlur(src=dilated_channel, ksize=(5, 5), sigmaX=1, sigmaY=1)
+    blurred_channel = cv2.GaussianBlur(src=dilated_channel, ksize=(5, 5), sigmaX=0, sigmaY=0)
 
     # 将处理后的通道放回原图
     processed_image = image.copy()

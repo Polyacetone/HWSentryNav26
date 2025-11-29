@@ -32,7 +32,7 @@ public:
     explicit OdomLocalizerNode(const rclcpp::NodeOptions& options);
 
 private:
-    unsigned num_threads_, cov_num_neighbors_, gicp_max_iterations_;
+    int num_threads_, cov_num_neighbors_, gicp_max_iterations_;
     double downsample_resolution_map_, downsample_resolution_lidar_, gicp_max_correspondence_distance_;
     double fitness_score_max_dist_, fitness_score_threshold_;
     double odom_to_map_no_filter_distance_, odom_to_map_no_filter_angle_;
@@ -152,7 +152,7 @@ double OdomLocalizerNode::calc_fitness_score(
     const Eigen::Isometry3d& transform
 ) const {
     double sum_dist = 0;
-    unsigned num_points = 0;
+    int num_points = 0;
     #pragma omp parallel for num_threads(num_threads_) schedule(guided) \
     reduction(+:num_points) reduction(+:sum_dist)
     for (int i = 0; i < source->size(); i++) {
