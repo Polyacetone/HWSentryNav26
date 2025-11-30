@@ -10,14 +10,8 @@ def process_image(image_path, output_path):
     # 提取第三个通道
     third_channel = image[:, :, 2]
 
-    # 创建膨胀核
-    kernel = np.ones((3, 3), np.uint8)
-
-    # 对第三个通道进行膨胀
-    dilated_channel = cv2.dilate(third_channel, kernel, iterations=1)
-
     # 对膨胀后的通道进行高斯模糊
-    blurred_channel = cv2.GaussianBlur(src=dilated_channel, ksize=(5, 5), sigmaX=0, sigmaY=0)
+    blurred_channel = cv2.GaussianBlur(src=third_channel, ksize=(5, 5), sigmaX=0, sigmaY=0)
 
     # 将处理后的通道放回原图
     processed_image = image.copy()

@@ -1,6 +1,5 @@
-#include <path_planner/path_optimizer.hpp>
-
-#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <path_planner/factor_graph_optimizer.hpp>
+#include <rclcpp/logging.hpp>
 #include <gtsam/nonlinear/DoglegOptimizer.h>
 #include <gtsam/slam/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
@@ -35,7 +34,7 @@ public:
     }
 
 private:
-    CostMap cost_map_;
+    const CostMap& cost_map_;
 };
 
 // 方向场因子：约束路径局部方向尽量与给定方向场一致
@@ -100,7 +99,7 @@ public:
     }
 
 private:
-    DirectionMap dir_map_;
+    const DirectionMap& dir_map_;
 };
 
 // 平滑因子：二阶差分（离散加速度）最小化，使路径更平滑
@@ -169,48 +168,51 @@ public:
     }
 };
 
-PathOptimizer::PathOptimizer(
+FactorGraphOptimizer::FactorGraphOptimizer(
     const double smoothness_weight,
     const double length_weight,
     const double obstacle_weight,
     const double direction_weight,
     const int max_iterations
-) : smoothness_weight(smoothness_weight),
-    length_weight(length_weight),
-    obstacle_weight(obstacle_weight),
-    direction_weight(direction_weight),
-    max_iterations(max_iterations) {}
+) : smoothness_weight_(smoothness_weight),
+    length_weight_(length_weight),
+    obstacle_weight_(obstacle_weight),
+    direction_weight_(direction_weight),
+    max_iterations_(max_iterations) {}
 
-std::vector<Eigen::Vector2d> PathOptimizer::optimize(
+std::vector<Eigen::Vector2d> FactorGraphOptimizer::optimize(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const std::vector<Eigen::Vector2d>& init_path
-) {
-    if (init_path.empty()) return {};
+) const {
+    if (init_path.size() <= 2) {
+        RCLCPP_WARN(rclcpp::get_logger("bspline_optimizer"), "Path too short to optimize!");
+        return init_path;
+    }
 
     gtsam::NonlinearFactorGraph graph;
     gtsam::Values initial_estimate;
 
     // 平滑项：最小化二阶差分（加速度）。权重越大，路径越平滑。
-    auto smoothness_noise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0 / smoothness_weight);
+    auto smoothness_noise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0 / smoothness_weight_);
     
     // 长度项：最小化相邻点距离。权重越大，路径越短。
-    auto length_noise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0 / length_weight);
+    auto length_noise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0 / length_weight_);
     
     // 障碍物项：最小化代价值。权重越大，越强烈避开障碍。
-    auto obstacle_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0 / obstacle_weight);
+    auto obstacle_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0 / obstacle_weight_);
     
     // 方向项：路径方向跟随方向场。权重越大，越强制贴合方向场。
-    auto direction_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0 / direction_weight);
+    auto direction_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0 / direction_weight_);
 
     // 等距项：使用与长度权重相关的噪声模型，确保点分布均匀
     // 这里复用 length_weight，因为均匀性也是关于长度的约束
-    auto spacing_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0 / length_weight);
+    auto spacing_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0 / length_weight_);
 
     // 先验项：固定起点和终点
-    auto prior_noise = gtsam::noiseModel::Isotropic::Sigma(2, 1e-4); // 很强的先验
+    auto prior_noise = gtsam::noiseModel::Isotropic::Sigma(2, 1e-6); // 很强的先验
 
-    for (size_t i = 0; i < init_path.size(); ++i) {
+    for (size_t i = 0; i < init_path.size(); i++) {
         gtsam::Key key = gtsam::Symbol('x', i);
         initial_estimate.insert(key, gtsam::Point2(init_path[i]));
 
@@ -252,18 +254,18 @@ std::vector<Eigen::Vector2d> PathOptimizer::optimize(
         }
     }
 
-    // LM 参数设置
-    gtsam::LevenbergMarquardtParams params;
-    params.setVerbosity("ERROR");
-    params.setMaxIterations(max_iterations);
+    // 参数设置
+    gtsam::DoglegParams params;
+    params.setVerbosity("SILENT");
+    params.setMaxIterations(max_iterations_);
     
-    gtsam::LevenbergMarquardtOptimizer optimizer(graph, initial_estimate, params);
+    gtsam::DoglegOptimizer optimizer(graph, initial_estimate, params);
     gtsam::Values result = optimizer.optimize();
 
     std::vector<Eigen::Vector2d> optimized_path;
     optimized_path.reserve(init_path.size());
 
-    for (size_t i = 0; i < init_path.size(); ++i) {
+    for (size_t i = 0; i < init_path.size(); i++) {
         gtsam::Key key = gtsam::Symbol('x', i);
         optimized_path.push_back(result.at<gtsam::Point2>(key));
     }

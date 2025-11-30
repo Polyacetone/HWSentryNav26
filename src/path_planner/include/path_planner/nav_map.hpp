@@ -8,6 +8,7 @@ namespace path_planner {
 class CostMap {
 public:
     using Ptr = std::shared_ptr<CostMap>;
+    using ConstPtr = std::shared_ptr<const CostMap>;
     explicit CostMap(const nav_msgs::msg::OccupancyGrid& occupancy_grid);
     Eigen::Vector2d map_coord_to_grid(const Eigen::Vector2d& map_coord) const;
     Eigen::Vector2d grid_coord_to_map(const Eigen::Vector2d& grid_coord) const;
@@ -26,6 +27,7 @@ public:
 class DirectionMap {
 public:
     using Ptr = std::shared_ptr<DirectionMap>;
+    using ConstPtr = std::shared_ptr<const DirectionMap>;
     explicit DirectionMap(const cv::Mat& direction_map, double resolution, double origin_x, double origin_y);
     Eigen::Vector2d map_coord_to_grid(const Eigen::Vector2d& map_coord) const;
     Eigen::Vector2d grid_coord_to_map(const Eigen::Vector2d& grid_coord) const;

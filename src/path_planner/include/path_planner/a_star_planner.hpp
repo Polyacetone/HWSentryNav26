@@ -5,10 +5,12 @@
 #include <path_planner/nav_map.hpp>
 
 namespace path_planner {
-class PathPlanner {
+class AStarPlanner {
 public:
-    using Ptr = std::shared_ptr<PathPlanner>;
-    explicit PathPlanner(
+    using Ptr = std::shared_ptr<AStarPlanner>;
+    using ConstPtr = std::shared_ptr<const AStarPlanner>;
+
+    explicit AStarPlanner(
         const double direction_weight,
         const double obstacle_weight,
         const int downsampled_waypoint_max_interval,

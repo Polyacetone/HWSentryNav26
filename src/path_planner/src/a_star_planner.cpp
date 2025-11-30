@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/clock.hpp>
-#include <path_planner/path_planner.hpp>
+#include <path_planner/a_star_planner.hpp>
 #include <path_planner/nav_map.hpp>
 
 namespace path_planner {
@@ -19,7 +19,7 @@ struct Node {
 }
 
 namespace path_planner {
-PathPlanner::PathPlanner(
+AStarPlanner::AStarPlanner(
     const double direction_weight,
     const double obstacle_weight,
     const int downsampled_waypoint_max_interval,
@@ -30,15 +30,15 @@ PathPlanner::PathPlanner(
     downsampled_waypoint_max_interval_(downsampled_waypoint_max_interval),
     occupied_threshold_(occupied_threshold) {}
 
-double PathPlanner::heuristic(const Eigen::Vector2i& s, const Eigen::Vector2i& t) const {
+double AStarPlanner::heuristic(const Eigen::Vector2i& s, const Eigen::Vector2i& t) const {
     return (t - s).norm();
 }
 
-bool PathPlanner::is_valid(const CostMap& costmap, const Eigen::Vector2i& coord) const {
+bool AStarPlanner::is_valid(const CostMap& costmap, const Eigen::Vector2i& coord) const {
     return costmap.is_valid_coord(coord) && costmap.at(coord) <= occupied_threshold_;
 }
 
-bool PathPlanner::is_line_safe(
+bool AStarPlanner::is_line_safe(
     const CostMap& costmap,
     const Eigen::Vector2i& s,
     const Eigen::Vector2i& t
@@ -65,7 +65,7 @@ bool PathPlanner::is_line_safe(
     return false;
 }
 
-std::vector<Eigen::Vector2i> PathPlanner::search_path(
+std::vector<Eigen::Vector2i> AStarPlanner::search_path(
     const CostMap& costmap,
     const DirectionMap& direction_map,
     const Eigen::Vector2i& start_grid,

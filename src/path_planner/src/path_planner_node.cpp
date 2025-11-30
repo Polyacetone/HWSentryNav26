@@ -11,8 +11,9 @@
 #include <nav_msgs/msg/path.hpp>
 
 #include <path_planner/nav_map.hpp>
-#include <path_planner/path_planner.hpp>
-#include <path_planner/path_optimizer.hpp>
+#include <path_planner/a_star_planner.hpp>
+#include <path_planner/factor_graph_optimizer.hpp>
+#include <path_planner/bspline_optimizer.hpp>
 #include <common_utils/convert.hpp>
 
 namespace path_planner {
@@ -29,11 +30,11 @@ private:
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
 
-    CostMap::Ptr cost_map_;
-    DirectionMap::Ptr direction_map_;
+    CostMap::ConstPtr cost_map_;
+    DirectionMap::ConstPtr direction_map_;
     geometry_msgs::msg::PointStamped::SharedPtr goal_;
-    PathPlanner::Ptr path_planner_;
-    PathOptimizer::Ptr path_optimizer_;
+    AStarPlanner::ConstPtr path_planner_;
+    BSplineOptimizer::ConstPtr path_optimizer_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     std::vector<Eigen::Vector2d> vv2i_to_vv2d(const std::vector<Eigen::Vector2i>& path) const;
@@ -43,17 +44,18 @@ private:
 PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner_node", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
-    path_planner_ = std::make_shared<PathPlanner>(
+    path_planner_ = std::make_shared<AStarPlanner>(
         declare_parameter<double>("path_planner.direction_weight"),
         declare_parameter<double>("path_planner.obstacle_weight"),
         declare_parameter<int>("path_planner.downsampled_waypoint_max_interval"),
         declare_parameter<int>("path_planner.occupied_threshold")
     );
-    path_optimizer_ = std::make_shared<PathOptimizer>(
+    path_optimizer_ = std::make_shared<BSplineOptimizer>(
         declare_parameter<double>("path_optimizer.smoothness_weight"),
         declare_parameter<double>("path_optimizer.length_weight"),
         declare_parameter<double>("path_optimizer.obstacle_weight"),
         declare_parameter<double>("path_optimizer.direction_weight"),
+        declare_parameter<double>("path_optimizer.num_samples_per_length"),
         declare_parameter<int>("path_optimizer.max_iterations")
     );
     std::string cost_map_sub_topic = declare_parameter<std::string>("cost_map_sub_topic");
