@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    map_cloud_path: "1897translated.pcd"
+    map_cloud_filename: "1897translated.pcd"
     odom_cloud_sub_topic: "odom_ivox"
     num_threads: 4 # 用于gicp对齐的线程数
     cov_num_neighbors: 100 # 计算点的协方差矩阵时采用多少个点作为邻居

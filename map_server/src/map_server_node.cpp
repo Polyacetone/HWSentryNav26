@@ -1,6 +1,7 @@
 #include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <tf2_ros/transform_listener.hpp>
 #include <tf2_ros/buffer.hpp>
 #include <cv_bridge/cv_bridge.hpp>
@@ -39,7 +40,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     direction_map_pub_ = create_publisher<sensor_msgs::msg::Image>(direction_map_pub_topic, 1);
     std::string cost_map_pub_topic = declare_parameter<std::string>("cost_map_pub_topic");
     cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(cost_map_pub_topic, 1);
-    std::string global_map_path = declare_parameter<std::string>("global_map_path");
+    std::string global_map_filename = declare_parameter<std::string>("global_map_filename");
+    std::string global_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + global_map_filename;
     cv::Mat global_map = cv::imread(global_map_path, cv::IMREAD_COLOR);
     if (global_map.empty()) {
         RCLCPP_FATAL(get_logger(), "Failed to load global navmap from %s", global_map_path.c_str());

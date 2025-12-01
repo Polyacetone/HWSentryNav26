@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(odom_localizer)
+project(map_server)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")
@@ -12,7 +12,7 @@ add_compile_options(-O3)
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-file(GLOB_RECURSE sources "src/*.cpp")
+file(GLOB sources "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 
 find_package(OpenMP REQUIRED)
@@ -21,12 +21,16 @@ target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
 find_package(Eigen3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 
+find_package(OpenCV REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
+
 find_package(PCL REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARY_DIRS})
 
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN odom_localizer::OdomLocalizerNode
+  PLUGIN map_server::MapServerNode
   EXECUTABLE ${PROJECT_NAME}_node
 )
 
@@ -35,4 +39,5 @@ ament_auto_package(
   INSTALL_TO_SHARE
   config
   launch
+  maps
 )

@@ -13,9 +13,9 @@
       occupied_threshold: 200 # 超过该阈值的格子被视为不可通行
 
     path_optimizer:
-      smoothness_weight: 1.0 # 平滑代价权重
-      length_weight: 0.8 # 路径长度代价权重
+      smoothness_weight: 0.05 # 平滑代价权重
+      length_weight: 0.1 # 长度代价权重
       obstacle_weight: 2.0 # 障碍物代价权重
       direction_weight: 3.0 # 方向代价权重
-      num_samples_per_length: 0.8 # 每长度采样点个数，用于计算障碍物代价等（长度以格子为单位）
+      num_samples_per_length: 1.5 # 每长度采样点个数，用于计算障碍物代价等（长度以格子为单位）
       max_iterations: 50 # 优化的最大迭代次数

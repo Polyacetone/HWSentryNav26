@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
@@ -58,7 +59,8 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
     downsample_resolution_lidar_ = declare_parameter<double>("downsample_resolution_lidar");
     fitness_score_max_dist_ = declare_parameter<double>("fitness_score_max_dist");
     fitness_score_threshold_ = declare_parameter<double>("fitness_score_threshold");
-    std::string map_cloud_path = declare_parameter<std::string>("map_cloud_path");
+    std::string map_cloud_filename = declare_parameter<std::string>("map_cloud_filename");
+    std::string map_cloud_path = ament_index_cpp::get_package_share_directory("odom_localizer") + "/maps/" + map_cloud_filename;
     std::string odom_cloud_sub_topic = declare_parameter<std::string>("odom_cloud_sub_topic");
     double odom_to_map_filter_ratio = declare_parameter<double>("odom_to_map_filter_ratio");
     odom_to_map_ = std::make_unique<utils::EMAFilter<Eigen::Isometry3d>>(odom_to_map_filter_ratio);

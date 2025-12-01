@@ -2,7 +2,6 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <gtsam_points/optimizers/linearization_hook.hpp>
 #include <common_utils/convert.hpp>
 #include <sensor_msgs/msg/imu.hpp>

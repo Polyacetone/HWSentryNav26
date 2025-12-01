@@ -114,22 +114,6 @@ private:
     const DirectionMap& direction_map_;
     const double weight_;
 };
-
-// 长度代价使用自动求导
-class LengthCostFunction {
-public:
-    explicit LengthCostFunction(const double weight): weight_(weight) {}
-    template<typename T> bool operator()(const T* const p0, const T* const p1, T* residual) const {
-        const T dx = p1[0] - p0[0];
-        const T dy = p1[1] - p0[1];
-        const T distance = ceres::sqrt(dx * dx + dy * dy + T(1e-6));
-        residual[0] = weight_ * distance;
-        return true;
-    }
-
-private:
-    const double weight_;
-};
 }
 
 // 路径优化器主类实现
@@ -160,13 +144,18 @@ std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
     }
     Spline spline(pad_control_points(init_path));
     ubs::UniformBSplineCeres<Spline> spline_ceres(spline);
+    auto& control_points = spline.getControlPointsContainer();
+    using ContainerT = ubs::FixedSizeContainerTypeTrait<Eigen::Vector2d>;
     ceres::Problem problem;
 
-    // 添加光滑度代价
-    spline_ceres.addSmoothnessResidualsGrid<1>(problem, smoothness_weight_);
-    std::vector<double*> parameter_pointers(spline_ceres.getNumPointParameterPointers());
+    // 添加长度代价（最小化路径速度的平方积分）
+    spline_ceres.addSmoothnessResiduals<1>(problem, length_weight_);
+
+    // 添加光滑度代价（最小化路径加速度的平方积分）
+    spline_ceres.addSmoothnessResiduals<2>(problem, smoothness_weight_);
 
     const int num_samples = num_samples_per_length_ * estimate_path_length(init_path);
+    std::vector<double*> parameter_pointers(spline_ceres.getNumPointParameterPointers());
     for (int i = 0; i < num_samples; i++) {
         const double pos_u = double(i) / double(num_samples);
         const auto data = spline_ceres.getPointData(pos_u);
@@ -184,22 +173,6 @@ std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
         // 对于每个采样点添加方向代价
         problem.AddResidualBlock(
             new DirectionCostFunction(pos_evaluator, vel_evaluator, direction_map, direction_weight_),
-            nullptr,
-            parameter_pointers
-        );
-    }
-
-    // 对于每个控制点添加长度代价
-    auto& control_points = spline.getControlPointsContainer();
-    using ContainerT = ubs::FixedSizeContainerTypeTrait<Eigen::Vector2d>;
-    parameter_pointers.resize(2);
-    for (int i = 1; i < control_points.getNumElements(); i++) {
-        parameter_pointers[0] = ContainerT::data(control_points.at(i - 1));
-        parameter_pointers[1] = ContainerT::data(control_points.at(i));
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<LengthCostFunction, 1, 2, 2>(
-                new LengthCostFunction(length_weight_)
-            ),
             nullptr,
             parameter_pointers
         );
