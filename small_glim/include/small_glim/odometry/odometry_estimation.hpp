@@ -54,18 +54,27 @@ public:
     // Logging params
     bool save_imu_rate_trajectory;
 
-    int num_threads;                  // Number of threads for preprocessing and per-factor parallelism
+    // Number of threads for preprocessing and per-factor parallelism
+    int num_threads;
+    
+    // Voxel params
+    double voxel_resolution;
+    double voxel_resolution_max;
+    double voxel_resolution_dmin;
+    double voxel_resolution_dmax;
+    int voxelmap_levels;
+    double voxelmap_scaling_factor;
+    int full_connection_window_size;
 
-    // Registration params
-    std::string registration_type; ///< Registration type (GICP or VGICP)
-    int max_iterations; ///< Maximum number of iterations
-    int lru_thresh; ///< LRU cache threshold
-    double target_downsampling_rate; ///< Downsampling rate for points to be inserted into the target
-    double ivox_resolution; ///< iVox resolution (for GICP)
-    double ivox_min_dist; ///< Minimum distance between points in an iVox cell (for GICP)
-    double vgicp_resolution; ///< Voxelmap resolution (for VGICP)
-    int vgicp_voxelmap_levels; ///< Multi-resolution voxelmap levesl (for VGICP)
-    double vgicp_voxelmap_scaling_factor; ///< Multi-resolution voxelmap scaling factor (for VGICP)
+    // Keyframe params
+    enum class KeyframeUpdateStrategy { OVERLAP, DISPLACEMENT, ENTROPY };
+    KeyframeUpdateStrategy keyframe_strategy;
+    int max_num_keyframes;
+    double keyframe_min_overlap;
+    double keyframe_max_overlap;
+    double keyframe_delta_trans;
+    double keyframe_delta_rot;
+    double keyframe_entropy_thresh;
 };
 
 /**
@@ -81,16 +90,19 @@ public:
     EstimationFrame::ConstPtr get_target_ivox_frame();
 
 private:
+    void create_frame(EstimationFrame::Ptr& new_frame);
     gtsam::NonlinearFactorGraph create_factors(
         const int current,
         const std::shared_ptr<gtsam::ImuFactor>& imu_factor,
         gtsam::Values& new_values
     );
-    void fallback_smoother();
-    void update_target(const int current, const Eigen::Isometry3d& T_target_imu);
     void update_frames(const int current, const gtsam::NonlinearFactorGraph& new_factors);
     void update_smoother(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, const std::map<std::uint64_t, double>& new_stamp, int update_count = 0);
     void update_smoother(int update_count = 1);
+
+    void update_keyframes_overlap(int current);
+    void update_keyframes_displacement(int current);
+    void update_keyframes_entropy(const gtsam::NonlinearFactorGraph& matching_cost_factors, int current);
 
 private:
     std::unique_ptr<OdometryEstimationCPUParams> params;
@@ -102,6 +114,7 @@ private:
     // Frames & keyframes
     int marginalized_cursor;
     std::vector<EstimationFrame::Ptr> frames;
+    std::vector<EstimationFrame::Ptr> keyframes;
 
     // Utility classes
     std::unique_ptr<InitialStateEstimation> init_estimation;
@@ -115,10 +128,10 @@ private:
 
     // Registration params
     std::mt19937 mt; ///< RNG
-    Eigen::Isometry3d last_T_target_imu; ///< Last IMU pose w.r.t. target model
-    std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapCPU>> target_voxelmaps; ///< VGICP target voxelmap
-    std::shared_ptr<gtsam_points::iVox> target_ivox; ///< GICP target iVox
-    EstimationFrame::ConstPtr target_ivox_frame; ///< Target points
+    
+    // Entropy calculation
+    int entropy_num_frames;
+    double entropy_running_average;
 };
 
 }

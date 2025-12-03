@@ -21,7 +21,7 @@ void CloudCovarianceEstimation::estimate(
     const int k = neighbors.size() / points.size();
     if (k * points.size() != neighbors.size()) {
         logger::fatal("cloud_cov_estimation", "k * points.size() != neighbors.size()");
-        abort();
+        exit(EXIT_FAILURE);
     }
 
     estimate(points, neighbors, k, normals, covs);
@@ -135,7 +135,7 @@ std::vector<Eigen::Matrix4d> CloudCovarianceEstimation::estimate(
     const int k = neighbors.size() / points.size();
     if (k * points.size() != neighbors.size()) {
         logger::fatal("cloud_cov_estimation", "k * points.size() != neighbors.size()");
-        abort();
+        exit(EXIT_FAILURE);
     }
 
     return estimate(points, neighbors, k);

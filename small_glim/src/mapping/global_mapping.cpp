@@ -446,12 +446,8 @@ GlobalMapping::create_between_factors(int current) const {
         );
         return factors;
     } else {
-        logger::fatal(
-            "global_mapping",
-            "unknown between registration type ({})",
-            params->between_registration_type
-        );
-        abort();
+        logger::fatal("global_mapping", "unknown between registration type ({})", params->between_registration_type);
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -491,12 +487,8 @@ GlobalMapping::create_matching_cost_factors(int current) const {
                 );
             }
         } else {
-            logger::fatal(
-                "global_mapping",
-                "unknown registration error type ({})",
-                params->registration_error_factor_type
-            );
-            abort();
+            logger::fatal("global_mapping", "unknown registration error type ({})", params->registration_error_factor_type);
+            exit(EXIT_FAILURE);
         }
     }
 
@@ -858,7 +850,7 @@ bool GlobalMapping::load(const std::string& path) {
             }
         } else {
             logger::fatal("global_mapping", "unsupported matching cost factor type ({})", type);
-            abort();
+            exit(EXIT_FAILURE);
         }
     }
 

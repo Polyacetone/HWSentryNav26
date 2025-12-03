@@ -8,26 +8,29 @@
       
       # Optimization
       smoother_lag: 5.0 # Fixed-lag smoothing window size [sec]
-      use_isam2_dogleg: true # Use the dogleg optimizer as the backend of ISAM2 that is slow but more robust
+      use_isam2_dogleg: false # Use the dogleg optimizer as the backend of ISAM2 that is slow but more robust
       isam2_relinearize_skip: 1 # Relinearization is performed every $isam2_relinearize_skip optimization calls
       isam2_relinearize_thresh: 0.1 # Relinearization is performed only when linear delta gets larger than this
       fix_imu_bias: false # If true, disable IMU bias estimation and use the initial IMU bias
 
-      # Registration
-      registration_type: "VGICP" # Registration type (GICP or VGICP)
-      max_iterations: 8 # Maximum number of iterations
-      lru_thresh: 100 # LRU cache threshold
-      target_downsampling_rate: 0.1 # Downsampling rate for points to be inserted into the target
+      # Voxel params
+      voxel_resolution: 0.25 # Base resolution for VGICP voxels
+      voxel_resolution_max: 0.5 # Maximum base resolution for VGICP voxels
+      voxel_resolution_dmin: 5.0 # Distance min for adaptive resolution
+      voxel_resolution_dmax: 20.0 # Distance max for adaptive resolution
+      voxelmap_levels: 2 # Multi-resolution voxelmap levels
+      voxelmap_scaling_factor: 2.0 # Multi-resolution voxelmap scaling factor
+      full_connection_window_size: 2 # Latest sensor pose variable is connected with all of the past $full_connection_window_size poses
 
-      # GICP + iVox
-      ivox_resolution: 1.0 # iVox resolution
-      ivox_min_dist: 0.1 # Minimum distance between points in an iVox cell
-
-      # VGICP
-      vgicp_resolution: 0.5 # Voxelmap resolution (for VGICP)
-      vgicp_voxelmap_levels: 1 # Multi-resolution voxelmap levesl (for VGICP)
-      vgicp_voxelmap_scaling_factor: 2.0 # Multi-resolution voxelmap scaling factor (for VGICP)
+      # Keyframe params
+      keyframe_update_strategy: "OVERLAP" # "OVERLAP" / "DISPLACEMENT" / "ENTROPY"
+      max_num_keyframes: 10 # Maximum number of keyframes
+      keyframe_min_overlap: 0.01 # Keyframes that overlap to the latest keyframe with a rate smaller than this will be eliminated
+      keyframe_max_overlap: 0.7 # If the overlap between the latest frame and keyframes is smaller than this, it is inserted into the keyframe list
+      keyframe_delta_trans: 2.0 # Keyframe displacement threshold [m]
+      keyframe_delta_rot: 0.5 # Keyframe displacement threshold [rad]
+      keyframe_entropy_thresh: 0.99 # Entropy threshold
 
       # MISC
       save_imu_rate_trajectory: true # If true, save the IMU rate trajectory
-      num_threads: 4 # Number of threads for odometry estimation
+      num_threads: 8 # Number of threads for odometry estimation

@@ -6,6 +6,7 @@
 
 #include <gtsam_points/ann/ivox.hpp>
 #include <gtsam_points/types/point_cloud_cpu.hpp>
+#include <gtsam_points/types/gaussian_voxelmap_cpu.hpp>
 #include <gtsam_points/factors/linear_damping_factor.hpp>
 #include <gtsam_points/factors/integrated_gicp_factor.hpp>
 #include <gtsam_points/factors/integrated_vgicp_factor.hpp>
@@ -33,8 +34,8 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
     if (bias.size() == 6) {
         imu_bias = Eigen::Map<const Eigen::Matrix<double, 6, 1>>(bias.data());
     } else {
-        throw std::invalid_argument("sensors.imu_bias need 6 parameters");
-        abort();
+        logger::fatal("odometry_estimation", "sensors.imu_bias need 6 parameters");
+        exit(EXIT_FAILURE);
     }
 
     // odometry config
@@ -52,16 +53,34 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
     save_imu_rate_trajectory = config->param<bool>("odometry_estimation.save_imu_rate_trajectory");
     num_threads = config->param<int>("odometry_estimation.num_threads");
 
-    // odometry config
-    registration_type = config->param<std::string>("odometry_estimation.registration_type");
-    max_iterations = config->param<int>("odometry_estimation.max_iterations");
-    lru_thresh = config->param<int>("odometry_estimation.lru_thresh");
-    target_downsampling_rate = config->param<double>("odometry_estimation.target_downsampling_rate");
-    ivox_resolution = config->param<double>("odometry_estimation.ivox_resolution");
-    ivox_min_dist = config->param<double>("odometry_estimation.ivox_min_dist");
-    vgicp_resolution = config->param<double>("odometry_estimation.vgicp_resolution");
-    vgicp_voxelmap_levels = config->param<int>("odometry_estimation.vgicp_voxelmap_levels");
-    vgicp_voxelmap_scaling_factor = config->param<double>("odometry_estimation.vgicp_voxelmap_scaling_factor");
+    // Voxel params
+    voxel_resolution = config->param<double>("odometry_estimation.voxel_resolution");
+    voxel_resolution_max = config->param<double>("odometry_estimation.voxel_resolution_max");
+    voxel_resolution_dmin = config->param<double>("odometry_estimation.voxel_resolution_dmin");
+    voxel_resolution_dmax = config->param<double>("odometry_estimation.voxel_resolution_dmax");
+    voxelmap_levels = config->param<int>("odometry_estimation.voxelmap_levels");
+    voxelmap_scaling_factor = config->param<double>("odometry_estimation.voxelmap_scaling_factor");
+    full_connection_window_size = config->param<int>("odometry_estimation.full_connection_window_size");
+
+    // Keyframe params
+    const std::string strategy = config->param<std::string>("odometry_estimation.keyframe_update_strategy");
+    if (strategy == "OVERLAP") {
+        keyframe_strategy = KeyframeUpdateStrategy::OVERLAP;
+    } else if (strategy == "DISPLACEMENT") {
+        keyframe_strategy = KeyframeUpdateStrategy::DISPLACEMENT;
+    } else if (strategy == "ENTROPY") {
+        keyframe_strategy = KeyframeUpdateStrategy::ENTROPY;
+    } else {
+        logger::fatal("odom_estimation", "unknown keyframe update strategy: {}", strategy);
+        exit(EXIT_FAILURE);
+    }
+
+    max_num_keyframes = config->param<int>("odometry_estimation.max_num_keyframes");
+    keyframe_min_overlap = config->param<double>("odometry_estimation.keyframe_min_overlap");
+    keyframe_max_overlap = config->param<double>("odometry_estimation.keyframe_max_overlap");
+    keyframe_delta_trans = config->param<double>("odometry_estimation.keyframe_delta_trans");
+    keyframe_delta_rot = config->param<double>("odometry_estimation.keyframe_delta_rot");
+    keyframe_entropy_thresh = config->param<double>("odometry_estimation.keyframe_entropy_thresh");
 }
 
 OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
@@ -87,22 +106,29 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
     isam2_params.setRelinearizeThreshold(params->isam2_relinearize_thresh);
     smoother = std::make_unique<FixedLagSmootherExt>(params->smoother_lag, isam2_params);
 
-    last_T_target_imu.setIdentity();
-    if (params->registration_type == "GICP") {
-        target_ivox = std::make_shared<gtsam_points::iVox>(params->ivox_resolution);
-        target_ivox->voxel_insertion_setting().set_min_dist_in_cell(params->ivox_min_dist);
-        target_ivox->set_lru_horizon(params->lru_thresh);
-        target_ivox->set_neighbor_voxel_mode(1);
-    } else if (params->registration_type == "VGICP") {
-        target_voxelmaps.resize(params->vgicp_voxelmap_levels);
-        for (int i = 0; i < params->vgicp_voxelmap_levels; i++) {
-            const double resolution = params->vgicp_resolution * std::pow(params->vgicp_voxelmap_scaling_factor, i);
-            target_voxelmaps[i] = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
-            target_voxelmaps[i]->set_lru_horizon(params->lru_thresh);
+    entropy_num_frames = 0;
+    entropy_running_average = 0.0;
+}
+
+void OdometryEstimationCPU::create_frame(EstimationFrame::Ptr& new_frame) {
+    // Adaptively determine the voxel resolution based on the median distance
+    const int max_scan_count = 256;
+    const double dist_median = gtsam_points::median_distance(new_frame->frame, max_scan_count);
+    const double p = std::max(0.0, std::min(1.0, (dist_median - params->voxel_resolution_dmin) / (params->voxel_resolution_dmax - params->voxel_resolution_dmin)));
+    const double base_resolution = params->voxel_resolution + p * (params->voxel_resolution_max - params->voxel_resolution);
+
+    // Create frame and voxelmaps
+    // new_frame->frame = gtsam_points::PointCloudCPU::clone(*new_frame->frame); // Already CPU
+    for (int i = 0; i < params->voxelmap_levels; i++) {
+        if (!new_frame->frame->size()) {
+            new_frame->voxelmaps.push_back(nullptr);
+            continue;
         }
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        abort();
+
+        const double resolution = base_resolution * std::pow(params->voxelmap_scaling_factor, i);
+        auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
+        voxelmap->insert(*new_frame->frame);
+        new_frame->voxelmaps.push_back(voxelmap);
     }
 }
 
@@ -113,156 +139,56 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
 ) {
     const int last = current - 1;
 
-    if (current == 0) {
-        last_T_target_imu = frames[current]->T_world_imu;
-        update_target(current, frames[current]->T_world_imu);
+    if (current == 0 || !frames[current]->frame->size()) {
         return gtsam::NonlinearFactorGraph();
     }
 
-    const Eigen::Isometry3d pred_T_last_current = frames[last]->T_world_imu.inverse() * frames[current]->T_world_imu;
-    const Eigen::Isometry3d pred_T_target_imu = last_T_target_imu * pred_T_last_current;
-
-    gtsam::Values values;
-    values.insert(X(current), gtsam::Pose3(pred_T_target_imu.matrix()));
-
-    // Create frame-to-model matching factor
-    gtsam::NonlinearFactorGraph matching_cost_factors;
-    if (params->registration_type == "GICP") {
-        auto gicp_factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor_<gtsam_points::iVox, gtsam_points::PointCloud>>(
-            gtsam::Pose3(),
-            X(current),
-            target_ivox,
-            frames[current]->frame,
-            target_ivox
-        );
-        gicp_factor->set_max_correspondence_distance(params->ivox_resolution * 2.0);
-        gicp_factor->set_num_threads(params->num_threads);
-        matching_cost_factors.add(gicp_factor);
-    } else if (params->registration_type == "VGICP") {
-        for (const auto& voxelmap: target_voxelmaps) {
-            auto vgicp_factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
-                gtsam::Pose3(),
-                X(current),
+    const auto create_binary_factor = [this](
+        gtsam::NonlinearFactorGraph& factors,
+        gtsam::Key target_key,
+        gtsam::Key source_key,
+        const EstimationFrame::ConstPtr& target,
+        const EstimationFrame::ConstPtr& source
+    ) {
+        for (const auto& voxelmap : target->voxelmaps) {
+            if (!voxelmap) continue;
+            auto factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
+                target_key,
+                source_key,
                 voxelmap,
-                frames[current]->frame
+                source->frame
             );
-            vgicp_factor->set_num_threads(params->num_threads);
-            matching_cost_factors.add(vgicp_factor);
+            factor->set_num_threads(params->num_threads);
+            factors.add(factor);
         }
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        abort();
-    }
-
-    gtsam::NonlinearFactorGraph graph;
-    graph.add(matching_cost_factors);
-
-    gtsam_points::LevenbergMarquardtExtParams lm_params;
-    lm_params.setMaxIterations(params->max_iterations);
-    lm_params.setAbsoluteErrorTol(0.1);
-
-    gtsam::Pose3 last_estimate = values.at<gtsam::Pose3>(X(current));
-    lm_params.termination_criteria = [&](const gtsam::Values& values) {
-        const gtsam::Pose3 current_pose = values.at<gtsam::Pose3>(X(current));
-        const gtsam::Pose3 delta = last_estimate.inverse() * current_pose;
-
-        const double delta_t = delta.translation().norm();
-        const double delta_r = Eigen::AngleAxisd(delta.rotation().matrix()).angle();
-        last_estimate = current_pose;
-
-        if (delta_t < 1e-10 && delta_r < 1e-10) {
-            // Maybe failed to solve the linear system
-            return false;
-        }
-
-        // Convergence check
-        return delta_t < 1e-3 && delta_r < 1e-3 * M_PI / 180.0;
     };
-
-    // Optimize
-    // lm_params.setDiagonalDamping(true);
-    gtsam_points::LevenbergMarquardtOptimizerExt optimizer(graph, values, lm_params);
-    values = optimizer.optimize();
-
-    const Eigen::Isometry3d T_target_imu(values.at<gtsam::Pose3>(X(current)).matrix());
-    Eigen::Isometry3d T_last_current = last_T_target_imu.inverse() * T_target_imu;
-    T_last_current.linear() = Eigen::Quaterniond(T_last_current.linear()).normalized().toRotationMatrix();
-    frames[current]->T_world_imu = frames[last]->T_world_imu * T_last_current;
-    new_values.insert_or_assign(X(current), gtsam::Pose3(frames[current]->T_world_imu.matrix()));
 
     gtsam::NonlinearFactorGraph factors;
 
-    // Get linearized matching cost factors
-    // const auto linearized = optimizer.last_linearized();
-    // for (int i = linearized->size() - matching_cost_factors.size(); i < linearized->size(); i++) {
-    //   factors.emplace_shared<gtsam::LinearContainerFactor>(linearized->at(i), values);
-    // }
-
-    // TODO: Extract a relative pose covariance from a frame-to-model matching result?
-    factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-        X(last),
-        X(current),
-        gtsam::Pose3(T_last_current.matrix()),
-        gtsam::noiseModel::Isotropic::Precision(6, 1e3)
-    );
-    factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
-        X(current),
-        gtsam::Pose3(T_target_imu.matrix()),
-        gtsam::noiseModel::Isotropic::Precision(6, 1e3)
-    );
-
-    update_target(current, T_target_imu);
-    last_T_target_imu = T_target_imu;
-
-    return factors;
-}
-
-void OdometryEstimationCPU::fallback_smoother() {}
-
-void OdometryEstimationCPU::update_target(
-    const int current,
-    const Eigen::Isometry3d& T_target_imu
-) {
-    auto frame = frames[current]->frame;
-    if (current >= 5) {
-        frame = gtsam_points::random_sampling(
-            frames[current]->frame,
-            params->target_downsampling_rate,
-            mt
-        );
-    }
-
-    auto transformed = gtsam_points::transform(frame, T_target_imu);
-    if (params->registration_type == "GICP") {
-        target_ivox->insert(*transformed);
-    } else if (params->registration_type == "VGICP") {
-        for (auto& target_voxelmap: target_voxelmaps) {
-            target_voxelmap->insert(*transformed);
+    // There must be at least one factor between consecutive frames
+    for (int target = current - params->full_connection_window_size; target < current; target++) {
+        if (target < 0) {
+            continue;
         }
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        abort();
+        create_binary_factor(factors, X(target), X(current), frames[target], frames[current]);
     }
 
-    // Update target point cloud (published as cloud_registered)
-    EstimationFrame::Ptr target_frame = std::make_shared<EstimationFrame>();
-    target_frame->id = frames.size() - 1;
-    target_frame->stamp = frames.back()->stamp;
-    target_frame->T_lidar_imu = frames.back()->T_lidar_imu;
-    target_frame->T_world_lidar = target_frame->T_lidar_imu.inverse();
-    target_frame->T_world_imu.setIdentity();
-    target_frame->v_world_imu.setZero();
-    target_frame->imu_bias.setZero();
-    target_frame->frame_id = FrameID::IMU;
-    if (params->registration_type == "GICP") {
-        target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_ivox->voxel_points());
-    } else if (params->registration_type == "VGICP") {
-        target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_voxelmaps[0]->voxel_points());
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        abort();
+    for (const auto& keyframe : keyframes) {
+        if (keyframe->id >= current - params->full_connection_window_size) {
+            // Already connected in the previous loop
+            continue;
+        }
+
+        double span = frames[current]->stamp - keyframe->stamp;
+        if (span > params->smoother_lag - 0.1 || !frames[keyframe->id]) {
+            // Keyframe is already marginalized
+            continue; 
+        } else {
+            create_binary_factor(factors, X(keyframe->id), X(current), keyframe, frames[current]);
+        }
     }
-    target_ivox_frame = target_frame;
+    
+    return factors;
 }
 
 void OdometryEstimationCPU::insert_imu(
@@ -346,6 +272,8 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         frame->add_normals(normals);
         new_frame->frame = frame;
         new_frame->frame_id = FrameID::IMU;
+        
+        create_frame(new_frame); // Create voxelmaps
         frames.push_back(new_frame);
 
         // Initialize the estimator
@@ -450,14 +378,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         );
         new_factors.add(imu_factor);
     } else {
-        logger::warn("odom_estimation", "insufficient number of IMU data between LiDAR scans!! (odometry_estimation)");
-        logger::warn(
-            "odom_estimation",
-            "t_last={:.6f} t_current={:.6f} num_imu={}",
-            last_stamp,
-            raw_frame->stamp,
-            num_imu_integrated
-        );
+        logger::warn("odom_estimation", "insufficient number of IMU data between LiDAR scans!!");
         new_factors.add(
             gtsam::BetweenFactor<gtsam::Vector3>(
                 V(last),
@@ -511,7 +432,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         raw_frame->times,
         raw_frame->points
     );
-    for (auto& pt: deskewed) {
+    for (auto& pt : deskewed) {
         pt = T_imu_lidar * pt;
     }
 
@@ -527,6 +448,8 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     frame->add_normals(deskewed_normals);
     new_frame->frame = frame;
     new_frame->frame_id = FrameID::IMU;
+    
+    create_frame(new_frame); // Create voxelmaps
     frames.push_back(new_frame);
 
     new_factors.add(create_factors(current, imu_factor, new_values));
@@ -558,22 +481,30 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 }
 
 std::vector<EstimationFrame::ConstPtr> OdometryEstimationCPU::get_remaining_frames() {
-    // Perform a few optimization iterations at the end
-    // for(int i=0; i<5; i++) {
-    //   smoother->update();
-    // }
-    // OdometryEstimationCPU::update_frames(frames.size() - 1, gtsam::NonlinearFactorGraph());
-
     std::vector<EstimationFrame::ConstPtr> marginalized_frames;
     for (int i = marginalized_cursor; i < frames.size(); i++) {
         marginalized_frames.push_back(frames[i]);
     }
-
     return marginalized_frames;
 }
 
 EstimationFrame::ConstPtr OdometryEstimationCPU::get_target_ivox_frame() {
-    return target_ivox_frame;
+    if (keyframes.empty()) return nullptr;
+    std::vector<gtsam_points::PointCloud::ConstPtr> frames;
+    std::vector<Eigen::Isometry3d> poses;
+    for (const auto& keyframe : keyframes) {
+        frames.push_back(keyframe->frame);
+        poses.push_back(keyframe->T_world_imu);
+    }
+    auto merged = gtsam_points::merge_frames(poses, frames, params->voxel_resolution);
+    EstimationFrame::Ptr ivox_frame = std::make_shared<EstimationFrame>();
+    ivox_frame->id = 0;
+    ivox_frame->stamp = keyframes.back()->stamp;
+    ivox_frame->frame_id = FrameID::WORLD;
+    ivox_frame->T_world_lidar = Eigen::Isometry3d::Identity();
+    ivox_frame->T_world_imu = Eigen::Isometry3d::Identity();
+    ivox_frame->frame = merged;
+    return ivox_frame;
 }
 
 void OdometryEstimationCPU::update_frames(
@@ -593,9 +524,21 @@ void OdometryEstimationCPU::update_frames(
             frames[i]->imu_bias = imu_bias;
         } catch (std::out_of_range& e) {
             logger::error("odom_estimation", "caught {}", e.what());
-            logger::error("odom_estimation", "current={}", current);
-            logger::error("odom_estimation", "marginalized_cursor={}", marginalized_cursor);
-            fallback_smoother();
+            break;
+        }
+    }
+
+    switch (params->keyframe_strategy) {
+        case OdometryEstimationCPUParams::KeyframeUpdateStrategy::OVERLAP: {
+            update_keyframes_overlap(current);
+            break;
+        }
+        case OdometryEstimationCPUParams::KeyframeUpdateStrategy::DISPLACEMENT: {
+            update_keyframes_displacement(current);
+            break;
+        }
+        case OdometryEstimationCPUParams::KeyframeUpdateStrategy::ENTROPY: {
+            update_keyframes_entropy(new_factors, current);
             break;
         }
     }
@@ -624,6 +567,191 @@ void OdometryEstimationCPU::update_smoother(int count) {
         std::map<std::uint64_t, double>(),
         count - 1
     );
+}
+
+void OdometryEstimationCPU::update_keyframes_overlap(int current) {
+    if (!frames[current]->frame->size()) {
+        return;
+    }
+
+    if (keyframes.empty()) {
+        keyframes.push_back(frames[current]);
+        return;
+    }
+
+    // Calculate overlap with all existing keyframes
+    std::vector<gtsam_points::GaussianVoxelMap::ConstPtr> keyframes_(keyframes.size());
+    std::vector<Eigen::Isometry3d> delta_from_keyframes(keyframes.size());
+    for (int i = 0; i < keyframes.size(); i++) {
+        keyframes_[i] = keyframes[i]->voxelmaps.back();
+        delta_from_keyframes[i] = keyframes[i]->T_world_imu.inverse() * frames[current]->T_world_imu;
+    }
+
+    const double overlap = gtsam_points::overlap_auto(keyframes_, frames[current]->frame, delta_from_keyframes);
+    if (overlap > params->keyframe_max_overlap) {
+        return;
+    }
+
+    const auto& new_keyframe = frames[current];
+    keyframes.push_back(new_keyframe);
+
+    if (keyframes.size() <= params->max_num_keyframes) {
+        return;
+    }
+
+    // Remove keyframes without overlap to the new keyframe
+    for (int i = 0; i < keyframes.size(); i++) {
+        if (keyframes[i] == new_keyframe) {
+            continue;
+        }
+        const Eigen::Isometry3d delta = keyframes[i]->T_world_imu.inverse() * new_keyframe->T_world_imu;
+        const double overlap = gtsam_points::overlap_auto(keyframes[i]->voxelmaps.back(), new_keyframe->frame, delta);
+        if (overlap < params->keyframe_min_overlap) {
+            keyframes.erase(keyframes.begin() + i);
+            i--;
+        }
+    }
+
+    if (keyframes.size() <= params->max_num_keyframes) {
+        return;
+    }
+
+    // Remove the keyframe with the minimum score
+    std::vector<double> scores(keyframes.size() - 1, 0.0);
+    for (int i = 0; i < keyframes.size() - 1; i++) {
+        const auto& keyframe = keyframes[i];
+        const double overlap_latest = gtsam_points::overlap_auto(
+            keyframe->voxelmaps.back(),
+            new_keyframe->frame,
+            keyframe->T_world_imu.inverse() * new_keyframe->T_world_imu
+        );
+
+        std::vector<gtsam_points::GaussianVoxelMap::ConstPtr> other_keyframes;
+        std::vector<Eigen::Isometry3d> delta_from_others;
+        for (int j = 0; j < keyframes.size() - 1; j++) {
+            if (i == j) {
+                continue;
+            }
+
+            const auto& other = keyframes[j];
+            other_keyframes.push_back(other->voxelmaps.back());
+            delta_from_others.push_back(other->T_world_imu.inverse() * keyframe->T_world_imu);
+        }
+
+        const double overlap_others = gtsam_points::overlap_auto(other_keyframes, keyframe->frame, delta_from_others);
+        scores[i] = overlap_latest * (1.0 - overlap_others);
+    }
+
+    double min_score = scores[0];
+    int frame_to_eliminate = 0;
+    for (int i = 1; i < scores.size(); i++) {
+        if (scores[i] < min_score) {
+            min_score = scores[i];
+            frame_to_eliminate = i;
+        }
+    }
+
+    keyframes.erase(keyframes.begin() + frame_to_eliminate);
+}
+
+void OdometryEstimationCPU::update_keyframes_displacement(int current) {
+    if (keyframes.empty()) {
+        keyframes.push_back(frames[current]);
+        return;
+    }
+
+    const Eigen::Isometry3d delta_from_last = keyframes.back()->T_world_imu.inverse() * frames[current]->T_world_imu;
+    const double delta_trans = delta_from_last.translation().norm();
+    const double delta_rot = Eigen::AngleAxisd(delta_from_last.linear()).angle();
+
+    if (delta_trans < params->keyframe_delta_trans && delta_rot < params->keyframe_delta_rot) {
+        return;
+    }
+
+    const auto& new_keyframe = frames[current];
+    keyframes.push_back(new_keyframe);
+
+    if (keyframes.size() <= params->max_num_keyframes) {
+        return;
+    }
+
+    // First, try to remove keyframes with very low overlap to the new keyframe
+    for (int i = 0; i < keyframes.size() - 1; i++) {
+        const Eigen::Isometry3d delta = keyframes[i]->T_world_imu.inverse() * new_keyframe->T_world_imu;
+        const double overlap = gtsam_points::overlap_auto(keyframes[i]->voxelmaps.back(), new_keyframe->frame, delta);
+
+        if (overlap < 0.01) {
+            keyframes.erase(keyframes.begin() + i);
+            return;
+        }
+    }
+
+    // Calculate score for each keyframe based on distance
+    const int leave_window = 2;
+    const double eps = 1e-3;
+    std::vector<double> scores(keyframes.size() - 1, 0.0);
+    for (int i = leave_window; i < keyframes.size() - 1; i++) {
+        double sum_inv_dist = 0.0;
+        for (int j = 0; j < keyframes.size() - 1; j++) {
+            if (i == j) {
+                continue;
+            }
+
+            const double dist = (keyframes[i]->T_world_imu.translation() - keyframes[j]->T_world_imu.translation()).norm();
+            sum_inv_dist += 1.0 / (dist + eps);
+        }
+
+        const double d0 = (keyframes[i]->T_world_imu.translation() - new_keyframe->T_world_imu.translation()).norm();
+        scores[i] = std::sqrt(d0) * sum_inv_dist;
+    }
+
+    const auto max_score_loc = std::max_element(scores.begin(), scores.end());
+    const int max_score_index = std::distance(scores.begin(), max_score_loc);
+
+    keyframes.erase(keyframes.begin() + max_score_index);
+}
+
+void OdometryEstimationCPU::update_keyframes_entropy(const gtsam::NonlinearFactorGraph& matching_cost_factors, int current) {
+    gtsam::Values values = smoother->calculateEstimate();
+
+    gtsam::NonlinearFactorGraph valid_factors;
+    for (const auto& factor : matching_cost_factors) {
+        bool valid = std::all_of(factor->keys().begin(), factor->keys().end(), [&](const gtsam::Key key) { return values.exists(key); });
+        if (!valid) {
+            continue;
+        }
+
+        valid_factors.push_back(factor->clone());
+    }
+
+    if (valid_factors.empty()) {
+        logger::warn("odom_estimation", "no valid factors for entropy calculation");
+        update_keyframes_displacement(current);
+        return;
+    }
+
+    auto linearized = valid_factors.linearize(values);
+    gtsam::Matrix6 H = linearized->hessianBlockDiagonal()[X(current)];
+    double negative_entropy = std::log(H.determinant());
+
+    entropy_num_frames++;
+    entropy_running_average += (negative_entropy - entropy_running_average) / entropy_num_frames;
+
+    if (!keyframes.empty() && negative_entropy > entropy_running_average * params->keyframe_entropy_thresh) {
+        return;
+    }
+
+    entropy_num_frames = 0;
+    entropy_running_average = 0.0;
+
+    const auto& new_keyframe = frames[current];
+    keyframes.push_back(new_keyframe);
+
+    if (keyframes.size() <= params->max_num_keyframes) {
+        return;
+    }
+
+    keyframes.erase(keyframes.begin());
 }
 
 }

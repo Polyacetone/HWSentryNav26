@@ -31,7 +31,7 @@ void EstimationFrame::set_T_world_sensor(FrameID frame_id, const Eigen::Isometry
     switch (frame_id) {
         default: {
             logger::fatal("estimation_frame", "frame_id must be either of LIDAR or IMU");
-            abort();
+            exit(EXIT_FAILURE);
             break;
         }
         case FrameID::LIDAR: {

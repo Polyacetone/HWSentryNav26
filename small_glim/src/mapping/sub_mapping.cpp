@@ -210,12 +210,8 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
                 gtsam::noiseModel::Isotropic::Precision(6, 1e3)
             );
         } else {
-            logger::fatal(
-                "sub_mapping",
-                "unknown between registration type ({})",
-                params->between_registration_type
-            );
-            abort();
+            logger::fatal("sub_mapping", "unknown between registration type ({})", params->between_registration_type);
+            exit(EXIT_FAILURE);
         }
     }
 
@@ -301,11 +297,10 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
             const double delta_trans = delta_from_keyframe.translation().norm();
             const double delta_angle = Eigen::AngleAxisd(delta_from_keyframe.linear()).angle();
 
-            insert_as_keyframe = delta_trans > params->keyframe_update_interval_trans
-                || delta_angle > params->keyframe_update_interval_rot;
+            insert_as_keyframe = delta_trans > params->keyframe_update_interval_trans || delta_angle > params->keyframe_update_interval_rot;
         } else {
             logger::fatal("sub_mapping", "unknown keyframe update strategy ({})", params->keyframe_update_strategy);
-            abort();
+            exit(EXIT_FAILURE);
         }
     }
 
@@ -340,12 +335,8 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
                     );
                 }
             } else {
-                logger::fatal(
-                    "sub_mapping",
-                    "unknown registration error factor type ({})",
-                    params->registration_error_factor_type
-                );
-                abort();
+                logger::fatal("sub_mapping", "unknown registration error factor type ({})", params->registration_error_factor_type);
+                exit(EXIT_FAILURE);
             }
         }
     }
