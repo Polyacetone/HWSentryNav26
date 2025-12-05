@@ -3,15 +3,12 @@
 #include <random>
 #include <vector>
 #include <memory>
-#include <string>
 #include <Eigen/Core>
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam_points/types/point_cloud.hpp>
-#include <gtsam_points/types/gaussian_voxelmap.hpp>
 #include <gtsam_points/factors/linear_damping_factor.hpp>
 #include <gtsam_points/factors/integrated_gicp_factor.hpp>
-#include <gtsam_points/factors/integrated_vgicp_factor.hpp>
 #include <gtsam_points/optimizers/levenberg_marquardt_ext.hpp>
 #include <gtsam_points/optimizers/incremental_fixed_lag_smoother_with_fallback.hpp>
 #include <gtsam_points/ann/ivox.hpp>
@@ -57,21 +54,14 @@ public:
     // Number of threads for preprocessing and per-factor parallelism
     int num_threads;
     
-    // Voxel params
-    double voxel_resolution;
-    double voxel_resolution_max;
-    double voxel_resolution_dmin;
-    double voxel_resolution_dmax;
-    int voxelmap_levels;
-    double voxelmap_scaling_factor;
+    // GICP params
+    double correspondence_distance;
     int full_connection_window_size;
 
     // Keyframe params
-    enum class KeyframeUpdateStrategy { OVERLAP, DISPLACEMENT, ENTROPY };
+    enum class KeyframeUpdateStrategy { DISPLACEMENT, ENTROPY };
     KeyframeUpdateStrategy keyframe_strategy;
     int max_num_keyframes;
-    double keyframe_min_overlap;
-    double keyframe_max_overlap;
     double keyframe_delta_trans;
     double keyframe_delta_rot;
     double keyframe_entropy_thresh;
@@ -90,7 +80,6 @@ public:
     EstimationFrame::ConstPtr get_target_ivox_frame();
 
 private:
-    void create_frame(EstimationFrame::Ptr& new_frame);
     gtsam::NonlinearFactorGraph create_factors(
         const int current,
         const std::shared_ptr<gtsam::ImuFactor>& imu_factor,
@@ -100,7 +89,6 @@ private:
     void update_smoother(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, const std::map<std::uint64_t, double>& new_stamp, int update_count = 0);
     void update_smoother(int update_count = 1);
 
-    void update_keyframes_overlap(int current);
     void update_keyframes_displacement(int current);
     void update_keyframes_entropy(const gtsam::NonlinearFactorGraph& matching_cost_factors, int current);
 

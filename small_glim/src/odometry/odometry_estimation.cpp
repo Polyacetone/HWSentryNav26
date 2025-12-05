@@ -6,10 +6,8 @@
 
 #include <gtsam_points/ann/ivox.hpp>
 #include <gtsam_points/types/point_cloud_cpu.hpp>
-#include <gtsam_points/types/gaussian_voxelmap_cpu.hpp>
 #include <gtsam_points/factors/linear_damping_factor.hpp>
 #include <gtsam_points/factors/integrated_gicp_factor.hpp>
-#include <gtsam_points/factors/integrated_vgicp_factor.hpp>
 #include <gtsam_points/optimizers/levenberg_marquardt_ext.hpp>
 #include <gtsam_points/optimizers/incremental_fixed_lag_smoother_with_fallback.hpp>
 
@@ -53,20 +51,13 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
     save_imu_rate_trajectory = config->param<bool>("odometry_estimation.save_imu_rate_trajectory");
     num_threads = config->param<int>("odometry_estimation.num_threads");
 
-    // Voxel params
-    voxel_resolution = config->param<double>("odometry_estimation.voxel_resolution");
-    voxel_resolution_max = config->param<double>("odometry_estimation.voxel_resolution_max");
-    voxel_resolution_dmin = config->param<double>("odometry_estimation.voxel_resolution_dmin");
-    voxel_resolution_dmax = config->param<double>("odometry_estimation.voxel_resolution_dmax");
-    voxelmap_levels = config->param<int>("odometry_estimation.voxelmap_levels");
-    voxelmap_scaling_factor = config->param<double>("odometry_estimation.voxelmap_scaling_factor");
+    // GICP params
+    correspondence_distance = config->param<double>("odometry_estimation.correspondence_distance");
     full_connection_window_size = config->param<int>("odometry_estimation.full_connection_window_size");
 
     // Keyframe params
     const std::string strategy = config->param<std::string>("odometry_estimation.keyframe_update_strategy");
-    if (strategy == "OVERLAP") {
-        keyframe_strategy = KeyframeUpdateStrategy::OVERLAP;
-    } else if (strategy == "DISPLACEMENT") {
+    if (strategy == "DISPLACEMENT") {
         keyframe_strategy = KeyframeUpdateStrategy::DISPLACEMENT;
     } else if (strategy == "ENTROPY") {
         keyframe_strategy = KeyframeUpdateStrategy::ENTROPY;
@@ -76,8 +67,6 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
     }
 
     max_num_keyframes = config->param<int>("odometry_estimation.max_num_keyframes");
-    keyframe_min_overlap = config->param<double>("odometry_estimation.keyframe_min_overlap");
-    keyframe_max_overlap = config->param<double>("odometry_estimation.keyframe_max_overlap");
     keyframe_delta_trans = config->param<double>("odometry_estimation.keyframe_delta_trans");
     keyframe_delta_rot = config->param<double>("odometry_estimation.keyframe_delta_rot");
     keyframe_entropy_thresh = config->param<double>("odometry_estimation.keyframe_entropy_thresh");
@@ -110,28 +99,6 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
     entropy_running_average = 0.0;
 }
 
-void OdometryEstimationCPU::create_frame(EstimationFrame::Ptr& new_frame) {
-    // Adaptively determine the voxel resolution based on the median distance
-    const int max_scan_count = 256;
-    const double dist_median = gtsam_points::median_distance(new_frame->frame, max_scan_count);
-    const double p = std::max(0.0, std::min(1.0, (dist_median - params->voxel_resolution_dmin) / (params->voxel_resolution_dmax - params->voxel_resolution_dmin)));
-    const double base_resolution = params->voxel_resolution + p * (params->voxel_resolution_max - params->voxel_resolution);
-
-    // Create frame and voxelmaps
-    // new_frame->frame = gtsam_points::PointCloudCPU::clone(*new_frame->frame); // Already CPU
-    for (int i = 0; i < params->voxelmap_levels; i++) {
-        if (!new_frame->frame->size()) {
-            new_frame->voxelmaps.push_back(nullptr);
-            continue;
-        }
-
-        const double resolution = base_resolution * std::pow(params->voxelmap_scaling_factor, i);
-        auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
-        voxelmap->insert(*new_frame->frame);
-        new_frame->voxelmaps.push_back(voxelmap);
-    }
-}
-
 gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
     const int current,
     const std::shared_ptr<gtsam::ImuFactor>& imu_factor,
@@ -150,17 +117,16 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
         const EstimationFrame::ConstPtr& target,
         const EstimationFrame::ConstPtr& source
     ) {
-        for (const auto& voxelmap : target->voxelmaps) {
-            if (!voxelmap) continue;
-            auto factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
-                target_key,
-                source_key,
-                voxelmap,
-                source->frame
-            );
-            factor->set_num_threads(params->num_threads);
-            factors.add(factor);
-        }
+        auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
+            target_key,
+            source_key,
+            target->frame,
+            source->frame
+        );
+        factor->set_max_correspondence_distance(params->correspondence_distance);
+        factor->set_num_threads(params->num_threads);
+        factor->set_fused_cov_cache_mode(gtsam_points::FusedCovCacheMode::FULL);
+        factors.add(factor);
     };
 
     gtsam::NonlinearFactorGraph factors;
@@ -271,9 +237,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         frame->add_covs(covs);
         frame->add_normals(normals);
         new_frame->frame = frame;
-        new_frame->frame_id = FrameID::IMU;
-        
-        create_frame(new_frame); // Create voxelmaps
+        new_frame->frame_id = FrameID::IMU; 
         frames.push_back(new_frame);
 
         // Initialize the estimator
@@ -448,8 +412,6 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     frame->add_normals(deskewed_normals);
     new_frame->frame = frame;
     new_frame->frame_id = FrameID::IMU;
-    
-    create_frame(new_frame); // Create voxelmaps
     frames.push_back(new_frame);
 
     new_factors.add(create_factors(current, imu_factor, new_values));
@@ -496,7 +458,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::get_target_ivox_frame() {
         frames.push_back(keyframe->frame);
         poses.push_back(keyframe->T_world_imu);
     }
-    auto merged = gtsam_points::merge_frames(poses, frames, params->voxel_resolution);
+    auto merged = gtsam_points::merge_frames(poses, frames, 0.25);
     EstimationFrame::Ptr ivox_frame = std::make_shared<EstimationFrame>();
     ivox_frame->id = 0;
     ivox_frame->stamp = keyframes.back()->stamp;
@@ -529,10 +491,6 @@ void OdometryEstimationCPU::update_frames(
     }
 
     switch (params->keyframe_strategy) {
-        case OdometryEstimationCPUParams::KeyframeUpdateStrategy::OVERLAP: {
-            update_keyframes_overlap(current);
-            break;
-        }
         case OdometryEstimationCPUParams::KeyframeUpdateStrategy::DISPLACEMENT: {
             update_keyframes_displacement(current);
             break;
@@ -569,91 +527,6 @@ void OdometryEstimationCPU::update_smoother(int count) {
     );
 }
 
-void OdometryEstimationCPU::update_keyframes_overlap(int current) {
-    if (!frames[current]->frame->size()) {
-        return;
-    }
-
-    if (keyframes.empty()) {
-        keyframes.push_back(frames[current]);
-        return;
-    }
-
-    // Calculate overlap with all existing keyframes
-    std::vector<gtsam_points::GaussianVoxelMap::ConstPtr> keyframes_(keyframes.size());
-    std::vector<Eigen::Isometry3d> delta_from_keyframes(keyframes.size());
-    for (int i = 0; i < keyframes.size(); i++) {
-        keyframes_[i] = keyframes[i]->voxelmaps.back();
-        delta_from_keyframes[i] = keyframes[i]->T_world_imu.inverse() * frames[current]->T_world_imu;
-    }
-
-    const double overlap = gtsam_points::overlap_auto(keyframes_, frames[current]->frame, delta_from_keyframes);
-    if (overlap > params->keyframe_max_overlap) {
-        return;
-    }
-
-    const auto& new_keyframe = frames[current];
-    keyframes.push_back(new_keyframe);
-
-    if (keyframes.size() <= params->max_num_keyframes) {
-        return;
-    }
-
-    // Remove keyframes without overlap to the new keyframe
-    for (int i = 0; i < keyframes.size(); i++) {
-        if (keyframes[i] == new_keyframe) {
-            continue;
-        }
-        const Eigen::Isometry3d delta = keyframes[i]->T_world_imu.inverse() * new_keyframe->T_world_imu;
-        const double overlap = gtsam_points::overlap_auto(keyframes[i]->voxelmaps.back(), new_keyframe->frame, delta);
-        if (overlap < params->keyframe_min_overlap) {
-            keyframes.erase(keyframes.begin() + i);
-            i--;
-        }
-    }
-
-    if (keyframes.size() <= params->max_num_keyframes) {
-        return;
-    }
-
-    // Remove the keyframe with the minimum score
-    std::vector<double> scores(keyframes.size() - 1, 0.0);
-    for (int i = 0; i < keyframes.size() - 1; i++) {
-        const auto& keyframe = keyframes[i];
-        const double overlap_latest = gtsam_points::overlap_auto(
-            keyframe->voxelmaps.back(),
-            new_keyframe->frame,
-            keyframe->T_world_imu.inverse() * new_keyframe->T_world_imu
-        );
-
-        std::vector<gtsam_points::GaussianVoxelMap::ConstPtr> other_keyframes;
-        std::vector<Eigen::Isometry3d> delta_from_others;
-        for (int j = 0; j < keyframes.size() - 1; j++) {
-            if (i == j) {
-                continue;
-            }
-
-            const auto& other = keyframes[j];
-            other_keyframes.push_back(other->voxelmaps.back());
-            delta_from_others.push_back(other->T_world_imu.inverse() * keyframe->T_world_imu);
-        }
-
-        const double overlap_others = gtsam_points::overlap_auto(other_keyframes, keyframe->frame, delta_from_others);
-        scores[i] = overlap_latest * (1.0 - overlap_others);
-    }
-
-    double min_score = scores[0];
-    int frame_to_eliminate = 0;
-    for (int i = 1; i < scores.size(); i++) {
-        if (scores[i] < min_score) {
-            min_score = scores[i];
-            frame_to_eliminate = i;
-        }
-    }
-
-    keyframes.erase(keyframes.begin() + frame_to_eliminate);
-}
-
 void OdometryEstimationCPU::update_keyframes_displacement(int current) {
     if (keyframes.empty()) {
         keyframes.push_back(frames[current]);
@@ -673,17 +546,6 @@ void OdometryEstimationCPU::update_keyframes_displacement(int current) {
 
     if (keyframes.size() <= params->max_num_keyframes) {
         return;
-    }
-
-    // First, try to remove keyframes with very low overlap to the new keyframe
-    for (int i = 0; i < keyframes.size() - 1; i++) {
-        const Eigen::Isometry3d delta = keyframes[i]->T_world_imu.inverse() * new_keyframe->T_world_imu;
-        const double overlap = gtsam_points::overlap_auto(keyframes[i]->voxelmaps.back(), new_keyframe->frame, delta);
-
-        if (overlap < 0.01) {
-            keyframes.erase(keyframes.begin() + i);
-            return;
-        }
     }
 
     // Calculate score for each keyframe based on distance
