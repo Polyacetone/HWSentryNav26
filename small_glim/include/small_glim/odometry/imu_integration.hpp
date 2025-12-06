@@ -18,6 +18,9 @@ struct IMUIntegrationParams {
     double acc_noise; // Linear acceleration noise
     double gyro_noise; // Angular velocity noise
     double int_noise; // Integration noise
+    double acc_saturation_thresh; // Accelerometer saturation threshold
+    double gyro_saturation_thresh; // Gyroscope saturation threshold
+    double saturation_mult; // Covariance multiplier when saturated
 };
 
 /**
@@ -103,6 +106,7 @@ public:
 private:
     std::shared_ptr<gtsam::PreintegratedImuMeasurements> imu_measurements;
     std::deque<Eigen::Matrix<double, 7, 1>> imu_queue;
+    std::unique_ptr<IMUIntegrationParams> params;
 };
 
 }

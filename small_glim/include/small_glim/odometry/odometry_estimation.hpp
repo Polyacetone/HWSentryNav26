@@ -3,12 +3,15 @@
 #include <random>
 #include <vector>
 #include <memory>
+#include <string>
 #include <Eigen/Core>
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam_points/types/point_cloud.hpp>
+#include <gtsam_points/types/gaussian_voxelmap.hpp>
 #include <gtsam_points/factors/linear_damping_factor.hpp>
 #include <gtsam_points/factors/integrated_gicp_factor.hpp>
+#include <gtsam_points/factors/integrated_vgicp_factor.hpp>
 #include <gtsam_points/optimizers/levenberg_marquardt_ext.hpp>
 #include <gtsam_points/optimizers/incremental_fixed_lag_smoother_with_fallback.hpp>
 #include <gtsam_points/ann/ivox.hpp>
@@ -51,20 +54,19 @@ public:
     // Logging params
     bool save_imu_rate_trajectory;
 
-    // Number of threads for preprocessing and per-factor parallelism
-    int num_threads;
-    
-    // GICP params
-    double correspondence_distance;
-    int full_connection_window_size;
+    int num_threads;                  // Number of threads for preprocessing and per-factor parallelism
 
-    // Keyframe params
-    enum class KeyframeUpdateStrategy { DISPLACEMENT, ENTROPY };
-    KeyframeUpdateStrategy keyframe_strategy;
-    int max_num_keyframes;
-    double keyframe_delta_trans;
-    double keyframe_delta_rot;
-    double keyframe_entropy_thresh;
+    // Registration params
+    std::string registration_type; ///< Registration type (GICP or VGICP)
+    int keyframe_window_size; ///< Local window size for pairwise registration
+    int keyframe_delta; ///< Keyframe delta
+    int lru_thresh; ///< LRU cache threshold
+    double target_downsampling_rate; ///< Downsampling rate for points to be inserted into the target
+    double ivox_resolution; ///< iVox resolution (for GICP)
+    double ivox_min_dist; ///< Minimum distance between points in an iVox cell (for GICP)
+    double vgicp_resolution; ///< Voxelmap resolution (for VGICP)
+    int vgicp_voxelmap_levels; ///< Multi-resolution voxelmap levesl (for VGICP)
+    double vgicp_voxelmap_scaling_factor; ///< Multi-resolution voxelmap scaling factor (for VGICP)
 };
 
 /**
@@ -85,12 +87,10 @@ private:
         const std::shared_ptr<gtsam::ImuFactor>& imu_factor,
         gtsam::Values& new_values
     );
+    void fallback_smoother();
+    void update_target(const int current, const Eigen::Isometry3d& T_target_imu);
     void update_frames(const int current, const gtsam::NonlinearFactorGraph& new_factors);
     void update_smoother(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, const std::map<std::uint64_t, double>& new_stamp, int update_count = 0);
-    void update_smoother(int update_count = 1);
-
-    void update_keyframes_displacement(int current);
-    void update_keyframes_entropy(const gtsam::NonlinearFactorGraph& matching_cost_factors, int current);
 
 private:
     std::unique_ptr<OdometryEstimationCPUParams> params;
@@ -102,7 +102,6 @@ private:
     // Frames & keyframes
     int marginalized_cursor;
     std::vector<EstimationFrame::Ptr> frames;
-    std::vector<EstimationFrame::Ptr> keyframes;
 
     // Utility classes
     std::unique_ptr<InitialStateEstimation> init_estimation;
@@ -116,10 +115,10 @@ private:
 
     // Registration params
     std::mt19937 mt; ///< RNG
-    
-    // Entropy calculation
-    int entropy_num_frames;
-    double entropy_running_average;
+    Eigen::Isometry3d last_T_target_imu; ///< Last IMU pose w.r.t. target model
+    std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapCPU>> target_voxelmaps; ///< VGICP target voxelmap
+    std::shared_ptr<gtsam_points::iVox> target_ivox; ///< GICP target iVox
+    std::deque<int> active_keyframes; ///< Active keyframes for pairwise registration
 };
 
 }

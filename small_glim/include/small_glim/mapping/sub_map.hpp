@@ -3,7 +3,6 @@
 #include <memory>
 #include <Eigen/Dense>
 #include <small_glim/odometry/estimation_frame.hpp>
-#include <gtsam_points/types/gaussian_voxelmap.hpp>
 
 namespace small_glim {
 

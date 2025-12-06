@@ -106,8 +106,8 @@ void AsyncOdometryEstimation::run() {
             auto estimation_frame = odometry_estimation->insert_frame(frame, marginalized);
             auto target_ivox_frame = odometry_estimation->get_target_ivox_frame();
 
-            output_estimation_results.push_back(estimation_frame);
-            output_target_ivox_frames.push_back(target_ivox_frame);
+            if (estimation_frame) output_estimation_results.push_back(estimation_frame);
+            if (target_ivox_frame) output_target_ivox_frames.push_back(target_ivox_frame);
             output_marginalized_frames.insert(marginalized);
             raw_frames.pop_front();
             internal_frame_queue_size = raw_frames.size();

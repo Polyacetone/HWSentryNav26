@@ -1,5 +1,6 @@
 #include <small_glim/odometry/imu_integration.hpp>
 #include <small_glim/common/config.hpp>
+#include <small_glim/common/logger.hpp>
 
 namespace small_glim {
 
@@ -8,10 +9,13 @@ IMUIntegrationParams::IMUIntegrationParams(const Config::Ptr config) {
     acc_noise = config->param<double>("sensors.imu_acc_noise");
     gyro_noise = config->param<double>("sensors.imu_gyro_noise");
     int_noise = config->param<double>("sensors.imu_int_noise");
+    acc_saturation_thresh = config->param<double>("sensors.imu_acc_saturation_thresh");
+    gyro_saturation_thresh = config->param<double>("sensors.imu_gyro_saturation_thresh");
+    saturation_mult = config->param<double>("sensors.imu_saturation_mult");
 }
 
 IMUIntegration::IMUIntegration(const Config::Ptr config) {
-    auto params = std::make_unique<IMUIntegrationParams>(config);
+    params = std::make_unique<IMUIntegrationParams>(config);
     auto imu_params = gtsam::PreintegrationParams::MakeSharedU();
     if (!params->upright) {
         imu_params = gtsam::PreintegrationParams::MakeSharedD();
@@ -65,7 +69,22 @@ int IMUIntegration::integrate_imu(
 
         const auto& a = imu_frame.block<3, 1>(1, 0);
         const auto& w = imu_frame.block<3, 1>(4, 0);
-        imu_measurements->integrateMeasurement(a, w, dt);
+
+        bool saturated = a.cwiseAbs().maxCoeff() > params->acc_saturation_thresh ||
+            w.cwiseAbs().maxCoeff() > params->gyro_saturation_thresh;
+
+        if (saturated) {
+            logger::info("imu_integration", "IMU saturation detected: |acc| = {:.2f}, |gyro| = {:.2f}", a.norm(), w.norm());
+            auto cov_acc = imu_measurements->p().accelerometerCovariance;
+            auto cov_gyro = imu_measurements->p().gyroscopeCovariance;
+            imu_measurements->p().accelerometerCovariance *= params->saturation_mult;
+            imu_measurements->p().gyroscopeCovariance *= params->saturation_mult;
+            imu_measurements->integrateMeasurement(a, w, dt);
+            imu_measurements->p().accelerometerCovariance = cov_acc;
+            imu_measurements->p().gyroscopeCovariance = cov_gyro;
+        } else {
+            imu_measurements->integrateMeasurement(a, w, dt);
+        }
 
         last_stamp = imu_stamp;
         (*num_integrated)++;
@@ -76,7 +95,22 @@ int IMUIntegration::integrate_imu(
         Eigen::Matrix<double, 7, 1> last_imu_frame = imu_itr == imu_queue.end() ? *(imu_itr - 1) : *imu_itr;
         const auto& a = last_imu_frame.block<3, 1>(1, 0);
         const auto& w = last_imu_frame.block<3, 1>(4, 0);
-        imu_measurements->integrateMeasurement(a, w, dt);
+
+        bool saturated = a.cwiseAbs().maxCoeff() > params->acc_saturation_thresh ||
+            w.cwiseAbs().maxCoeff() > params->gyro_saturation_thresh;
+
+        if (saturated) {
+            logger::info("imu_integration", "IMU saturation detected: |acc| = {:.2f}, |gyro| = {:.2f}", a.norm(), w.norm());
+            auto cov_acc = imu_measurements->p().accelerometerCovariance;
+            auto cov_gyro = imu_measurements->p().gyroscopeCovariance;
+            imu_measurements->p().accelerometerCovariance *= params->saturation_mult;
+            imu_measurements->p().gyroscopeCovariance *= params->saturation_mult;
+            imu_measurements->integrateMeasurement(a, w, dt);
+            imu_measurements->p().accelerometerCovariance = cov_acc;
+            imu_measurements->p().gyroscopeCovariance = cov_gyro;
+        } else {
+            imu_measurements->integrateMeasurement(a, w, dt);
+        }
     }
 
     return cursor;
@@ -119,7 +153,22 @@ int IMUIntegration::integrate_imu(
 
         const auto& a = imu_frame.block<3, 1>(1, 0);
         const auto& w = imu_frame.block<3, 1>(4, 0);
-        imu_measurements->integrateMeasurement(a, w, dt);
+
+        bool saturated = a.cwiseAbs().maxCoeff() > params->acc_saturation_thresh ||
+            w.cwiseAbs().maxCoeff() > params->gyro_saturation_thresh;
+
+        if (saturated) {
+            logger::info("imu_integration", "IMU saturation detected: |acc| = {:.2f}, |gyro| = {:.2f}", a.norm(), w.norm());
+            auto cov_acc = imu_measurements->p().accelerometerCovariance;
+            auto cov_gyro = imu_measurements->p().gyroscopeCovariance;
+            imu_measurements->p().accelerometerCovariance *= params->saturation_mult;
+            imu_measurements->p().gyroscopeCovariance *= params->saturation_mult;
+            imu_measurements->integrateMeasurement(a, w, dt);
+            imu_measurements->p().accelerometerCovariance = cov_acc;
+            imu_measurements->p().gyroscopeCovariance = cov_gyro;
+        } else {
+            imu_measurements->integrateMeasurement(a, w, dt);
+        }
 
         auto predicted = imu_measurements->predict(state, bias);
         pred_times.emplace_back(imu_stamp);
@@ -132,7 +181,22 @@ int IMUIntegration::integrate_imu(
         Eigen::Matrix<double, 7, 1> last_imu_frame = imu_itr == imu_queue.end() ? *(imu_itr - 1) : *imu_itr;
         const auto& a = last_imu_frame.block<3, 1>(1, 0);
         const auto& w = last_imu_frame.block<3, 1>(4, 0);
-        imu_measurements->integrateMeasurement(a, w, dt);
+
+        bool saturated = a.cwiseAbs().maxCoeff() > params->acc_saturation_thresh ||
+            w.cwiseAbs().maxCoeff() > params->gyro_saturation_thresh;
+
+        if (saturated) {
+            logger::info("imu_integration", "IMU saturation detected: |acc| = {:.2f}, |gyro| = {:.2f}", a.norm(), w.norm());
+            auto cov_acc = imu_measurements->p().accelerometerCovariance;
+            auto cov_gyro = imu_measurements->p().gyroscopeCovariance;
+            imu_measurements->p().accelerometerCovariance *= params->saturation_mult;
+            imu_measurements->p().gyroscopeCovariance *= params->saturation_mult;
+            imu_measurements->integrateMeasurement(a, w, dt);
+            imu_measurements->p().accelerometerCovariance = cov_acc;
+            imu_measurements->p().gyroscopeCovariance = cov_gyro;
+        } else {
+            imu_measurements->integrateMeasurement(a, w, dt);
+        }
 
         auto predicted = imu_measurements->predict(state, bias);
         pred_times.emplace_back(end_time);

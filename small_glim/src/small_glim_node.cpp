@@ -208,7 +208,6 @@ void SmallGlimNode::timer_callback() {
 }
 
 void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
-    if (!frame) return;
     const rclcpp::Time stamp(frame->stamp * 1e9);
     const Eigen::Isometry3d T_odom_imu = frame->T_world_imu;
     const Eigen::Isometry3d T_lidar_imu = frame->T_lidar_imu;
@@ -233,7 +232,6 @@ void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
 }
 
 void SmallGlimNode::pub_odom_ivox(const EstimationFrame::ConstPtr frame) {
-    if (!frame) return;
     const size_t num_points = frame->frame->num_points;
     const auto& points = frame->frame->points;
     sensor_msgs::msg::PointCloud2 msg;
