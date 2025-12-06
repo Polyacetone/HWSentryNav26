@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <Eigen/Dense>
-
 #include <gtsam_points/types/point_cloud.hpp>
 #include <gtsam_points/types/gaussian_voxelmap.hpp>
 #include <small_glim/preprocess/preprocessed_frame.hpp>

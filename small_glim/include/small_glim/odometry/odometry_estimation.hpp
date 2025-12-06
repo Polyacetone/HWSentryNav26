@@ -3,7 +3,6 @@
 #include <random>
 #include <vector>
 #include <memory>
-#include <string>
 #include <Eigen/Core>
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -57,7 +56,7 @@ public:
     int num_threads;                  // Number of threads for preprocessing and per-factor parallelism
 
     // Registration params
-    std::string registration_type; ///< Registration type (GICP or VGICP)
+    enum class RegistrationType { GICP, VGICP } registration_type; ///< Registration type (GICP or VGICP)
     int keyframe_window_size; ///< Local window size for pairwise registration
     int keyframe_delta; ///< Keyframe delta
     int lru_thresh; ///< LRU cache threshold

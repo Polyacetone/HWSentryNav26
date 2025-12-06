@@ -52,8 +52,6 @@ CloudPreprocessor::CloudPreprocessor(const Config::Ptr config) {
 }
 
 PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr& raw_points) {
-    logger::debug("cloud_preprocess", "Preprocessing input: {} points", raw_points->size());
-
     auto frame = std::make_shared<gtsam_points::PointCloud>();
     frame->num_points = raw_points->size();
     frame->times = const_cast<double*>(raw_points->times.data());

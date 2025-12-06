@@ -30,8 +30,6 @@ public:
 
     int k_neighbors; // Number of neighbors of each point
     std::vector<int> neighbors; // k-nearest neighbors of each point
-
-    RawPoints::ConstPtr raw_points;
 };
 
 }

@@ -54,7 +54,15 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
     num_threads = config->param<int>("odometry_estimation.num_threads");
 
     // odometry config
-    registration_type = config->param<std::string>("odometry_estimation.registration_type");
+    std::string reg_type = config->param<std::string>("odometry_estimation.registration_type");
+    if (reg_type == "GICP") {
+        registration_type = RegistrationType::GICP;
+    } else if (reg_type == "VGICP") {
+        registration_type = RegistrationType::VGICP;
+    } else {
+        logger::fatal("odometry_estimation", "unknown registration type for odometry_estimation: {}", reg_type);
+        exit(EXIT_FAILURE);
+    }
     keyframe_window_size = config->param<int>("odometry_estimation.keyframe_window_size");
     keyframe_delta = config->param<int>("odometry_estimation.keyframe_delta");
     lru_thresh = config->param<int>("odometry_estimation.lru_thresh");
@@ -90,21 +98,23 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
     smoother = std::make_unique<FixedLagSmootherExt>(params->smoother_lag, isam2_params);
 
     last_T_target_imu.setIdentity();
-    if (params->registration_type == "GICP") {
-        target_ivox = std::make_shared<gtsam_points::iVox>(params->ivox_resolution);
-        target_ivox->voxel_insertion_setting().set_min_dist_in_cell(params->ivox_min_dist);
-        target_ivox->set_lru_horizon(params->lru_thresh);
-        target_ivox->set_neighbor_voxel_mode(1);
-    } else if (params->registration_type == "VGICP") {
-        target_voxelmaps.resize(params->vgicp_voxelmap_levels);
-        for (int i = 0; i < params->vgicp_voxelmap_levels; i++) {
-            const double resolution = params->vgicp_resolution * std::pow(params->vgicp_voxelmap_scaling_factor, i);
-            target_voxelmaps[i] = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
-            target_voxelmaps[i]->set_lru_horizon(params->lru_thresh);
+    switch (params->registration_type) {
+        case OdometryEstimationCPUParams::RegistrationType::GICP: {
+            target_ivox = std::make_shared<gtsam_points::iVox>(params->ivox_resolution);
+            target_ivox->voxel_insertion_setting().set_min_dist_in_cell(params->ivox_min_dist);
+            target_ivox->set_lru_horizon(params->lru_thresh);
+            target_ivox->set_neighbor_voxel_mode(1);
+            break;
         }
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        exit(EXIT_FAILURE);
+        case OdometryEstimationCPUParams::RegistrationType::VGICP: {
+            target_voxelmaps.resize(params->vgicp_voxelmap_levels);
+            for (int i = 0; i < params->vgicp_voxelmap_levels; i++) {
+                const double resolution = params->vgicp_resolution * std::pow(params->vgicp_voxelmap_scaling_factor, i);
+                target_voxelmaps[i] = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
+                target_voxelmaps[i]->set_lru_horizon(params->lru_thresh);
+            }
+            break;
+        }
     }
 }
 
@@ -124,68 +134,73 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
     gtsam::NonlinearFactorGraph factors;
 
     // Create frame-to-model matching factors and add directly to the main factor graph
-    if (params->registration_type == "GICP") {
-        if (target_ivox->has_points()) {
-            // Clone the target to ensure the factor's cost function remains stable during optimization
-            // even if the global map is updated later.
-            auto target_ivox_copy = std::make_shared<gtsam_points::iVox>(*target_ivox);
-            auto gicp_factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor_<gtsam_points::iVox, gtsam_points::PointCloud>>(
-                gtsam::Pose3(),
-                X(current),
-                target_ivox_copy,
-                frames[current]->frame,
-                target_ivox_copy
-            );
-            gicp_factor->set_max_correspondence_distance(params->ivox_resolution * 2.0);
-            gicp_factor->set_num_threads(params->num_threads);
-            factors.add(gicp_factor);
+    switch (params->registration_type) {
+        case OdometryEstimationCPUParams::RegistrationType::GICP: {
+            if (target_ivox->has_points()) {
+                // Clone the target to ensure the factor's cost function remains stable during optimization
+                // even if the global map is updated later.
+                auto target_ivox_copy = std::make_shared<gtsam_points::iVox>(*target_ivox);
+                auto gicp_factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor_<gtsam_points::iVox, gtsam_points::PointCloud>>(
+                    gtsam::Pose3(),
+                    X(current),
+                    target_ivox_copy,
+                    frames[current]->frame,
+                    target_ivox_copy
+                );
+                gicp_factor->set_max_correspondence_distance(params->ivox_resolution * 2.0);
+                gicp_factor->set_num_threads(params->num_threads);
+                factors.add(gicp_factor);
+            }
+            break;
         }
-    } else if (params->registration_type == "VGICP") {
-        for (const auto& voxelmap: target_voxelmaps) {
-            if (!voxelmap->has_points()) continue;
-            // Clone the target to ensure the factor's cost function remains stable
-            auto voxelmap_copy = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(*voxelmap);
-            auto vgicp_factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
-                gtsam::Pose3(),
-                X(current),
-                voxelmap_copy,
-                frames[current]->frame
-            );
-            vgicp_factor->set_num_threads(params->num_threads);
-            factors.add(vgicp_factor);
+        case OdometryEstimationCPUParams::RegistrationType::VGICP: {
+            for (const auto& voxelmap: target_voxelmaps) {
+                if (!voxelmap->has_points()) continue;
+                // Clone the target to ensure the factor's cost function remains stable
+                auto voxelmap_copy = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(*voxelmap);
+                auto vgicp_factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
+                    gtsam::Pose3(),
+                    X(current),
+                    voxelmap_copy,
+                    frames[current]->frame
+                );
+                vgicp_factor->set_num_threads(params->num_threads);
+                factors.add(vgicp_factor);
+            }
+            break;
         }
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        exit(EXIT_FAILURE);
     }
 
     // Create pairwise matching factors
     for (const int target : active_keyframes) {
         if (target < 0 || target < marginalized_cursor) continue;
         if (frames[target]->frame->size() < 20) continue;
-        if (params->registration_type == "GICP") {
-            auto gicp_factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
-                X(target),
-                X(current),
-                frames[target]->frame,
-                frames[current]->frame
-            );
-            gicp_factor->set_max_correspondence_distance(params->ivox_resolution * 2.0);
-            gicp_factor->set_num_threads(params->num_threads);
-            factors.add(gicp_factor);
-        } else if (params->registration_type == "VGICP") {
-            if (frames[target]->voxelmaps.empty()) {
-                continue;
-            }
-            for (const auto& voxelmap : frames[target]->voxelmaps) {
-                auto vgicp_factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
+        switch (params->registration_type) {
+            case OdometryEstimationCPUParams::RegistrationType::GICP: {
+                auto gicp_factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
                     X(target),
                     X(current),
-                    voxelmap,
+                    frames[target]->frame,
                     frames[current]->frame
                 );
-                vgicp_factor->set_num_threads(params->num_threads);
-                factors.add(vgicp_factor);
+                gicp_factor->set_max_correspondence_distance(params->ivox_resolution * 2.0);
+                gicp_factor->set_num_threads(params->num_threads);
+                factors.add(gicp_factor);
+                break;
+            }
+            case OdometryEstimationCPUParams::RegistrationType::VGICP: {
+                if (frames[target]->voxelmaps.empty()) continue;
+                for (const auto& voxelmap : frames[target]->voxelmaps) {
+                    auto vgicp_factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
+                        X(target),
+                        X(current),
+                        voxelmap,
+                        frames[current]->frame
+                    );
+                    vgicp_factor->set_num_threads(params->num_threads);
+                    factors.add(vgicp_factor);
+                }
+                break;
             }
         }
     }
@@ -209,15 +224,17 @@ void OdometryEstimationCPU::update_target(
     }
 
     auto transformed = gtsam_points::transform(frame, T_target_imu);
-    if (params->registration_type == "GICP") {
-        target_ivox->insert(*transformed);
-    } else if (params->registration_type == "VGICP") {
-        for (auto& target_voxelmap: target_voxelmaps) {
-            target_voxelmap->insert(*transformed);
+    switch (params->registration_type) {
+        case OdometryEstimationCPUParams::RegistrationType::GICP: {
+            target_ivox->insert(*transformed);
+            break;
         }
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        exit(EXIT_FAILURE);
+        case OdometryEstimationCPUParams::RegistrationType::VGICP: {
+            for (auto& target_voxelmap: target_voxelmaps) {
+                target_voxelmap->insert(*transformed);
+            }
+            break;
+        }
     }
 }
 
@@ -488,7 +505,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     new_frame->frame = frame;
     new_frame->frame_id = FrameID::IMU;
 
-    if (params->registration_type == "VGICP") {
+    if (params->registration_type == OdometryEstimationCPUParams::RegistrationType::VGICP) {
         new_frame->voxelmaps.resize(params->vgicp_voxelmap_levels);
         for (int i = 0; i < params->vgicp_voxelmap_levels; i++) {
             double resolution = params->vgicp_resolution * std::pow(params->vgicp_voxelmap_scaling_factor, i);
@@ -529,7 +546,6 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
     // Update frames
     update_frames(current, new_factors);
-    logger::debug("odom_estimation", "frames updated");
 
     if (current % params->keyframe_delta == 0) {
         active_keyframes.push_back(current);
@@ -577,13 +593,15 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::get_target_ivox_frame() {
     target_frame->v_world_imu.setZero();
     target_frame->imu_bias.setZero();
     target_frame->frame_id = FrameID::IMU;
-    if (params->registration_type == "GICP") {
-        target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_ivox->voxel_points());
-    } else if (params->registration_type == "VGICP") {
-        target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_voxelmaps[0]->voxel_points());
-    } else {
-        logger::fatal("odom_estimation", "unknown registration type for odometry_estimation: {}", params->registration_type);
-        exit(EXIT_FAILURE);
+    switch (params->registration_type) {
+        case OdometryEstimationCPUParams::RegistrationType::GICP: {
+            target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_ivox->voxel_points());
+            break;
+        }
+        case OdometryEstimationCPUParams::RegistrationType::VGICP: {
+            target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_voxelmaps[0]->voxel_points());
+            break;
+        }
     }
     return target_frame;
 }

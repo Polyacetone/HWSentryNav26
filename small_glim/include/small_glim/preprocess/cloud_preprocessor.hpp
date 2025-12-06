@@ -3,7 +3,6 @@
 #include <random>
 #include <vector>
 #include <Eigen/Dense>
-
 #include <small_glim/common/config.hpp>
 #include <small_glim/preprocess/preprocessed_frame.hpp>
 #include <small_glim/common/raw_points.hpp>

@@ -23,7 +23,8 @@ target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 
 find_package(PCL REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${PCL_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARY_DIRS})
+target_compile_definitions(${PROJECT_NAME} PRIVATE ${PCL_DEFINITIONS})
+target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARIES})
 
 find_package(GTSAM 4.3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} gtsam)
