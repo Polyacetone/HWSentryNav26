@@ -3,8 +3,8 @@
 
 namespace small_glim {
 
-AsyncOdometryEstimation::AsyncOdometryEstimation(const std::shared_ptr<OdometryEstimationCPU>& odometry_estimation):
-    odometry_estimation(odometry_estimation) {
+AsyncOdometryEstimation::AsyncOdometryEstimation(const Config::Ptr config):
+    odometry_estimation(std::make_shared<OdometryEstimationCPU>(config)) {
     kill_switch = false;
     end_of_sequence = false;
     internal_frame_queue_size = 0;
@@ -26,7 +26,7 @@ void AsyncOdometryEstimation::insert_imu(
     input_imu_queue.push_back(imu_data);
 }
 
-void AsyncOdometryEstimation::insert_frame(const PreprocessedFrame::Ptr& frame) {
+void AsyncOdometryEstimation::insert_frame(const PreprocessedFrame::Ptr frame) {
     input_frame_queue.push_back(frame);
 }
 

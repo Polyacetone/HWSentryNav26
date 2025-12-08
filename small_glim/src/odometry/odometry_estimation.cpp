@@ -250,7 +250,7 @@ void OdometryEstimationCPU::insert_imu(
 }
 
 EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
-    const PreprocessedFrame::Ptr& raw_frame,
+    const PreprocessedFrame::Ptr raw_frame,
     std::vector<EstimationFrame::ConstPtr>& marginalized_frames
 ) {
     if (raw_frame->size()) {

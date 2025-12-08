@@ -76,7 +76,7 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     explicit OdometryEstimationCPU(const Config::Ptr config);
     void insert_imu(const double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel);
-    EstimationFrame::ConstPtr insert_frame(const PreprocessedFrame::Ptr& frame, std::vector<EstimationFrame::ConstPtr>& marginalized_frames);
+    EstimationFrame::ConstPtr insert_frame(const PreprocessedFrame::Ptr frame, std::vector<EstimationFrame::ConstPtr>& marginalized_frames);
     std::vector<EstimationFrame::ConstPtr> get_remaining_frames();
     EstimationFrame::ConstPtr get_target_ivox_frame();
 

@@ -147,9 +147,9 @@ Eigen::Matrix4d CloudCovarianceEstimation::regularize(
     Eigen::Matrix3d* eigenvectors
 ) const {
     switch (regularization_method) {
-        default:
-        case RegularizationMethod::NONE:
+        case RegularizationMethod::NONE: {
             return cov;
+        }
 
         case RegularizationMethod::PLANE: {
             Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig;
@@ -196,6 +196,7 @@ Eigen::Matrix4d CloudCovarianceEstimation::regularize(
             return C_;
         }
     }
+    __builtin_unreachable();
 }
 
 }

@@ -1,3 +1,4 @@
+#include <filesystem>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -29,7 +30,6 @@ public:
     void pub_odometry(const EstimationFrame::ConstPtr frame);
     void pub_odom_ivox(const EstimationFrame::ConstPtr frame);
     void wait(bool auto_quit = false);
-    void save(const std::string& path);
 
 private:
     std::unique_ptr<tf2_ros::Buffer> tf_buffer;
@@ -45,6 +45,7 @@ private:
     double points_time_offset;
     double acc_scale;
     bool dump_on_unload;
+    bool save_raw_mapping_frames;
 
     std::string intensity_field, ring_field;
 
@@ -60,7 +61,7 @@ private:
 
 namespace small_glim {
 
-SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_glim_node", options) {
+SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_glim", options) {
     tf_buffer = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener = std::make_unique<tf2_ros::TransformListener>(*tf_buffer);
     tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(this);
@@ -74,14 +75,11 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     }
 
     dump_on_unload = config->param<bool>("node.dump_on_unload");
-    if (dump_on_unload) {
-        logger::info("node", "dump_on_unload=true");
-    }
+    save_raw_mapping_frames = config->param<bool>("node.save_raw_mapping_frames");
 
     bool enable_mapping = config->param<bool>("node.enable_mapping");
     if (enable_mapping) {
-        auto mapping_ptr = std::make_shared<Mapping>(config);
-        mapping = std::make_unique<AsyncMapping>(mapping_ptr);
+        mapping = std::make_unique<AsyncMapping>(config);
     }
 
     imu_time_offset = config->param<double>("node.imu_time_offset");
@@ -96,8 +94,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     preprocessor = std::make_unique<CloudPreprocessor>(config);
 
     // Odometry estimation
-    auto odom = std::make_shared<OdometryEstimationCPU>(config);
-    odometry_estimation = std::make_unique<AsyncOdometryEstimation>(odom);
+    odometry_estimation = std::make_unique<AsyncOdometryEstimation>(config);
 
     // ROS-related
     const std::string imu_sub_topic = config->param<std::string>("node.imu_sub_topic");
@@ -128,9 +125,15 @@ SmallGlimNode::~SmallGlimNode() {
     if (dump_on_unload) {
         using namespace std::chrono;
         auto local_time = zoned_time(current_zone(), floor<seconds>(system_clock::now()));
-        std::string filename = std::format("{:%FT%H:%M:%S}", local_time) + ".pcd";
+        std::string timestr = std::format("{:%FT%H:%M:%S}", local_time);
         wait(true);
-        save(filename);
+        if (mapping) {
+            mapping->save(timestr + ".pcd");
+            if (save_raw_mapping_frames) {
+                std::filesystem::create_directory(timestr);
+                mapping->save_raw_frames(timestr);
+            }
+        }
     }
 }
 
@@ -250,12 +253,6 @@ void SmallGlimNode::wait(bool auto_quit) {
         }
         logger::info("node", "waiting for local mapping");
         mapping->join();
-    }
-}
-
-void SmallGlimNode::save(const std::string& path) {
-    if (mapping) {
-        mapping->save(path);
     }
 }
 

@@ -2,7 +2,7 @@
 
 namespace small_glim {
 
-AsyncMapping::AsyncMapping(const std::shared_ptr<Mapping>& mapping) : mapping(mapping) {
+AsyncMapping::AsyncMapping(const Config::Ptr config): mapping(std::make_shared<Mapping>(config)) {
     kill_switch = false;
     end_of_sequence = false;
     thread = std::thread([this] { run(); });
@@ -13,7 +13,7 @@ AsyncMapping::~AsyncMapping() {
     join();
 }
 
-void AsyncMapping::insert_frame(const EstimationFrame::ConstPtr& frame) {
+void AsyncMapping::insert_frame(const EstimationFrame::ConstPtr frame) {
     input_frame_queue.push_back(frame);
 }
 
@@ -26,6 +26,10 @@ void AsyncMapping::join() {
 
 void AsyncMapping::save(const std::string& path) {
     mapping->save(path);
+}
+
+void AsyncMapping::save_raw_frames(const std::string& dir) {
+    mapping->save_raw_frames(dir);
 }
 
 void AsyncMapping::run() {

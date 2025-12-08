@@ -30,7 +30,7 @@ private:
     void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp) const;
 };
 
-MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_server_node", options) {
+MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_server", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     map_resolution_ = declare_parameter<double>("map_resolution");

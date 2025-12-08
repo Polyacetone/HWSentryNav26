@@ -136,7 +136,7 @@ namespace mid360_driver {
     }
 
     Mid360DriverNode::Mid360DriverNode(const rclcpp::NodeOptions &options)
-        : Node("mid360_driver_node", options) {
+        : Node("mid360_driver", options) {
         std::string lidar_topic = declare_parameter<std::string>("lidar_topic");
         std::string lidar_frame = declare_parameter<std::string>("lidar_frame");
         std::string imu_topic = declare_parameter<std::string>("imu_topic");

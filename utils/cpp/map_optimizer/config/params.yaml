@@ -1,0 +1,8 @@
+/**:
+  ros__parameters:
+    data_path: "2025-12-07T21:55:23"
+    num_threads: 4
+    max_iterations: 500
+    k_neighbors: 10
+    loop_dist_thres: 10.0
+    gicp_max_correspondence_distance: 2.0

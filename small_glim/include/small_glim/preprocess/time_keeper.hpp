@@ -33,7 +33,7 @@ public:
     * @note   Point timestamps must be relative with respect to the first point
     * @return If the timestamp of the point cloud is valid
     */
-    bool process(const small_glim::RawPoints::Ptr& points);
+    bool process(const small_glim::RawPoints::Ptr points);
 
     /**
     * @brief Check if IMU and LiDAR data are (very roughly) synchronized
@@ -42,7 +42,7 @@ public:
     bool validate_imu_stamp(const double imu_stamp);
 
 private:
-    void replace_points_stamp(const small_glim::RawPoints::Ptr& points);
+    void replace_points_stamp(const small_glim::RawPoints::Ptr points);
     double estimate_scan_duration(const double stamp);
 
 private:

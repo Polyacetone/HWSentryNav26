@@ -17,7 +17,7 @@ public:
     * @brief Construct a new Async Odometry Estimation object
     * @param odometry_estimation  Odometry estimation to be wrapped
     */
-    explicit AsyncOdometryEstimation(const std::shared_ptr<OdometryEstimationCPU>& odometry_estimation);
+    explicit AsyncOdometryEstimation(const Config::Ptr config);
 
     /**
     * @brief Destroy the Async Odometry Estimation object
@@ -36,7 +36,7 @@ public:
     * @brief Insert a preprocessed point cloud into odometry estimation
     * @param frame  Preprocessed point cloud
     */
-    void insert_frame(const PreprocessedFrame::Ptr& frame);
+    void insert_frame(const PreprocessedFrame::Ptr frame);
 
     /**
     * @brief Wait for the odometry estimation thread
@@ -67,6 +67,7 @@ private:
     std::atomic_bool end_of_sequence;  // Flag to stop the thread when the input queues become empty (Soft kill switch)
     std::thread thread;
 
+    // Input queues
     ConcurrentVector<Eigen::Matrix<double, 7, 1>> input_imu_queue {DataStorePolicy::UPTO(100)};
     ConcurrentVector<PreprocessedFrame::Ptr> input_frame_queue {DataStorePolicy::UPTO(100)};
 

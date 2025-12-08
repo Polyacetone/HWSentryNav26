@@ -25,7 +25,7 @@ InitialStateEstimation::InitialStateEstimation(
     imu_integration = std::make_unique<IMUIntegration>(config);
 }
 
-void InitialStateEstimation::insert_frame(const PreprocessedFrame::ConstPtr& raw_frame) {
+void InitialStateEstimation::insert_frame(const PreprocessedFrame::ConstPtr raw_frame) {
     if (raw_frame->size() < 50) {
         logger::warn("initial_state_estimation", "skip initial state estimation for a frame with too few points ({} points)", raw_frame->size());
         return;

@@ -12,6 +12,7 @@
 
 #include <small_glim/mapping/mapping.hpp>
 #include <small_glim/common/logger.hpp>
+#include <small_glim/common/convert_to_string.hpp>
 
 namespace small_glim {
 
@@ -164,19 +165,19 @@ void Mapping::optimize() {
 }
 
 void Mapping::save(const std::string& path) {
-    std::lock_guard<std::mutex> lock(mutex);
-    
+    mutex.lock();    
     std::vector<gtsam_points::PointCloud::ConstPtr> frames;
     std::vector<Eigen::Isometry3d> poses;
     for (const auto& keyframe : keyframes) {
         frames.push_back(keyframe->frame);
         poses.push_back(keyframe->T_world_sensor());
     }
+    mutex.unlock();
+
     auto merged = gtsam_points::merge_frames(poses, frames, params->downsample_resolution);
-    
     auto pcl_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     pcl_cloud->resize(merged->size());
-    for (size_t i = 0; i < merged->size(); i++) {
+    for (int i = 0; i < merged->size(); i++) {
         const auto& pt = merged->points[i];
         pcl_cloud->at(i).x = pt.x();
         pcl_cloud->at(i).y = pt.y();
@@ -187,6 +188,39 @@ void Mapping::save(const std::string& path) {
     pcl_cloud->is_dense = false;
     pcl::io::savePCDFileBinary(path, *pcl_cloud);
     logger::info("mapping", "saved cloud with {} points to {}", pcl_cloud->size(), path);
+}
+
+void Mapping::save_raw_frames(const std::string& dir) {
+    mutex.lock();
+    std::vector<gtsam_points::PointCloud::ConstPtr> frames;
+    for (const auto& keyframe : keyframes) {
+        frames.push_back(keyframe->frame);
+    }
+    mutex.unlock();
+
+    std::fstream fs;
+    fs.open(dir + "/poses.txt", std::ios::out);
+    for (int i = 0; i < keyframes.size(); i++) {
+        const auto& keyframe = keyframes[i];
+        const auto& T = keyframe->T_world_sensor();
+        fs << convert_to_string(T) << std::endl;
+        
+        std::string filename = dir + "/frame_" + std::to_string(i) + ".pcd";
+        auto pcl_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl_cloud->resize(keyframe->frame->size());
+        for (int j = 0; j < keyframe->frame->size(); j++) {
+            const auto& pt = keyframe->frame->points[j];
+            pcl_cloud->at(j).x = pt.x();
+            pcl_cloud->at(j).y = pt.y();
+            pcl_cloud->at(j).z = pt.z();
+        }
+        pcl_cloud->width = keyframe->frame->size();
+        pcl_cloud->height = 1;
+        pcl_cloud->is_dense = false;
+        pcl::io::savePCDFileBinary(filename, *pcl_cloud);
+    }
+    fs.close();
+    logger::info("mapping", "saved {} raw frames to {}", keyframes.size(), dir);
 }
 
 }

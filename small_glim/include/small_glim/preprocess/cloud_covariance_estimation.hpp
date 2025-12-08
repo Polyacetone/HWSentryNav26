@@ -39,13 +39,21 @@ public:
         const std::vector<int>& neighbors,
         const int k_neighbors,
         std::vector<Eigen::Vector4d>& normals,
-        std::vector<Eigen::Matrix4d>& covs) const;
+        std::vector<Eigen::Matrix4d>& covs
+    ) const;
 
     /// Estimate point covariances
-    std::vector<Eigen::Matrix4d> estimate(const std::vector<Eigen::Vector4d>& points, const std::vector<int>& neighbors, const int k_neighbors) const;
+    std::vector<Eigen::Matrix4d> estimate(
+        const std::vector<Eigen::Vector4d>& points,
+        const std::vector<int>& neighbors,
+        const int k_neighbors
+    ) const;
 
     /// Estimate point covariances
-    std::vector<Eigen::Matrix4d> estimate(const std::vector<Eigen::Vector4d>& points, const std::vector<int>& neighbors) const;
+    std::vector<Eigen::Matrix4d> estimate(
+        const std::vector<Eigen::Vector4d>& points,
+        const std::vector<int>& neighbors
+    ) const;
 
     /**
     * @brief Regularize a covariance matrix
@@ -54,7 +62,11 @@ public:
     * @param eigenvectors [output] Eigenvectors of the covariance matrix
     * @return Regularized covariance matrix
     */
-    Eigen::Matrix4d regularize(const Eigen::Matrix4d& cov, Eigen::Vector3d* eigenvalues = nullptr, Eigen::Matrix3d* eigenvectors = nullptr) const;
+    Eigen::Matrix4d regularize(
+        const Eigen::Matrix4d& cov,
+        Eigen::Vector3d* eigenvalues = nullptr,
+        Eigen::Matrix3d* eigenvectors = nullptr
+    ) const;
 
 private:
     const RegularizationMethod regularization_method;

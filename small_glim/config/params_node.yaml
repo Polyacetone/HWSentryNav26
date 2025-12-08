@@ -3,7 +3,8 @@
     node:
       debug: false
       dump_on_unload: true
-      enable_mapping: false
+      enable_mapping: true
+      save_raw_mapping_frames: true
       imu_time_offset: 0.0
       points_time_offset: 0.0
       acc_scale: 9.80665

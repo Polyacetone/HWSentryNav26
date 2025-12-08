@@ -54,7 +54,7 @@ public:
     * @param raw_points  Raw points
     * @return Preprocessed points
     */
-    PreprocessedFrame::Ptr preprocess(const RawPoints::ConstPtr& raw_points);
+    PreprocessedFrame::Ptr preprocess(const RawPoints::ConstPtr raw_points);
 
 private:
     std::vector<int> find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const;

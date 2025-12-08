@@ -52,7 +52,7 @@ bool TimeKeeper::validate_imu_stamp(const double imu_stamp) {
     return true;
 }
 
-bool TimeKeeper::process(const small_glim::RawPoints::Ptr& points) {
+bool TimeKeeper::process(const small_glim::RawPoints::Ptr points) {
     replace_points_stamp(points);
 
     if (points->points.size() != points->times.size()) {
@@ -119,7 +119,7 @@ bool TimeKeeper::process(const small_glim::RawPoints::Ptr& points) {
     return true;
 }
 
-void TimeKeeper::replace_points_stamp(const small_glim::RawPoints::Ptr& points) {
+void TimeKeeper::replace_points_stamp(const small_glim::RawPoints::Ptr points) {
     // No per-point timestamps
     // Assign timestamps based on the estimated scan duration
     if (points->times.empty()) {

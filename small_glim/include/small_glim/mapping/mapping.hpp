@@ -41,6 +41,7 @@ public:
     explicit Mapping(const Config::Ptr config);
     void insert_frame(const EstimationFrame::ConstPtr& frame);
     void save(const std::string& path);
+    void save_raw_frames(const std::string& dir);
 
 private:
     bool is_keyframe(const EstimationFrame::ConstPtr& frame);

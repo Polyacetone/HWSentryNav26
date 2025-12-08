@@ -23,7 +23,7 @@ public:
         const Eigen::Isometry3d& T_lidar_imu,
         const Eigen::Matrix<double, 6, 1>& imu_bias
     );
-    void insert_frame(const PreprocessedFrame::ConstPtr& raw_frame);
+    void insert_frame(const PreprocessedFrame::ConstPtr raw_frame);
     void insert_imu(
         double stamp,
         const Eigen::Vector3d& linear_acc,
