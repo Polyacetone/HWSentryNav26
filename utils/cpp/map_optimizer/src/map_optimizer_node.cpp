@@ -3,6 +3,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/common/transforms.h>
+#include <pcl/filters/voxel_grid.h>
 
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -21,8 +22,22 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 using gtsam::symbol_shorthand::X;
+
+struct VoxelKey {
+    int x, y, z;
+    bool operator==(const VoxelKey& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+};
+
+struct VoxelKeyHash {
+    std::size_t operator()(const VoxelKey& k) const {
+        return ((std::hash<int>()(k.x) ^ (std::hash<int>()(k.y) << 1)) >> 1) ^ (std::hash<int>()(k.z) << 1);
+    }
+};
 
 struct {
     int num_threads;
@@ -30,6 +45,9 @@ struct {
     int k_neighbors;
     double loop_dist_thres;
     double gicp_max_correspondence_distance;
+    double voxel_resolution;
+    int pass_through_threshold;
+    double downsample_leaf_size;
 } node_params;
 
 rclcpp::Logger get_logger() {
@@ -155,7 +173,20 @@ gtsam_points::PointCloud::Ptr pcl_to_gtsam_points(const pcl::PointCloud<pcl::Poi
     return frame;
 }
 
-void run(const std::string& data_path) {
+int main(int argc, char* argv[]) {
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("map_optimizer");
+    node_params = {
+        (int)node->declare_parameter<int>("num_threads"),
+        (int)node->declare_parameter<int>("max_iterations"),
+        (int)node->declare_parameter<int>("k_neighbors"),
+        node->declare_parameter<double>("loop_dist_thres"),
+        node->declare_parameter<double>("gicp_max_correspondence_distance"),
+        node->declare_parameter<double>("voxel_resolution"),
+        (int)node->declare_parameter<int>("pass_through_threshold"),
+        node->declare_parameter<double>("downsample_leaf_size")
+    };
+    std::string data_path = node->declare_parameter<std::string>("data_path");
     std::vector<gtsam::Pose3> initial_poses;
     std::vector<gtsam_points::PointCloud::Ptr> frames;
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> pcl_frames;
@@ -165,7 +196,7 @@ void run(const std::string& data_path) {
     std::ifstream poses_file(poses_path);
     if (!poses_file.is_open()) {
         RCLCPP_ERROR(get_logger(), "Failed to open %s", poses_path.c_str());
-        return;
+        return 1;
     }
     std::string line;
     while (std::getline(poses_file, line)) {
@@ -184,14 +215,14 @@ void run(const std::string& data_path) {
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
         if (pcl::io::loadPCDFile(pcd_path, *cloud) == -1) {
             RCLCPP_ERROR(get_logger(), "Failed to load %s", pcd_path.c_str());
-            return;
+            return 1;
         }
         pcl_frames.push_back(cloud);
         frames.push_back(pcl_to_gtsam_points(cloud));
     }
     RCLCPP_INFO(get_logger(), "Loaded %zu frames", frames.size());
 
-    if (initial_poses.empty()) return;
+    if (initial_poses.empty()) return 1;
 
     // Build graph
     gtsam::NonlinearFactorGraph graph;
@@ -250,6 +281,109 @@ void run(const std::string& data_path) {
         *merged += transformed;
     }
 
+    // Dynamic Object Removal
+    if (node_params.pass_through_threshold > 0) {
+        RCLCPP_INFO(get_logger(), "Removing dynamic objects...");
+        double voxel_res = node_params.voxel_resolution;
+        std::unordered_map<VoxelKey, int, VoxelKeyHash> voxel_to_index;
+        std::vector<VoxelKey> index_to_voxel;
+
+        // Build voxel map from merged cloud
+        for (const auto& pt : *merged) {
+            VoxelKey k = {
+                (int)std::floor(pt.x / voxel_res),
+                (int)std::floor(pt.y / voxel_res),
+                (int)std::floor(pt.z / voxel_res)
+            };
+            if (voxel_to_index.find(k) == voxel_to_index.end()) {
+                voxel_to_index[k] = index_to_voxel.size();
+                index_to_voxel.push_back(k);
+            }
+        }
+
+        std::vector<int> pass_through_counts(index_to_voxel.size(), 0);
+
+        // Ray casting
+        #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 2)
+        for (size_t i = 0; i < initial_poses.size(); i++) {
+            gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
+            Eigen::Vector3d origin = pose.translation();
+            Eigen::Matrix4d T = pose.matrix();
+
+            for (const auto& pt_local : *pcl_frames[i]) {
+                Eigen::Vector4d pt_global_h = T * Eigen::Vector4d(pt_local.x, pt_local.y, pt_local.z, 1.0);
+                Eigen::Vector3d pt_global = pt_global_h.head<3>();
+
+                Eigen::Vector3d direction = pt_global - origin;
+                double distance = direction.norm();
+                direction.normalize();
+
+                VoxelKey target_k = {
+                    (int)std::floor(pt_global.x() / voxel_res),
+                    (int)std::floor(pt_global.y() / voxel_res),
+                    (int)std::floor(pt_global.z() / voxel_res)
+                };
+                
+                int target_idx = -1;
+                auto it_target = voxel_to_index.find(target_k);
+                if (it_target != voxel_to_index.end()) {
+                    target_idx = it_target->second;
+                }
+
+                int last_idx = -1;
+                for (double d = 0.0; d < distance - voxel_res; d += voxel_res / 2.0) {
+                    Eigen::Vector3d current_pos = origin + direction * d;
+                    VoxelKey k = {
+                        (int)std::floor(current_pos.x() / voxel_res),
+                        (int)std::floor(current_pos.y() / voxel_res),
+                        (int)std::floor(current_pos.z() / voxel_res)
+                    };
+
+                    auto it = voxel_to_index.find(k);
+                    if (it != voxel_to_index.end()) {
+                        int idx = it->second;
+                        if (idx != target_idx && idx != last_idx) {
+                            #pragma omp atomic
+                            pass_through_counts[idx]++;
+                            last_idx = idx;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Filter
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>);
+        for (const auto& pt : *merged) {
+            VoxelKey k = {
+                (int)std::floor(pt.x / voxel_res),
+                (int)std::floor(pt.y / voxel_res),
+                (int)std::floor(pt.z / voxel_res)
+            };
+            if (pass_through_counts[voxel_to_index[k]] <= node_params.pass_through_threshold) {
+                filtered->push_back(pt);
+            }
+        }
+        RCLCPP_INFO(get_logger(), "Dynamic removal done. Kept %zu / %zu points", filtered->size(), merged->size());
+        *merged = *filtered;
+    }
+
+    // Downsample
+    if (node_params.downsample_leaf_size > 0.0) {
+        RCLCPP_INFO(get_logger(), "Downsampling...");
+        pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::VoxelGrid<pcl::PointXYZ> sor;
+        sor.setInputCloud(merged);
+        sor.setLeafSize(
+            node_params.downsample_leaf_size,
+            node_params.downsample_leaf_size,
+            node_params.downsample_leaf_size
+        );
+        sor.filter(*downsampled);
+        RCLCPP_INFO(get_logger(), "Downsampling done. Kept %zu / %zu points", downsampled->size(), merged->size());
+        *merged = *downsampled;
+    }
+
     std::string output_path = data_path + "/optimized_map.pcd";
     pcl::io::savePCDFileBinary(output_path, *merged);
     RCLCPP_INFO(get_logger(), "Saved optimized map to %s", output_path.c_str());
@@ -260,23 +394,9 @@ void run(const std::string& data_path) {
         gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
         auto q = pose.rotation().toQuaternion();
         auto t = pose.translation();
-        // se3(x,y,z,qw,qx,qy,qz)
+        // se3(x,y,z,qx,qy,qz,qw)
         out_poses << "se3(" << t.x() << "," << t.y() << "," << t.z() << "," 
-            << q.w() << "," << q.x() << "," << q.y() << "," << q.z() << ")" << std::endl;
+            << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << ")" << std::endl;
     }
     RCLCPP_INFO(get_logger(), "Saved optimized poses");
-}
-
-int main(int argc, char* argv[]) {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<rclcpp::Node>("map_optimizer");
-    node_params = {
-        (int)node->declare_parameter<int>("num_threads"),
-        (int)node->declare_parameter<int>("max_iterations"),
-        (int)node->declare_parameter<int>("k_neighbors"),
-        node->declare_parameter<double>("loop_dist_thres"),
-        node->declare_parameter<double>("gicp_max_correspondence_distance")
-    };
-    std::string data_path = node->declare_parameter<std::string>("data_path");
-    run(data_path);
 }

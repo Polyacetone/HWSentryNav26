@@ -1,8 +1,18 @@
 /**:
   ros__parameters:
+    # Global
     data_path: "2025-12-07T21:55:23"
-    num_threads: 4
+    num_threads: 8
+
+    # Factor graph optimization
     max_iterations: 500
     k_neighbors: 10
     loop_dist_thres: 10.0
     gicp_max_correspondence_distance: 2.0
+
+    # Raycasting filter
+    voxel_resolution: 0.1
+    pass_through_threshold: 5
+
+    # Downsample
+    downsample_leaf_size: 0.1
