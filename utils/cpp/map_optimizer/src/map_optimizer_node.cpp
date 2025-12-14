@@ -4,6 +4,9 @@
 #include <pcl/point_types.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/surface/mls.h>
 
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -22,6 +25,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <atomic>
 #include <unordered_map>
 
 using gtsam::symbol_shorthand::X;
@@ -42,12 +46,25 @@ struct VoxelKeyHash {
 struct {
     int num_threads;
     int max_iterations;
+
     int k_neighbors;
     double loop_dist_thres;
     double gicp_max_correspondence_distance;
+
+    bool enable_raycasting_filter;
     double voxel_resolution;
     int pass_through_threshold;
+
+    bool enable_downsample;
     double downsample_leaf_size;
+
+    bool enable_statistical_outlier_removal;
+    int mean_k;
+    double std_dev_mul_thresh;
+
+    bool enable_mls_smoothing;
+    double search_radius;
+    int polynomial_order;
 } node_params;
 
 rclcpp::Logger get_logger() {
@@ -182,9 +199,17 @@ int main(int argc, char* argv[]) {
         (int)node->declare_parameter<int>("k_neighbors"),
         node->declare_parameter<double>("loop_dist_thres"),
         node->declare_parameter<double>("gicp_max_correspondence_distance"),
+        node->declare_parameter<bool>("enable_raycasting_filter"),
         node->declare_parameter<double>("voxel_resolution"),
         (int)node->declare_parameter<int>("pass_through_threshold"),
-        node->declare_parameter<double>("downsample_leaf_size")
+        node->declare_parameter<bool>("enable_downsample"),
+        node->declare_parameter<double>("downsample_leaf_size"),
+        node->declare_parameter<bool>("enable_statistical_outlier_removal"),
+        (int)node->declare_parameter<int>("mean_k"),
+        node->declare_parameter<double>("std_dev_mul_thresh"),
+        node->declare_parameter<bool>("enable_mls_smoothing"),
+        node->declare_parameter<double>("search_radius"),
+        (int)node->declare_parameter<int>("polynomial_order")
     };
     std::string data_path = node->declare_parameter<std::string>("data_path");
     std::vector<gtsam::Pose3> initial_poses;
@@ -212,7 +237,7 @@ int main(int argc, char* argv[]) {
     // Load frames
     for (size_t i = 0; i < initial_poses.size(); i++) {
         std::string pcd_path = data_path + "/frame_" + std::to_string(i) + ".pcd";
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         if (pcl::io::loadPCDFile(pcd_path, *cloud) == -1) {
             RCLCPP_ERROR(get_logger(), "Failed to load %s", pcd_path.c_str());
             return 1;
@@ -222,7 +247,10 @@ int main(int argc, char* argv[]) {
     }
     RCLCPP_INFO(get_logger(), "Loaded %zu frames", frames.size());
 
-    if (initial_poses.empty()) return 1;
+    if (initial_poses.size() != frames.size()) {
+        RCLCPP_ERROR(get_logger(), "Number of poses and frames do not match");
+        return 1;
+    }
 
     // Build graph
     gtsam::NonlinearFactorGraph graph;
@@ -264,6 +292,7 @@ int main(int argc, char* argv[]) {
     }
     RCLCPP_INFO(get_logger(), "Added %d loop closure factors", loop_count);
 
+    // Optimize
     RCLCPP_INFO(get_logger(), "Optimizing...");
     gtsam::LevenbergMarquardtParams params;
     params.setMaxIterations(node_params.max_iterations);
@@ -271,8 +300,8 @@ int main(int argc, char* argv[]) {
     gtsam::Values result = optimizer.optimize();
     RCLCPP_INFO(get_logger(), "Optimization done");
 
-    // Merge and save
-    pcl::PointCloud<pcl::PointXYZ>::Ptr merged(new pcl::PointCloud<pcl::PointXYZ>);
+    // Merge
+    pcl::PointCloud<pcl::PointXYZ>::Ptr merged = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     for (size_t i = 0; i < initial_poses.size(); i++) {
         gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
         Eigen::Matrix4f T = pose.matrix().cast<float>();
@@ -282,7 +311,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Dynamic Object Removal
-    if (node_params.pass_through_threshold > 0) {
+    if (node_params.enable_raycasting_filter) {
         RCLCPP_INFO(get_logger(), "Removing dynamic objects...");
         double voxel_res = node_params.voxel_resolution;
         std::unordered_map<VoxelKey, int, VoxelKeyHash> voxel_to_index;
@@ -301,10 +330,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        std::vector<int> pass_through_counts(index_to_voxel.size(), 0);
+        std::vector<std::atomic<int>> pass_through_counts(index_to_voxel.size());
 
         // Ray casting
-        #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 2)
+        #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided)
         for (size_t i = 0; i < initial_poses.size(); i++) {
             gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
             Eigen::Vector3d origin = pose.translation();
@@ -343,8 +372,7 @@ int main(int argc, char* argv[]) {
                     if (it != voxel_to_index.end()) {
                         int idx = it->second;
                         if (idx != target_idx && idx != last_idx) {
-                            #pragma omp atomic
-                            pass_through_counts[idx]++;
+                            pass_through_counts[idx].fetch_add(1);
                             last_idx = idx;
                         }
                     }
@@ -353,7 +381,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Filter
-        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         for (const auto& pt : *merged) {
             VoxelKey k = {
                 (int)std::floor(pt.x / voxel_res),
@@ -369,9 +397,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Downsample
-    if (node_params.downsample_leaf_size > 0.0) {
+    if (node_params.enable_downsample) {
         RCLCPP_INFO(get_logger(), "Downsampling...");
-        pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         pcl::VoxelGrid<pcl::PointXYZ> sor;
         sor.setInputCloud(merged);
         sor.setLeafSize(
@@ -384,12 +412,41 @@ int main(int argc, char* argv[]) {
         *merged = *downsampled;
     }
 
-    std::string output_path = data_path + "/optimized_map.pcd";
-    pcl::io::savePCDFileBinary(output_path, *merged);
-    RCLCPP_INFO(get_logger(), "Saved optimized map to %s", output_path.c_str());
+    // Remove statistical outliers
+    if (node_params.enable_statistical_outlier_removal) {
+        RCLCPP_INFO(get_logger(), "Removing statistical outliers...");
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+        sor.setInputCloud(merged);
+        sor.setMeanK(node_params.mean_k);
+        sor.setStddevMulThresh(node_params.std_dev_mul_thresh);
+        sor.filter(*filtered);
+        RCLCPP_INFO(get_logger(), "Statistical outlier removal done. Kept %zu / %zu points", filtered->size(), merged->size());
+        *merged = *filtered;
+    }
+
+    // MLS smoothing
+    if (node_params.enable_mls_smoothing) {
+        RCLCPP_INFO(get_logger(), "Applying MLS smoothing...");
+        pcl::PointCloud<pcl::PointXYZ>::Ptr smoothed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree = std::make_shared<pcl::search::KdTree<pcl::PointXYZ>>();
+        pcl::MovingLeastSquares<pcl::PointXYZ, pcl::PointXYZ> mls;
+        mls.setInputCloud(merged);
+        mls.setSearchMethod(tree);
+        mls.setSearchRadius(node_params.search_radius);
+        mls.setPolynomialOrder(node_params.polynomial_order);
+        mls.process(*smoothed);
+        RCLCPP_INFO(get_logger(), "MLS smoothing done.");
+        *merged = *smoothed;
+    }
+
+    std::string pcd_output_path = data_path + "/optimized_map.pcd";
+    pcl::io::savePCDFileBinary(pcd_output_path, *merged);
+    RCLCPP_INFO(get_logger(), "Saved optimized map to %s", pcd_output_path.c_str());
     
     // Save optimized poses
-    std::ofstream out_poses(data_path + "/optimized_poses.txt");
+    std::string pose_output_path = data_path + "/optimized_poses.txt";
+    std::ofstream out_poses(pose_output_path);
     for(size_t i = 0; i < initial_poses.size(); i++) {
         gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
         auto q = pose.rotation().toQuaternion();
@@ -398,5 +455,5 @@ int main(int argc, char* argv[]) {
         out_poses << "se3(" << t.x() << "," << t.y() << "," << t.z() << "," 
             << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << ")" << std::endl;
     }
-    RCLCPP_INFO(get_logger(), "Saved optimized poses");
+    RCLCPP_INFO(get_logger(), "Saved optimized poses to %s", pose_output_path.c_str());
 }

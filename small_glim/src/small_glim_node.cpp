@@ -28,7 +28,10 @@ public:
     size_t points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
 
     void pub_odometry(const EstimationFrame::ConstPtr frame);
-    void pub_odom_ivox(const EstimationFrame::ConstPtr frame);
+    void pub_cloud(
+        const EstimationFrame::ConstPtr frame,
+        const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
+    );
     void wait(bool auto_quit = false);
 
 private:
@@ -54,7 +57,8 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_sub;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_pub;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr odom_ivox_pub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_cloud_pub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr ivox_cloud_pub;
 };
 
 }
@@ -100,7 +104,8 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     const std::string imu_sub_topic = config->param<std::string>("node.imu_sub_topic");
     const std::string points_sub_topic = config->param<std::string>("node.points_sub_topic");
     const std::string odometry_pub_topic = config->param<std::string>("node.odometry_pub_topic");
-    const std::string odom_ivox_pub_topic = config->param<std::string>("node.odom_ivox_pub_topic");
+    const std::string registered_cloud_pub_topic = config->param<std::string>("node.registered_cloud_pub_topic");
+    const std::string ivox_cloud_pub_topic = config->param<std::string>("node.ivox_cloud_pub_topic");
 
     // Subscribers
     imu_sub = create_subscription<sensor_msgs::msg::Imu>(
@@ -114,7 +119,8 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
         [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { points_callback(msg); }
     );
     odometry_pub = create_publisher<nav_msgs::msg::Odometry>(odometry_pub_topic, rclcpp::QoS(1));
-    odom_ivox_pub = create_publisher<sensor_msgs::msg::PointCloud2>(odom_ivox_pub_topic, rclcpp::QoS(1));
+    registered_cloud_pub = create_publisher<sensor_msgs::msg::PointCloud2>(registered_cloud_pub_topic, rclcpp::QoS(1));
+    ivox_cloud_pub = create_publisher<sensor_msgs::msg::PointCloud2>(ivox_cloud_pub_topic, rclcpp::QoS(1));
 
     // Start timer
     timer = create_wall_timer(std::chrono::milliseconds(1), [this]() { timer_callback(); });
@@ -172,8 +178,13 @@ void SmallGlimNode::timer_callback() {
     std::vector<EstimationFrame::ConstPtr> target_ivox_frames;
     std::vector<EstimationFrame::ConstPtr> marginalized_frames;
     odometry_estimation->get_results(estimation_frames, target_ivox_frames, marginalized_frames);
-    if (!estimation_frames.empty()) pub_odometry(estimation_frames.back());
-    if (!target_ivox_frames.empty()) pub_odom_ivox(target_ivox_frames.back());
+    if (!estimation_frames.empty()) {
+        pub_odometry(estimation_frames.back());
+        pub_cloud(estimation_frames.back(), registered_cloud_pub);
+    }
+    if (!target_ivox_frames.empty()) {
+        pub_cloud(target_ivox_frames.back(), ivox_cloud_pub);
+    }
     if (mapping) {
         for (const auto& frame: marginalized_frames) {
             mapping->insert_frame(frame);
@@ -205,7 +216,10 @@ void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
     odometry_pub->publish(odom);
 }
 
-void SmallGlimNode::pub_odom_ivox(const EstimationFrame::ConstPtr frame) {
+void SmallGlimNode::pub_cloud(
+    const EstimationFrame::ConstPtr frame,
+    const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
+) {
     const size_t num_points = frame->frame->num_points;
     const auto& points = frame->frame->points;
     sensor_msgs::msg::PointCloud2 msg;
@@ -234,10 +248,11 @@ void SmallGlimNode::pub_odom_ivox(const EstimationFrame::ConstPtr frame) {
     msg.fields = {field_x, field_y, field_z};
     msg.data.resize(msg.row_step * msg.height);
     for (int i = 0; i < num_points; i++) {
-        const Eigen::Vector3f pt = points[i](Eigen::seq(0, 2)).cast<float>();
+        Eigen::Vector3f pt = points[i](Eigen::seq(0, 2)).cast<float>();
+        if (frame->frame_type != FrameType::WORLD) pt = frame->T_world_frame().cast<float>() * pt;
         std::memcpy(msg.data.data() + i * 12, pt.data(), sizeof(pt));
     }
-    odom_ivox_pub->publish(msg);
+    publisher->publish(msg);
 }
 
 void SmallGlimNode::wait(bool auto_quit) {

@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     map_cloud_filename: "1897translated.pcd"
-    odom_cloud_sub_topic: "odom_ivox"
+    source_cloud_sub_topic: "/small_glim/ivox_cloud"
     num_threads: 4 # 用于gicp对齐的线程数
     cov_num_neighbors: 100 # 计算点的协方差矩阵时采用多少个点作为邻居
     downsample_resolution_map: 0.1 # 给先验地图降采样的voxel大小，小于0则不进行降采样

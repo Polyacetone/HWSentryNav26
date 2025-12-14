@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
-    lidar_topic: /livox/lidar
+    lidar_topic: /mid360_driver/lidar
     lidar_frame: lidar
-    imu_topic: /livox/imu
+    imu_topic: /mid360_driver/imu
     imu_frame: lidar_imu
     lidar_publish_time_interval: 0.1
     host_ip: 192.168.1.50

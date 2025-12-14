@@ -8,7 +8,7 @@
 
 namespace small_glim {
 
-enum class FrameID { WORLD, LIDAR, IMU };
+enum class FrameType { WORLD, LIDAR, IMU };
 
 /**
 * @brief Odometry estimation frame
@@ -31,17 +31,17 @@ struct EstimationFrame {
     EstimationFrame::Ptr clone_wo_points() const;
 
     /**
-    * @brief Get the sensor pose according to frame_id.
+    * @brief Get the sensor pose according to frame_type.
     * @return const Eigen::Isometry3d  Sensor pose
     */
-    const Eigen::Isometry3d T_world_sensor() const;
+    const Eigen::Isometry3d T_world_frame() const;
 
     /**
     * @brief Set the sensor pose.
-    * @param frame_id  Sensor coodinate frame
-    * @param T         Sensor pose
+    * @param frame_type  Sensor coodinate frame
+    * @param T           Sensor pose
     */
-    void set_T_world_sensor(FrameID frame_id, const Eigen::Isometry3d& T);
+    void set_T_world_frame(FrameType frame_type, const Eigen::Isometry3d& T);
 
 public:
     long id; ///< Frame ID
@@ -57,7 +57,7 @@ public:
     PreprocessedFrame::ConstPtr raw_frame; ///< Raw input point cloud (LiDAR frame)
     Eigen::Matrix<double, 8, -1> imu_rate_trajectory; ///< IMU-rate trajectory 8 x N  [t, x, y, z, qx, qy, qz, qw]
 
-    FrameID frame_id; ///< Coordinate frame of $frame
+    FrameType frame_type; ///< Coordinate center type of $frame
     gtsam_points::PointCloud::ConstPtr frame; ///< Deskewed points for state estimation
     std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelmaps; ///< Multi-resolution voxelmaps
 };

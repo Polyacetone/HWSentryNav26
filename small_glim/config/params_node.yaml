@@ -2,13 +2,14 @@
   ros__parameters:
     node:
       debug: false
-      dump_on_unload: true
-      enable_mapping: true
-      save_raw_mapping_frames: true
+      dump_on_unload: false
+      enable_mapping: false
+      save_raw_mapping_frames: false
       imu_time_offset: 0.0
       points_time_offset: 0.0
       acc_scale: 9.80665
-      imu_sub_topic: "/livox/imu"
-      points_sub_topic: "/livox/lidar"
-      odometry_pub_topic: "/odometry"
-      odom_ivox_pub_topic: "/odom_ivox"
+      imu_sub_topic: "/mid360_driver/imu"
+      points_sub_topic: "/mid360_driver/lidar"
+      odometry_pub_topic: "/small_glim/odometry"
+      registered_cloud_pub_topic: "/small_glim/registered_cloud"
+      ivox_cloud_pub_topic: "/small_glim/ivox_cloud"

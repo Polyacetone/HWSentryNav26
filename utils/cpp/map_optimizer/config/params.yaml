@@ -1,18 +1,30 @@
 /**:
   ros__parameters:
     # Global
-    data_path: "2025-12-07T21:55:23"
-    num_threads: 8
+    data_path: "2025-12-14T21:09:27"
+    num_threads: 16
 
     # Factor graph optimization
-    max_iterations: 500
+    max_iterations: 100
     k_neighbors: 10
-    loop_dist_thres: 10.0
+    loop_dist_thres: 5.0
     gicp_max_correspondence_distance: 2.0
 
     # Raycasting filter
-    voxel_resolution: 0.1
+    enable_raycasting_filter: true
+    voxel_resolution: 0.05
     pass_through_threshold: 5
 
     # Downsample
+    enable_downsample: true
     downsample_leaf_size: 0.1
+
+    # Remove statistical outliers
+    enable_statistical_outlier_removal: true
+    mean_k: 10
+    std_dev_mul_thresh: 1.0
+
+    # MLS smoothing
+    enable_mls_smoothing: true
+    search_radius: 0.2
+    polynomial_order: 1

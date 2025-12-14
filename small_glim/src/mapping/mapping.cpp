@@ -58,6 +58,10 @@ Mapping::Mapping(const Config::Ptr config) {
 }
 
 void Mapping::insert_frame(const EstimationFrame::ConstPtr& frame) {
+    if (frame->frame_type != FrameType::IMU) {
+        logger::fatal("mapping", "only IMU frames can be inserted into mapping");
+        exit(EXIT_FAILURE);
+    }
     std::lock_guard<std::mutex> lock(mutex);
     if (is_keyframe(frame)) {
         logger::debug("mapping", "adding new keyframe, total keyframes: {}", keyframes.size() + 1);
@@ -69,7 +73,7 @@ bool Mapping::is_keyframe(const EstimationFrame::ConstPtr& frame) {
     if (keyframes.empty()) return true;
     switch (params->keyframe_update_strategy) {
         case MappingParams::KeyframeUpdateStrategy::DISPLACEMENT: {
-            Eigen::Isometry3d delta = last_keyframe_pose.inverse() * frame->T_world_sensor();
+            Eigen::Isometry3d delta = last_keyframe_pose.inverse() * frame->T_world_frame();
             double dist = delta.translation().norm();
             double rot = Eigen::AngleAxisd(delta.linear()).angle();
             return dist > params->keyframe_update_min_dist || rot > params->keyframe_update_min_rot;
@@ -82,11 +86,12 @@ bool Mapping::is_keyframe(const EstimationFrame::ConstPtr& frame) {
             const double overlap = gtsam_points::overlap(
                 keyframes.back()->voxelmaps.back(),
                 frame->frame,
-                keyframes.back()->T_world_sensor().inverse() * frame->T_world_sensor()
+                keyframes.back()->T_world_frame().inverse() * frame->T_world_frame()
             );
             return overlap < params->max_keyframe_overlap;
         }
     }
+    __builtin_unreachable();
 }
 
 void Mapping::add_keyframe(const EstimationFrame::ConstPtr& frame) {    
@@ -111,12 +116,12 @@ void Mapping::add_keyframe(const EstimationFrame::ConstPtr& frame) {
     keyframes.push_back(keyframe);
     keyframe_indices.push_back(current_idx);
     
-    values->insert(X(current_idx), gtsam::Pose3(frame->T_world_sensor().matrix()));
-    last_keyframe_pose = frame->T_world_sensor();
+    values->insert(X(current_idx), gtsam::Pose3(frame->T_world_frame().matrix()));
+    last_keyframe_pose = frame->T_world_frame();
 
     if (current_idx == 0) {
         auto noise = gtsam::noiseModel::Isotropic::Precision(6, 1e6);
-        graph->add(gtsam::PriorFactor<gtsam::Pose3>(X(0), gtsam::Pose3(frame->T_world_sensor().matrix()), noise));
+        graph->add(gtsam::PriorFactor<gtsam::Pose3>(X(0), gtsam::Pose3(frame->T_world_frame().matrix()), noise));
     } else {
         // Factor to the first keyframe (Global consistency)
         auto target = keyframes[0];
@@ -145,7 +150,7 @@ void Mapping::add_keyframe(const EstimationFrame::ConstPtr& frame) {
         }
         
         // Factor to the previous keyframe (Odometry consistency)
-        gtsam::Pose3 T_prev_curr( (keyframes[current_idx-1]->T_world_sensor().inverse() * frame->T_world_sensor()).matrix() );
+        gtsam::Pose3 T_prev_curr( (keyframes[current_idx-1]->T_world_frame().inverse() * frame->T_world_frame()).matrix() );
         auto odom_noise = gtsam::noiseModel::Isotropic::Precision(6, 100.0);
         graph->add(gtsam::BetweenFactor<gtsam::Pose3>(X(current_idx-1), X(current_idx), T_prev_curr, odom_noise));
     }
@@ -170,7 +175,7 @@ void Mapping::save(const std::string& path) {
     std::vector<Eigen::Isometry3d> poses;
     for (const auto& keyframe : keyframes) {
         frames.push_back(keyframe->frame);
-        poses.push_back(keyframe->T_world_sensor());
+        poses.push_back(keyframe->T_world_frame());
     }
     mutex.unlock();
 
@@ -202,7 +207,7 @@ void Mapping::save_raw_frames(const std::string& dir) {
     fs.open(dir + "/poses.txt", std::ios::out);
     for (int i = 0; i < keyframes.size(); i++) {
         const auto& keyframe = keyframes[i];
-        const auto& T = keyframe->T_world_sensor();
+        const auto& T = keyframe->T_world_frame();
         fs << convert_to_string(T) << std::endl;
         
         std::string filename = dir + "/frame_" + std::to_string(i) + ".pcd";

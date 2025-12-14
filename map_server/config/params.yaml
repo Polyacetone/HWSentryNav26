@@ -1,9 +1,15 @@
 /**:
   ros__parameters:
-    direction_map_pub_topic: "direction_map" # 台阶方向地图发布话题名称
-    cost_map_pub_topic: "cost_map" # 代价地图发布话题名称
+    direction_map_pub_topic: "/map_server/direction_map" # 台阶方向地图发布话题名称
+    cost_map_pub_topic: "/map_server/cost_map" # 代价地图发布话题名称
     map_resolution: 0.2 # 地图的每格大小，单位m
     map_size_x: 146 # 地图x方向的大小，以格点为单位，坐标系原点在tf的"map"
     map_size_y: 81 # 地图y方向的大小，以格点为单位，坐标系原点在tf的"map"
 
-    global_map_filename: "navigation_map_final.png" # 全局先验地图路径
+    global_map:
+      map_filename: "navigation_map_final.png" # 全局先验地图路径
+      cloud_filename: "navigation_map_final.pcd" # 全局点云路径
+    
+    local_map:
+      cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称
+      cloud_accumulate_frames: 3 # 局部点云累积帧数

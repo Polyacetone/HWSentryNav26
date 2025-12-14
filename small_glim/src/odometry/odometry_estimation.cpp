@@ -318,7 +318,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         frame->add_covs(covs);
         frame->add_normals(normals);
         new_frame->frame = frame;
-        new_frame->frame_id = FrameID::IMU;
+        new_frame->frame_type = FrameType::IMU;
         frames.push_back(new_frame);
 
         // Initialize the estimator
@@ -503,7 +503,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     frame->add_covs(deskewed_covs);
     frame->add_normals(deskewed_normals);
     new_frame->frame = frame;
-    new_frame->frame_id = FrameID::IMU;
+    new_frame->frame_type = FrameType::IMU;
 
     if (params->registration_type == OdometryEstimationCPUParams::RegistrationType::VGICP) {
         new_frame->voxelmaps.resize(params->vgicp_voxelmap_levels);
@@ -592,7 +592,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::get_target_ivox_frame() {
     target_frame->T_world_imu.setIdentity();
     target_frame->v_world_imu.setZero();
     target_frame->imu_bias.setZero();
-    target_frame->frame_id = FrameID::IMU;
+    target_frame->frame_type = FrameType::WORLD;
     switch (params->registration_type) {
         case OdometryEstimationCPUParams::RegistrationType::GICP: {
             target_frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(target_ivox->voxel_points());

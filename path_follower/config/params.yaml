@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
-    path_sub_topic: "path"
-    cmd_vel_pub_topic: "cmd_vel"
+    path_sub_topic: "/path_planner/path"
+    cmd_vel_pub_topic: "/path_follower/cmd_vel"
     control_freq: 10
     max_velocity: 4.0
     stop_distance: 0.1

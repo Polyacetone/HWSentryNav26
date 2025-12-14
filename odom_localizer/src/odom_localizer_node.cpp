@@ -61,7 +61,7 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
     fitness_score_threshold_ = declare_parameter<double>("fitness_score_threshold");
     std::string map_cloud_filename = declare_parameter<std::string>("map_cloud_filename");
     std::string map_cloud_path = ament_index_cpp::get_package_share_directory("odom_localizer") + "/maps/" + map_cloud_filename;
-    std::string odom_cloud_sub_topic = declare_parameter<std::string>("odom_cloud_sub_topic");
+    std::string source_cloud_sub_topic = declare_parameter<std::string>("source_cloud_sub_topic");
     double odom_to_map_filter_ratio = declare_parameter<double>("odom_to_map_filter_ratio");
     odom_to_map_ = std::make_unique<utils::EMAFilter<Eigen::Isometry3d>>(odom_to_map_filter_ratio);
     odom_to_map_no_filter_distance_ = declare_parameter<double>("odom_to_map_no_filter_distance");
@@ -89,7 +89,7 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
 
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        odom_cloud_sub_topic,
+        source_cloud_sub_topic,
         rclcpp::QoS(1),
         [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { cloud_callback(msg); }
     );

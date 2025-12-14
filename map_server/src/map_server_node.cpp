@@ -6,6 +6,7 @@
 #include <tf2_ros/buffer.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <common_utils/convert.hpp>
 
@@ -17,15 +18,17 @@ public:
 private:
     double map_resolution_;
     int map_size_x_, map_size_y_;
+    int local_map_cloud_accumulate_frames_;
 
     cv::Mat global_direction_map_, global_cost_map_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr local_map_cloud_sub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr direction_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr cost_map_pub_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     rclcpp::TimerBase::SharedPtr timer_;
 
-    void timer_callback();
+    void local_map_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp) const;
     void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp) const;
 };
@@ -36,11 +39,18 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     map_resolution_ = declare_parameter<double>("map_resolution");
     map_size_x_ = declare_parameter<int>("map_size_x");
     map_size_y_ = declare_parameter<int>("map_size_y");
+    local_map_cloud_accumulate_frames_ = declare_parameter<int>("local_map.cloud_accumulate_frames");
+    std::string local_map_cloud_sub_topic = declare_parameter<std::string>("local_map.cloud_sub_topic");
+    local_map_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        local_map_cloud_sub_topic,
+        rclcpp::QoS(1),
+        [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { local_map_cloud_callback(msg); }
+    );
     std::string direction_map_pub_topic = declare_parameter<std::string>("direction_map_pub_topic");
     direction_map_pub_ = create_publisher<sensor_msgs::msg::Image>(direction_map_pub_topic, 1);
     std::string cost_map_pub_topic = declare_parameter<std::string>("cost_map_pub_topic");
     cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(cost_map_pub_topic, 1);
-    std::string global_map_filename = declare_parameter<std::string>("global_map_filename");
+    std::string global_map_filename = declare_parameter<std::string>("global_map.filename");
     std::string global_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + global_map_filename;
     cv::Mat global_map = cv::imread(global_map_path, cv::IMREAD_COLOR);
     if (global_map.empty()) {
@@ -51,13 +61,9 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     cv::split(global_map, channels);
     cv::merge(std::array{channels[0], channels[1]}, global_direction_map_); // 前两个通道表示台阶方向
     global_cost_map_ = channels[2]; // 第三个通道表示代价地图
-    timer_ = create_wall_timer(
-        std::chrono::seconds(1),
-        [this] { timer_callback(); }
-    );
 }
 
-void MapServerNode::timer_callback() {
+void MapServerNode::local_map_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     pub_direction_map(global_direction_map_, now());
     pub_cost_map(global_cost_map_, now());
 }

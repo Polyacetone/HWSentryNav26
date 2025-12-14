@@ -145,7 +145,7 @@ def save_height_map_cv(height_map, output_path):
 
 
 if __name__ == "__main__":
-    pcd_path="RMUC2026_aligned.pcd"
+    pcd_path="1897new.pcd"
     cloud = o3d.io.read_point_cloud(pcd_path)
     cloud = crop_cloud_by_bounds(cloud, min_bound=(0, 0, 0), max_bound=(1e3, 1e3, 1.5))
 

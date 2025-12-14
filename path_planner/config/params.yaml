@@ -1,9 +1,9 @@
 /**:
   ros__parameters:
-    direction_map_sub_topic: "direction_map"
-    cost_map_sub_topic: "cost_map"
-    goal_sub_topic: "goal"
-    path_pub_topic: "path"
+    direction_map_sub_topic: "/map_server/direction_map"
+    cost_map_sub_topic: "/map_server/cost_map"
+    goal_sub_topic: "/path_planner/goal"
+    path_pub_topic: "/path_planner/path"
     plan_freq: 10 # 规划路径的频率，单位Hz
 
     path_planner:
