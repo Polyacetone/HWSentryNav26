@@ -27,7 +27,8 @@ target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
 
 find_package(PCL REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${PCL_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARY_DIRS})
+target_compile_definitions(${PROJECT_NAME} PRIVATE ${PCL_DEFINITIONS})
+target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARIES})
 
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN map_server::MapServerNode

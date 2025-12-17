@@ -49,9 +49,11 @@ def generate_navigation_map(
     unit_x = gx / magnitude
     unit_y = gy / magnitude
     
-    # 映射向量到 [0, 255]
-    vec_x_map = ((unit_x + 1) * 127.5).astype(np.uint8)
-    vec_y_map = ((unit_y + 1) * 127.5).astype(np.uint8)
+    # 映射向量到 [1, 255], 128为中心
+    vec_x_map = (unit_x * 127 + 128).astype(np.uint8)
+    vec_x_map.clip(1, 255, out=vec_x_map)  # 避免0值
+    vec_y_map = (unit_y * 127 + 128).astype(np.uint8)
+    vec_y_map.clip(1, 255, out=vec_y_map)  # 避免0值
     
     # 4. 生成输出图 (向量化操作)
     # Mask 1: 不可跨越障碍 (高程差 >= 最大越障能力)
@@ -105,9 +107,9 @@ def generate_navigation_map(
     internal_region = (cost_map < 255) & (external_marker != 255)
 
     # 将这些内部封闭区域设为不可通行
-    output[internal_region, 2] = 255  # 代价
-    output[internal_region, 0] = 0    # 向量X
-    output[internal_region, 1] = 0    # 向量Y
+    # output[internal_region, 2] = 255  # 代价
+    # output[internal_region, 0] = 0    # 向量X
+    # output[internal_region, 1] = 0    # 向量Y
     
     return output
 
@@ -115,7 +117,7 @@ def generate_navigation_map(
 if __name__ == "__main__":
     # 参数设置 (根据机器人性能调整)
     STEP_THRESHOLD = 5       # 台阶阈值
-    MAX_HEIGHT = 50         # 机器人最大越障高度
+    MAX_HEIGHT = 20         # 机器人最大越障高度
     COST_COEFF = 0.5          # 代价系数
     
     # 生成导航地图

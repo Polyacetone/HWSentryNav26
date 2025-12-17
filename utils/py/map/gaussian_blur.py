@@ -21,6 +21,6 @@ def process_image(image_path, output_path):
     cv2.imwrite(output_path, processed_image)
 
 if __name__ == "__main__":
-    input_path = "navigation_map_edited.png"  # 输入文件路径
-    output_path = "navigation_map_dilated.png"  # 输出文件路径
+    input_path = "1897new_navmap.png"  # 输入文件路径
+    output_path = "1897new_navmap_dilated.png"  # 输出文件路径
     process_image(input_path, output_path)

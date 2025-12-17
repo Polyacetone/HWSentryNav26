@@ -3,13 +3,30 @@
     direction_map_pub_topic: "/map_server/direction_map" # 台阶方向地图发布话题名称
     cost_map_pub_topic: "/map_server/cost_map" # 代价地图发布话题名称
     map_resolution: 0.2 # 地图的每格大小，单位m
-    map_size_x: 146 # 地图x方向的大小，以格点为单位，坐标系原点在tf的"map"
-    map_size_y: 81 # 地图y方向的大小，以格点为单位，坐标系原点在tf的"map"
+    num_threads: 4 # 用于点云处理的线程数
+
+    debug_mode:
+      enable: false # 是否启用调试模式
+      global_cloud_pub_topic: "/map_server/debug/global_map_cloud" # 全局点云发布话题名称
+      accumulated_cloud_pub_topic: "/map_server/debug/accumulated_local_cloud" # 累积局部点云发布话题名称
+      dynamic_points_pub_topic: "/map_server/debug/dynamic_obstacle_points" # 动态障碍物点云发布话题名称
+      local_cost_map_pub_topic: "/map_server/debug/local_cost_map" # 局部代价地图发布话题名称
 
     global_map:
-      map_filename: "navigation_map_final.png" # 全局先验地图路径
-      cloud_filename: "navigation_map_final.pcd" # 全局点云路径
+      map_filename: "1897new_navmap_final.png" # 全局先验地图路径
+      cloud_filename: "1897new.pcd" # 全局点云路径
+      downsample_voxel_size: 0.1 # 全局点云下采样体素大小，单位m
     
     local_map:
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称
       cloud_accumulate_frames: 3 # 局部点云累积帧数
+      roi_xy_radius_min: 0.3 # 局部点云感兴趣区域xy平面半径最小值（以lidar为中心），单位m
+      roi_xy_radius_max: 3.0 # 局部点云感兴趣区域xy平面半径最大值（以lidar为中心），单位m
+      roi_z_max: 1.0 # 局部点云感兴趣区域z轴最大值（以lidar为中心），单位m
+      roi_z_min: -1.0 # 局部点云感兴趣区域z轴最小值（以lidar为中心），单位m
+      downsample_voxel_size: 0.1 # 局部点云下采样体素大小，单位m
+      distance_threshold: 0.4 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m
+      cell_obstacle_point_threshold: 5 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
+      dilate_kernel_size: 3 # 膨胀操作的卷积核大小
+      gaussian_blur_kernel_size: 5 # 高斯模糊操作的卷积核大小
+      gaussian_blur_sigma: 1.0 # 高斯模糊操作的标准差

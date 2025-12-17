@@ -62,7 +62,7 @@ std::vector<Eigen::Vector2d> convert_direction_map(const cv::Mat& mat) {
             if (val[0] == 0 && val[1] == 0) {
                 vec.emplace_back(0, 0);
             } else {
-                Eigen::Vector2d dir(val[0] - 127, val[1] - 127);
+                Eigen::Vector2d dir(val[0] - 128, val[1] - 128);
                 vec.emplace_back(dir.normalized());
             }
         }

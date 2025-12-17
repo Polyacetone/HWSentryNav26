@@ -29,9 +29,6 @@ find_package(Ceres REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${CERES_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${CERES_LIBRARIES})
 
-find_package(GTSAM REQUIRED)
-target_link_libraries(${PROJECT_NAME} gtsam)
-
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN path_planner::PathPlannerNode
   EXECUTABLE ${PROJECT_NAME}_node

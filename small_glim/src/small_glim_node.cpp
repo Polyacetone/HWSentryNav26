@@ -3,6 +3,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <gtsam_points/optimizers/linearization_hook.hpp>
 #include <common_utils/convert.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -25,7 +26,7 @@ public:
 
     void timer_callback();
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
-    size_t points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
+    int points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
 
     void pub_odometry(const EstimationFrame::ConstPtr frame);
     void pub_cloud(
@@ -38,6 +39,7 @@ private:
     std::unique_ptr<tf2_ros::Buffer> tf_buffer;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_static_broadcaster;
 
     std::unique_ptr<CloudPreprocessor> preprocessor;
     std::unique_ptr<TimeKeeper> time_keeper;
@@ -69,6 +71,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     tf_buffer = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener = std::make_unique<tf2_ros::TransformListener>(*tf_buffer);
     tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+    tf_static_broadcaster = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
 
     auto config = std::make_shared<Config>(this);
 
@@ -154,22 +157,18 @@ void SmallGlimNode::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
     odometry_estimation->insert_imu(imu_stamp, linear_acc, angular_vel);
 }
 
-size_t SmallGlimNode::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+int SmallGlimNode::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
     const auto raw_points = std::make_shared<RawPoints>(*msg, intensity_field, ring_field);
     if (raw_points == nullptr) {
         logger::warn("node", "failed to extract points from message");
         return 0;
     }
-
     raw_points->stamp += points_time_offset;
     time_keeper->process(raw_points);
     auto preprocessed = preprocessor->preprocess(raw_points);
-
     odometry_estimation->insert_frame(preprocessed);
-
-    const size_t workload = odometry_estimation->workload();
+    const int workload = odometry_estimation->workload();
     logger::debug("node", "workload={}", workload);
-
     return workload;
 }
 
@@ -198,12 +197,19 @@ void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
     const Eigen::Isometry3d T_lidar_imu = frame->T_lidar_imu;
     const Eigen::Isometry3d T_odom_lidar = T_odom_imu * T_lidar_imu.inverse();
 
-    geometry_msgs::msg::TransformStamped tf;
-    tf.header.frame_id = "odom";
-    tf.child_frame_id = "lidar";
-    tf.header.stamp = stamp;
-    utils::convert(T_odom_lidar, tf.transform);
-    tf_broadcaster->sendTransform(tf);
+    geometry_msgs::msg::TransformStamped tf_imu_lidar;
+    tf_imu_lidar.header.frame_id = "lidar";
+    tf_imu_lidar.child_frame_id = "imu";
+    tf_imu_lidar.header.stamp = stamp;
+    utils::convert(T_lidar_imu, tf_imu_lidar.transform);
+    tf_static_broadcaster->sendTransform(tf_imu_lidar);
+
+    geometry_msgs::msg::TransformStamped tf_lidar_odom;
+    tf_lidar_odom.header.frame_id = "odom";
+    tf_lidar_odom.child_frame_id = "lidar";
+    tf_lidar_odom.header.stamp = stamp;
+    utils::convert(T_odom_lidar, tf_lidar_odom.transform);
+    tf_broadcaster->sendTransform(tf_lidar_odom);
 
     const Eigen::Vector3d v_odom_imu = frame->v_world_imu;
     const Eigen::Vector3d v_odom_lidar = T_odom_imu.linear() * v_odom_imu;

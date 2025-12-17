@@ -12,7 +12,6 @@
 
 #include <path_planner/nav_map.hpp>
 #include <path_planner/a_star_planner.hpp>
-#include <path_planner/factor_graph_optimizer.hpp>
 #include <path_planner/bspline_optimizer.hpp>
 #include <common_utils/convert.hpp>
 

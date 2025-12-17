@@ -174,7 +174,7 @@ void estimate_cov(
     }
 }
 
-gtsam_points::PointCloud::Ptr pcl_to_gtsam_points(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pcl_cloud) {
+gtsam_points::PointCloudCPU::Ptr pcl_to_gtsam_points(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pcl_cloud) {
     std::vector<Eigen::Vector4d> points;
     points.reserve(pcl_cloud->size());
     for (const auto& pt : *pcl_cloud) {
@@ -213,7 +213,7 @@ int main(int argc, char* argv[]) {
     };
     std::string data_path = node->declare_parameter<std::string>("data_path");
     std::vector<gtsam::Pose3> initial_poses;
-    std::vector<gtsam_points::PointCloud::Ptr> frames;
+    std::vector<gtsam_points::PointCloudCPU::Ptr> frames;
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> pcl_frames;
 
     // Load poses
