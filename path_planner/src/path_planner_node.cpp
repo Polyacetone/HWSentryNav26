@@ -54,6 +54,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         declare_parameter<double>("path_optimizer.length_weight"),
         declare_parameter<double>("path_optimizer.obstacle_weight"),
         declare_parameter<double>("path_optimizer.direction_weight"),
+        declare_parameter<double>("path_optimizer.start_end_weight"),
         declare_parameter<double>("path_optimizer.num_samples_per_length"),
         declare_parameter<int>("path_optimizer.max_iterations")
     );
@@ -100,19 +101,19 @@ void PathPlannerNode::timer_callback() {
         return;
     }
 
-    const Eigen::Vector2i start_grid(cost_map_->map_coord_to_grid({base_to_map.getOrigin().x(), base_to_map.getOrigin().y()}).cast<int>());
-    const Eigen::Vector2i goal_grid(cost_map_->map_coord_to_grid({goal_->point.x, goal_->point.y}).cast<int>());
+    const Eigen::Vector2d start_grid = cost_map_->map_coord_to_grid({base_to_map.getOrigin().x(), base_to_map.getOrigin().y()});
+    const Eigen::Vector2d goal_grid = cost_map_->map_coord_to_grid({goal_->point.x, goal_->point.y});
 
     auto start = std::chrono::high_resolution_clock::now();
     // A*搜索得到初始路径，输入输出均为格点坐标系
-    auto rough = path_planner_->search_path(*cost_map_, *direction_map_, start_grid, goal_grid);
+    auto rough = path_planner_->search_path(*cost_map_, *direction_map_, start_grid.cast<int>(), goal_grid.cast<int>());
     auto end = std::chrono::high_resolution_clock::now();
     RCLCPP_INFO(get_logger(), "Plan: %.2fms", (end - start).count() / 1e6);
 
     start = std::chrono::high_resolution_clock::now();
     auto rough_f64 = vv2i_to_vv2d(rough);
     // 优化路径，输入输出均为格点坐标系
-    auto optimized = path_optimizer_->optimize(*cost_map_, *direction_map_, rough_f64);
+    auto optimized = path_optimizer_->optimize(*cost_map_, *direction_map_, rough_f64, start_grid, goal_grid);
     end = std::chrono::high_resolution_clock::now();
     RCLCPP_INFO(get_logger(), "Optimize: %.2fms", (end - start).count() / 1e6);
 

@@ -16,6 +16,7 @@ public:
         const double length_weight,
         const double obstacle_weight,
         const double direction_weight,
+        const double start_end_weight,
         const double num_samples_per_length,
         const int max_iterations
     );
@@ -23,7 +24,9 @@ public:
     std::vector<Eigen::Vector2d> optimize(
         const CostMap& cost_map,
         const DirectionMap& direction_map,
-        const std::vector<Eigen::Vector2d>& init_path
+        const std::vector<Eigen::Vector2d>& init_path,
+        const Eigen::Vector2d& start_grid,
+        const Eigen::Vector2d& goal_grid
     ) const;
 
 private:
@@ -31,6 +34,7 @@ private:
     const double length_weight_;
     const double obstacle_weight_;
     const double direction_weight_;
+    const double start_end_weight_;
     const double num_samples_per_length_;
     const int max_iterations_;
 

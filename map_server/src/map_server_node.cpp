@@ -142,6 +142,10 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         rclcpp::QoS(1),
         [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { local_map_cloud_callback(msg); }
     );
+
+    // 发布初始全局地图
+    pub_cost_map(global_cost_map_, now(), cost_map_pub_);
+    pub_direction_map(global_direction_map_, now());
 }
 
 void MapServerNode::local_map_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {

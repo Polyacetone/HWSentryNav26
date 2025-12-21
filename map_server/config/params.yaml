@@ -13,8 +13,8 @@
       local_cost_map_pub_topic: "/map_server/debug/local_cost_map" # 局部代价地图发布话题名称
 
     global_map:
-      map_filename: "1897new_navmap_final.png" # 全局先验地图路径
-      cloud_filename: "1897new.pcd" # 全局点云路径
+      map_filename: "RMUC2026_navmap_final.png" # 全局先验地图路径
+      cloud_filename: "RMUC2026_aligned.pcd" # 全局点云路径
       downsample_voxel_size: 0.1 # 全局点云下采样体素大小，单位m
     
     local_map:

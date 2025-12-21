@@ -21,7 +21,7 @@ public:
     ): pos_evaluator_(pos_evaluator), cost_map_(cost_map), weight_(weight) {
         // 设置参数块，每个控制点是2维向量
         mutable_parameter_block_sizes()->clear();
-        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; ++i) {
+        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
             mutable_parameter_block_sizes()->push_back(2);
         }
         set_num_residuals(1);
@@ -62,7 +62,7 @@ public:
         const double weight
     ): pos_evaluator_(pos_evaluator), vel_evaluator_(vel_evaluator), direction_map_(direction_map), weight_(weight) {
         mutable_parameter_block_sizes()->clear();
-        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; ++i) {
+        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
             mutable_parameter_block_sizes()->push_back(2);
         }
         set_num_residuals(1);
@@ -114,6 +114,30 @@ private:
     const DirectionMap& direction_map_;
     const double weight_;
 };
+
+// 起终点保持代价，自动求导
+class StartEndPositionCostFunction {
+public:
+    StartEndPositionCostFunction(
+        const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
+        const Eigen::Vector2d& target,
+        const double weight
+    ) : pos_evaluator_(pos_evaluator), target_(target), weight_(weight) {}
+
+    template <typename T>
+    bool operator()(T const* const p0, T const* const p1, T const* const p2, T* residuals) const {
+        T pos[2];
+        pos_evaluator_.evaluate(p0, p1, p2, pos);
+        residuals[0] = T(weight_) * (pos[0] - T(target_.x()));
+        residuals[1] = T(weight_) * (pos[1] - T(target_.y()));
+        return true;
+    }
+
+private:
+    const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
+    const Eigen::Vector2d target_;
+    const double weight_;
+};
 }
 
 // 路径优化器主类实现
@@ -123,6 +147,7 @@ BSplineOptimizer::BSplineOptimizer(
     const double length_weight,
     const double obstacle_weight,
     const double direction_weight,
+    const double start_end_weight,
     const double num_samples_per_length,
     const int max_iterations
 ):
@@ -130,13 +155,16 @@ BSplineOptimizer::BSplineOptimizer(
     length_weight_(length_weight),
     obstacle_weight_(obstacle_weight),
     direction_weight_(direction_weight),
+    start_end_weight_(start_end_weight),
     num_samples_per_length_(num_samples_per_length),
     max_iterations_(max_iterations) {}
 
 std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
-    const std::vector<Eigen::Vector2d>& init_path
+    const std::vector<Eigen::Vector2d>& init_path,
+    const Eigen::Vector2d& start_grid,
+    const Eigen::Vector2d& goal_grid
 ) const {
     if (init_path.size() <= 2) {
         RCLCPP_WARN(rclcpp::get_logger("bspline_optimizer"), "Path too short to optimize!");
@@ -178,11 +206,27 @@ std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
         );
     }
 
-    // 保持起终点不变
-    problem.SetParameterBlockConstant(ContainerT::data(control_points.at(0)));
-    problem.SetParameterBlockConstant(ContainerT::data(control_points.at(1)));
-    problem.SetParameterBlockConstant(ContainerT::data(control_points.at(control_points.getNumElements() - 2)));
-    problem.SetParameterBlockConstant(ContainerT::data(control_points.at(control_points.getNumElements() - 1)));
+    // 保持起终点位置
+    const auto start_data = spline_ceres.getPointData(0.0);
+    const auto goal_data = spline_ceres.getPointData(1.0);
+    const ubs::UniformBSplineCeresEvaluator<Spline> start_evaluator = spline_ceres.getEvaluator(start_data);
+    const ubs::UniformBSplineCeresEvaluator<Spline> goal_evaluator = spline_ceres.getEvaluator(goal_data);
+    std::vector<double*> start_parameter_pointers(spline_ceres.getNumPointParameterPointers());
+    std::vector<double*> goal_parameter_pointers(spline_ceres.getNumPointParameterPointers());
+    spline_ceres.fillParameterPointers(start_data, start_parameter_pointers.begin(), start_parameter_pointers.end());
+    spline_ceres.fillParameterPointers(goal_data, goal_parameter_pointers.begin(), goal_parameter_pointers.end());
+    problem.AddResidualBlock(
+        new ceres::AutoDiffCostFunction<StartEndPositionCostFunction, 2, 2, 2, 2>(
+            new StartEndPositionCostFunction(start_evaluator, start_grid, start_end_weight_)
+        ),
+        nullptr, start_parameter_pointers
+    );
+    problem.AddResidualBlock(
+        new ceres::AutoDiffCostFunction<StartEndPositionCostFunction, 2, 2, 2, 2>(
+            new StartEndPositionCostFunction(goal_evaluator, goal_grid, start_end_weight_)
+        ), 
+        nullptr, goal_parameter_pointers
+    );
 
     ceres::Solver::Options options;
     options.minimizer_type = ceres::TRUST_REGION;

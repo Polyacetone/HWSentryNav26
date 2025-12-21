@@ -5,6 +5,7 @@
       dump_on_unload: false
       enable_mapping: false
       save_raw_mapping_frames: false
+      enable_tf_publish: false
       imu_time_offset: 0.0
       points_time_offset: 0.0
       acc_scale: 9.80665

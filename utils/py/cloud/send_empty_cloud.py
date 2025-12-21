@@ -5,7 +5,7 @@ from sensor_msgs.msg import PointCloud2
 class PublishEmptyPointCloud(Node):
     def __init__(self):
         super().__init__('publish_empty_pointcloud')
-        self.publisher_ = self.create_publisher(PointCloud2, 'cloud_registered', 10)
+        self.publisher_ = self.create_publisher(PointCloud2, '/small_glim/registered_cloud', 10)
         timer_period = 0.1
         self.timer = self.create_timer(timer_period, self.timer_callback)
 

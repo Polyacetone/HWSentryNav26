@@ -51,6 +51,7 @@ private:
     double acc_scale;
     bool dump_on_unload;
     bool save_raw_mapping_frames;
+    bool enable_tf_publish;
 
     std::string intensity_field, ring_field;
 
@@ -83,6 +84,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 
     dump_on_unload = config->param<bool>("node.dump_on_unload");
     save_raw_mapping_frames = config->param<bool>("node.save_raw_mapping_frames");
+    enable_tf_publish = config->param<bool>("node.enable_tf_publish");
 
     bool enable_mapping = config->param<bool>("node.enable_mapping");
     if (enable_mapping) {
@@ -194,31 +196,30 @@ void SmallGlimNode::timer_callback() {
 void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
     const rclcpp::Time stamp(frame->stamp * 1e9);
     const Eigen::Isometry3d T_odom_imu = frame->T_world_imu;
-    const Eigen::Isometry3d T_lidar_imu = frame->T_lidar_imu;
-    const Eigen::Isometry3d T_odom_lidar = T_odom_imu * T_lidar_imu.inverse();
-
-    geometry_msgs::msg::TransformStamped tf_imu_lidar;
-    tf_imu_lidar.header.frame_id = "lidar";
-    tf_imu_lidar.child_frame_id = "imu";
-    tf_imu_lidar.header.stamp = stamp;
-    utils::convert(T_lidar_imu, tf_imu_lidar.transform);
-    tf_static_broadcaster->sendTransform(tf_imu_lidar);
-
-    geometry_msgs::msg::TransformStamped tf_lidar_odom;
-    tf_lidar_odom.header.frame_id = "odom";
-    tf_lidar_odom.child_frame_id = "lidar";
-    tf_lidar_odom.header.stamp = stamp;
-    utils::convert(T_odom_lidar, tf_lidar_odom.transform);
-    tf_broadcaster->sendTransform(tf_lidar_odom);
-
     const Eigen::Vector3d v_odom_imu = frame->v_world_imu;
-    const Eigen::Vector3d v_odom_lidar = T_odom_imu.linear() * v_odom_imu;
+    const Eigen::Isometry3d T_lidar_imu = frame->T_lidar_imu;
+
+    if (enable_tf_publish) {
+        geometry_msgs::msg::TransformStamped tf_imu_to_lidar;
+        tf_imu_to_lidar.header.frame_id = "lidar_link";
+        tf_imu_to_lidar.child_frame_id = "imu_link";
+        tf_imu_to_lidar.header.stamp = stamp;
+        utils::convert(T_lidar_imu, tf_imu_to_lidar.transform);
+        tf_static_broadcaster->sendTransform(tf_imu_to_lidar);
+        geometry_msgs::msg::TransformStamped tf_imu_to_odom;
+        tf_imu_to_odom.header.frame_id = "odom";
+        tf_imu_to_odom.child_frame_id = "imu_link";
+        tf_imu_to_odom.header.stamp = stamp;
+        utils::convert(T_odom_imu, tf_imu_to_odom.transform);
+        tf_broadcaster->sendTransform(tf_imu_to_odom);
+    }
+
     nav_msgs::msg::Odometry odom;
     odom.header.frame_id = "odom";
-    odom.child_frame_id = "lidar";
+    odom.child_frame_id = "imu_link";
     odom.header.stamp = stamp;
-    utils::convert(T_odom_lidar, odom.pose.pose);
-    utils::convert(v_odom_lidar, odom.twist.twist.linear);
+    utils::convert(T_odom_imu, odom.pose.pose);
+    utils::convert(v_odom_imu, odom.twist.twist.linear);
     odometry_pub->publish(odom);
 }
 

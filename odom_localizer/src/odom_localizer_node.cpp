@@ -157,7 +157,7 @@ void OdomLocalizerNode::update_and_publish(const Eigen::Isometry3d& transform, c
             odom_to_map_->value().translation().z()
         );
     } else {
-        odom_to_map_->force_change_value(transform);
+        odom_to_map_->initialize(transform);
         RCLCPP_DEBUG(get_logger(), "Updated odom->map forcedly without filtering, current T=(%.3f, %.3f, %.3f)", 
             odom_to_map_->value().translation().x(),
             odom_to_map_->value().translation().y(),
