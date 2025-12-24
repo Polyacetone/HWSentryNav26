@@ -1,6 +1,20 @@
 #include <path_planner/nav_map.hpp>
 
 namespace path_planner {
+CostMap::CostMap(
+    const int width,
+    const int height,
+    const double resolution,
+    const double origin_x,
+    const double origin_y,
+    const std::vector<uint8_t>& data
+):  width(width),
+    height(height),
+    resolution(resolution),
+    origin_x(origin_x),
+    origin_y(origin_y),
+    data(data) {}
+
 CostMap::CostMap(const nav_msgs::msg::OccupancyGrid& occupancy_grid):
     width(occupancy_grid.info.width),
     height(occupancy_grid.info.height),
@@ -8,6 +22,19 @@ CostMap::CostMap(const nav_msgs::msg::OccupancyGrid& occupancy_grid):
     origin_x(occupancy_grid.info.origin.position.x),
     origin_y(occupancy_grid.info.origin.position.y),
     data(occupancy_grid.data.begin(), occupancy_grid.data.end()) {}
+
+CostMap CostMap::merge(const CostMap& other) const {
+    if (width != other.width || height != other.height || resolution != other.resolution ||
+        origin_x != other.origin_x || origin_y != other.origin_y) {
+        throw std::runtime_error("Cannot merge cost maps with different parameters");
+    }
+    std::vector<uint8_t> merged_data;
+    merged_data.reserve(data.size());
+    for (size_t i = 0; i < data.size(); i++) {
+        merged_data.push_back(std::max(data[i], other.data[i]));
+    }
+    return CostMap(width, height, resolution, origin_x, origin_y, merged_data);
+}
 
 Eigen::Vector2d CostMap::map_coord_to_grid(const Eigen::Vector2d& map_coord) const {
     return {(map_coord.x() - origin_x) / resolution, (map_coord.y() - origin_y) / resolution};

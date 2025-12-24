@@ -23,19 +23,19 @@ AStarPlanner::AStarPlanner(
     const double direction_weight,
     const double obstacle_weight,
     const int downsampled_waypoint_max_interval,
-    const int occupied_threshold
+    const int feasible_threshold
 ):
     direction_weight_(direction_weight),
     obstacle_weight_(obstacle_weight),
     downsampled_waypoint_max_interval_(downsampled_waypoint_max_interval),
-    occupied_threshold_(occupied_threshold) {}
+    feasible_threshold_(feasible_threshold) {}
 
 double AStarPlanner::heuristic(const Eigen::Vector2i& s, const Eigen::Vector2i& t) const {
-    return (t - s).norm();
+    return std::abs(s.x() - t.x()) + std::abs(s.y() - t.y());
 }
 
 bool AStarPlanner::is_valid(const CostMap& costmap, const Eigen::Vector2i& coord) const {
-    return costmap.is_valid_coord(coord) && costmap.at(coord) <= occupied_threshold_;
+    return costmap.is_valid_coord(coord) && costmap.at(coord) <= feasible_threshold_;
 }
 
 bool AStarPlanner::is_line_safe(
@@ -49,7 +49,7 @@ bool AStarPlanner::is_line_safe(
     int err = dx - dy;
     // Bresenham网格直线遍历
     for (int _ = 0; _ < 100000; _++) {
-        if (costmap.at({x1, y1}) > occupied_threshold_) return false;
+        if (costmap.at({x1, y1}) > feasible_threshold_) return false;
         if (x1 == x2 && y1 == y2) return true;
         const int err2 = err * 2;
         if (err2 > -dy) {

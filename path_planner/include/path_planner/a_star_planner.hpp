@@ -14,7 +14,7 @@ public:
         const double direction_weight,
         const double obstacle_weight,
         const int downsampled_waypoint_max_interval,
-        const int occupied_threshold
+        const int feasible_threshold
     );
     std::vector<Eigen::Vector2i> search_path(
         const CostMap& cost_map,
@@ -43,6 +43,6 @@ private:
         {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
     };
     const double direction_weight_, obstacle_weight_;
-    const int downsampled_waypoint_max_interval_, occupied_threshold_;
+    const int downsampled_waypoint_max_interval_, feasible_threshold_;
 };
 } // namespace path_planner

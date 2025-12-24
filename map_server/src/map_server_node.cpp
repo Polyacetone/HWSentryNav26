@@ -45,23 +45,24 @@ private:
     small_gicp::KdTree<small_gicp::PointCloud>::Ptr global_kdtree_;
     std::deque<small_gicp::PointCloud::Ptr> local_map_cloud_queue_;
 
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr local_map_cloud_sub_;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr direction_map_pub_;
-    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr cost_map_pub_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr local_cloud_sub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr global_direction_map_pub_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_pub_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_dynamic_points_pub_;
-    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_local_cost_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_accumulated_cloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_global_cloud_pub_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     rclcpp::TimerBase::SharedPtr timer_;
 
-    void local_map_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg);
+    void timer_callback();
+    void local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg);
     small_gicp::PointCloud::Ptr preprocess_cloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) const;
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
     cv::Mat dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const;
-    void pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp) const;
-    void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp, rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher) const;
+    void pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher) const;
+    void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp, const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher) const;
     void pub_cloud(const small_gicp::PointCloud& cloud, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher) const;
 };
 
@@ -88,8 +89,6 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     if (enable_debug_) {
         std::string dynamic_points_pub_topic = declare_parameter<std::string>("debug_mode.dynamic_points_pub_topic");
         debug_dynamic_points_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(dynamic_points_pub_topic, 1);
-        std::string local_cost_map_pub_topic = declare_parameter<std::string>("debug_mode.local_cost_map_pub_topic");
-        debug_local_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(local_cost_map_pub_topic, 1);
         std::string accumulated_cloud_pub_topic = declare_parameter<std::string>("debug_mode.accumulated_cloud_pub_topic");
         debug_accumulated_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(accumulated_cloud_pub_topic, 1);
         std::string global_cloud_pub_topic = declare_parameter<std::string>("debug_mode.global_cloud_pub_topic");
@@ -132,23 +131,30 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     RCLCPP_INFO(get_logger(), "Downsampled global point cloud to %zu points", global_point_cloud_->size());
 
     // ROS相关
-    std::string direction_map_pub_topic = declare_parameter<std::string>("direction_map_pub_topic");
-    direction_map_pub_ = create_publisher<sensor_msgs::msg::Image>(direction_map_pub_topic, 1);
-    std::string cost_map_pub_topic = declare_parameter<std::string>("cost_map_pub_topic");
-    cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(cost_map_pub_topic, 1);
-    std::string local_map_cloud_sub_topic = declare_parameter<std::string>("local_map.cloud_sub_topic");
-    local_map_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        local_map_cloud_sub_topic,
-        rclcpp::QoS(1),
-        [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { local_map_cloud_callback(msg); }
+    std::string global_direction_map_pub_topic = declare_parameter<std::string>("global_map.direction_map_pub_topic");
+    global_direction_map_pub_ = create_publisher<sensor_msgs::msg::Image>(global_direction_map_pub_topic, 1);
+    std::string global_cost_map_pub_topic = declare_parameter<std::string>("global_map.cost_map_pub_topic");
+    global_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(global_cost_map_pub_topic, 1);
+    std::string local_cost_map_pub_topic = declare_parameter<std::string>("local_map.cost_map_pub_topic");
+    local_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(local_cost_map_pub_topic, 1);
+    double global_map_pub_freq = declare_parameter<double>("global_map.pub_freq");
+    timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / global_map_pub_freq), [this] { timer_callback(); });
+    std::string local_cloud_sub_topic = declare_parameter<std::string>("local_map.cloud_sub_topic");
+    local_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        local_cloud_sub_topic, 1,
+        [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { local_cloud_callback(msg); }
     );
-
-    // 发布初始全局地图
-    pub_cost_map(global_cost_map_, now(), cost_map_pub_);
-    pub_direction_map(global_direction_map_, now());
 }
 
-void MapServerNode::local_map_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+void MapServerNode::timer_callback() {
+    pub_cost_map(global_cost_map_, now(), global_cost_map_pub_);
+    pub_direction_map(global_direction_map_, now(), global_direction_map_pub_);
+    if (enable_debug_) {
+        pub_cloud(*global_point_cloud_, now(), debug_global_cloud_pub_);
+    }
+}
+
+void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // 预处理点云，累积并下采样
     local_map_cloud_queue_.push_front(preprocess_cloud(msg));
     RCLCPP_DEBUG(get_logger(), "Inserted local cloud into queue with %zu points", local_map_cloud_queue_.front()->points.size());
@@ -181,20 +187,15 @@ void MapServerNode::local_map_cloud_callback(sensor_msgs::msg::PointCloud2::Shar
     }
     RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", dynamic_points.points.size());
 
-    // 动态障碍物分析，生成代价地图
+    // 动态障碍物分析，发布代价地图
     cv::Mat local_cost_map = dynamic_obstacle_analysis(dynamic_points);
-    cv::Mat cost_map = cv::max(global_cost_map_, local_cost_map);
+    pub_cost_map(local_cost_map, msg->header.stamp, local_cost_map_pub_);
 
     // 调试信息发布
     if (enable_debug_) {
-        pub_cost_map(local_cost_map, msg->header.stamp, debug_local_cost_map_pub_);
         pub_cloud(dynamic_points, msg->header.stamp, debug_dynamic_points_pub_);
         pub_cloud(accumulated, msg->header.stamp, debug_accumulated_cloud_pub_);
-        pub_cloud(*global_point_cloud_, msg->header.stamp, debug_global_cloud_pub_);
     }
-
-    pub_cost_map(cost_map, msg->header.stamp, cost_map_pub_);
-    pub_direction_map(global_direction_map_, msg->header.stamp);
 }
 
 small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) const {
@@ -287,17 +288,21 @@ small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::
     return small_gicp_cloud;
 }
 
-void MapServerNode::pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp) const {
+void MapServerNode::pub_direction_map(
+    const cv::Mat& direction_map,
+    const rclcpp::Time& stamp,
+    const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher
+) const {
     sensor_msgs::msg::Image::SharedPtr direction_map_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "8UC2", direction_map).toImageMsg();
     direction_map_msg->header.stamp = stamp;
     direction_map_msg->header.frame_id = "map";
-    direction_map_pub_->publish(*direction_map_msg);
+    publisher->publish(*direction_map_msg);
 }
 
 void MapServerNode::pub_cost_map(
     const cv::Mat& cost_map,
     const rclcpp::Time& stamp,
-    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher
+    const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher
 ) const {
     nav_msgs::msg::OccupancyGrid occupancy_grid;
     occupancy_grid.header.frame_id = "map";

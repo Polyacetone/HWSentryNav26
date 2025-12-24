@@ -9,7 +9,9 @@ class CostMap {
 public:
     using Ptr = std::shared_ptr<CostMap>;
     using ConstPtr = std::shared_ptr<const CostMap>;
+    explicit CostMap(const int width, const int height, const double resolution, const double origin_x, const double origin_y, const std::vector<uint8_t>& data);
     explicit CostMap(const nav_msgs::msg::OccupancyGrid& occupancy_grid);
+    CostMap merge(const CostMap& other) const;
     Eigen::Vector2d map_coord_to_grid(const Eigen::Vector2d& map_coord) const;
     Eigen::Vector2d grid_coord_to_map(const Eigen::Vector2d& grid_coord) const;
 
