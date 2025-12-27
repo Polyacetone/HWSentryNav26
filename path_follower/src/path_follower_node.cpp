@@ -2,12 +2,14 @@
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/buffer.hpp>
 #include <tf2_ros/transform_listener.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <nav_msgs/msg/path.hpp>
-#include <geometry_msgs/msg/twist_stamped.hpp>
+#include <interfaces/msg/chassis_status.hpp>
+#include <interfaces/msg/chassis_cmd.hpp>
 
 #include <common_utils/convert.hpp>
-#include <common_utils/ema_filter.hpp>
+#include <path_follower/mpc_controller.hpp>
 
 namespace path_follower {
 class PathFollowerNode: public rclcpp::Node {
@@ -15,122 +17,138 @@ public:
     explicit PathFollowerNode(const rclcpp::NodeOptions& options);
 
 private:
+    void path_callback(const nav_msgs::msg::Path::SharedPtr msg);
+    void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
     void timer_callback();
-    int find_nearest_point_on_path(const Eigen::Vector2d& point) const;
-    Eigen::Vector2d find_lookahead_point_on_path(const int current_index, const double lookahead_distance) const;
-    void publish_velocity(const Eigen::Vector2d& velocity) const;
-
-    int control_freq_;
-    double max_velocity_, stop_distance_, nearest_point_threshold_, lookahead_distance_basic_;
-
+    
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
-    rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_vel_pub_;
+    rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
+    rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
-    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
-    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
-    nav_msgs::msg::Path path_;
-    std::unique_ptr<utils::EMAFilter<Eigen::Vector2d>> velocity_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
+
+    std::vector<Eigen::Vector3d> path_points_; // 路径(x, y, theta)
+    std::vector<double> path_dist_; // 累积距离
+    Eigen::Vector2d current_status_; // 从串口接收的当前(v, omega)
+    Eigen::Vector2d last_cmd_status_; // MPC给出的上一个控制量(v, omega)
+    
+    MPCParams params_;
+    std::unique_ptr<MPCController> mpc_controller_;
+    double stop_threshold_;
 };
 
 PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+    params_ = {
+        .horizon = (int)declare_parameter<int>("mpc.horizon"),
+        .dt = declare_parameter<double>("mpc.dt"),
+        .target_vel = declare_parameter<double>("mpc.target_vel"),
+        .vel_max = declare_parameter<double>("mpc.vel_max"),
+        .vel_min = declare_parameter<double>("mpc.vel_min"),
+        .omega_max = declare_parameter<double>("mpc.omega_max"),
+        .omega_min = declare_parameter<double>("mpc.omega_min"),
+        .acc_max = declare_parameter<double>("mpc.acc_max"),
+        .alpha_max = declare_parameter<double>("mpc.alpha_max"),
+        .pos_weight = declare_parameter<double>("mpc.weights.pos"),
+        .angle_weight = declare_parameter<double>("mpc.weights.angle"),
+        .vel_smooth_weight = declare_parameter<double>("mpc.weights.vel_smooth"),
+        .omega_smooth_weight = declare_parameter<double>("mpc.weights.omega_smooth"),
+        .acc_limit_weight = declare_parameter<double>("mpc.weights.acc_limit"),
+        .alpha_limit_weight = declare_parameter<double>("mpc.weights.alpha_limit"),
+    };
+    mpc_controller_ = std::make_unique<MPCController>(params_);
+    stop_threshold_ = declare_parameter<double>("stop_threshold");
+    current_status_ = Eigen::Vector2d::Zero();
+    last_cmd_status_ = Eigen::Vector2d::Zero();
 
-    control_freq_ = declare_parameter<int>("control_freq");
-    max_velocity_ = declare_parameter<double>("max_velocity");
-    stop_distance_ = declare_parameter<double>("stop_distance");
-    nearest_point_threshold_ = declare_parameter<double>("nearest_point_threshold");
-    lookahead_distance_basic_ = declare_parameter<double>("lookahead_distance_basic");
-    double ema_filter_ratio = declare_parameter<double>("ema_filter_ratio");
-    velocity_ = std::make_unique<utils::EMAFilter<Eigen::Vector2d>>(ema_filter_ratio);
-
-    std::string path_sub_topic = declare_parameter<std::string>("path_sub_topic");
     path_sub_ = create_subscription<nav_msgs::msg::Path>(
-        path_sub_topic, 1,
-        [this](const nav_msgs::msg::Path::SharedPtr msg) { path_ = *msg; }
+        declare_parameter<std::string>("path_sub_topic"), 1,
+        [this](const nav_msgs::msg::Path::SharedPtr msg) { path_callback(msg); }
     );
-    std::string cmd_vel_pub_topic = declare_parameter<std::string>("cmd_vel_pub_topic");
-    cmd_vel_pub_ = create_publisher<geometry_msgs::msg::TwistStamped>(cmd_vel_pub_topic, 1);
-    timer_ = create_wall_timer(
-        std::chrono::milliseconds(1000 / control_freq_),
-        [this]() { timer_callback(); }
+    chassis_status_sub_ = create_subscription<interfaces::msg::ChassisStatus>(
+        declare_parameter<std::string>("chassis_status_sub_topic"), 1,
+        [this](const interfaces::msg::ChassisStatus::SharedPtr msg) { chassis_status_callback(msg); }
     );
+    chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("chassis_cmd_pub_topic"), 1);
+    timer_ = create_wall_timer(std::chrono::duration<double>(params_.dt), [this]() { timer_callback(); });
+}
+
+void PathFollowerNode::path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
+    if (msg->poses.empty()) return;
+    path_points_.clear();
+    path_dist_.clear();
+    double s = 0.0;
+    for (size_t i = 0; i < msg->poses.size(); i++) {
+        Eigen::Vector3d pt;
+        pt.x() = msg->poses[i].pose.position.x;
+        pt.y() = msg->poses[i].pose.position.y;
+        if (i + 1 < msg->poses.size()) {
+            double dx = msg->poses[i+1].pose.position.x - pt.x();
+            double dy = msg->poses[i+1].pose.position.y - pt.y();
+            pt.z() = atan2(dy, dx);
+        } else if (i > 0) {
+            pt.z() = path_points_.back().z();
+        } else {
+            pt.z() = 0.0;
+        }
+        path_points_.push_back(pt);
+        if (i > 0) {
+            double dist = (path_points_[i].head<2>() - path_points_[i-1].head<2>()).norm();
+            s += dist;
+        }
+        path_dist_.push_back(s);
+    }
+    mpc_controller_->set_path(path_points_, path_dist_);
+}
+
+void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
+    current_status_.x() = msg->velocity;
+    current_status_.y() = msg->palstance;
 }
 
 void PathFollowerNode::timer_callback() {
-    if (path_.poses.size() < 3) {
-        publish_velocity({0, 0});
-        return;
-    }
+    if (path_points_.empty()) return;
 
-    Eigen::Vector2d base_to_map;
+    geometry_msgs::msg::TransformStamped tf;
     try {
-        base_to_map = utils::convert_to<Eigen::Vector3d>(tf_buffer_->lookupTransform(
-            "map", "base", tf2::TimePointZero
-        ).transform.translation)(Eigen::seq(0, 1));
-    } catch (const std::exception& ex) {
-        RCLCPP_WARN(get_logger(), "Failed to lookup base to map: %s", ex.what());
-        publish_velocity({0, 0});
+        tf = tf_buffer_->lookupTransform("map", "chassis_link", tf2::TimePointZero);
+    } catch (const tf2::TransformException& ex) {
+        RCLCPP_WARN(get_logger(), "Could not transform chassis_link to map: %s", ex.what());
         return;
     }
 
-    const Eigen::Vector2d last_point = utils::convert_to<Eigen::Vector3d>(
-        path_.poses[path_.poses.size() - 1].pose.position
-    )(Eigen::seq(0, 1));
-    if ((last_point - base_to_map).norm() < stop_distance_) {
-        publish_velocity({0, 0});
+    Eigen::Vector3d current_pose;
+    current_pose.head<2>() = utils::convert_to<Eigen::Vector3d>(tf.transform.translation).head<2>();
+
+    Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
+    Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
+    if (x_axis.norm() < 1e-6) {
+        RCLCPP_WARN(get_logger(), "Invalid chassis_link orientation");
+        return;
+    }
+    current_pose.z() = atan2(x_axis.y(), x_axis.x());
+
+    if ((path_points_.back().head<2>() - current_pose.head<2>()).norm() < stop_threshold_) {
+        interfaces::msg::ChassisCmd msg;
+        msg.velocity = 0.0;
+        msg.palstance = 0.0;
+        msg.step_ahead = false;
+        chassis_cmd_pub_->publish(msg);
+        last_cmd_status_ = Eigen::Vector2d::Zero();
         return;
     }
 
-    const int nearest_point_idx = find_nearest_point_on_path(base_to_map);
-    if (nearest_point_idx == -1) {
-        RCLCPP_WARN(get_logger(), "Base too far from path!");
-        publish_velocity({0, 0});
-        return;
-    }
+    Eigen::Vector2d cmd_status = mpc_controller_->solve(current_pose, last_cmd_status_);
+    last_cmd_status_ = cmd_status;
 
-    const double lookahead_distance = 1.0 / control_freq_ * velocity_->value().norm() + lookahead_distance_basic_;
-    const Eigen::Vector2d lookahead_point = find_lookahead_point_on_path(nearest_point_idx, lookahead_distance);
-    const Eigen::Vector2d position_diff = lookahead_point - base_to_map;
-    const Eigen::Vector2d velocity = position_diff.normalized() * (position_diff.norm() / lookahead_distance * max_velocity_);
-    publish_velocity(velocity);
-}
-
-int PathFollowerNode::find_nearest_point_on_path(const Eigen::Vector2d& point) const {
-    double min_distance = std::numeric_limits<double>::max();
-    int point_index = -1;
-    for (int i = 0; i < path_.poses.size(); i++) {
-        const Eigen::Vector2d path_point(path_.poses[i].pose.position.x, path_.poses[i].pose.position.y);
-        const double distance = (point - path_point).norm();
-        if (distance < nearest_point_threshold_ && distance < min_distance) {
-            min_distance = distance;
-            point_index = i;
-        }
-    }
-    return point_index;
-}
-
-Eigen::Vector2d PathFollowerNode::find_lookahead_point_on_path(const int current_index, const double lookahead_distance) const {
-    double accumulated_distance = 0;
-    int i;
-    for (i = current_index + 1; i < path_.poses.size(); i++) {
-        const Eigen::Vector2d prev_point(path_.poses[i - 1].pose.position.x, path_.poses[i - 1].pose.position.y);
-        const Eigen::Vector2d curr_point(path_.poses[i].pose.position.x, path_.poses[i].pose.position.y);
-        accumulated_distance += (curr_point - prev_point).norm();
-        if (accumulated_distance > lookahead_distance) break;
-    }
-    return {path_.poses[i].pose.position.x, path_.poses[i].pose.position.y};
-}
-
-void PathFollowerNode::publish_velocity(const Eigen::Vector2d& velocity) const {
-    velocity_->update(velocity);
-    geometry_msgs::msg::TwistStamped msg;
-    msg.header.frame_id = "map";
-    msg.header.stamp = now();
-    msg.twist.linear.x = velocity_->value().x();
-    msg.twist.linear.y = velocity_->value().y();
-    cmd_vel_pub_->publish(msg);
+    interfaces::msg::ChassisCmd msg;
+    msg.velocity = cmd_status.x();
+    msg.palstance = cmd_status.y();
+    msg.step_ahead = false;
+    chassis_cmd_pub_->publish(msg);
 }
 }
 

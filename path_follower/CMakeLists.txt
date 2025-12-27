@@ -21,6 +21,10 @@ target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
 find_package(Eigen3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 
+find_package(Ceres REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${CERES_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${CERES_LIBRARIES})
+
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN path_follower::PathFollowerNode
   EXECUTABLE ${PROJECT_NAME}_node

@@ -1,10 +1,23 @@
 /**:
   ros__parameters:
     path_sub_topic: "/path_planner/path"
-    cmd_vel_pub_topic: "/path_follower/cmd_vel"
-    control_freq: 10
-    max_velocity: 4.0
-    stop_distance: 0.1
-    nearest_point_threshold: 0.3
-    ema_filter_ratio: 0.5
-    lookahead_distance_basic: 0.1
+    chassis_status_sub_topic: "/serial/chassis_status"
+    chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
+    stop_threshold: 0.1 # 停止阈值 (m)
+    mpc:
+      horizon: 10 # 预测步数
+      dt: 0.1 # 预测时间间隔
+      target_vel: 2.9 # 目标速度 (m/s)
+      vel_max: 3.0 # 最大速度 (m/s)
+      vel_min: 0.0 # 最小速度 (m/s)
+      omega_max: 8.0 # 最大角速度 (rad/s)
+      omega_min: -8.0 # 最小角速度 (rad/s)
+      acc_max: 12.0 # 最大加速度 (m/s²)
+      alpha_max: 12.0 # 最大角加速度 (rad/s²)
+      weights: # 权重
+        pos: 4.0 # 位置误差权重
+        angle: 4.0 # 角度误差权重
+        vel_smooth: 0.03 # 速度平滑权重
+        omega_smooth: 0.03 # 角速度平滑权重
+        acc_limit: 20.0 # 加速度限制权重
+        alpha_limit: 20.0 # 角加速度限制权重

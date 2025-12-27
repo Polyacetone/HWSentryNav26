@@ -118,18 +118,18 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
         return;
     }
 
-    tf2::Transform base_to_map;
+    tf2::Transform chassis_to_map;
     try {
-        base_to_map = utils::convert_to<tf2::Transform>(
-            tf_buffer_->lookupTransform("map", "base", tf2::TimePointZero).transform
+        chassis_to_map = utils::convert_to<tf2::Transform>(
+            tf_buffer_->lookupTransform("map", "chassis_link", tf2::TimePointZero).transform
         );
     } catch (const std::exception& ex) {
-        RCLCPP_WARN(get_logger(), "Failed to lookup base to map: %s", ex.what());
+        RCLCPP_WARN(get_logger(), "Failed to lookup chassis_link to map: %s", ex.what());
         return;
     }
 
-    RCLCPP_INFO(get_logger(), "Received new goal: (%.2f, %.2f) -> (%.2f, %.2f)", base_to_map.getOrigin().x(), base_to_map.getOrigin().y(), msg->point.x, msg->point.y);
-    start_grid_ = global_cost_map_->map_coord_to_grid({base_to_map.getOrigin().x(), base_to_map.getOrigin().y()});
+    RCLCPP_INFO(get_logger(), "Received new goal: (%.2f, %.2f) -> (%.2f, %.2f)", chassis_to_map.getOrigin().x(), chassis_to_map.getOrigin().y(), msg->point.x, msg->point.y);
+    start_grid_ = global_cost_map_->map_coord_to_grid({chassis_to_map.getOrigin().x(), chassis_to_map.getOrigin().y()});
     goal_grid_ = global_cost_map_->map_coord_to_grid({msg->point.x, msg->point.y});
     
     // A*搜索得到初始路径，输入输出均为格点坐标系
