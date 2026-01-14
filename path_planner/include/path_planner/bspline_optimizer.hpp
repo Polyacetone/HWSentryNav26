@@ -21,7 +21,8 @@ public:
         const int max_iterations
     );
 
-    std::vector<Eigen::Vector2d> optimize(
+    // 返回优化后的控制点和采样点
+    std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> optimize(
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const std::vector<Eigen::Vector2d>& init_path,

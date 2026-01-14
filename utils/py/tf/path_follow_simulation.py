@@ -29,6 +29,7 @@ class SimulationNode(Node):
         self.theta = 0.0
         self.v = 0.0
         self.omega = 0.0
+        self.last_recv_time = self.get_clock().now()
         
         # Publishers
         self.joint_state_pub = self.create_publisher(JointState, '/serial_bridge/joint_state', 2)
@@ -49,8 +50,13 @@ class SimulationNode(Node):
     def cmd_callback(self, msg):
         self.v = msg.velocity
         self.omega = msg.palstance
+        self.last_recv_time = self.get_clock().now()
 
     def timer_callback(self):
+        if self.get_clock().now() - self.last_recv_time > rclpy.duration.Duration(seconds=0.3):
+            self.v = 0.0
+            self.omega = 0.0
+
         # Update state
         self.x += self.v * math.cos(self.theta) * self.dt
         self.y += self.v * math.sin(self.theta) * self.dt

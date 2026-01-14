@@ -25,15 +25,16 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_sub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr control_points_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_optimized_path_pub_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
 
     CostMap::ConstPtr global_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     Eigen::Vector2d start_grid_, goal_grid_;
-    std::vector<Eigen::Vector2d> rough_path_, optimized_path_;
+    std::vector<Eigen::Vector2d> rough_path_, optimized_path_, control_points_;
     AStarPlanner::ConstPtr path_planner_;
     BSplineOptimizer::ConstPtr path_optimizer_;
     double feasible_threshold_;
@@ -49,10 +50,12 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     feasible_threshold_ = declare_parameter<int>("feasible_threshold");
-    enable_debug_ = declare_parameter<bool>("debug_mode.enable");
+    enable_debug_ = declare_parameter<bool>("debug.enable");
     if (enable_debug_) {
-        std::string rough_path_pub_topic = declare_parameter<std::string>("debug_mode.rough_path_pub_topic");
+        std::string rough_path_pub_topic = declare_parameter<std::string>("debug.rough_path_pub_topic");
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(rough_path_pub_topic, 1);
+        std::string optimized_path_pub_topic = declare_parameter<std::string>("debug.optimized_path_pub_topic");
+        debug_optimized_path_pub_ = create_publisher<nav_msgs::msg::Path>(optimized_path_pub_topic, 1);
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
@@ -108,8 +111,8 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         local_cost_map_sub_topic, 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { local_cost_map_callback(msg); }
     );
-    std::string path_pub_topic = declare_parameter<std::string>("path_pub_topic");
-    path_pub_ = create_publisher<nav_msgs::msg::Path>(path_pub_topic, 1);
+    std::string control_points_pub_topic = declare_parameter<std::string>("control_points_pub_topic");
+    control_points_pub_ = create_publisher<nav_msgs::msg::Path>(control_points_pub_topic, 1);
 }
 
 void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg) {
@@ -146,7 +149,6 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
     optimized_path_.clear();
 
     RCLCPP_DEBUG(get_logger(), "New rough path size: %zu", rough_path_.size());
-    // 发布调试用的原始路径
     if (enable_debug_) {
         std::vector<Eigen::Vector2d> rough_path_map;
         for (auto& pt: rough_path_) {
@@ -158,7 +160,7 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
 
 void PathPlannerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     if (rough_path_.empty()) { // 还没有收到目标点且全局地图，或者A*没有找到路径时发布空路径
-        path_pub_->publish(path_to_nav_msg({}));
+        control_points_pub_->publish(path_to_nav_msg({}));
         return;
     }
 
@@ -166,12 +168,13 @@ void PathPlannerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid
     CostMap final_cost_map = global_cost_map_->merge(local_cost_map);
     if (check_optimized_path_feasibility(local_cost_map)) { // 注意这里使用的是local_cost_map
         // 原来的优化路径仍然可行，直接发布
-        path_pub_->publish(path_to_nav_msg(optimized_path_));
+        control_points_pub_->publish(path_to_nav_msg(control_points_));
+        if (enable_debug_) debug_optimized_path_pub_->publish(path_to_nav_msg(optimized_path_));
         return;
     }
 
     // 优化路径，输入输出均为格点坐标系
-    auto optimized = path_optimizer_->optimize(
+    auto [control_points, sample_points] = path_optimizer_->optimize(
         final_cost_map,
         *global_direction_map_,
         rough_path_,
@@ -179,13 +182,19 @@ void PathPlannerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid
         goal_grid_
     );
 
-    // 最后转换成map坐标系发布
-    optimized_path_.clear();
-    for (auto& pt: optimized) {
-        optimized_path_.push_back(global_cost_map_->grid_coord_to_map(pt));
-    }
-    path_pub_->publish(path_to_nav_msg(optimized_path_));
-    RCLCPP_DEBUG(get_logger(), "New optimized path size: %zu", optimized_path_.size());
+    // 转换到map坐标系并发布
+    const auto to_map_coord = [this](const std::vector<Eigen::Vector2d>& points) {
+        std::vector<Eigen::Vector2d> map_points;
+        for (const auto& pt: points) {
+            map_points.push_back(global_cost_map_->grid_coord_to_map(pt));
+        }
+        return map_points;
+    };
+    control_points_ = to_map_coord(control_points);
+    optimized_path_ = to_map_coord(sample_points);
+    control_points_pub_->publish(path_to_nav_msg(control_points_));
+    if (enable_debug_) debug_optimized_path_pub_->publish(path_to_nav_msg(optimized_path_));
+    RCLCPP_DEBUG(get_logger(), "Published new optimized path with %zu control points and %zu sample points", control_points_.size(), optimized_path_.size());
 }
 
 bool PathPlannerNode::check_optimized_path_feasibility(const CostMap& final_cost_map) const {

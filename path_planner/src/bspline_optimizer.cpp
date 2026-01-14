@@ -159,7 +159,7 @@ BSplineOptimizer::BSplineOptimizer(
     num_samples_per_length_(num_samples_per_length),
     max_iterations_(max_iterations) {}
 
-std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
+std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> BSplineOptimizer::optimize(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const std::vector<Eigen::Vector2d>& init_path,
@@ -168,7 +168,7 @@ std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
 ) const {
     if (init_path.size() <= 2) {
         RCLCPP_WARN(rclcpp::get_logger("bspline_optimizer"), "Path too short to optimize!");
-        return init_path;
+        return {init_path, init_path};
     }
     Spline spline(pad_control_points(init_path));
     ubs::UniformBSplineCeres<Spline> spline_ceres(spline);
@@ -237,11 +237,11 @@ std::vector<Eigen::Vector2d> BSplineOptimizer::optimize(
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
 
-    std::vector<Eigen::Vector2d> optimized;
+    std::vector<Eigen::Vector2d> sample_points;
     for (int i = 0; i < num_samples; i++) {
-        optimized.push_back(spline.evaluate(double(i) / num_samples));
+        sample_points.push_back(spline.evaluate(double(i) / num_samples));
     }
-    return optimized;
+    return {spline.getControlPoints(), sample_points};
 }
 
 std::vector<Eigen::Vector2d> BSplineOptimizer::pad_control_points(const std::vector<Eigen::Vector2d>& path) const {

@@ -4,12 +4,13 @@
     global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图订阅话题
     local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图订阅话题
     goal_sub_topic: "/path_planner/goal" # 目标点订阅话题
-    path_pub_topic: "/path_planner/path" # 规划路径发布话题
+    control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
     feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
 
-    debug_mode:
-      enable: false # 是否启用调试模式
+    debug:
+      enable: true # 是否启用调试模式
       rough_path_pub_topic: "/path_planner/debug/rough_path" # A*原始路径发布话题
+      optimized_path_pub_topic: "/path_planner/debug/optimized_path" # 优化后路径的采样点发布话题
 
     path_planner:
       direction_weight: 2.0 # 方向代价权重

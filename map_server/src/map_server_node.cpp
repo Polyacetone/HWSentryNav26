@@ -85,13 +85,13 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .gaussian_blur_kernel_size = (int)declare_parameter<int>("local_map.gaussian_blur_kernel_size"),
         .gaussian_blur_sigma = declare_parameter<double>("local_map.gaussian_blur_sigma")
     };
-    enable_debug_ = declare_parameter<bool>("debug_mode.enable");
+    enable_debug_ = declare_parameter<bool>("debug.enable");
     if (enable_debug_) {
-        std::string dynamic_points_pub_topic = declare_parameter<std::string>("debug_mode.dynamic_points_pub_topic");
+        std::string dynamic_points_pub_topic = declare_parameter<std::string>("debug.dynamic_points_pub_topic");
         debug_dynamic_points_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(dynamic_points_pub_topic, 1);
-        std::string accumulated_cloud_pub_topic = declare_parameter<std::string>("debug_mode.accumulated_cloud_pub_topic");
+        std::string accumulated_cloud_pub_topic = declare_parameter<std::string>("debug.accumulated_cloud_pub_topic");
         debug_accumulated_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(accumulated_cloud_pub_topic, 1);
-        std::string global_cloud_pub_topic = declare_parameter<std::string>("debug_mode.global_cloud_pub_topic");
+        std::string global_cloud_pub_topic = declare_parameter<std::string>("debug.global_cloud_pub_topic");
         debug_global_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(global_cloud_pub_topic, 1);
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");

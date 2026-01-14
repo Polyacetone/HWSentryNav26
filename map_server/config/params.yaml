@@ -3,7 +3,7 @@
     map_resolution: 0.2 # 地图的每格大小，单位m
     num_threads: 4 # 用于点云处理的线程数
 
-    debug_mode:
+    debug:
       enable: false # 是否启用调试模式
       global_cloud_pub_topic: "/map_server/debug/global_map_cloud" # 全局点云发布话题名称
       accumulated_cloud_pub_topic: "/map_server/debug/accumulated_local_cloud" # 累积局部点云发布话题名称
