@@ -8,24 +8,24 @@
       horizon: 8 # 预测步数
       dt: 0.1 # 预测时间间隔
       projection: # 投影参数
-        num_samples: 30 # 投影到样条参数u时的采样数
+        num_samples: 50 # 投影到样条参数u时的采样数
         search_window: 0.1 # 局部搜索窗口大小（0~1）
         max_correspondence_distance: 1.0 # 最大对应点距离 (m)
       thresholds: # 运动限制
         vel_max: 3.0 # 最大速度 (m/s)
-        vel_min: 0.0 # 最小速度 (m/s)
+        vel_min: 0.1 # 最小速度 (m/s)
         omega_max: 6.0 # 最大角速度 (rad/s)
         omega_min: -6.0 # 最小角速度 (rad/s)
         acc_max: 12.0 # 最大加速度 (m/s²)
         alpha_max: 12.0 # 最大角加速度 (rad/s²)
       weights: # 权重
         q_y: 3.0 # 横向误差权重
-        q_theta: 5.0 # 航向误差权重
-        q_u: 1.0 # 进度项权重
+        q_theta: 3.0 # 航向误差权重
+        q_u: 4.0 # 进度项权重
         q_v_final: 0.1 # 终点速度为0权重
         r_v: 0.001 # 线速度正则
-        r_omega: 0.005 # 角速度正则
-        r_dv: 0.01 # 线速度平滑
-        r_domega: 0.01 # 角速度平滑
-        acc_limit: 20.0 # 超过加速度上限的惩罚
-        alpha_limit: 20.0 # 超过角加速度上限的惩罚
+        r_omega: 0.001 # 角速度正则
+        r_dv: 0.1 # 线速度平滑
+        r_domega: 0.1 # 角速度平滑
+        acc_limit: 100.0 # 超过加速度上限的惩罚
+        alpha_limit: 100.0 # 超过角加速度上限的惩罚

@@ -13,7 +13,7 @@ public:
 
     explicit BSplineOptimizer(
         const double smoothness_weight,
-        const double length_weight,
+        const double uniform_speed_weight,
         const double obstacle_weight,
         const double direction_weight,
         const double start_end_weight,
@@ -32,7 +32,7 @@ public:
 
 private:
     const double smoothness_weight_;
-    const double length_weight_;
+    const double uniform_speed_weight_;
     const double obstacle_weight_;
     const double direction_weight_;
     const double start_end_weight_;

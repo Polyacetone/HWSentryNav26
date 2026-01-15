@@ -20,22 +20,20 @@ private:
     void control_points_callback(const nav_msgs::msg::Path::SharedPtr msg);
     void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
     void timer_callback();
+    void publish_chassis_cmd(double velocity, double palstance, bool step_ahead);
     
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr control_points_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
-
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
-
-    std::vector<Eigen::Vector2d> control_points_; // B样条控制点(x, y)
-    Eigen::Vector2d current_status_; // 从串口接收的当前(v, omega)
-    Eigen::Vector2d last_cmd_status_; // MPC给出的上一个控制量(v, omega)
     
     MPCParams params_;
     std::unique_ptr<MPCController> mpc_controller_;
     double stop_threshold_;
+
+    Eigen::Vector2d current_status_ = Eigen::Vector2d::Zero(); // 从串口接收的当前(v, omega)
 };
 
 PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower", options) {
@@ -66,8 +64,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     };
     mpc_controller_ = std::make_unique<MPCController>(params_);
     stop_threshold_ = declare_parameter<double>("stop_threshold");
-    current_status_ = Eigen::Vector2d::Zero();
-    last_cmd_status_ = Eigen::Vector2d::Zero();
 
     control_points_sub_ = create_subscription<nav_msgs::msg::Path>(
         declare_parameter<std::string>("control_points_sub_topic"), 1,
@@ -82,18 +78,18 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
 }
 
 void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::SharedPtr msg) {
+    std::vector<Eigen::Vector2d> control_points;
     if (msg->poses.size() < 3) {
         if (!msg->poses.empty()) {
             RCLCPP_WARN(get_logger(), "Received insufficient control points (%zu), need at least 3!", msg->poses.size());
         }
-        control_points_.clear();
-        return;
+    } else {
+        control_points.reserve(msg->poses.size());
+        for (const auto& ps : msg->poses) {
+            control_points.emplace_back(ps.pose.position.x, ps.pose.position.y);
+        }
     }
-    control_points_.clear();
-    control_points_.reserve(msg->poses.size());
-    for (const auto& ps : msg->poses) {
-        control_points_.emplace_back(ps.pose.position.x, ps.pose.position.y);
-    }
+    mpc_controller_->set_control_points(control_points);
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
@@ -102,13 +98,16 @@ void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisSta
 }
 
 void PathFollowerNode::timer_callback() {
-    if (control_points_.empty()) return;
+    if (!mpc_controller_->has_control_points()) {
+        publish_chassis_cmd(0, 0, false);
+        return;
+    }
 
     geometry_msgs::msg::TransformStamped tf;
     try {
         tf = tf_buffer_->lookupTransform("map", "chassis_link", tf2::TimePointZero);
     } catch (const tf2::TransformException& ex) {
-        RCLCPP_WARN(get_logger(), "Could not transform chassis_link to map: %s", ex.what());
+        RCLCPP_ERROR(get_logger(), "Could not transform chassis_link to map: %s", ex.what());
         return;
     }
 
@@ -118,28 +117,27 @@ void PathFollowerNode::timer_callback() {
     Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
     Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
     if (x_axis.norm() < 1e-6) {
-        RCLCPP_WARN(get_logger(), "Invalid chassis_link orientation");
+        RCLCPP_ERROR(get_logger(), "Invalid chassis_link orientation");
         return;
     }
     current_pose.z() = atan2(x_axis.y(), x_axis.x());
 
-    if ((mpc_controller_->get_end_position(control_points_) - current_pose.head<2>()).norm() < stop_threshold_) {
-        interfaces::msg::ChassisCmd msg;
-        msg.velocity = 0.0;
-        msg.palstance = 0.0;
-        msg.step_ahead = false;
-        chassis_cmd_pub_->publish(msg);
-        last_cmd_status_ = Eigen::Vector2d::Zero();
+    if ((mpc_controller_->get_destination() - current_pose.head<2>()).norm() < stop_threshold_) {
+        RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", current_pose.x(), current_pose.y());
+        publish_chassis_cmd(0, 0, false);
+        mpc_controller_->set_control_points({});
         return;
     }
 
-    Eigen::Vector2d cmd_status = mpc_controller_->solve(control_points_, current_pose, last_cmd_status_);
-    last_cmd_status_ = cmd_status;
+    Eigen::Vector2d cmd_status = mpc_controller_->step(current_pose);
+    publish_chassis_cmd(cmd_status.x(), cmd_status.y(), false);
+}
 
+void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_ahead) {
     interfaces::msg::ChassisCmd msg;
-    msg.velocity = cmd_status.x();
-    msg.palstance = cmd_status.y();
-    msg.step_ahead = false;
+    msg.velocity = velocity;
+    msg.palstance = palstance;
+    msg.step_ahead = step_ahead;
     chassis_cmd_pub_->publish(msg);
 }
 }

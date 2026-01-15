@@ -5,6 +5,7 @@
     local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图订阅话题
     goal_sub_topic: "/path_planner/goal" # 目标点订阅话题
     control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
+    lazy_distance: 1.0 # 如果目标点距离当前点小于该值，则不进行路径规划（单位：米）
     feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
 
     debug:
@@ -18,10 +19,10 @@
       downsampled_waypoint_max_interval: 5 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
 
     path_optimizer:
-      smoothness_weight: 0.1 # 平滑代价权重
-      length_weight: 0.05 # 长度代价权重
-      obstacle_weight: 3.0 # 障碍物代价权重
+      smoothness_weight: 0.2 # 平滑代价权重
+      uniform_speed_weight: 0.1 # 速度均匀代价权重
+      obstacle_weight: 5.0 # 障碍物代价权重
       direction_weight: 2.0 # 方向代价权重
       start_end_weight: 1000.0 # 起终点保持代价权重
-      num_samples_per_length: 1.5 # 每长度采样点个数，用于计算障碍物代价等（长度以格子为单位）
+      num_samples_per_length: 1.5 # 每长度采样点个数，用于计算障碍物代价等（以格子为单位）
       max_iterations: 50 # 优化的最大迭代次数

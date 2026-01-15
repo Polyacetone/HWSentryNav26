@@ -44,6 +44,7 @@ class SimulationNode(Node):
         
         # Timer
         self.timer = self.create_timer(self.dt, self.timer_callback)
+        self.timer_count = 0
         
         self.get_logger().info("Simulation Node Started")
 
@@ -53,6 +54,7 @@ class SimulationNode(Node):
         self.last_recv_time = self.get_clock().now()
 
     def timer_callback(self):
+        self.timer_count += 1
         if self.get_clock().now() - self.last_recv_time > rclpy.duration.Duration(seconds=0.3):
             self.v = 0.0
             self.omega = 0.0
@@ -108,11 +110,13 @@ class SimulationNode(Node):
         odom_msg.pose.pose.orientation = euler_to_quaternion(0, 0, self.theta)
         self.odom_pub.publish(odom_msg)
 
-        cloud_msg = PointCloud2()
-        cloud_msg.header.stamp = self.get_clock().now().to_msg()
-        cloud_msg.header.frame_id = "odom"
-        self.cloud_publisher.publish(cloud_msg)
-
+        # Publish PointCloud2 (Every 10 cycles)
+        if self.timer_count % 10 == 0:
+            cloud_msg = PointCloud2()
+            cloud_msg.header.stamp = self.get_clock().now().to_msg()
+            cloud_msg.header.frame_id = "odom"
+            self.cloud_publisher.publish(cloud_msg)
+    
 def main(args=None):
     rclpy.init(args=args)
     node = SimulationNode()

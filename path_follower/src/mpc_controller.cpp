@@ -85,7 +85,7 @@ struct MPCCostFuncor {
             residuals[res_idx++] = T(std::sqrt(params_.r_domega)) * domega;
 
             // 终点速度为0约束
-            T terminal_weight = ceres::fmax(T(0.0), ceres::fmin(T(1.0), (u - T(0.99)) / T(0.01)));
+            T terminal_weight = ceres::fmax(T(0.0), ceres::fmin(T(1.0), (u - T(0.999)) / T(0.001)));
             residuals[res_idx++] = T(std::sqrt(params_.q_v_final)) * terminal_weight * v;
 
             // 软加速度限制
@@ -118,17 +118,18 @@ struct MPCCostFuncor {
         return true;
     }
 
-    ubs::UniformBSplineCeresGenerator<SplineT> generator_;
-    int num_control_points_{0};
-    Eigen::Vector3d start_point_;
-    double u0_{0.0};
-    Eigen::Vector2d start_state_;
-    MPCParams params_;
+    const ubs::UniformBSplineCeresGenerator<SplineT> generator_;
+    const int num_control_points_;
+    const Eigen::Vector3d start_point_;
+    const double u0_;
+    const Eigen::Vector2d start_state_;
+    const MPCParams params_;
 };
 }
 
 namespace path_follower {
 MPCController::MPCController(const MPCParams& params) : params_(params) {}
+bool MPCController::has_control_points() const { return !control_points_.empty(); }
 
 double project_to_spline_u(
     const SplineD& spline,
@@ -182,12 +183,8 @@ double project_to_spline_u(
     return -1.0;
 }
 
-Eigen::Vector2d MPCController::solve(
-    const std::vector<Eigen::Vector2d>& control_points,
-    const Eigen::Vector3d& current_pose,
-    const Eigen::Vector2d& last_cmd_status
-) {
-    SplineD spline(control_points);
+Eigen::Vector2d MPCController::step(const Eigen::Vector3d& current_pose) {
+    SplineD spline(control_points_);
     spline.setExtrapolate(true);
 
     const double u0 = project_to_spline_u(
@@ -198,17 +195,17 @@ Eigen::Vector2d MPCController::solve(
         params_.proj_search_window,
         params_.max_correspondence_distance
     );
-    if (u0 < 0.0) {
+    if (u0 < 0) {
         RCLCPP_ERROR(rclcpp::get_logger("path_follower"), "Failed to project current position to spline!");
         return Eigen::Vector2d::Zero();
     }
     last_u_ = u0;
 
     // 控制点作为常量参数块传入 cost functor，允许在 Jet 下评估样条
-    const int num_cps = static_cast<int>(control_points.size());
+    const int num_cps = static_cast<int>(control_points_.size());
     std::vector<std::array<double, 2>> control_point_blocks;
     control_point_blocks.reserve(num_cps);
-    for (const auto& p : control_points) {
+    for (const auto& p : control_points_) {
         control_point_blocks.push_back({p.x(), p.y()});
     }
 
@@ -217,15 +214,15 @@ Eigen::Vector2d MPCController::solve(
     
     ceres::Problem problem;
     auto* cost_function = new ceres::DynamicAutoDiffCostFunction<MPCCostFuncor>(
-        new MPCCostFuncor(generator, num_cps, current_pose, u0, last_cmd_status, params_)
+        new MPCCostFuncor(generator, num_cps, current_pose, u0, last_cmd_status_, params_)
     );
 
     std::vector<std::vector<double>> controls(params_.horizon, std::vector<double>(2));
     
     // 初始解给上一次的控制量
     for (int i = 0; i < params_.horizon; i++) {
-        controls[i][0] = last_cmd_status.x();
-        controls[i][1] = last_cmd_status.y();
+        controls[i][0] = last_cmd_status_.x();
+        controls[i][1] = last_cmd_status_.y();
         cost_function->AddParameterBlock(2);
     }
 
@@ -264,12 +261,19 @@ Eigen::Vector2d MPCController::solve(
     ceres::Solve(options, &problem, &summary);
 
     Eigen::Vector2d cmd_status(controls[0][0], controls[0][1]);
+    last_cmd_status_ = cmd_status;
     return cmd_status;
 }
 
-Eigen::Vector2d MPCController::get_end_position(const std::vector<Eigen::Vector2d>& control_points) const {
-    SplineD spline(control_points);
+Eigen::Vector2d MPCController::get_destination() const {
+    SplineD spline(control_points_);
     spline.setExtrapolate(true);
     return spline.evaluate(1.0);
+}
+
+void MPCController::set_control_points(const std::vector<Eigen::Vector2d>& control_points) {
+    control_points_ = control_points;
+    last_u_ = 0.0;
+    last_cmd_status_ = Eigen::Vector2d::Zero();
 }
 }

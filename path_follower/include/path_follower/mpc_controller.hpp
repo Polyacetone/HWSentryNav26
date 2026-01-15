@@ -39,15 +39,15 @@ class MPCController {
 public:
     explicit MPCController(const MPCParams& params);
 
-    Eigen::Vector2d get_end_position(const std::vector<Eigen::Vector2d>& control_points) const;
-    Eigen::Vector2d solve(
-        const std::vector<Eigen::Vector2d>& control_points,
-        const Eigen::Vector3d& current_pose,
-        const Eigen::Vector2d& last_cmd_status
-    );
+    void set_control_points(const std::vector<Eigen::Vector2d>& control_points);
+    bool has_control_points() const;
+    Eigen::Vector2d get_destination() const;
+    Eigen::Vector2d step(const Eigen::Vector3d& current_pose);
 
 private:
-    MPCParams params_;
-    double last_u_{0.0};
+    const MPCParams params_;
+    std::vector<Eigen::Vector2d> control_points_;
+    Eigen::Vector2d last_cmd_status_ = Eigen::Vector2d::Zero();
+    double last_u_ = 0;
 };
 }

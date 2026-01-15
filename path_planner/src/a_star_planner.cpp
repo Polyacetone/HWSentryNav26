@@ -7,7 +7,7 @@
 #include <path_planner/nav_map.hpp>
 
 namespace path_planner {
-constexpr int MIN_PATH_SIZE = 5;
+constexpr int MIN_PATH_SIZE = 3;
 
 struct Node {
     using Ptr = std::shared_ptr<Node>;
@@ -71,8 +71,9 @@ std::vector<Eigen::Vector2i> AStarPlanner::search_path(
     const Eigen::Vector2i& start_grid,
     const Eigen::Vector2i& goal_grid
 ) const {
-    if ((start_grid - goal_grid).norm() < 2) {
-        RCLCPP_WARN(rclcpp::get_logger("a_star_planner"), "Start and goal too close!");
+    // 保证路径长度大于等于MIN_PATH_SIZE
+    if (std::max(std::abs(start_grid.x() - goal_grid.x()), std::abs(start_grid.y() - goal_grid.y())) < MIN_PATH_SIZE) {
+        RCLCPP_ERROR(rclcpp::get_logger("a_star_planner"), "Start and goal too close!");
         return {};
     }
     if (!costmap.is_valid_coord(start_grid)) {
@@ -197,21 +198,13 @@ std::vector<Eigen::Vector2i> AStarPlanner::search_path(
     // 路径降采样
     const int resolution = std::min<int>(
         downsampled_waypoint_max_interval_,
-        std::max<int>(raw_path.size() / (MIN_PATH_SIZE - 1), 1) // 使路径点最好不少于MIN_PATH_SIZE个
+        std::max<int>((raw_path.size() - 1) / (MIN_PATH_SIZE - 1), 1) // 使路径点不少于MIN_PATH_SIZE个
     );
     std::vector<Eigen::Vector2i> downsampled_path;
-    for (int i = 0; i < int(raw_path.size()) - resolution; i += resolution) {
+    for (int i = 0; i < raw_path.size() - resolution; i += resolution) {
         downsampled_path.emplace_back(raw_path[i]);
     }
     downsampled_path.emplace_back(raw_path[raw_path.size() - 1]);
-    // 如果路径点数为2，插值成3个（由前面逻辑保证点数大于等于2且起点终点不在相邻格子）
-    if (downsampled_path.size() == 2) {
-        downsampled_path = {
-            downsampled_path[0],
-            (downsampled_path[0] + downsampled_path[1]) / 2,
-            downsampled_path[1]
-        };
-    }
 
     return downsampled_path;
 }

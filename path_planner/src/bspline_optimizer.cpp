@@ -138,6 +138,30 @@ private:
     const Eigen::Vector2d target_;
     const double weight_;
 };
+
+// 速度均匀代价，自动求导
+class UniformSpeedCostFunction {
+public:
+    UniformSpeedCostFunction(
+        const ubs::UniformBSplineCeresEvaluator<Spline>& vel_evaluator,
+        double target_speed,
+        double weight
+    ) : vel_evaluator_(vel_evaluator), target_speed_(target_speed), weight_(weight) {}
+
+    template <typename T>
+    bool operator()(T const* const p0, T const* const p1, T const* const p2, T* residuals) const {
+        T vel[2];
+        vel_evaluator_.evaluate(p0, p1, p2, vel);
+        T speed = ceres::sqrt(vel[0] * vel[0] + vel[1] * vel[1] + T(1e-8));
+        residuals[0] = T(weight_) * (speed - T(target_speed_));
+        return true;
+    }
+
+private:
+    const ubs::UniformBSplineCeresEvaluator<Spline> vel_evaluator_;
+    const double target_speed_;
+    const double weight_;
+};
 }
 
 // 路径优化器主类实现
@@ -152,7 +176,7 @@ BSplineOptimizer::BSplineOptimizer(
     const int max_iterations
 ):
     smoothness_weight_(smoothness_weight),
-    length_weight_(length_weight),
+    uniform_speed_weight_(length_weight),
     obstacle_weight_(obstacle_weight),
     direction_weight_(direction_weight),
     start_end_weight_(start_end_weight),
@@ -170,19 +194,17 @@ std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> BSplineOp
         RCLCPP_WARN(rclcpp::get_logger("bspline_optimizer"), "Path too short to optimize!");
         return {init_path, init_path};
     }
-    Spline spline(pad_control_points(init_path));
+    Spline spline(init_path);
     ubs::UniformBSplineCeres<Spline> spline_ceres(spline);
     auto& control_points = spline.getControlPointsContainer();
     using ContainerT = ubs::FixedSizeContainerTypeTrait<Eigen::Vector2d>;
     ceres::Problem problem;
 
-    // 添加长度代价（最小化路径速度的平方积分）
-    spline_ceres.addSmoothnessResiduals<1>(problem, length_weight_);
-
-    // 添加光滑度代价（最小化路径加速度的平方积分）
+    // 添加光滑度代价
     spline_ceres.addSmoothnessResiduals<2>(problem, smoothness_weight_);
 
-    const int num_samples = num_samples_per_length_ * estimate_path_length(init_path);
+    const double path_length = estimate_path_length(init_path);
+    const int num_samples = num_samples_per_length_ * path_length;
     std::vector<double*> parameter_pointers(spline_ceres.getNumPointParameterPointers());
     for (int i = 0; i < num_samples; i++) {
         const double pos_u = double(i) / double(num_samples);
@@ -201,6 +223,15 @@ std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> BSplineOp
         // 对于每个采样点添加方向代价
         problem.AddResidualBlock(
             new DirectionCostFunction(pos_evaluator, vel_evaluator, direction_map, direction_weight_),
+            nullptr,
+            parameter_pointers
+        );
+
+        // 对于每个采样点添加速度均匀代价
+        problem.AddResidualBlock(
+            new ceres::AutoDiffCostFunction<UniformSpeedCostFunction, 1, 2, 2, 2>(
+                new UniformSpeedCostFunction(vel_evaluator, path_length * 0.5, uniform_speed_weight_)
+            ),
             nullptr,
             parameter_pointers
         );
@@ -242,14 +273,6 @@ std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> BSplineOp
         sample_points.push_back(spline.evaluate(double(i) / num_samples));
     }
     return {spline.getControlPoints(), sample_points};
-}
-
-std::vector<Eigen::Vector2d> BSplineOptimizer::pad_control_points(const std::vector<Eigen::Vector2d>& path) const {
-    std::vector<Eigen::Vector2d> patched;
-    patched.push_back(path[0]);
-    patched.insert(patched.end(), path.begin(), path.end());
-    patched.push_back(path[path.size() - 1]);
-    return patched;
 }
 
 double BSplineOptimizer::estimate_path_length(const std::vector<Eigen::Vector2d>& path) const {
