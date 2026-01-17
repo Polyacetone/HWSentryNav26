@@ -91,7 +91,7 @@ bool Mapping::is_keyframe(const EstimationFrame::ConstPtr& frame) {
             return overlap < params->max_keyframe_overlap;
         }
     }
-    __builtin_unreachable();
+    std::unreachable();
 }
 
 void Mapping::add_keyframe(const EstimationFrame::ConstPtr& frame) {    

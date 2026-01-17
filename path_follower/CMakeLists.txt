@@ -21,6 +21,10 @@ target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
 find_package(Eigen3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 
+find_package(OpenCV REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
+
 find_package(Ceres REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${CERES_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${CERES_LIBRARIES})

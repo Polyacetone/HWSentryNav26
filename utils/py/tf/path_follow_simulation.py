@@ -20,15 +20,14 @@ class SimulationNode(Node):
     def __init__(self):
         super().__init__('simulation_node')
         
-        # Parameters
-        self.dt = 0.01
-        
         # State
         self.x = 2.0
         self.y = 5.0
         self.theta = 0.0
         self.v = 0.0
+        self.last_v = 0.0
         self.omega = 0.0
+        self.last_omega = 0.0
         self.last_recv_time = self.get_clock().now()
         
         # Publishers
@@ -43,14 +42,22 @@ class SimulationNode(Node):
         self.create_subscription(ChassisCmd, '/path_follower/chassis_cmd', self.cmd_callback, 2)
         
         # Timer
-        self.timer = self.create_timer(self.dt, self.timer_callback)
+        self.timer = self.create_timer(0.01, self.timer_callback)
         self.timer_count = 0
         
         self.get_logger().info("Simulation Node Started")
 
     def cmd_callback(self, msg):
+        self.last_v = self.v
+        self.last_omega = self.omega
         self.v = msg.velocity
         self.omega = msg.palstance
+        if abs(self.v - self.last_v) / 0.1 > 3.0:
+            print("High acceleration detected: ", abs(self.v - self.last_v) / 0.1)
+            self.v = 0.1 * (3.0 * (1 if self.v - self.last_v > 0 else -1)) + self.last_v
+        if abs(self.omega - self.last_omega) / 0.1 > 8.0:
+            print("High angular acceleration detected: ", abs(self.omega - self.last_omega) / 0.1)
+            self.omega = 0.1 * (8.0 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
         self.last_recv_time = self.get_clock().now()
 
     def timer_callback(self):
@@ -58,11 +65,13 @@ class SimulationNode(Node):
         if self.get_clock().now() - self.last_recv_time > rclpy.duration.Duration(seconds=0.3):
             self.v = 0.0
             self.omega = 0.0
+            self.last_v = 0.0
+            self.last_omega = 0.0
 
         # Update state
-        self.x += self.v * math.cos(self.theta) * self.dt
-        self.y += self.v * math.sin(self.theta) * self.dt
-        self.theta += self.omega * self.dt
+        self.x += self.v * math.cos(self.theta) * 0.01
+        self.y += self.v * math.sin(self.theta) * 0.01
+        self.theta += self.omega * 0.01
         
         # Publish Imu (imu_link in imu_world)
         imu_msg = Imu()

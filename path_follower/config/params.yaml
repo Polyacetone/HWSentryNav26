@@ -1,31 +1,43 @@
 /**:
   ros__parameters:
     control_points_sub_topic: "/path_planner/control_points"
+    global_direction_map_sub_topic: "/map_server/global_direction_map"
+    global_cost_map_sub_topic: "/map_server/global_cost_map"
+    local_cost_map_sub_topic: "/map_server/local_cost_map"
     chassis_status_sub_topic: "/serial/chassis_status"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
-    stop_threshold: 0.3 # 停止阈值 (m)
-    mpc:
-      horizon: 8 # 预测步数
+    stop_threshold: 0.1 # 停止阈值 (m)
+
+    debug:
+      enable: true
+      predicted_path_pub_topic: "/path_follower/debug/predicted_path"
+
+    teb:
+      horizon: 20 # 预测步数
       dt: 0.1 # 预测时间间隔
+      max_iterations: 50 # 最大迭代次数
+      num_threads: 4 # 优化线程数
       projection: # 投影参数
         num_samples: 50 # 投影到样条参数u时的采样数
         search_window: 0.1 # 局部搜索窗口大小（0~1）
         max_correspondence_distance: 1.0 # 最大对应点距离 (m)
       thresholds: # 运动限制
-        vel_max: 3.0 # 最大速度 (m/s)
+        vel_max: 2.8 # 最大速度 (m/s)
         vel_min: 0.1 # 最小速度 (m/s)
-        omega_max: 6.0 # 最大角速度 (rad/s)
-        omega_min: -6.0 # 最小角速度 (rad/s)
-        acc_max: 12.0 # 最大加速度 (m/s²)
-        alpha_max: 12.0 # 最大角加速度 (rad/s²)
+        omega_max: 7.2 # 最大角速度 (rad/s)
+        omega_min: -7.2 # 最小角速度 (rad/s)
+        acc_max: 2.5 # 最大加速度 (m/s²)
+        alpha_max: 7.2 # 最大角加速度 (rad/s²)
       weights: # 权重
-        q_y: 3.0 # 横向误差权重
+        q_y: 2.0 # 横向误差权重
         q_theta: 3.0 # 航向误差权重
         q_u: 4.0 # 进度项权重
-        q_v_final: 0.1 # 终点速度为0权重
+        q_v_final: 0.5 # 终点速度为0权重
         r_v: 0.001 # 线速度正则
         r_omega: 0.001 # 角速度正则
-        r_dv: 0.1 # 线速度平滑
-        r_domega: 0.1 # 角速度平滑
+        r_dv: 0.15 # 线速度平滑
+        r_domega: 0.05 # 角速度平滑
         acc_limit: 100.0 # 超过加速度上限的惩罚
         alpha_limit: 100.0 # 超过角加速度上限的惩罚
+        obstacle: 1.2 # 避障权重（使用合并代价地图：全局+局部）
+        direction: 0.8 # 台阶方向对齐权重（使用全局方向场）

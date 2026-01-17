@@ -196,7 +196,7 @@ Eigen::Matrix4d CloudCovarianceEstimation::regularize(
             return C_;
         }
     }
-    __builtin_unreachable();
+    std::unreachable();
 }
 
 }

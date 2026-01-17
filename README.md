@@ -8,9 +8,6 @@
 ### ROS2-Jazzy
 推荐使用[鱼香ROS自动安装脚本](https://github.com/fishros/install)。
 
-### Boost
-推荐使用apt安装：`sudo apt install libboost-all-dev`。
-
 ### Eigen3
 推荐使用apt安装：`sudo apt install libeigen3-dev`。
 
