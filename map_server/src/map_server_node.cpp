@@ -228,10 +228,10 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
     Eigen::Vector3d lidar_to_map;
     try {
         lidar_to_map = utils::convert_to<Eigen::Isometry3d>(
-            tf_buffer_->lookupTransform("map", "lidar", tf2::TimePointZero).transform
+            tf_buffer_->lookupTransform("map", "lidar_link", tf2::TimePointZero).transform
         ).translation().head<3>();
     } catch (const std::exception& ex) {
-        RCLCPP_WARN(get_logger(), "Failed to lookup lidar to map: %s", ex.what());
+        RCLCPP_WARN(get_logger(), "Failed to lookup lidar_link to map: %s", ex.what());
         return preprocessed;
     }
 
@@ -293,7 +293,9 @@ void MapServerNode::pub_direction_map(
     const rclcpp::Time& stamp,
     const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher
 ) const {
-    sensor_msgs::msg::Image::SharedPtr direction_map_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "8UC2", direction_map).toImageMsg();
+    sensor_msgs::msg::Image::SharedPtr direction_map_msg = cv_bridge::CvImage(
+        std_msgs::msg::Header(), "8UC2", direction_map
+    ).toImageMsg();
     direction_map_msg->header.stamp = stamp;
     direction_map_msg->header.frame_id = "map";
     publisher->publish(*direction_map_msg);

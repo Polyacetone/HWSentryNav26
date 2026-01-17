@@ -12,11 +12,11 @@
       enable: true
       predicted_path_pub_topic: "/path_follower/debug/predicted_path"
 
-    teb:
-      horizon: 20 # 预测步数
+    mpc:
+      horizon: 15 # 预测步数
       dt: 0.1 # 预测时间间隔
-      max_iterations: 50 # 最大迭代次数
-      num_threads: 4 # 优化线程数
+      max_iterations: 100 # 最大迭代次数
+      num_threads: 2 # 优化线程数
       projection: # 投影参数
         num_samples: 50 # 投影到样条参数u时的采样数
         search_window: 0.1 # 局部搜索窗口大小（0~1）
@@ -28,16 +28,25 @@
         omega_min: -7.2 # 最小角速度 (rad/s)
         acc_max: 2.5 # 最大加速度 (m/s²)
         alpha_max: 7.2 # 最大角加速度 (rad/s²)
+        vel_max_on_step: 1.0 # 台阶区域最大速度 (m/s)
+        v_omega_product_max: 3.5 # |v*omega| 最大值软约束 (m/s * rad/s)
       weights: # 权重
-        q_y: 2.0 # 横向误差权重
-        q_theta: 3.0 # 航向误差权重
-        q_u: 4.0 # 进度项权重
-        q_v_final: 0.5 # 终点速度为0权重
-        r_v: 0.001 # 线速度正则
-        r_omega: 0.001 # 角速度正则
-        r_dv: 0.15 # 线速度平滑
-        r_domega: 0.05 # 角速度平滑
-        acc_limit: 100.0 # 超过加速度上限的惩罚
-        alpha_limit: 100.0 # 超过角加速度上限的惩罚
-        obstacle: 1.2 # 避障权重（使用合并代价地图：全局+局部）
-        direction: 0.8 # 台阶方向对齐权重（使用全局方向场）
+        q_y: 0.4 # 横向误差权重
+        q_theta: 0.1 # 航向误差权重
+        q_u: 1.0 # 进度项权重
+        q_v_final: 0.3 # 终点速度为0权重
+        r_v: 0.03 # 线速度正则
+        r_omega: 0.03 # 角速度正则
+        r_dv: 0.1 # 线速度平滑
+        r_domega: 0.1 # 角速度平滑
+        acc_limit: 10.0 # 超过加速度上限的惩罚
+        alpha_limit: 10.0 # 超过角加速度上限的惩罚
+        vel_max_on_step: 3.0 # 台阶区域限速权重
+        v_omega_product: 7.0 # 超过 |v*omega| 上限的惩罚
+        obstacle: 2.0 # 避障权重（全局+局部）
+        direction: 1.0 # 台阶方向对齐权重
+
+    step_ahead:
+      window_back: 0.1 # 当前在全局路径上的后方窗口 (m)
+      window_front: 1.2 # 当前在全局路径上的前方窗口 (m)
+      sample_step: 0.05 # 沿样条弧长采样间隔 (m)

@@ -12,9 +12,11 @@
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/chassis_cmd.hpp>
 
+#include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
 #include <path_follower/nav_map.hpp>
-#include <path_follower/teb_controller.hpp>
+#include <path_follower/mpc_controller.hpp>
+#include <path_follower/utils.hpp>
 
 namespace path_follower {
 class PathFollowerNode: public rclcpp::Node {
@@ -26,11 +28,11 @@ private:
     void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
     void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
     void control_timer_callback();
-    void publish_chassis_cmd(double velocity, double palstance, bool step_ahead);
-
+    void publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead);
     bool get_current_pose(Eigen::Vector3d& current_pose) const;
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
-    
+    std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& current_pose_map);
+
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr control_points_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
@@ -46,12 +48,18 @@ private:
     
     double stop_threshold_;
     bool enable_debug_;
-    TebParams params_;
-    std::unique_ptr<TebController> teb_controller_;
+    double step_check_back_;
+    double step_check_front_;
+    double step_check_sample_step_;
+    MPCParams params_;
+    std::unique_ptr<MPCController> mpc_controller_;
 
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
-    Eigen::Vector2d current_state_ = Eigen::Vector2d::Zero(); // 从串口接收的当前(v, omega)
+    Eigen::Vector2d current_state_ = Eigen::Vector2d::Zero();
+
+    std::optional<SplineD> global_path_;
+    double last_reference_u_ = 0.0;
 };
 
 PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower", options) {
@@ -67,39 +75,47 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     }
 
     params_ = {
-        .horizon = (int)declare_parameter<int>("teb.horizon"),
-        .dt = declare_parameter<double>("teb.dt"),
-        .max_iterations = (int)declare_parameter<int>("teb.max_iterations"),
-        .num_threads = (int)declare_parameter<int>("teb.num_threads"),
-        .vel_max = declare_parameter<double>("teb.thresholds.vel_max"),
-        .vel_min = declare_parameter<double>("teb.thresholds.vel_min"),
-        .omega_max = declare_parameter<double>("teb.thresholds.omega_max"),
-        .omega_min = declare_parameter<double>("teb.thresholds.omega_min"),
-        .acc_max = declare_parameter<double>("teb.thresholds.acc_max"),
-        .alpha_max = declare_parameter<double>("teb.thresholds.alpha_max"),
-        .q_y = declare_parameter<double>("teb.weights.q_y"),
-        .q_theta = declare_parameter<double>("teb.weights.q_theta"),
-        .q_u = declare_parameter<double>("teb.weights.q_u"),
-        .q_v_final = declare_parameter<double>("teb.weights.q_v_final"),
-        .r_v = declare_parameter<double>("teb.weights.r_v"),
-        .r_omega = declare_parameter<double>("teb.weights.r_omega"),
-        .r_dv = declare_parameter<double>("teb.weights.r_dv"),
-        .r_domega = declare_parameter<double>("teb.weights.r_domega"),
-        .acc_limit_weight = declare_parameter<double>("teb.weights.acc_limit"),
-        .alpha_limit_weight = declare_parameter<double>("teb.weights.alpha_limit"),
-        .obstacle_weight = declare_parameter<double>("teb.weights.obstacle"),
-        .direction_weight = declare_parameter<double>("teb.weights.direction"),
-        .proj_num_samples = (int)declare_parameter<int>("teb.projection.num_samples"),
-        .proj_search_window = declare_parameter<double>("teb.projection.search_window"),
-        .max_correspondence_distance = declare_parameter<double>("teb.projection.max_correspondence_distance")
+        .horizon = (int)declare_parameter<int>("mpc.horizon"),
+        .dt = declare_parameter<double>("mpc.dt"),
+        .max_iterations = (int)declare_parameter<int>("mpc.max_iterations"),
+        .num_threads = (int)declare_parameter<int>("mpc.num_threads"),
+        .vel_max = declare_parameter<double>("mpc.thresholds.vel_max"),
+        .vel_min = declare_parameter<double>("mpc.thresholds.vel_min"),
+        .omega_max = declare_parameter<double>("mpc.thresholds.omega_max"),
+        .omega_min = declare_parameter<double>("mpc.thresholds.omega_min"),
+        .acc_max = declare_parameter<double>("mpc.thresholds.acc_max"),
+        .alpha_max = declare_parameter<double>("mpc.thresholds.alpha_max"),
+        .vel_max_on_step = declare_parameter<double>("mpc.thresholds.vel_max_on_step"),
+        .v_omega_product_max = declare_parameter<double>("mpc.thresholds.v_omega_product_max"),
+        .q_y = declare_parameter<double>("mpc.weights.q_y"),
+        .q_theta = declare_parameter<double>("mpc.weights.q_theta"),
+        .q_u = declare_parameter<double>("mpc.weights.q_u"),
+        .q_v_final = declare_parameter<double>("mpc.weights.q_v_final"),
+        .r_v = declare_parameter<double>("mpc.weights.r_v"),
+        .r_omega = declare_parameter<double>("mpc.weights.r_omega"),
+        .r_dv = declare_parameter<double>("mpc.weights.r_dv"),
+        .r_domega = declare_parameter<double>("mpc.weights.r_domega"),
+        .acc_limit_weight = declare_parameter<double>("mpc.weights.acc_limit"),
+        .alpha_limit_weight = declare_parameter<double>("mpc.weights.alpha_limit"),
+        .vel_max_on_step_weight = declare_parameter<double>("mpc.weights.vel_max_on_step"),
+        .v_omega_product_weight = declare_parameter<double>("mpc.weights.v_omega_product"),
+        .obstacle_weight = declare_parameter<double>("mpc.weights.obstacle"),
+        .direction_weight = declare_parameter<double>("mpc.weights.direction"),
+        .proj_num_samples = (int)declare_parameter<int>("mpc.projection.num_samples"),
+        .proj_search_window = declare_parameter<double>("mpc.projection.search_window"),
+        .max_correspondence_distance = declare_parameter<double>("mpc.projection.max_correspondence_distance")
     };
-    teb_controller_ = std::make_unique<TebController>(params_);
+    mpc_controller_ = std::make_unique<MPCController>(params_);
+
+    step_check_back_ = declare_parameter<double>("step_ahead.window_back");
+    step_check_front_ = declare_parameter<double>("step_ahead.window_front");
+    step_check_sample_step_ = declare_parameter<double>("step_ahead.sample_step", 0.05);
 
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("global_cost_map_sub_topic"), 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
             global_cost_map_ = std::make_shared<CostMap>(*msg);
-            RCLCPP_INFO(get_logger(), "Received global cost map: size=(%d,%d), resolution=%.3f", global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution);
+            RCLCPP_INFO(get_logger(), "Received global cost map: size=(%d,%d), resolution=%.2f", global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution);
             global_cost_map_sub_.reset();
         }
     );
@@ -141,15 +157,18 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
         if (!msg->poses.empty()) {
             RCLCPP_WARN(get_logger(), "Received insufficient control points (%zu), need at least 3!", msg->poses.size());
         }
-        teb_controller_->set_reference_path({});
+        global_path_ = std::nullopt;
+        last_reference_u_ = 0.0;
         return;
     }
-    std::vector<Eigen::Vector2d> path;
-    path.reserve(msg->poses.size());
+    std::vector<Eigen::Vector2d> cpts;
+    cpts.reserve(msg->poses.size());
     for (const auto& ps: msg->poses) {
-        path.emplace_back(ps.pose.position.x, ps.pose.position.y);
+        cpts.emplace_back(ps.pose.position.x, ps.pose.position.y);
     }
-    teb_controller_->set_reference_path(path);
+    global_path_ = SplineD(cpts);
+    global_path_->setExtrapolate(true);
+    last_reference_u_ = 0.0;
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
@@ -168,49 +187,120 @@ void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGri
 }
 
 void PathFollowerNode::control_timer_callback() {
-    if (!teb_controller_->has_reference_path()) {
-        publish_chassis_cmd(0, 0, false);
+    if (!global_path_ || !merged_cost_map_ || !global_direction_map_) {
+        publish_chassis_cmd(0, 0, false, false);
         return;
     }
 
     Eigen::Vector3d current_pose;
     if (!get_current_pose(current_pose)) return;
 
-    if ((teb_controller_->get_destination() - current_pose.head<2>()).norm() < stop_threshold_) {
+    if ((global_path_->evaluate(1.0) - current_pose.head<2>()).norm() < stop_threshold_) {
         RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", current_pose.x(), current_pose.y());
-        publish_chassis_cmd(0, 0, false);
-        teb_controller_->set_reference_path({});
+        publish_chassis_cmd(0, 0, false, false);
+        global_path_ = std::nullopt;
+        last_reference_u_ = 0.0;
         return;
     }
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    const auto result = teb_controller_->solve(
+    const auto result = mpc_controller_->step(
+        *global_path_,
         current_pose,
         current_state_,
-        merged_cost_map_.get(),
-        global_direction_map_.get()
+        *merged_cost_map_,
+        *global_direction_map_
     );
-    if (!result.ok) {
-        publish_chassis_cmd(0, 0, false);
+    if (!result) {
+        RCLCPP_ERROR(get_logger(), "MPCController solve failed: %s", result.error().c_str());
+        publish_chassis_cmd(0, 0, false, false);
         return;
     }
 
-    RCLCPP_DEBUG(get_logger(), "TebController solve time: %.2f ms",
+    RCLCPP_DEBUG(
+        get_logger(), "MPCController solve time: %.2f ms",
         std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count()
     );
 
-    publish_chassis_cmd(result.cmd_v_omega.x(), result.cmd_v_omega.y(), false);
+    const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose);
+    publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), step_up_ahead, step_down_ahead);
     if (enable_debug_) {
-        debug_predicted_path_pub_->publish(path_to_nav_msg(result.predicted_path_map));
+        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
     }
 }
 
-void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_ahead) {
+std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vector3d& current_pose_map) {
+    constexpr double dir_norm_threshold = 0.8;
+    constexpr double dot_threshold = 0.8;
+
+    if (!global_direction_map_) return {false, false};
+    if (!global_path_) return {false, false};
+    if (step_check_front_ <= 0.0 && step_check_back_ <= 0.0) return {false, false};
+    if (step_check_sample_step_ <= 1e-6) return {false, false};
+
+    const double u0 = project_to_spline_u(
+        *global_path_,
+        current_pose_map.head<2>(),
+        last_reference_u_,
+        params_.proj_num_samples,
+        params_.proj_search_window,
+        params_.max_correspondence_distance
+    );
+    last_reference_u_ = u0;
+
+    const Eigen::Vector2d heading(std::cos(current_pose_map.z()), std::sin(current_pose_map.z()));
+    bool step_up = false;
+    bool step_down = false;
+
+    const auto sample_at_u = [&](double u) {
+        const Eigen::Vector2d p_map = global_path_->evaluate(u);
+        const Eigen::Vector2d g = global_direction_map_->map_coord_to_grid(p_map);
+        const Eigen::Vector2d dir = global_direction_map_->interpolate(g);
+        const double n = dir.norm();
+        if (n < dir_norm_threshold) return;
+        const double dot = dir.normalized().dot(heading);
+        if (dot > dot_threshold) step_up = true;
+        if (dot < -dot_threshold) step_down = true;
+    };
+
+    sample_at_u(u0);
+
+    // 向前：按弧长近似等间距采样
+    double u_fwd = u0;
+    double dist_fwd = 0.0;
+    const double target_fwd = std::max(0.0, step_check_front_);
+    while (dist_fwd + 1e-9 < target_fwd && u_fwd < 1.0 - 1e-9 && !(step_up && step_down)) {
+        const Eigen::Vector2d d1 = global_path_->derivative(u_fwd, 1);
+        const double dsdu = std::max(1e-6, d1.norm());
+        const double du = step_check_sample_step_ / dsdu;
+        u_fwd = std::min(1.0, u_fwd + du);
+        dist_fwd += step_check_sample_step_;
+        sample_at_u(u_fwd);
+    }
+
+    // 向后：按弧长近似等间距采样
+    double u_bwd = u0;
+    double dist_bwd = 0.0;
+    const double target_bwd = std::max(0.0, step_check_back_);
+    while (dist_bwd + 1e-9 < target_bwd && u_bwd > 1e-9 && !(step_up && step_down)) {
+        const Eigen::Vector2d d1 = global_path_->derivative(u_bwd, 1);
+        const double dsdu = std::max(1e-6, d1.norm());
+        const double du = step_check_sample_step_ / dsdu;
+        u_bwd = std::max(0.0, u_bwd - du);
+        dist_bwd += step_check_sample_step_;
+        sample_at_u(u_bwd);
+    }
+
+    return {step_up, step_down};
+}
+
+void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead) {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = velocity;
     msg.palstance = palstance;
-    msg.step_ahead = step_ahead;
+    msg.step_up_ahead = step_up_ahead;
+    msg.step_down_ahead = step_down_ahead;
     chassis_cmd_pub_->publish(msg);
 }
 

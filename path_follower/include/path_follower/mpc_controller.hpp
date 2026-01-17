@@ -1,11 +1,13 @@
 #pragma once
 
+#include <expected>
 #include <Eigen/Dense>
 #include <path_follower/nav_map.hpp>
+#include <path_follower/utils.hpp>
 
 namespace path_follower {
 
-struct TebParams {
+struct MPCParams {
     int horizon;
     double dt;
     int max_iterations;
@@ -15,23 +17,23 @@ struct TebParams {
     double vel_min;
     double omega_max;
     double omega_min;
-
     double acc_max;
     double alpha_max;
+    double vel_max_on_step;
+    double v_omega_product_max;
 
     double q_y;
     double q_theta;
     double q_u;
     double q_v_final;
-
     double r_v;
     double r_omega;
     double r_dv;
     double r_domega;
-
     double acc_limit_weight;
     double alpha_limit_weight;
-
+    double vel_max_on_step_weight;
+    double v_omega_product_weight;
     double obstacle_weight;
     double direction_weight;
 
@@ -40,31 +42,20 @@ struct TebParams {
     double max_correspondence_distance;
 };
 
-class TebController {
+class MPCController {
 public:
-    struct Result {
-        Eigen::Vector2d cmd_v_omega = Eigen::Vector2d::Zero();
-        std::vector<Eigen::Vector2d> predicted_path_map;  // 预测轨迹（map坐标系）
-        bool ok = false;
-    };
+    explicit MPCController(const MPCParams& params);
 
-    explicit TebController(const TebParams& params);
-
-    void set_reference_path(std::vector<Eigen::Vector2d> path_points_map);
-    bool has_reference_path() const;
-    Eigen::Vector2d get_destination() const;
-
-    // 输入：当前位姿(x,y,theta)、当前状态(v,omega)、地图（可为空）
-    Result solve(
+    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> step(
+        const SplineD& global_path,
         const Eigen::Vector3d& current_pose_map,
         const Eigen::Vector2d& current_state,
-        const CostMap* merged_cost_map,
-        const DirectionMap* global_direction_map
+        const CostMap& merged_cost_map,
+        const DirectionMap& global_direction_map
     );
 
 private:
-    TebParams params_;
-    std::vector<Eigen::Vector2d> ref_path_map_;
+    MPCParams params_;
     std::vector<Eigen::Vector2d> last_controls_;
     double last_u_ = 0.0;
 };

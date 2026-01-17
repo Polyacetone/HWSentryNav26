@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <expected>
 #include <Eigen/Core>
 #include <path_planner/nav_map.hpp>
 
@@ -16,7 +17,7 @@ public:
         const int downsampled_waypoint_max_interval,
         const int feasible_threshold
     );
-    std::vector<Eigen::Vector2i> search_path(
+    std::expected<std::vector<Eigen::Vector2i>, std::string> search_path(
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const Eigen::Vector2i& start_grid,
@@ -25,11 +26,6 @@ public:
 
 private:
     double heuristic(const Eigen::Vector2i& s, const Eigen::Vector2i& t) const;
-    bool is_line_safe(
-        const CostMap& cost_map,
-        const Eigen::Vector2i& s,
-        const Eigen::Vector2i& t
-    ) const;
     bool is_valid(
         const CostMap& cost_map,
         const Eigen::Vector2i& coord

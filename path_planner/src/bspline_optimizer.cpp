@@ -1,4 +1,3 @@
-#include <rclcpp/logging.hpp>
 #include <ceres/ceres.h>
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <uniform_bspline_ceres/uniform_bspline_ceres.hpp>
@@ -183,7 +182,7 @@ BSplineOptimizer::BSplineOptimizer(
     num_samples_per_length_(num_samples_per_length),
     max_iterations_(max_iterations) {}
 
-std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> BSplineOptimizer::optimize(
+std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> BSplineOptimizer::optimize(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const std::vector<Eigen::Vector2d>& init_path,
@@ -191,8 +190,7 @@ std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> BSplineOp
     const Eigen::Vector2d& goal_grid
 ) const {
     if (init_path.size() <= 2) {
-        RCLCPP_WARN(rclcpp::get_logger("bspline_optimizer"), "Path too short to optimize!");
-        return {init_path, init_path};
+        return std::unexpected("Initial path too short for optimization");
     }
     Spline spline(init_path);
     ubs::UniformBSplineCeres<Spline> spline_ceres(spline);
@@ -268,11 +266,14 @@ std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>> BSplineOp
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
 
+    if (!summary.IsSolutionUsable()) return std::unexpected(summary.BriefReport());
+
     std::vector<Eigen::Vector2d> sample_points;
     for (int i = 0; i < num_samples; i++) {
         sample_points.push_back(spline.evaluate(double(i) / num_samples));
     }
-    return {spline.getControlPoints(), sample_points};
+
+    return std::tuple{spline.getControlPoints(), sample_points};
 }
 
 double BSplineOptimizer::estimate_path_length(const std::vector<Eigen::Vector2d>& path) const {

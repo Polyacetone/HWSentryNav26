@@ -1,8 +1,6 @@
 #include <queue>
 #include <cmath>
 #include <algorithm>
-#include <rclcpp/logging.hpp>
-#include <rclcpp/clock.hpp>
 #include <path_planner/a_star_planner.hpp>
 #include <path_planner/nav_map.hpp>
 
@@ -38,34 +36,7 @@ bool AStarPlanner::is_valid(const CostMap& costmap, const Eigen::Vector2i& coord
     return costmap.is_valid_coord(coord) && costmap.at(coord) <= feasible_threshold_;
 }
 
-bool AStarPlanner::is_line_safe(
-    const CostMap& costmap,
-    const Eigen::Vector2i& s,
-    const Eigen::Vector2i& t
-) const {
-    int x1 = s.x(), x2 = t.x(), y1 = s.y(), y2 = t.y();
-    const int dx = std::abs(x2 - x1), dy = std::abs(y2 - y1);
-    const int sx = x1 < x2 ? 1 : -1, sy = y1 < y2 ? 1 : -1;
-    int err = dx - dy;
-    // Bresenham网格直线遍历
-    for (int _ = 0; _ < 100000; _++) {
-        if (costmap.at({x1, y1}) > feasible_threshold_) return false;
-        if (x1 == x2 && y1 == y2) return true;
-        const int err2 = err * 2;
-        if (err2 > -dy) {
-            err -= dy;
-            x1 += sx;
-        }
-        if (err2 < dx) {
-            err += dx;
-            y1 += sy;
-        }
-    }
-    RCLCPP_ERROR(rclcpp::get_logger("a_star_planner"), "Unexpected situation occurred in Bresenham iteration!");
-    return false;
-}
-
-std::vector<Eigen::Vector2i> AStarPlanner::search_path(
+std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_path(
     const CostMap& costmap,
     const DirectionMap& direction_map,
     const Eigen::Vector2i& start_grid,
@@ -73,16 +44,13 @@ std::vector<Eigen::Vector2i> AStarPlanner::search_path(
 ) const {
     // 保证路径长度大于等于MIN_PATH_SIZE
     if (std::max(std::abs(start_grid.x() - goal_grid.x()), std::abs(start_grid.y() - goal_grid.y())) < MIN_PATH_SIZE) {
-        RCLCPP_ERROR(rclcpp::get_logger("a_star_planner"), "Start and goal too close!");
-        return {};
+        return std::unexpected("Start and goal too close");
     }
     if (!costmap.is_valid_coord(start_grid)) {
-        RCLCPP_ERROR(rclcpp::get_logger("a_star_planner"), "Invalid start pose!");
-        return {};
+        return std::unexpected("Invalid start pose");
     }
     if (!costmap.is_valid_coord(goal_grid)) {
-        RCLCPP_ERROR(rclcpp::get_logger("a_star_planner"), "Invalid goal pose!");
-        return {};
+        return std::unexpected("Invalid goal pose");
     }
     const auto cmp = [](const Node::Ptr& n1, const Node::Ptr& n2) { return n1->f() > n2->f(); };
     std::priority_queue<Node::Ptr, std::vector<Node::Ptr>, decltype(cmp)> open_fwd(cmp), open_bwd(cmp);
@@ -176,8 +144,7 @@ std::vector<Eigen::Vector2i> AStarPlanner::search_path(
         if (meet_fwd && meet_bwd) break;
     }
     if (!meet_bwd || !meet_fwd) {
-        RCLCPP_WARN(rclcpp::get_logger("a_star_planner"), "No path found!");
-        return {};
+        return std::unexpected("No feasible path found");
     }
 
     // 根据相遇节点反向构建路径

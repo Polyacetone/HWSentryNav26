@@ -155,8 +155,13 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
         start_grid.cast<int>(),
         goal_grid.cast<int>()
     );
+    if (!plan_result) {
+        RCLCPP_ERROR(get_logger(), "Path planning failed: %s", plan_result.error().c_str());
+        publish_path({}, {}, {});
+        return;
+    }
     std::vector<Eigen::Vector2d> rough_path;
-    std::for_each(plan_result.begin(), plan_result.end(), [&](const Eigen::Vector2i& pt) {
+    std::for_each(plan_result->begin(), plan_result->end(), [&](const Eigen::Vector2i& pt) {
         rough_path.push_back(pt.cast<double>());
     });
 
@@ -169,13 +174,19 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
 
     // 优化路径，输入输出均为格点坐标系
     std::vector<Eigen::Vector2d> control_points, optimized_path;
-    std::tie(control_points, optimized_path) = path_optimizer_->optimize(
+    const auto optimize_result = path_optimizer_->optimize(
         *global_cost_map_,
         *global_direction_map_,
         rough_path,
         start_grid,
         goal_grid
     );
+    if (!optimize_result) {
+        RCLCPP_ERROR(get_logger(), "Path optimization failed: %s", optimize_result.error().c_str());
+        publish_path({}, {}, {});
+        return;
+    }
+    std::tie(control_points, optimized_path) = *optimize_result;
 
     RCLCPP_DEBUG(
         get_logger(), "Path optimization took %.2f ms, control points: %d, optimized path length: %d",

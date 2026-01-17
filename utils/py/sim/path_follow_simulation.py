@@ -5,7 +5,8 @@ from geometry_msgs.msg import TransformStamped, Quaternion, Vector3
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
 from interfaces.msg import JointState, ChassisStatus, ChassisCmd
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
+import struct
 from tf2_ros import TransformBroadcaster
 import math
 
@@ -121,9 +122,51 @@ class SimulationNode(Node):
 
         # Publish PointCloud2 (Every 10 cycles)
         if self.timer_count % 10 == 0:
+            # moving sphere parameters
+            radius = 0.2
+            cx = 14.0
+            cz = 1.0
+            # time in seconds (timer runs at 0.01s)
+            t = self.timer_count * 0.01
+            period = 10.0
+            cy = 5.5 + 0.5 * math.sin(2.0 * math.pi * t / period)
+
+            # sample sphere surface with grid in spherical coordinates
+            num_theta = 20
+            num_phi = 20
+            points = []
+            for i in range(num_phi):
+                phi = math.pi * (i + 0.5) / num_phi
+                for j in range(num_theta):
+                    theta = 2.0 * math.pi * j / num_theta
+                    px = cx + radius * math.sin(phi) * math.cos(theta)
+                    py = cy + radius * math.sin(phi) * math.sin(theta)
+                    pz = cz + radius * math.cos(phi)
+                    points.append((px, py, pz))
+
             cloud_msg = PointCloud2()
             cloud_msg.header.stamp = self.get_clock().now().to_msg()
             cloud_msg.header.frame_id = "odom"
+            cloud_msg.height = 1
+            cloud_msg.width = len(points)
+
+            # fields: x, y, z as float32
+            cloud_msg.fields = []
+            cloud_msg.fields.append(PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1))
+            cloud_msg.fields.append(PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1))
+            cloud_msg.fields.append(PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1))
+
+            cloud_msg.is_bigendian = False
+            cloud_msg.point_step = 12  # 3 * 4 bytes
+            cloud_msg.row_step = cloud_msg.point_step * cloud_msg.width
+            cloud_msg.is_dense = True
+
+            # pack points as float32 little-endian
+            data = bytearray()
+            for (px, py, pz) in points:
+                data += struct.pack('<fff', float(px), float(py), float(pz))
+
+            cloud_msg.data = bytes(data)
             self.cloud_publisher.publish(cloud_msg)
     
 def main(args=None):
