@@ -5,7 +5,9 @@
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
+
 // --------- Jet 兼容的小工具：取标量部分用于索引 ---------
+
 inline double scalar_value(double v) { return v; }
 
 template <typename S, int N>
@@ -74,6 +76,37 @@ Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_map, co
     return (T(1.0) - dx) * (T(1.0) - dy) * v00 + dx * (T(1.0) - dy) * v10 + (T(1.0) - dx) * dy * v01 + dx * dy * v11;
 }
 
+// --------- 剩余弧长估计 ---------
+
+template <typename T, typename Spline>
+T estimate_remaining_arclength(const Spline& spline, const T& u_in, int num_samples) {
+    const T u = ceres::fmin(ceres::fmax(u_in, T(0.0)), T(1.0));
+    const T one_minus_u = T(1.0) - u;
+
+    if (num_samples <= 1) {
+        const auto d1 = spline.derivative(u, 1);
+        const T dsdu = ceres::sqrt(d1.squaredNorm() + T(1e-12));
+        return one_minus_u * dsdu;
+    }
+
+    T length = T(0.0);
+    T u_prev = u;
+    const auto d1_prev = spline.derivative(u_prev, 1);
+    T dsdu_prev = ceres::sqrt(d1_prev.squaredNorm() + T(1e-12));
+
+    for (int i = 1; i <= num_samples; i++) {
+        const T ui = u + one_minus_u * (T(i) / T(num_samples));
+        const auto d1 = spline.derivative(ui, 1);
+        const T dsdu = ceres::sqrt(d1.squaredNorm() + T(1e-12));
+        const T du = ui - u_prev;
+        length += (dsdu_prev + dsdu) * T(0.5) * du;
+        u_prev = ui;
+        dsdu_prev = dsdu;
+    }
+
+    return length;
+}
+
 // --------- Ceres cost functor：优化 (v,omega) 序列 ---------
 struct MPCCostFunctor {
     MPCCostFunctor(
@@ -110,7 +143,7 @@ struct MPCCostFunctor {
 
         // 每一步的 residual 个数：
         // ey(1) + etheta(1) + progress_u(1) + reg(v,omega)(2) + smooth(dv,domega)(2)
-        // + v_final(1) + soft_limits(2) + v_omega_product(1) + obstacle(1) + direction(1) + step_speed(1) = 14
+        // + goal_slow_down(1) + soft_limits(2) + v_omega_product(1) + obstacle(1) + direction(1) + step_speed(1) = 14
         const int expected_residuals = 14 * params_.horizon;
 
         int res_idx = 0;
@@ -122,9 +155,13 @@ struct MPCCostFunctor {
             const T* uk = parameters[k];
             const T v = uk[0];
             const T omega = uk[1];
-
             const T dv = v - last_v;
             const T domega = omega - last_omega;
+
+            // 单车模型动力学
+            x += v * cos(theta) * T(params_.dt);
+            y += v * sin(theta) * T(params_.dt);
+            theta += omega * T(params_.dt);
 
             // 参考点（由u决定）
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -163,10 +200,6 @@ struct MPCCostFunctor {
             residuals[res_idx++] = T(params_.r_dv) * dv;
             residuals[res_idx++] = T(params_.r_domega) * domega;
 
-            // 终点速度为0（u接近1时生效）
-            const T terminal_weight = ceres::fmax(T(0.0), ceres::fmin(T(1.0), (u - T(0.999)) / T(0.001)));
-            residuals[res_idx++] = T(params_.q_v_final) * terminal_weight * v;
-
             // 软加速度限制
             const T dv_limit = T(params_.acc_max * params_.dt);
             const T domega_limit = T(params_.alpha_max * params_.dt);
@@ -179,11 +212,6 @@ struct MPCCostFunctor {
             const T vomega_excess = ceres::fmax(T(0.0), ceres::abs(v * omega) - T(params_.v_omega_product_max));
             residuals[res_idx++] = T(params_.v_omega_product_weight) * vomega_excess;
 
-            // 单车模型动力学
-            x += v * cos(theta) * T(params_.dt);
-            y += v * sin(theta) * T(params_.dt);
-            theta += omega * T(params_.dt);
-
             // 避障（使用合并代价地图：全局+局部）
             const T cost = interpolate_cost_map(merged_cost_map_, x, y);
             // 归一化到 [0,1]，并进行惩罚
@@ -194,15 +222,26 @@ struct MPCCostFunctor {
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-9));
             const auto dir_normalized = dir / dir_norm;
             const Eigen::Matrix<T, 2, 1> heading(cos(theta), sin(theta));
-            const T dot = heading.dot(dir_normalized);
+            const T heading_dot_dir = heading.dot(dir_normalized);
             // 惩罚 1 - |cos|，即鼓励朝向与方向场对齐（允许正反向都对齐）
-            residuals[res_idx++] = T(params_.direction_weight) * (T(1.0) - ceres::abs(dot));
+            residuals[res_idx++] = T(params_.direction_weight) * (T(1.0) - ceres::abs(heading_dot_dir));
 
             // 台阶区域限速：当方向场非0（台阶）时，惩罚超过 step_speed_max 的速度
             // 使用 direction norm 做软开关，避免边界插值处不连续
-            const T step_gate = ceres::fmin(T(1.0), dir_norm * 2.0); // [0,1]
-            const T v_excess = ceres::fmax(T(0.0), v - T(params_.vel_max_on_step));
-            residuals[res_idx++] = T(params_.vel_max_on_step_weight) * step_gate * v_excess;
+            const T gate_step = ceres::fmin(T(1.0), dir_norm * 2.0); // [0,1]
+            const T v_excess_step = ceres::fmax(T(0.0), v - T(params_.vel_max_on_step));
+            residuals[res_idx++] = T(params_.vel_max_on_step_weight) * gate_step * v_excess_step;
+
+            // 终点减速：基于剩余弧长在 goal_slow_down_distance 内逐渐限速
+            // 设计为软约束形式：只惩罚 v 超过 v_limit_goal(remaining_distance)
+            const T s_remain = estimate_remaining_arclength(spline, u, params_.slow_down_num_samples);
+            const T slow_dist = T(params_.slow_down_distance);
+            const T s_remain_ratio = ceres::fmin(T(1.0), s_remain / (slow_dist + T(1e-6))); // 1: far, 0: at goal
+            const T gate_goal = ceres::fmin(T(1.0), ceres::fmax(T(0.0), (slow_dist - s_remain) / (slow_dist + T(1e-6))));
+            // v_limit_goal: far -> vel_max, near -> vel_min
+            const T v_limit_goal = T(params_.vel_min) + (T(params_.vel_max) - T(params_.vel_min)) * s_remain_ratio;
+            const T v_excess_goal = ceres::fmax(T(0.0), v - v_limit_goal);
+            residuals[res_idx++] = T(params_.q_v_final) * gate_goal * v_excess_goal;
 
             // 进度动力学（将 ds/dt 转成 du/dt）
             T denom = T(1.0) - kappa * ey;
@@ -331,9 +370,10 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     }
 
     ceres::Solver::Options options;
+    options.minimizer_type = ceres::TRUST_REGION;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
     options.linear_solver_type = ceres::DENSE_QR;
     options.max_num_iterations = params_.max_iterations;
-    options.num_threads = params_.num_threads;
     options.minimizer_progress_to_stdout = false;
     options.logging_type = ceres::SILENT;
 

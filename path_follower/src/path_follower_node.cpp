@@ -78,7 +78,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         .horizon = (int)declare_parameter<int>("mpc.horizon"),
         .dt = declare_parameter<double>("mpc.dt"),
         .max_iterations = (int)declare_parameter<int>("mpc.max_iterations"),
-        .num_threads = (int)declare_parameter<int>("mpc.num_threads"),
         .vel_max = declare_parameter<double>("mpc.thresholds.vel_max"),
         .vel_min = declare_parameter<double>("mpc.thresholds.vel_min"),
         .omega_max = declare_parameter<double>("mpc.thresholds.omega_max"),
@@ -87,6 +86,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         .alpha_max = declare_parameter<double>("mpc.thresholds.alpha_max"),
         .vel_max_on_step = declare_parameter<double>("mpc.thresholds.vel_max_on_step"),
         .v_omega_product_max = declare_parameter<double>("mpc.thresholds.v_omega_product_max"),
+        .slow_down_distance = declare_parameter<double>("mpc.thresholds.slow_down_distance"),
+        .slow_down_num_samples = (int)declare_parameter<int>("mpc.thresholds.slow_down_num_samples"),
         .q_y = declare_parameter<double>("mpc.weights.q_y"),
         .q_theta = declare_parameter<double>("mpc.weights.q_theta"),
         .q_u = declare_parameter<double>("mpc.weights.q_u"),
@@ -218,10 +219,12 @@ void PathFollowerNode::control_timer_callback() {
         return;
     }
 
-    RCLCPP_DEBUG(
-        get_logger(), "MPCController solve time: %.2f ms",
-        std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count()
-    );
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+    if (solve_ms > params_.dt * 500.0) {
+        RCLCPP_WARN(get_logger(), "MPCController solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
+    } else {
+        RCLCPP_DEBUG(get_logger(), "MPCController solve time: %.2f ms", solve_ms);
+    }
 
     const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose);
     publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), step_up_ahead, step_down_ahead);

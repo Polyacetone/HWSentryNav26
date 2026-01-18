@@ -16,7 +16,6 @@
       horizon: 15 # 预测步数
       dt: 0.1 # 预测时间间隔
       max_iterations: 100 # 最大迭代次数
-      num_threads: 2 # 优化线程数
       projection: # 投影参数
         num_samples: 50 # 投影到样条参数u时的采样数
         search_window: 0.1 # 局部搜索窗口大小（0~1）
@@ -30,11 +29,13 @@
         alpha_max: 7.2 # 最大角加速度 (rad/s²)
         vel_max_on_step: 1.0 # 台阶区域最大速度 (m/s)
         v_omega_product_max: 3.5 # |v*omega| 最大值软约束 (m/s * rad/s)
+        slow_down_distance: 1.0 # 距离终点剩余弧长小于该值时开始减速 (m)
+        slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
       weights: # 权重
         q_y: 0.4 # 横向误差权重
         q_theta: 0.1 # 航向误差权重
         q_u: 1.0 # 进度项权重
-        q_v_final: 0.3 # 终点速度为0权重
+        q_v_final: 0.3 # 终点减速权重
         r_v: 0.03 # 线速度正则
         r_omega: 0.03 # 角速度正则
         r_dv: 0.1 # 线速度平滑

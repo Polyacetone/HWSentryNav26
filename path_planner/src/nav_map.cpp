@@ -67,7 +67,7 @@ double CostMap::interpolate(const Eigen::Vector2d& grid_coord) const {
 }
 
 Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
-    constexpr int samples = 3;
+    constexpr int samples = 2;
     const int x = grid_coord.x(), y = grid_coord.y();
     Eigen::Vector2d sum_grad(0, 0);
     for (int i = 1; i <= samples; i++) {

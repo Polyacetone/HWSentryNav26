@@ -11,7 +11,6 @@ struct MPCParams {
     int horizon;
     double dt;
     int max_iterations;
-    int num_threads;
 
     double vel_max;
     double vel_min;
@@ -21,6 +20,9 @@ struct MPCParams {
     double alpha_max;
     double vel_max_on_step;
     double v_omega_product_max;
+
+    double slow_down_distance;
+    int slow_down_num_samples;
 
     double q_y;
     double q_theta;

@@ -259,8 +259,8 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
 
     ceres::Solver::Options options;
     options.minimizer_type = ceres::TRUST_REGION;
-    options.trust_region_strategy_type = ceres::DOGLEG;
-    options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    options.linear_solver_type = ceres::DENSE_QR;
     options.use_nonmonotonic_steps = true;
     options.max_num_iterations = max_iterations_;
     ceres::Solver::Summary summary;

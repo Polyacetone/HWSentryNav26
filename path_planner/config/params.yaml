@@ -14,14 +14,14 @@
     path_planner:
       direction_weight: 2.0 # 方向代价权重
       obstacle_weight: 1.0 # 障碍物代价权重
-      downsampled_waypoint_max_interval: 5 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
+      downsampled_waypoint_max_interval: 3 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
       feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
 
     path_optimizer:
-      smoothness_weight: 0.2 # 平滑代价权重
+      smoothness_weight: 0.1 # 平滑代价权重
       uniform_speed_weight: 0.1 # 速度均匀代价权重
       obstacle_weight: 5.0 # 障碍物代价权重
       direction_weight: 2.0 # 方向代价权重
       start_end_weight: 1000.0 # 起终点保持代价权重
-      num_samples_per_length: 1.5 # 每长度采样点个数，用于计算障碍物代价等（以格子为单位）
-      max_iterations: 100 # 优化的最大迭代次数
+      num_samples_per_length: 2.0 # 每长度采样点个数，用于计算障碍物代价等（以格子为单位）
+      max_iterations: 200 # 优化的最大迭代次数
