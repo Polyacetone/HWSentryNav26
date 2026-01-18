@@ -2,7 +2,7 @@
   ros__parameters:
     global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局方向地图订阅话题
     global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图订阅话题
-    goal_sub_topic: "/path_planner/goal" # 目标点订阅话题
+    goal_sub_topic: "/decision/nav_goal" # 目标点订阅话题
     control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
     lazy_distance: 1.0 # 如果目标点距离当前点小于该值，则不进行路径规划（单位：米）
 
@@ -14,7 +14,7 @@
     path_planner:
       direction_weight: 2.0 # 方向代价权重
       obstacle_weight: 1.0 # 障碍物代价权重
-      downsampled_waypoint_max_interval: 3 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
+      downsampled_waypoint_max_interval: 4 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
       feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
 
     path_optimizer:

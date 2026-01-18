@@ -56,9 +56,12 @@ class SimulationNode(Node):
         if abs(self.v - self.last_v) / 0.1 > 3.0:
             print("High acceleration detected: ", abs(self.v - self.last_v) / 0.1)
             self.v = 0.1 * (3.0 * (1 if self.v - self.last_v > 0 else -1)) + self.last_v
-        if abs(self.omega - self.last_omega) / 0.1 > 8.0:
+        if abs(self.omega - self.last_omega) / 0.1 > 12.5:
             print("High angular acceleration detected: ", abs(self.omega - self.last_omega) / 0.1)
-            self.omega = 0.1 * (8.0 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
+            self.omega = 0.1 * (12.5 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
+        if abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1 > 3.5:
+            print("High combined acceleration detected: ", abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1)
+            self.v = 3.5 / (abs(self.omega - self.last_omega) / 0.1) * (1 if self.v - self.last_v > 0 else -1) + self.last_v
         self.last_recv_time = self.get_clock().now()
 
     def timer_callback(self):

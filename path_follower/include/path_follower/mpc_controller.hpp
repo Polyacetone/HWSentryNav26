@@ -7,11 +7,13 @@
 
 namespace path_follower {
 
-struct MPCParams {
-    int horizon;
-    double dt;
-    int max_iterations;
+struct MPCProjectionParams {
+    int num_samples;
+    double search_window;
+    double max_correspondence_distance;
+};
 
+struct MPCPathFollowParams {
     double vel_max;
     double vel_min;
     double omega_max;
@@ -38,17 +40,38 @@ struct MPCParams {
     double v_omega_product_weight;
     double obstacle_weight;
     double direction_weight;
+};
 
-    int proj_num_samples;
-    double proj_search_window;
-    double max_correspondence_distance;
+struct MPCSpinFollowParams {
+    double omega_max;
+    double omega_min;
+    double acc_max;
+    double alpha_max;
+    double v_omega_product_max;
+
+    double acc_limit_weight;
+    double alpha_limit_weight;
+    double v_omega_product_weight;
+
+    double q_omega;
+    double r_v;
+};
+
+struct MPCParams {
+    int horizon;
+    double dt;
+    int max_iterations;
+
+    MPCProjectionParams projection;
+    MPCPathFollowParams path_follow;
+    MPCSpinFollowParams spin_follow;
 };
 
 class MPCController {
 public:
     explicit MPCController(const MPCParams& params);
 
-    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> step(
+    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> solve_path(
         const SplineD& global_path,
         const Eigen::Vector3d& current_pose_map,
         const Eigen::Vector2d& current_state,
@@ -56,8 +79,14 @@ public:
         const DirectionMap& global_direction_map
     );
 
+    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> solve_spin(
+        const Eigen::Vector3d& current_pose_map,
+        const Eigen::Vector2d& current_state,
+        double target_omega
+    );
+
 private:
-    MPCParams params_;
+    const MPCParams params_;
     std::vector<Eigen::Vector2d> last_controls_;
     double last_u_ = 0.0;
 };
