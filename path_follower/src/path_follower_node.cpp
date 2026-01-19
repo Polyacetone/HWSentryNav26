@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <cmath>
 #include <rclcpp/rclcpp.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/core.hpp>
@@ -30,13 +31,10 @@ private:
     void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
     void control_timer_callback();
-    void publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead);
+    void publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin);
     bool get_current_pose(Eigen::Vector3d& current_pose) const;
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
-    std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& current_pose_map);
-    bool is_in_obstacle(const Eigen::Vector3d& current_pose_map) const;
-    bool is_on_step(const Eigen::Vector3d& current_pose_map) const;
-    double spin_target_omega() const;
+    std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& current_pose_map, const double u0);
 
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr control_points_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
@@ -51,7 +49,7 @@ private:
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
-    
+
     double stop_threshold_;
     bool enable_debug_;
     double step_check_back_;
@@ -64,10 +62,12 @@ private:
     DirectionMap::ConstPtr global_direction_map_;
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
-    Eigen::Vector2d current_state_ = Eigen::Vector2d::Zero();
 
-    double spin_slow_omega_, spin_fast_omega_;
-    double spin_obstacle_cost_threshold_, spin_step_dir_norm_threshold_;
+    enum class ControlState { FOLLOW, STOPPING_TO_SPIN, SPIN, STOPPING_TO_FOLLOW } control_state_ = ControlState::FOLLOW;
+    double vel_to_spin_threshold_;
+    double omega_to_follow_threshold_;
+
+    Eigen::Vector2d current_state_ = Eigen::Vector2d::Zero();
 
     std::optional<SplineD> global_path_;
     double last_reference_u_ = 0.0;
@@ -86,62 +86,74 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     }
 
     params_ = {
-        .horizon = (int)declare_parameter<int>("mpc_controller.horizon"),
-        .dt = declare_parameter<double>("mpc_controller.dt"),
-        .max_iterations = (int)declare_parameter<int>("mpc_controller.max_iterations"),
-        .projection = {
-            .num_samples = (int)declare_parameter<int>("mpc_controller.projection.num_samples"),
-            .search_window = declare_parameter<double>("mpc_controller.projection.search_window"),
-            .max_correspondence_distance = declare_parameter<double>("mpc_controller.projection.max_correspondence_distance")
+        .horizon = (int)declare_parameter<int>("mpc.general.horizon"),
+        .dt = declare_parameter<double>("mpc.general.dt"),
+        .max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations"),
+        .follow_limits = {
+            .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
+            .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
+            .omega_max = declare_parameter<double>("mpc.follow_path.limits.omega_max"),
+            .omega_min = declare_parameter<double>("mpc.follow_path.limits.omega_min"),
+            .acc_max = declare_parameter<double>("mpc.follow_path.limits.acc_max"),
+            .alpha_max = declare_parameter<double>("mpc.follow_path.limits.alpha_max"),
+            .vel_max_on_step = declare_parameter<double>("mpc.follow_path.limits.vel_max_on_step"),
+            .v_omega_product_max = declare_parameter<double>("mpc.follow_path.limits.v_omega_product_max"),
+            .slow_down_distance = declare_parameter<double>("mpc.follow_path.limits.slow_down_distance"),
+            .slow_down_num_samples = (int)declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples")
         },
-        .path_follow = {
-            .vel_max = declare_parameter<double>("mpc_controller.path_follow.vel_max"),
-            .vel_min = declare_parameter<double>("mpc_controller.path_follow.vel_min"),
-            .omega_max = declare_parameter<double>("mpc_controller.path_follow.omega_max"),
-            .omega_min = declare_parameter<double>("mpc_controller.path_follow.omega_min"),
-            .acc_max = declare_parameter<double>("mpc_controller.path_follow.acc_max"),
-            .alpha_max = declare_parameter<double>("mpc_controller.path_follow.alpha_max"),
-            .vel_max_on_step = declare_parameter<double>("mpc_controller.path_follow.vel_max_on_step"),
-            .v_omega_product_max = declare_parameter<double>("mpc_controller.path_follow.v_omega_product_max"),
-            .slow_down_distance = declare_parameter<double>("mpc_controller.path_follow.slow_down_distance"),
-            .slow_down_num_samples = (int)declare_parameter<int>("mpc_controller.path_follow.slow_down_num_samples"),
-            .q_y = declare_parameter<double>("mpc_controller.path_follow.weights.q_y"),
-            .q_theta = declare_parameter<double>("mpc_controller.path_follow.weights.q_theta"),
-            .q_u = declare_parameter<double>("mpc_controller.path_follow.weights.q_u"),
-            .q_v_final = declare_parameter<double>("mpc_controller.path_follow.weights.q_v_final"),
-            .r_v = declare_parameter<double>("mpc_controller.path_follow.weights.r_v"),
-            .r_omega = declare_parameter<double>("mpc_controller.path_follow.weights.r_omega"),
-            .r_dv = declare_parameter<double>("mpc_controller.path_follow.weights.r_dv"),
-            .r_domega = declare_parameter<double>("mpc_controller.path_follow.weights.r_domega"),
-            .acc_limit_weight = declare_parameter<double>("mpc_controller.path_follow.weights.acc_limit"),
-            .alpha_limit_weight = declare_parameter<double>("mpc_controller.path_follow.weights.alpha_limit"),
-            .vel_max_on_step_weight = declare_parameter<double>("mpc_controller.path_follow.weights.vel_max_on_step"),
-            .v_omega_product_weight = declare_parameter<double>("mpc_controller.path_follow.weights.v_omega_product"),
-            .obstacle_weight = declare_parameter<double>("mpc_controller.path_follow.weights.obstacle"),
-            .direction_weight = declare_parameter<double>("mpc_controller.path_follow.weights.direction")
+        .follow_weights = {
+            .q_y = declare_parameter<double>("mpc.follow_path.weights.q_y"),
+            .q_theta = declare_parameter<double>("mpc.follow_path.weights.q_theta"),
+            .q_u = declare_parameter<double>("mpc.follow_path.weights.q_u"),
+            .q_v_final = declare_parameter<double>("mpc.follow_path.weights.q_v_final"),
+            .r_v = declare_parameter<double>("mpc.follow_path.weights.r_v"),
+            .r_omega = declare_parameter<double>("mpc.follow_path.weights.r_omega"),
+            .r_dv = declare_parameter<double>("mpc.follow_path.weights.r_dv"),
+            .r_domega = declare_parameter<double>("mpc.follow_path.weights.r_domega"),
+            .acc_limit_weight = declare_parameter<double>("mpc.follow_path.weights.acc_limit"),
+            .alpha_limit_weight = declare_parameter<double>("mpc.follow_path.weights.alpha_limit"),
+            .vel_max_on_step_weight = declare_parameter<double>("mpc.follow_path.weights.vel_max_on_step"),
+            .v_omega_product_weight = declare_parameter<double>("mpc.follow_path.weights.v_omega_product"),
+            .obstacle_weight = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
+            .direction_weight = declare_parameter<double>("mpc.follow_path.weights.direction")
         },
-        .spin_follow = {
-            .omega_max = declare_parameter<double>("mpc_controller.spin_follow.omega_max"),
-            .omega_min = declare_parameter<double>("mpc_controller.spin_follow.omega_min"),
-            .acc_max = declare_parameter<double>("mpc_controller.spin_follow.acc_max"),
-            .alpha_max = declare_parameter<double>("mpc_controller.spin_follow.alpha_max"),
-            .v_omega_product_max = declare_parameter<double>("mpc_controller.spin_follow.v_omega_product_max"),
-            .acc_limit_weight = declare_parameter<double>("mpc_controller.spin_follow.weights.acc_limit"),
-            .alpha_limit_weight = declare_parameter<double>("mpc_controller.spin_follow.weights.alpha_limit"),
-            .v_omega_product_weight = declare_parameter<double>("mpc_controller.spin_follow.weights.v_omega_product"),
-            .q_omega = declare_parameter<double>("mpc_controller.spin_follow.weights.q_omega"),
-            .r_v = declare_parameter<double>("mpc_controller.spin_follow.weights.r_v")
+        .follow_projection = {
+            .proj_num_samples = (int)declare_parameter<int>("mpc.follow_path.projection.num_samples"),
+            .proj_search_window = declare_parameter<double>("mpc.follow_path.projection.search_window"),
+            .max_correspondence_distance = declare_parameter<double>("mpc.follow_path.projection.max_correspondence_distance")
+        },
+        .stop_limits = {
+            .vel_max = declare_parameter<double>("mpc.stop.limits.vel_max"),
+            .omega_max = declare_parameter<double>("mpc.stop.limits.omega_max"),
+            .omega_min = declare_parameter<double>("mpc.stop.limits.omega_min"),
+            .acc_max = declare_parameter<double>("mpc.stop.limits.acc_max"),
+            .alpha_max = declare_parameter<double>("mpc.stop.limits.alpha_max"),
+            .vel_max_on_step = declare_parameter<double>("mpc.stop.limits.vel_max_on_step"),
+            .v_omega_product_max = declare_parameter<double>("mpc.stop.limits.v_omega_product_max"),
+            .step_exit_speed_min = declare_parameter<double>("mpc.stop.limits.step_exit_speed_min")
+        },
+        .stop_weights = {
+            .q_v = declare_parameter<double>("mpc.stop.weights.q_v"),
+            .q_omega = declare_parameter<double>("mpc.stop.weights.q_omega"),
+            .acc_limit_weight = declare_parameter<double>("mpc.stop.weights.acc_limit"),
+            .alpha_limit_weight = declare_parameter<double>("mpc.stop.weights.alpha_limit"),
+            .vel_max_on_step_weight = declare_parameter<double>("mpc.stop.weights.vel_max_on_step"),
+            .v_omega_product_weight = declare_parameter<double>("mpc.stop.weights.v_omega_product"),
+            .obstacle_weight = declare_parameter<double>("mpc.stop.weights.obstacle"),
+            .obstacle_terminal_weight = declare_parameter<double>("mpc.stop.weights.obstacle_terminal"),
+            .direction_weight = declare_parameter<double>("mpc.stop.weights.direction"),
+            .step_exit_weight = declare_parameter<double>("mpc.stop.weights.step_exit"),
+            .step_terminal_weight = declare_parameter<double>("mpc.stop.weights.step_terminal")
         }
     };
     mpc_controller_ = std::make_unique<MPCController>(params_);
 
+    vel_to_spin_threshold_ = declare_parameter<double>("spin_switch.vel_to_spin_threshold");
+    omega_to_follow_threshold_ = declare_parameter<double>("spin_switch.omega_to_follow_threshold");
+
     step_check_back_ = declare_parameter<double>("step_ahead.window_back");
     step_check_front_ = declare_parameter<double>("step_ahead.window_front");
     step_check_sample_step_ = declare_parameter<double>("step_ahead.sample_step");
-    spin_slow_omega_ = declare_parameter<double>("spin.slow_omega");
-    spin_fast_omega_ = declare_parameter<double>("spin.fast_omega");
-    spin_obstacle_cost_threshold_ = declare_parameter<double>("spin.obstacle_cost_threshold");
-    spin_step_dir_norm_threshold_ = declare_parameter<double>("spin.step_dir_norm_threshold");
 
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("global_cost_map_sub_topic"), 1,
@@ -234,58 +246,131 @@ void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGri
 
 void PathFollowerNode::control_timer_callback() {
     if (!merged_cost_map_ || !global_direction_map_) {
-        publish_chassis_cmd(0, 0, false, false);
+        publish_chassis_cmd(0.0, 0.0, false, false, false, false);
+        return;
+    }
+
+    const bool spin_requested = (spin_state_ != SpinState::STOP);
+    const bool can_spin = spin_high_priority_ || (!global_path_.has_value());
+    const bool should_spin = spin_requested && can_spin;
+
+    // 更新控制状态机
+    if (should_spin) {
+        if (control_state_ == ControlState::FOLLOW || control_state_ == ControlState::STOPPING_TO_FOLLOW) {
+            RCLCPP_INFO(get_logger(), "Stopping to spin");
+            control_state_ = ControlState::STOPPING_TO_SPIN;
+        }
+    } else {
+        if (control_state_ == ControlState::SPIN || control_state_ == ControlState::STOPPING_TO_SPIN) {
+            RCLCPP_INFO(get_logger(), "Stopping to follow");
+            control_state_ = ControlState::STOPPING_TO_FOLLOW;
+        }
+    }
+
+    // 小陀螺模式
+    if (control_state_ == ControlState::SPIN) {
+        const bool slow_spin = (spin_state_ == SpinState::SPIN_SLOW);
+        const bool fast_spin = (spin_state_ == SpinState::SPIN_FAST);
+        publish_chassis_cmd(0.0, 0.0, false, false, slow_spin, fast_spin);
         return;
     }
 
     Eigen::Vector3d current_pose;
-    if (!get_current_pose(current_pose)) {
-        publish_chassis_cmd(0, 0, false, false);
-        return;
-    }
+    if (!get_current_pose(current_pose)) return;
 
-    bool should_spin = false;
-    if (spin_state_ != SpinState::STOP) {
-        const bool can_spin = !is_in_obstacle(current_pose) && !is_on_step(current_pose);
-        const bool want_spin = spin_high_priority_ || !global_path_;
-        if (want_spin && !can_spin) RCLCPP_WARN(get_logger(), "Cannot spin due to obstacle or step!");
-        should_spin = can_spin && want_spin;
-    }
+    // 路径跟随切换到旋转，需要先停下来
+    if (control_state_ == ControlState::STOPPING_TO_SPIN) {
+        if (std::abs(current_state_.x()) < vel_to_spin_threshold_) {
+            RCLCPP_INFO(get_logger(), "Finished stopping, start spinning");
+            control_state_ = ControlState::SPIN;
+            const bool slow_spin = (spin_state_ == SpinState::SPIN_SLOW);
+            const bool fast_spin = (spin_state_ == SpinState::SPIN_FAST);
+            publish_chassis_cmd(0.0, 0.0, false, false, slow_spin, fast_spin);
+            return;
+        }
 
-    if (should_spin) {
         auto start_time = std::chrono::high_resolution_clock::now();
 
-        const double target_omega = spin_target_omega();
-        const auto result = mpc_controller_->solve_spin(
+        const auto result = mpc_controller_->stop(
             current_pose,
             current_state_,
-            target_omega
+            *merged_cost_map_,
+            *global_direction_map_
         );
         if (!result) {
-            RCLCPP_ERROR(get_logger(), "Spin MPC solve failed: %s", result.error().c_str());
-            publish_chassis_cmd(0, 0, false, false);
+            RCLCPP_ERROR(get_logger(), "MPCController(Stop) solve failed: %s", result.error().c_str());
+            publish_chassis_cmd(0, 0, false, false, false, false);
             return;
         }
 
         const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
         if (solve_ms > params_.dt * 500.0) {
-            RCLCPP_WARN(get_logger(), "Spin MPC solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
+            RCLCPP_WARN(get_logger(), "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
         } else {
-            RCLCPP_DEBUG(get_logger(), "Spin MPC solve time: %.2f ms", solve_ms);
+            RCLCPP_DEBUG(get_logger(), "MPCController(Stop) solve time: %.2f ms", solve_ms);
         }
 
-        publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), false, false);
+        publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), false, false, false, false);
         if (enable_debug_) {
             debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
         }
         return;
     }
 
-    if (!global_path_) return;
+    // 旋转切换到路径跟随，需要先停下来
+    if (control_state_ == ControlState::STOPPING_TO_FOLLOW) {
+        if (std::abs(current_state_.y()) < omega_to_follow_threshold_) {
+            RCLCPP_INFO(get_logger(), "Finished stopping, start following");
+            control_state_ = ControlState::FOLLOW;
+        } else {
+            auto start_time = std::chrono::high_resolution_clock::now();
+            const auto result = mpc_controller_->stop(
+                current_pose,
+                current_state_,
+                *merged_cost_map_,
+                *global_direction_map_
+            );
+            if (!result) {
+                RCLCPP_ERROR(get_logger(), "MPCController(Stop) solve failed: %s", result.error().c_str());
+                publish_chassis_cmd(0, 0, false, false, false, false);
+                return;
+            }
 
-    if ((global_path_->evaluate(1.0) - current_pose.head<2>()).norm() < stop_threshold_) {
+            const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+            if (solve_ms > params_.dt * 500.0) {
+                RCLCPP_WARN(get_logger(), "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
+            } else {
+                RCLCPP_DEBUG(get_logger(), "MPCController(Stop) solve time: %.2f ms", solve_ms);
+            }
+
+            publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), false, false, false, false);
+            if (enable_debug_) {
+                debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
+            }
+            return;
+        }
+    }
+
+    // 跟随模式
+    if (!global_path_) {
+        publish_chassis_cmd(0.0, 0.0, false, false, false, false);
+        return;
+    }
+
+    const double u0 = project_to_spline_u(
+        *global_path_,
+        current_pose.head<2>(),
+        last_reference_u_,
+        params_.follow_projection.proj_num_samples,
+        params_.follow_projection.proj_search_window,
+        params_.follow_projection.max_correspondence_distance
+    );
+    last_reference_u_ = u0;
+
+    // 如果已经到达目标点且不需要旋转，直接停止
+    if (!should_spin && control_state_ == ControlState::FOLLOW && u0 >= stop_threshold_) {
         RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", current_pose.x(), current_pose.y());
-        publish_chassis_cmd(0, 0, false, false);
+        publish_chassis_cmd(0, 0, false, false, false, false);
         global_path_ = std::nullopt;
         last_reference_u_ = 0.0;
         return;
@@ -293,7 +378,7 @@ void PathFollowerNode::control_timer_callback() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    const auto result = mpc_controller_->solve_path(
+    const auto result = mpc_controller_->follow_path(
         *global_path_,
         current_pose,
         current_state_,
@@ -301,49 +386,26 @@ void PathFollowerNode::control_timer_callback() {
         *global_direction_map_
     );
     if (!result) {
-        RCLCPP_ERROR(get_logger(), "Path Follow MPC solve failed: %s", result.error().c_str());
-        publish_chassis_cmd(0, 0, false, false);
+        RCLCPP_ERROR(get_logger(), "MPCController(Follow) solve failed: %s", result.error().c_str());
+        publish_chassis_cmd(0, 0, false, false, false, false);
         return;
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
     if (solve_ms > params_.dt * 500.0) {
-        RCLCPP_WARN(get_logger(), "Path Follow MPC solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
+        RCLCPP_WARN(get_logger(), "MPCController(Follow) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
     } else {
-        RCLCPP_DEBUG(get_logger(), "Path Follow MPC solve time: %.2f ms", solve_ms);
+        RCLCPP_DEBUG(get_logger(), "MPCController(Follow) solve time: %.2f ms", solve_ms);
     }
 
-    const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose);
-    publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), step_up_ahead, step_down_ahead);
+    const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose, u0);
+    publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), step_up_ahead, step_down_ahead, false, false);
     if (enable_debug_) {
         debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
     }
 }
 
-bool PathFollowerNode::is_in_obstacle(const Eigen::Vector3d& current_pose_map) const {
-    if (!merged_cost_map_) return true;
-    const Eigen::Vector2d g = merged_cost_map_->map_coord_to_grid(current_pose_map.head<2>());
-    const double cost = merged_cost_map_->interpolate(g);
-    return cost >= spin_obstacle_cost_threshold_;
-}
-
-bool PathFollowerNode::is_on_step(const Eigen::Vector3d& current_pose_map) const {
-    if (!global_direction_map_) return true;
-    const Eigen::Vector2d g = global_direction_map_->map_coord_to_grid(current_pose_map.head<2>());
-    const Eigen::Vector2d dir = global_direction_map_->interpolate(g);
-    return dir.norm() >= spin_step_dir_norm_threshold_;
-}
-
-double PathFollowerNode::spin_target_omega() const {
-    switch (spin_state_) {
-        case SpinState::SPIN_SLOW: return spin_slow_omega_;
-        case SpinState::SPIN_FAST: return spin_fast_omega_;
-        case SpinState::STOP: return 0.0;
-    }
-    return 0.0;
-}
-
-std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vector3d& current_pose_map) {
+std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vector3d& current_pose_map, const double u0) {
     constexpr double dir_norm_threshold = 0.8;
     constexpr double dot_threshold = 0.8;
 
@@ -351,16 +413,6 @@ std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vec
     if (!global_path_) return {false, false};
     if (step_check_front_ <= 0.0 && step_check_back_ <= 0.0) return {false, false};
     if (step_check_sample_step_ <= 1e-6) return {false, false};
-
-    const double u0 = project_to_spline_u(
-        *global_path_,
-        current_pose_map.head<2>(),
-        last_reference_u_,
-        params_.projection.num_samples,
-        params_.projection.search_window,
-        params_.projection.max_correspondence_distance
-    );
-    last_reference_u_ = u0;
 
     const Eigen::Vector2d heading(std::cos(current_pose_map.z()), std::sin(current_pose_map.z()));
     bool step_up = false;
@@ -408,12 +460,14 @@ std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vec
     return {step_up, step_down};
 }
 
-void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead) {
+void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = velocity;
     msg.palstance = palstance;
     msg.step_up_ahead = step_up_ahead;
     msg.step_down_ahead = step_down_ahead;
+    msg.slow_spin = slow_spin;
+    msg.fast_spin = fast_spin;
     chassis_cmd_pub_->publish(msg);
 }
 

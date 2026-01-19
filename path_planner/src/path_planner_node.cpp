@@ -222,22 +222,13 @@ nav_msgs::msg::Path PathPlannerNode::path_to_nav_msg(const std::vector<Eigen::Ve
     nav_msgs::msg::Path msg;
     msg.header.stamp = now();
     msg.header.frame_id = "map";
-    for (int i = 0; i < path.size(); i++) {
-        geometry_msgs::msg::PoseStamped pose_stamped;
-        pose_stamped.header = msg.header;
-        pose_stamped.pose.position.x = path[i].x();
-        pose_stamped.pose.position.y = path[i].y();
-        pose_stamped.pose.position.z = 0.0;
-        Eigen::Vector2d dir;
-        if (i == 0) dir = path[i + 1] - path[i];
-        else if (i == path.size() - 1) dir = path[i] - path[i - 1];
-        else dir = path[i + 1] - path[i - 1];
-        dir.normalize();
-        double yaw = std::atan2(dir.y(), dir.x());
-        pose_stamped.pose.orientation = utils::convert_to<geometry_msgs::msg::Quaternion>(
-            tf2::Quaternion(tf2::Vector3(0, 0, 1), yaw)
-        );
-        msg.poses.push_back(pose_stamped);
+    for (const auto& p: path) {
+        geometry_msgs::msg::PoseStamped ps;
+        ps.header = msg.header;
+        ps.pose.position.x = p.x();
+        ps.pose.position.y = p.y();
+        ps.pose.position.z = 0.0;
+        msg.poses.push_back(ps);
     }
     return msg;
 }

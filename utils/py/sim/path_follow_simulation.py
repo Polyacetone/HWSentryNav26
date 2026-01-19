@@ -29,6 +29,8 @@ class SimulationNode(Node):
         self.last_v = 0.0
         self.omega = 0.0
         self.last_omega = 0.0
+        self.slow_spin = False
+        self.fast_spin = False
         self.last_recv_time = self.get_clock().now()
         
         # Publishers
@@ -53,15 +55,29 @@ class SimulationNode(Node):
         self.last_omega = self.omega
         self.v = msg.velocity
         self.omega = msg.palstance
-        if abs(self.v - self.last_v) / 0.1 > 3.0:
-            print("High acceleration detected: ", abs(self.v - self.last_v) / 0.1)
-            self.v = 0.1 * (3.0 * (1 if self.v - self.last_v > 0 else -1)) + self.last_v
-        if abs(self.omega - self.last_omega) / 0.1 > 12.5:
-            print("High angular acceleration detected: ", abs(self.omega - self.last_omega) / 0.1)
-            self.omega = 0.1 * (12.5 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
-        if abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1 > 3.5:
-            print("High combined acceleration detected: ", abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1)
-            self.v = 3.5 / (abs(self.omega - self.last_omega) / 0.1) * (1 if self.v - self.last_v > 0 else -1) + self.last_v
+        self.slow_spin = msg.slow_spin
+        self.fast_spin = msg.fast_spin
+        if self.fast_spin or self.slow_spin: # 小陀螺模式
+            # 强制设定角速度和线速度
+            if self.fast_spin: self.omega = 12.5 * (1 if self.last_omega >= 0 else -1)
+            else: self.omega = 6.0 * (1 if self.last_omega >= 0 else -1)
+            # 限制加速度
+            if abs(self.last_v) / 0.1 > 3.0:
+                print("High acceleration detected before spin: ", abs(self.last_v) / 0.1)
+                self.v = 0.1 * (3.0 * (1 if self.last_v > 0 else -1))
+            else: self.v = 0.0
+            # 限制角加速度
+            if abs(self.omega - self.last_omega) / 0.1 > 12.5:
+                self.omega = 0.1 * (12.5 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
+        else: # 普通模式
+            if abs(self.v - self.last_v) / 0.1 > 3.0: # 限制加速度
+                print("High acceleration detected: ", abs(self.v - self.last_v) / 0.1)
+                self.v = 0.1 * (3.0 * (1 if self.v - self.last_v > 0 else -1)) + self.last_v
+            if abs(self.omega - self.last_omega) / 0.1 > 12.5: # 限制角加速度
+                print("High angular acceleration detected: ", abs(self.omega - self.last_omega) / 0.1)
+                self.omega = 0.1 * (12.5 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
+            if abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1 > 3.5: # 限制线速度和角速度乘积
+                print("High combined acceleration detected: ", abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1)
         self.last_recv_time = self.get_clock().now()
 
     def timer_callback(self):

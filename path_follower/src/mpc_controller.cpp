@@ -16,7 +16,7 @@ inline double scalar_value(const ceres::Jet<S, N>& v) { return static_cast<doubl
 // --------- cost map / direction map 的可微插值 ---------
 
 template <typename T>
-T interpolate_cost_map(const CostMap& cost_map, const T& x_map, const T& y_map) {
+inline T interpolate_cost_map(const CostMap& cost_map, const T& x_map, const T& y_map) {
     const T gx = (x_map - T(cost_map.origin_x)) / T(cost_map.resolution);
     const T gy = (y_map - T(cost_map.origin_y)) / T(cost_map.resolution);
 
@@ -44,7 +44,7 @@ T interpolate_cost_map(const CostMap& cost_map, const T& x_map, const T& y_map) 
 }
 
 template <typename T>
-Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_map, const T& x_map, const T& y_map) {
+inline Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_map, const T& x_map, const T& y_map) {
     const T gx = (x_map - T(dir_map.origin_x)) / T(dir_map.resolution);
     const T gy = (y_map - T(dir_map.origin_y)) / T(dir_map.resolution);
 
@@ -79,7 +79,7 @@ Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_map, co
 // --------- 剩余弧长估计 ---------
 
 template <typename T, typename Spline>
-T estimate_remaining_arclength(const Spline& spline, const T& u_in, int num_samples) {
+inline T estimate_remaining_arclength(const Spline& spline, const T& u_in, int num_samples) {
     const T u = ceres::fmin(ceres::fmax(u_in, T(0.0)), T(1.0));
     const T one_minus_u = T(1.0) - u;
 
@@ -109,8 +109,8 @@ T estimate_remaining_arclength(const Spline& spline, const T& u_in, int num_samp
 
 // --------- Ceres cost functor：优化 (v,omega) 序列 ---------
 
-struct MPCPathCostFunctor {
-    MPCPathCostFunctor(
+struct FollowMPCCostFunctor {
+    FollowMPCCostFunctor(
         const ubs::UniformBSplineCeresGenerator<SplineT>& generator,
         const int num_control_points,
         const Eigen::Vector3d& start_pose,
@@ -141,11 +141,6 @@ struct MPCPathCostFunctor {
 
         T last_v = T(start_state_.x());
         T last_omega = T(start_state_.y());
-
-        // 每一步的 residual 个数：
-        // ey(1) + etheta(1) + progress_u(1) + reg(v,omega)(2) + smooth(dv,domega)(2)
-        // + goal_slow_down(1) + soft_limits(2) + v_omega_product(1) + obstacle(1) + direction(1) + step_speed(1) = 14
-        const int expected_residuals = 14 * params_.horizon;
 
         int res_idx = 0;
 
@@ -187,36 +182,36 @@ struct MPCPathCostFunctor {
             etheta = atan2(sin(etheta), cos(etheta));
 
             // 贴合全局路径
-            residuals[res_idx++] = T(params_.path_follow.q_y) * ey;
-            residuals[res_idx++] = T(params_.path_follow.q_theta) * etheta;
+            residuals[res_idx++] = T(params_.follow_weights.q_y) * ey;
+            residuals[res_idx++] = T(params_.follow_weights.q_theta) * etheta;
 
             // 推进项（鼓励u增长）
-            residuals[res_idx++] = T(params_.path_follow.q_u) * (T(1.0) - u);
+            residuals[res_idx++] = T(params_.follow_weights.q_u) * (T(1.0) - u);
 
             // 控制正则
-            residuals[res_idx++] = T(params_.path_follow.r_v) * v;
-            residuals[res_idx++] = T(params_.path_follow.r_omega) * omega;
+            residuals[res_idx++] = T(params_.follow_weights.r_v) * v;
+            residuals[res_idx++] = T(params_.follow_weights.r_omega) * omega;
 
             // 控制平滑
-            residuals[res_idx++] = T(params_.path_follow.r_dv) * dv;
-            residuals[res_idx++] = T(params_.path_follow.r_domega) * domega;
+            residuals[res_idx++] = T(params_.follow_weights.r_dv) * dv;
+            residuals[res_idx++] = T(params_.follow_weights.r_domega) * domega;
 
             // 软加速度限制
-            const T dv_limit = T(params_.path_follow.acc_max * params_.dt);
-            const T domega_limit = T(params_.path_follow.alpha_max * params_.dt);
+            const T dv_limit = T(params_.follow_limits.acc_max * params_.dt);
+            const T domega_limit = T(params_.follow_limits.alpha_max * params_.dt);
             const T dv_excess = ceres::fmax(T(0.0), ceres::abs(dv) - dv_limit);
             const T domega_excess = ceres::fmax(T(0.0), ceres::abs(domega) - domega_limit);
-            residuals[res_idx++] = T(params_.path_follow.acc_limit_weight) * dv_excess;
-            residuals[res_idx++] = T(params_.path_follow.alpha_limit_weight) * domega_excess;
+            residuals[res_idx++] = T(params_.follow_weights.acc_limit_weight) * dv_excess;
+            residuals[res_idx++] = T(params_.follow_weights.alpha_limit_weight) * domega_excess;
 
             // 限制 |v * omega| 软约束
-            const T vomega_excess = ceres::fmax(T(0.0), ceres::abs(v * omega) - T(params_.path_follow.v_omega_product_max));
-            residuals[res_idx++] = T(params_.path_follow.v_omega_product_weight) * vomega_excess;
+            const T vomega_excess = ceres::fmax(T(0.0), ceres::abs(v * omega) - T(params_.follow_limits.v_omega_product_max));
+            residuals[res_idx++] = T(params_.follow_weights.v_omega_product_weight) * vomega_excess;
 
             // 避障（使用合并代价地图：全局+局部）
             const T cost = interpolate_cost_map(merged_cost_map_, x, y);
             // 归一化到 [0,1]，并进行惩罚
-            residuals[res_idx++] = T(params_.path_follow.obstacle_weight) * (cost / T(255.0));
+            residuals[res_idx++] = T(params_.follow_weights.obstacle_weight) * (cost / T(255.0));
 
             // 对齐台阶方向（方向地图在障碍附近/台阶上才有意义；无方向则不惩罚）
             const auto dir = interpolate_direction_map(direction_map_, x, y);
@@ -225,24 +220,24 @@ struct MPCPathCostFunctor {
             const Eigen::Matrix<T, 2, 1> heading(cos(theta), sin(theta));
             const T heading_dot_dir = heading.dot(dir_normalized);
             // 惩罚 1 - |cos|，即鼓励朝向与方向场对齐（允许正反向都对齐）
-            residuals[res_idx++] = T(params_.path_follow.direction_weight) * (T(1.0) - ceres::abs(heading_dot_dir));
+            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * (T(1.0) - ceres::abs(heading_dot_dir));
 
             // 台阶区域限速：当方向场非0（台阶）时，惩罚超过 step_speed_max 的速度
             // 使用 direction norm 做软开关，避免边界插值处不连续
             const T gate_step = ceres::fmin(T(1.0), dir_norm * 2.0); // [0,1]
-            const T v_excess_step = ceres::fmax(T(0.0), v - T(params_.path_follow.vel_max_on_step));
-            residuals[res_idx++] = T(params_.path_follow.vel_max_on_step_weight) * gate_step * v_excess_step;
+            const T v_excess_step = ceres::fmax(T(0.0), v - T(params_.follow_limits.vel_max_on_step));
+            residuals[res_idx++] = T(params_.follow_weights.vel_max_on_step_weight) * gate_step * v_excess_step;
 
             // 终点减速：基于剩余弧长在 goal_slow_down_distance 内逐渐限速
             // 设计为软约束形式：只惩罚 v 超过 v_limit_goal(remaining_distance)
-            const T s_remain = estimate_remaining_arclength(spline, u, params_.path_follow.slow_down_num_samples);
-            const T slow_dist = T(params_.path_follow.slow_down_distance);
+            const T s_remain = estimate_remaining_arclength(spline, u, params_.follow_limits.slow_down_num_samples);
+            const T slow_dist = T(params_.follow_limits.slow_down_distance);
             const T s_remain_ratio = ceres::fmin(T(1.0), s_remain / (slow_dist + T(1e-6))); // 1: far, 0: at goal
             const T gate_goal = ceres::fmin(T(1.0), ceres::fmax(T(0.0), (slow_dist - s_remain) / (slow_dist + T(1e-6))));
             // v_limit_goal: far -> vel_max, near -> vel_min
-            const T v_limit_goal = T(params_.path_follow.vel_min) + (T(params_.path_follow.vel_max) - T(params_.path_follow.vel_min)) * s_remain_ratio;
+            const T v_limit_goal = T(params_.follow_limits.vel_min) + (T(params_.follow_limits.vel_max) - T(params_.follow_limits.vel_min)) * s_remain_ratio;
             const T v_excess_goal = ceres::fmax(T(0.0), v - v_limit_goal);
-            residuals[res_idx++] = T(params_.path_follow.q_v_final) * gate_goal * v_excess_goal;
+            residuals[res_idx++] = T(params_.follow_weights.q_v_final) * gate_goal * v_excess_goal;
 
             // 进度动力学（将 ds/dt 转成 du/dt）
             T denom = T(1.0) - kappa * ey;
@@ -270,26 +265,30 @@ struct MPCPathCostFunctor {
     const DirectionMap& direction_map_;
 };
 
-// --------- Ceres cost functor：原地旋转（小陀螺） ---------
-
-struct MPCSpinCostFunctor {
-    MPCSpinCostFunctor(
+struct StopMPCCostFunctor {
+    StopMPCCostFunctor(
         const Eigen::Vector3d& start_pose,
         const Eigen::Vector2d& start_state,
         const MPCParams& params,
-        const double target_omega
+        const CostMap& merged_cost_map,
+        const DirectionMap& direction_map
     ) : start_pose_(start_pose),
         start_state_(start_state),
         params_(params),
-        target_omega_(target_omega) {}
+        merged_cost_map_(merged_cost_map),
+        direction_map_(direction_map) {}
 
     template <typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
+        T x = T(start_pose_.x());
+        T y = T(start_pose_.y());
         T theta = T(start_pose_.z());
+
         T last_v = T(start_state_.x());
         T last_omega = T(start_state_.y());
 
         int res_idx = 0;
+
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
             const T v = uk[0];
@@ -298,29 +297,63 @@ struct MPCSpinCostFunctor {
             const T domega = omega - last_omega;
 
             // 单车模型动力学
+            x += v * cos(theta) * T(params_.dt);
+            y += v * sin(theta) * T(params_.dt);
             theta += omega * T(params_.dt);
 
-            // 跟踪目标角速度
-            residuals[res_idx++] = T(params_.spin_follow.q_omega) * (omega - T(target_omega_));
+            // 1) 线速度正则（希望停止）
+            residuals[res_idx++] = T(params_.stop_weights.q_v) * v;
+            // 2) 角速度正则（希望停止）
+            residuals[res_idx++] = T(params_.stop_weights.q_omega) * omega;
 
-            // 控制正则
-            residuals[res_idx++] = T(params_.spin_follow.r_v) * v;
-
-            // 软加速度限制
-            const T dv_limit = T(params_.spin_follow.acc_max * params_.dt);
-            const T domega_limit = T(params_.spin_follow.alpha_max * params_.dt);
+            // 3) 最大加速度（软约束）
+            const T dv_limit = T(params_.stop_limits.acc_max * params_.dt);
             const T dv_excess = ceres::fmax(T(0.0), ceres::abs(dv) - dv_limit);
-            const T domega_excess = ceres::fmax(T(0.0), ceres::abs(domega) - domega_limit);
-            residuals[res_idx++] = T(params_.spin_follow.acc_limit_weight) * dv_excess;
-            residuals[res_idx++] = T(params_.spin_follow.alpha_limit_weight) * domega_excess;
+            residuals[res_idx++] = T(params_.stop_weights.acc_limit_weight) * dv_excess;
 
-            // 限制 |v * omega| 软约束
-            const T vomega_excess = ceres::fmax(T(0.0), ceres::abs(v * omega) - T(params_.spin_follow.v_omega_product_max));
-            residuals[res_idx++] = T(params_.spin_follow.v_omega_product_weight) * vomega_excess;
+            // 4) 最大角加速度（软约束）
+            const T domega_limit = T(params_.stop_limits.alpha_max * params_.dt);
+            const T domega_excess = ceres::fmax(T(0.0), ceres::abs(domega) - domega_limit);
+            residuals[res_idx++] = T(params_.stop_weights.alpha_limit_weight) * domega_excess;
+
+            // 5) 最大速度乘以角速度（软约束）
+            const T vomega_excess = ceres::fmax(T(0.0), ceres::abs(v * omega) - T(params_.stop_limits.v_omega_product_max));
+            residuals[res_idx++] = T(params_.stop_weights.v_omega_product_weight) * vomega_excess;
+
+            // 6) 避障代价：如果在障碍物中，需要推动其退出
+            const T cost = interpolate_cost_map(merged_cost_map_, x, y);
+            residuals[res_idx++] = T(params_.stop_weights.obstacle_weight) * (cost / T(255.0));
+
+            // 7) 台阶避让代价：若在台阶上，必须沿台阶方向行驶直到离开台阶
+            const auto dir = interpolate_direction_map(direction_map_, x, y);
+            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-9));
+            const T gate_step = ceres::fmin(T(1.0), dir_norm * 2.0);
+            const auto dir_normalized = dir / dir_norm;
+            const Eigen::Matrix<T, 2, 1> heading(cos(theta), sin(theta));
+            const T heading_dot_dir = heading.dot(dir_normalized);
+            // 朝向必须对齐台阶方向（允许正反向）
+            residuals[res_idx++] = T(params_.stop_weights.direction_weight) * gate_step * (T(1.0) - ceres::abs(heading_dot_dir));
+
+            // 8) 台阶区域最大速度（软约束）
+            const T v_excess_step = ceres::fmax(T(0.0), v - T(params_.stop_limits.vel_max_on_step));
+            residuals[res_idx++] = T(params_.stop_weights.vel_max_on_step_weight) * gate_step * v_excess_step;
+
+            // 9) 台阶退出：在台阶上时不允许停下
+            const T v_lack_step = ceres::fmax(T(0.0), T(params_.stop_limits.step_exit_speed_min) - v);
+            residuals[res_idx++] = T(params_.stop_weights.step_exit_weight) * gate_step * v_lack_step;
 
             last_v = v;
             last_omega = omega;
         }
+
+        // 避免停在障碍物或台阶上
+        const T cost_terminal = interpolate_cost_map(merged_cost_map_, x, y);
+        residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal_weight) * (cost_terminal / T(255.0));
+
+        const auto dir_t = interpolate_direction_map(direction_map_, x, y);
+        const T dir_t_norm = ceres::sqrt(dir_t.squaredNorm() + T(1e-9));
+        const T gate_step_t = ceres::fmin(T(1.0), dir_t_norm * 2.0);
+        residuals[res_idx++] = T(params_.stop_weights.step_terminal_weight) * gate_step_t;
 
         return true;
     }
@@ -328,7 +361,8 @@ struct MPCSpinCostFunctor {
     const Eigen::Vector3d& start_pose_;
     const Eigen::Vector2d& start_state_;
     const MPCParams& params_;
-    const double target_omega_;
+    const CostMap& merged_cost_map_;
+    const DirectionMap& direction_map_;
 };
 
 }
@@ -339,7 +373,7 @@ MPCController::MPCController(const MPCParams& params) : params_(params) {
     last_controls_.assign(static_cast<size_t>(std::max(1, params_.horizon)), Eigen::Vector2d::Zero());
 }
 
-std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCController::solve_path(
+std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCController::follow_path(
     const SplineD& global_path,
     const Eigen::Vector3d& current_pose_map,
     const Eigen::Vector2d& current_state,
@@ -350,9 +384,9 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         global_path,
         current_pose_map.head<2>(),
         last_u_,
-        params_.projection.num_samples,
-        params_.projection.search_window,
-        params_.projection.max_correspondence_distance
+        params_.follow_projection.proj_num_samples,
+        params_.follow_projection.proj_search_window,
+        params_.follow_projection.max_correspondence_distance
     );
 
     last_u_ = u0;
@@ -386,8 +420,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
 
     ceres::Problem problem;
 
-    auto* cost_function = new ceres::DynamicAutoDiffCostFunction<MPCPathCostFunctor>(
-        new MPCPathCostFunctor(
+    auto* cost_function = new ceres::DynamicAutoDiffCostFunction<FollowMPCCostFunctor>(
+        new FollowMPCCostFunctor(
             generator,
             num_pts,
             current_pose_map,
@@ -424,10 +458,10 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     problem.AddResidualBlock(cost_function, nullptr, parameter_blocks);
 
     for (int i = 0; i < params_.horizon; i++) {
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, params_.path_follow.vel_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.path_follow.vel_max);
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.path_follow.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.path_follow.omega_max);
+        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, params_.follow_limits.vel_min);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.follow_limits.vel_max);
+        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.follow_limits.omega_min);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.follow_limits.omega_max);
     }
 
     ceres::Solver::Options options;
@@ -474,36 +508,38 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     return std::tuple{cmd_v_omega, predicted_path_map};
 }
 
-std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCController::solve_spin(
+std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCController::stop(
     const Eigen::Vector3d& current_pose_map,
     const Eigen::Vector2d& current_state,
-    double target_omega
+    const CostMap& merged_cost_map,
+    const DirectionMap& global_direction_map
 ) {
     // 决策变量：控制序列 (v, omega)
     std::vector<std::vector<double>> controls(static_cast<size_t>(params_.horizon), std::vector<double>(2, 0.0));
 
-    // warm start：沿用上次解（不区分模式）
+    // warm start：把上次解往前移一格，否则用当前状态
     if (last_controls_.size() == static_cast<size_t>(params_.horizon)) {
         for (int i = 0; i < params_.horizon; i++) {
             const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[static_cast<size_t>(i + 1)] : last_controls_.back();
-            controls[static_cast<size_t>(i)][0] = init.x();
+            controls[static_cast<size_t>(i)][0] = std::max(0.0, init.x());
             controls[static_cast<size_t>(i)][1] = init.y();
         }
     } else {
         for (int i = 0; i < params_.horizon; i++) {
-            controls[static_cast<size_t>(i)][0] = 0.0;
-            controls[static_cast<size_t>(i)][1] = target_omega;
+            controls[static_cast<size_t>(i)][0] = std::max(0.0, current_state.x());
+            controls[static_cast<size_t>(i)][1] = current_state.y();
         }
     }
 
     ceres::Problem problem;
 
-    auto* cost_function = new ceres::DynamicAutoDiffCostFunction<MPCSpinCostFunctor>(
-        new MPCSpinCostFunctor(
+    auto* cost_function = new ceres::DynamicAutoDiffCostFunction<StopMPCCostFunctor>(
+        new StopMPCCostFunctor(
             current_pose_map,
             current_state,
             params_,
-            target_omega
+            merged_cost_map,
+            global_direction_map
         )
     );
 
@@ -511,22 +547,21 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         cost_function->AddParameterBlock(2);
     }
 
-    // residual 总数：每步 5 个
-    // q_omega(1) + r_v(1) + soft_limits(2) + v_omega_product(1)
-    cost_function->SetNumResiduals(5 * params_.horizon);
+    // 每步 9 个 residual + terminal 2 个
+    cost_function->SetNumResiduals(9 * params_.horizon + 2);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
-    for (auto& c : controls) parameter_blocks.push_back(c.data());
-
+    for (auto& c : controls) {
+        parameter_blocks.push_back(c.data());
+    }
     problem.AddResidualBlock(cost_function, nullptr, parameter_blocks);
 
     for (int i = 0; i < params_.horizon; i++) {
         problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, 0.0);
-        // 注意：spin 模式不对 v 施加上界硬约束，避免从路径跟随切换时速度被卡在上界导致突变
-        // 通过 r_v 与 soft constraints 让优化器自行把 v 收敛到 0
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.spin_follow.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.spin_follow.omega_max);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.stop_limits.vel_max);
+        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.stop_limits.omega_min);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.stop_limits.omega_max);
     }
 
     ceres::Solver::Options options;
@@ -546,6 +581,7 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
 
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
 
+    // 保存 warm start
     last_controls_.resize(static_cast<size_t>(params_.horizon));
     for (int i = 0; i < params_.horizon; i++) {
         last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(
@@ -554,6 +590,7 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         );
     }
 
+    // 预测轨迹（用于调试展示）
     std::vector<Eigen::Vector2d> predicted_path_map;
     predicted_path_map.reserve(static_cast<size_t>(params_.horizon + 1));
     Eigen::Vector3d pose = current_pose_map;
