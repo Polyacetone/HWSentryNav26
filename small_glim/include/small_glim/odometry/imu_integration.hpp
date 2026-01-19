@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <array>
 #include <vector>
 #include <Eigen/Core>
 #include <gtsam/navigation/ImuFactor.h>
@@ -21,6 +22,18 @@ struct IMUIntegrationParams {
     double acc_saturation_thresh; // Accelerometer saturation threshold
     double gyro_saturation_thresh; // Gyroscope saturation threshold
     double saturation_mult; // Covariance multiplier when saturated
+};
+
+/**
+* @brief Per-axis IMU saturation status aggregated over an integration interval.
+*/
+struct IMUSaturationStatus {
+    std::array<bool, 3> acc_axes {false, false, false};
+    std::array<bool, 3> gyro_axes {false, false, false};
+
+    bool any_acc() const { return acc_axes[0] || acc_axes[1] || acc_axes[2]; }
+    bool any_gyro() const { return gyro_axes[0] || gyro_axes[1] || gyro_axes[2]; }
+    bool any() const { return any_acc() || any_gyro(); }
 };
 
 /**
@@ -50,7 +63,8 @@ public:
         double start_time,
         double end_time,
         const gtsam::imuBias::ConstantBias& bias,
-        int* num_integrated
+        int* num_integrated,
+        IMUSaturationStatus* saturation_status = nullptr
     );
 
     /**
@@ -69,7 +83,8 @@ public:
         const gtsam::NavState& state,
         const gtsam::imuBias::ConstantBias& bias,
         std::vector<double>& pred_times,
-        std::vector<Eigen::Isometry3d>& pred_poses
+        std::vector<Eigen::Isometry3d>& pred_poses,
+        IMUSaturationStatus* saturation_status = nullptr
     );
 
     /**

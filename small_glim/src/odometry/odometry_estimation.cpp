@@ -210,6 +210,30 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
 
 void OdometryEstimationCPU::fallback_smoother() {}
 
+int OdometryEstimationCPU::select_target_update_frame(const int preferred) const {
+    if (preferred < 0 || preferred >= static_cast<int>(frames.size())) return -1;
+
+    auto is_valid = [&](int idx) -> bool {
+        if (idx < 0 || idx >= static_cast<int>(frames.size())) return false;
+        if (!frames[idx]) return false;
+        if (!frames[idx]->frame) return false;
+        return !frames[idx]->deskew_imu_saturated;
+    };
+
+    if (is_valid(preferred)) return preferred;
+
+    // Search nearby frames (prefer closest in time/index).
+    constexpr int kSearchRadius = 5;
+    for (int d = 1; d <= kSearchRadius; d++) {
+        const int left = preferred - d;
+        const int right = preferred + d;
+        if (is_valid(left)) return left;
+        if (is_valid(right)) return right;
+    }
+
+    return -1;
+}
+
 void OdometryEstimationCPU::update_target(
     const int current,
     const Eigen::Isometry3d& T_target_imu
@@ -448,13 +472,15 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     // Motion prediction for deskewing (intra-scan)
     std::vector<double> pred_imu_times;
     std::vector<Eigen::Isometry3d> pred_imu_poses;
+    IMUSaturationStatus deskew_sat;
     imu_integration->integrate_imu(
         raw_frame->stamp,
         raw_frame->scan_end_time,
         predicted_nav_world_imu,
         last_imu_bias,
         pred_imu_times,
-        pred_imu_poses
+        pred_imu_poses,
+        &deskew_sat
     );
 
     // Create EstimationFrame
@@ -468,6 +494,10 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     new_frame->v_world_imu = predicted_v_world_imu;
     new_frame->imu_bias = last_imu_bias.vector();
     new_frame->raw_frame = raw_frame;
+
+    new_frame->deskew_imu_saturated = deskew_sat.any();
+    new_frame->deskew_acc_saturated_axes = deskew_sat.acc_axes;
+    new_frame->deskew_gyro_saturated_axes = deskew_sat.gyro_axes;
 
     if (params->save_imu_rate_trajectory) {
         new_frame->imu_rate_trajectory.resize(8, pred_imu_times.size());
@@ -554,8 +584,28 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
             active_keyframes.pop_front();
 
             if (frames[old_keyframe]) {
-                update_target(old_keyframe, frames[old_keyframe]->T_world_imu);
-                last_T_target_imu = frames[old_keyframe]->T_world_imu;
+                const int chosen = select_target_update_frame(old_keyframe);
+                if (chosen < 0) {
+                    logger::warn(
+                        "odom_estimation",
+                        "skip iVox target update: no valid neighbor found (preferred={}, time={})",
+                        old_keyframe,
+                        frames[old_keyframe]->stamp
+                    );
+                } else {
+                    if (chosen != old_keyframe) {
+                        logger::warn(
+                            "odom_estimation",
+                            "replace saturated target frame: preferred={} -> chosen={} (preferred_time={}, chosen_time={})",
+                            old_keyframe,
+                            chosen,
+                            frames[old_keyframe]->stamp,
+                            frames[chosen]->stamp
+                        );
+                    }
+                    update_target(chosen, frames[chosen]->T_world_imu);
+                    last_T_target_imu = frames[chosen]->T_world_imu;
+                }
             }
         }
     }

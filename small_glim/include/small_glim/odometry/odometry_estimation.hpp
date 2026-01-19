@@ -88,6 +88,7 @@ private:
     );
     void fallback_smoother();
     void update_target(const int current, const Eigen::Isometry3d& T_target_imu);
+    int select_target_update_frame(const int preferred) const;
     void update_frames(const int current, const gtsam::NonlinearFactorGraph& new_factors);
     void update_smoother(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, const std::map<std::uint64_t, double>& new_stamp, int update_count = 0);
 

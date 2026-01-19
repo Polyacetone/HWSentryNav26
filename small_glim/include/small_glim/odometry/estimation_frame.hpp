@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <array>
 #include <Eigen/Dense>
 #include <gtsam_points/types/point_cloud.hpp>
 #include <gtsam_points/types/gaussian_voxelmap.hpp>
@@ -56,6 +57,12 @@ public:
 
     PreprocessedFrame::ConstPtr raw_frame; ///< Raw input point cloud (LiDAR frame)
     Eigen::Matrix<double, 8, -1> imu_rate_trajectory; ///< IMU-rate trajectory 8 x N  [t, x, y, z, qx, qy, qz, qw]
+
+    // If true, this frame's deskewing relied on IMU measurements that saturated.
+    // Used to avoid inserting heavily distorted scans into iVox.
+    bool deskew_imu_saturated {false};
+    std::array<bool, 3> deskew_acc_saturated_axes {false, false, false};
+    std::array<bool, 3> deskew_gyro_saturated_axes {false, false, false};
 
     FrameType frame_type; ///< Coordinate center type of $frame
     gtsam_points::PointCloud::ConstPtr frame; ///< Deskewed points for state estimation
