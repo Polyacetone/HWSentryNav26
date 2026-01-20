@@ -1,7 +1,7 @@
 import open3d as o3d
 import numpy as np
 
-pcd = o3d.io.read_point_cloud("1897new.pcd")
+pcd = o3d.io.read_point_cloud("part.pcd")
 pcd_clean, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
 
 obb = pcd_clean.get_oriented_bounding_box()
@@ -19,4 +19,4 @@ T[:3, 3] = -R.T @ (center - R @ (extent / 2))
 print(T)
 
 pcd_aligned = pcd_clean.transform(T)
-o3d.io.write_point_cloud("1897new_aligned.pcd", pcd_aligned)
+o3d.io.write_point_cloud("part_aligned.pcd", pcd_aligned)

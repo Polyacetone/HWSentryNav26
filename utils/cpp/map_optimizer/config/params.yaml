@@ -1,30 +1,39 @@
 /**:
   ros__parameters:
     # Global
-    data_path: "2025-12-14T21:09:27"
-    num_threads: 16
+    data_path: "2026-01-21T00:51:25"
+    num_threads: 20
 
     # Factor graph optimization
-    max_iterations: 100
+    enable_factor_graph_optimization: false
+    max_iterations: 500
     k_neighbors: 10
-    loop_dist_thres: 5.0
+    loop_dist_thres: 1.0
     gicp_max_correspondence_distance: 2.0
 
     # Raycasting filter
     enable_raycasting_filter: true
-    voxel_resolution: 0.05
-    pass_through_threshold: 5
+    # If built with -DMAP_OPTIMIZER_USE_CUDA=ON, enables CUDA raycasting.
+    # If CUDA is not compiled in, the node will fall back to CPU automatically.
+    use_cuda_raycasting: true
+    voxel_resolution: 0.02
+    pass_through_threshold: 1
 
     # Downsample
     enable_downsample: true
-    downsample_leaf_size: 0.1
+    downsample_leaf_size: 0.05
+
+    # Remove radius outliers
+    enable_radius_outlier_removal: true
+    radius_search: 0.5
+    min_neighbors_in_radius: 2
 
     # Remove statistical outliers
-    enable_statistical_outlier_removal: true
+    enable_statistical_outlier_removal: false
     mean_k: 10
-    std_dev_mul_thresh: 1.0
+    std_dev_mul_thresh: 3.0
 
     # MLS smoothing
-    enable_mls_smoothing: true
+    enable_mls_smoothing: false
     search_radius: 0.2
     polynomial_order: 1

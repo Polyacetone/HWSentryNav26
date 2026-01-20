@@ -2,9 +2,9 @@
   ros__parameters:
     node:
       debug: false
-      dump_on_unload: false
-      enable_mapping: false
-      save_raw_mapping_frames: false
+      dump_on_unload: true
+      enable_mapping: true
+      save_raw_mapping_frames: true
       enable_tf_publish: false
       imu_time_offset: 0.0
       points_time_offset: 0.0

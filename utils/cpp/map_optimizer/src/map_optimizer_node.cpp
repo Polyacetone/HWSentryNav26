@@ -4,6 +4,7 @@
 #include <pcl/point_types.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/radius_outlier_removal.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/search/kdtree.h>
 #include <pcl/surface/mls.h>
@@ -20,33 +21,131 @@
 #include <gtsam_points/types/point_cloud_cpu.hpp>
 #include <gtsam_points/ann/kdtree.hpp>
 
-#include <fstream>
+#include <map_optimizer/voxel_key.hpp>
+
 #include <regex>
-#include <iostream>
-#include <vector>
-#include <string>
+
 #include <atomic>
+#include <fstream>
+#include <limits>
 #include <unordered_map>
+
+#include <omp.h>
+
+#if defined(MAP_OPTIMIZER_USE_CUDA)
+#include <map_optimizer/raycasting_cuda.hpp>
+#endif
 
 using gtsam::symbol_shorthand::X;
 
-struct VoxelKey {
-    int x, y, z;
-    bool operator==(const VoxelKey& other) const {
-        return x == other.x && y == other.y && z == other.z;
+// Amanatides & Woo style voxel traversal (3D DDA).
+// Traverses voxels from origin toward end_pt, excluding the end voxel.
+// For each traversed voxel that exists in voxel_to_index, increments the per-thread counter map.
+inline void traverse_voxels_dda(
+    const Eigen::Vector3d& origin,
+    const Eigen::Vector3d& end_pt,
+    const double voxel_res,
+    const double inv_voxel_res,
+    const std::unordered_map<VoxelKey, int, VoxelKeyHash>& voxel_to_index,
+    std::unordered_map<int, int>& local_counts
+) {
+    Eigen::Vector3d delta = end_pt - origin;
+    const double distance = delta.norm();
+    if (distance <= 1e-9) {
+        return;
     }
-};
+    if (distance < voxel_res * 0.5) {
+        return;
+    }
 
-struct VoxelKeyHash {
-    std::size_t operator()(const VoxelKey& k) const {
-        return ((std::hash<int>()(k.x) ^ (std::hash<int>()(k.y) << 1)) >> 1) ^ (std::hash<int>()(k.z) << 1);
+    const Eigen::Vector3d dir = delta / distance;
+
+    VoxelKey v = voxel_key_from_xyz(origin.x(), origin.y(), origin.z(), inv_voxel_res);
+    const VoxelKey vend = voxel_key_from_xyz(end_pt.x(), end_pt.y(), end_pt.z(), inv_voxel_res);
+    if (v == vend) {
+        return;
     }
-};
+
+    const int step_x = (dir.x() > 0.0) ? 1 : ((dir.x() < 0.0) ? -1 : 0);
+    const int step_y = (dir.y() > 0.0) ? 1 : ((dir.y() < 0.0) ? -1 : 0);
+    const int step_z = (dir.z() > 0.0) ? 1 : ((dir.z() < 0.0) ? -1 : 0);
+
+    const double inf = std::numeric_limits<double>::infinity();
+
+    auto next_boundary = [&](int voxel_coord, int step) {
+        // boundary in world coordinates
+        return (step > 0) ? (double)(voxel_coord + 1) * voxel_res : (double)voxel_coord * voxel_res;
+    };
+
+    double t_max_x = inf;
+    double t_max_y = inf;
+    double t_max_z = inf;
+    double t_delta_x = inf;
+    double t_delta_y = inf;
+    double t_delta_z = inf;
+
+    if (step_x != 0) {
+        const double bx = next_boundary(v.x, step_x);
+        t_max_x = (bx - origin.x()) / dir.x();
+        t_delta_x = voxel_res / std::abs(dir.x());
+    }
+    if (step_y != 0) {
+        const double by = next_boundary(v.y, step_y);
+        t_max_y = (by - origin.y()) / dir.y();
+        t_delta_y = voxel_res / std::abs(dir.y());
+    }
+    if (step_z != 0) {
+        const double bz = next_boundary(v.z, step_z);
+        t_max_z = (bz - origin.z()) / dir.z();
+        t_delta_z = voxel_res / std::abs(dir.z());
+    }
+
+    // Step into the next voxel first, so we don't count the origin cell.
+    // Also mimic the previous sampling behavior: only count voxels before (distance - voxel_res).
+    while (!(v == vend)) {
+        double t_next = 0.0;
+        if (t_max_x < t_max_y) {
+            if (t_max_x < t_max_z) {
+                t_next = t_max_x;
+                v.x += step_x;
+                t_max_x += t_delta_x;
+            } else {
+                t_next = t_max_z;
+                v.z += step_z;
+                t_max_z += t_delta_z;
+            }
+        } else {
+            if (t_max_y < t_max_z) {
+                t_next = t_max_y;
+                v.y += step_y;
+                t_max_y += t_delta_y;
+            } else {
+                t_next = t_max_z;
+                v.z += step_z;
+                t_max_z += t_delta_z;
+            }
+        }
+
+        if (t_next > distance - voxel_res) {
+            break;
+        }
+
+        if (v == vend) {
+            break;
+        }
+
+        auto it = voxel_to_index.find(v);
+        if (it != voxel_to_index.end()) {
+            local_counts[it->second] += 1;
+        }
+    }
+}
 
 struct {
     int num_threads;
     int max_iterations;
 
+    bool enable_factor_graph_optimization;
     int k_neighbors;
     double loop_dist_thres;
     double gicp_max_correspondence_distance;
@@ -57,6 +156,10 @@ struct {
 
     bool enable_downsample;
     double downsample_leaf_size;
+
+    bool enable_radius_outlier_removal;
+    double radius_search;
+    int min_neighbors_in_radius;
 
     bool enable_statistical_outlier_removal;
     int mean_k;
@@ -196,6 +299,7 @@ int main(int argc, char* argv[]) {
     node_params = {
         (int)node->declare_parameter<int>("num_threads"),
         (int)node->declare_parameter<int>("max_iterations"),
+        node->declare_parameter<bool>("enable_factor_graph_optimization"),
         (int)node->declare_parameter<int>("k_neighbors"),
         node->declare_parameter<double>("loop_dist_thres"),
         node->declare_parameter<double>("gicp_max_correspondence_distance"),
@@ -204,6 +308,9 @@ int main(int argc, char* argv[]) {
         (int)node->declare_parameter<int>("pass_through_threshold"),
         node->declare_parameter<bool>("enable_downsample"),
         node->declare_parameter<double>("downsample_leaf_size"),
+        node->declare_parameter<bool>("enable_radius_outlier_removal"),
+        node->declare_parameter<double>("radius_search"),
+        (int)node->declare_parameter<int>("min_neighbors_in_radius"),
         node->declare_parameter<bool>("enable_statistical_outlier_removal"),
         (int)node->declare_parameter<int>("mean_k"),
         node->declare_parameter<double>("std_dev_mul_thresh"),
@@ -212,7 +319,8 @@ int main(int argc, char* argv[]) {
         (int)node->declare_parameter<int>("polynomial_order")
     };
     std::string data_path = node->declare_parameter<std::string>("data_path");
-    std::vector<gtsam::Pose3> initial_poses;
+    bool use_cuda_raycasting = node->declare_parameter<bool>("use_cuda_raycasting", true);
+    std::vector<gtsam::Pose3> poses;
     std::vector<gtsam_points::PointCloudCPU::Ptr> frames;
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> pcl_frames;
 
@@ -227,15 +335,15 @@ int main(int argc, char* argv[]) {
     while (std::getline(poses_file, line)) {
         if (line.empty()) continue;
         try {
-            initial_poses.push_back(parse_pose(line));
+            poses.push_back(parse_pose(line));
         } catch (const std::exception& e) {
             RCLCPP_WARN(get_logger(), "Skipping invalid line: %s", line.c_str());
         }
     }
-    RCLCPP_INFO(get_logger(), "Loaded %zu poses", initial_poses.size());
+    RCLCPP_INFO(get_logger(), "Loaded %zu poses", poses.size());
 
     // Load frames
-    for (size_t i = 0; i < initial_poses.size(); i++) {
+    for (size_t i = 0; i < poses.size(); i++) {
         std::string pcd_path = data_path + "/frame_" + std::to_string(i) + ".pcd";
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         if (pcl::io::loadPCDFile(pcd_path, *cloud) == -1) {
@@ -247,135 +355,204 @@ int main(int argc, char* argv[]) {
     }
     RCLCPP_INFO(get_logger(), "Loaded %zu frames", frames.size());
 
-    if (initial_poses.size() != frames.size()) {
+    if (poses.size() != frames.size()) {
         RCLCPP_ERROR(get_logger(), "Number of poses and frames do not match");
         return 1;
     }
 
-    // Build graph
-    gtsam::NonlinearFactorGraph graph;
-    gtsam::Values values;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr merged = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
-    auto prior_noise = gtsam::noiseModel::Isotropic::Precision(6, 1e6);
+    if (node_params.enable_factor_graph_optimization) {
+        // Build graph
+        gtsam::NonlinearFactorGraph graph;
+        gtsam::Values values;
 
-    for (size_t i = 0; i < initial_poses.size(); i++) {
-        values.insert(X(i), initial_poses[i]);
+        auto prior_noise = gtsam::noiseModel::Isotropic::Precision(6, 1e6);
 
-        if (i == 0) {
-            graph.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), initial_poses[0], prior_noise));
-        } else {
-            // GICP factor (sequential)
-            auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
-                X(i-1), X(i), frames[i-1], frames[i]
-            );
-            factor->set_num_threads(node_params.num_threads);
-            factor->set_max_correspondence_distance(node_params.gicp_max_correspondence_distance);
-            graph.add(factor);
-        }
-    }
+        for (size_t i = 0; i < poses.size(); i++) {
+            values.insert(X(i), poses[i]);
 
-    // Loop closure (simple distance based)
-    int loop_count = 0;
-    for (size_t i = 0; i < initial_poses.size(); i++) {
-        for (size_t j = i + 2; j < initial_poses.size(); j++) {
-            double dist = (initial_poses[i].translation() - initial_poses[j].translation()).norm();
-            if (dist < node_params.loop_dist_thres) {
+            if (i == 0) {
+                graph.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), poses[0], prior_noise));
+            } else {
+                // GICP factor (sequential)
                 auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
-                    X(i), X(j), frames[i], frames[j]
+                    X(i-1), X(i), frames[i-1], frames[i]
                 );
                 factor->set_num_threads(node_params.num_threads);
                 factor->set_max_correspondence_distance(node_params.gicp_max_correspondence_distance);
                 graph.add(factor);
-                loop_count++;
             }
         }
+
+        // Loop closure (simple distance based)
+        int loop_count = 0;
+        for (size_t i = 0; i < poses.size(); i++) {
+            for (size_t j = i + 2; j < poses.size(); j++) {
+                double dist = (poses[i].translation() - poses[j].translation()).norm();
+                if (dist < node_params.loop_dist_thres) {
+                    auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
+                        X(i), X(j), frames[i], frames[j]
+                    );
+                    factor->set_num_threads(node_params.num_threads);
+                    factor->set_max_correspondence_distance(node_params.gicp_max_correspondence_distance);
+                    graph.add(factor);
+                    loop_count++;
+                }
+            }
+        }
+        RCLCPP_INFO(get_logger(), "Added %d loop closure factors", loop_count);
+
+        // Optimize
+        RCLCPP_INFO(get_logger(), "Optimizing...");
+        gtsam::LevenbergMarquardtParams params;
+        params.setMaxIterations(node_params.max_iterations);
+        gtsam::LevenbergMarquardtOptimizer optimizer(graph, values, params);
+        gtsam::Values result = optimizer.optimize();
+        RCLCPP_INFO(get_logger(), "Optimization done");
+
+        for (size_t i = 0; i < poses.size(); i++) {
+            poses[i] = result.at<gtsam::Pose3>(X(i));
+        }
     }
-    RCLCPP_INFO(get_logger(), "Added %d loop closure factors", loop_count);
 
-    // Optimize
-    RCLCPP_INFO(get_logger(), "Optimizing...");
-    gtsam::LevenbergMarquardtParams params;
-    params.setMaxIterations(node_params.max_iterations);
-    gtsam::LevenbergMarquardtOptimizer optimizer(graph, values, params);
-    gtsam::Values result = optimizer.optimize();
-    RCLCPP_INFO(get_logger(), "Optimization done");
-
-    // Merge
-    pcl::PointCloud<pcl::PointXYZ>::Ptr merged = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-    for (size_t i = 0; i < initial_poses.size(); i++) {
-        gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
-        Eigen::Matrix4f T = pose.matrix().cast<float>();
-        pcl::PointCloud<pcl::PointXYZ> transformed;
-        pcl::transformPointCloud(*pcl_frames[i], transformed, T);
-        *merged += transformed;
+    // Merge point clouds
+    for (size_t i = 0; i < poses.size(); i++) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr transformed = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        Eigen::Matrix4f T = poses[i].matrix().cast<float>();
+        pcl::transformPointCloud(*pcl_frames[i], *transformed, T);
+        *merged += *transformed;
     }
 
     // Dynamic Object Removal
     if (node_params.enable_raycasting_filter) {
         RCLCPP_INFO(get_logger(), "Removing dynamic objects...");
         double voxel_res = node_params.voxel_resolution;
+        const double inv_voxel_res = 1.0 / voxel_res;
         std::unordered_map<VoxelKey, int, VoxelKeyHash> voxel_to_index;
-        std::vector<VoxelKey> index_to_voxel;
+        std::vector<VoxelKey> keys_by_index;
 
-        // Build voxel map from merged cloud
+        // Heuristic reserve to reduce rehashing (merged points >> unique voxels).
+        voxel_to_index.reserve(std::max<size_t>(1024, merged->size() / 8));
+
+        // Build voxel map from merged cloud (unique voxels only)
+        keys_by_index.reserve(std::max<size_t>(1024, merged->size() / 16));
         for (const auto& pt : *merged) {
-            VoxelKey k = {
-                (int)std::floor(pt.x / voxel_res),
-                (int)std::floor(pt.y / voxel_res),
-                (int)std::floor(pt.z / voxel_res)
-            };
-            if (voxel_to_index.find(k) == voxel_to_index.end()) {
-                voxel_to_index[k] = index_to_voxel.size();
-                index_to_voxel.push_back(k);
+            VoxelKey k = voxel_key_from_xyz(pt.x, pt.y, pt.z, inv_voxel_res);
+            const int new_index = (int)voxel_to_index.size();
+            auto [it, inserted] = voxel_to_index.emplace(k, new_index);
+            if (inserted) {
+                keys_by_index.push_back(k);
             }
         }
 
-        std::vector<std::atomic<int>> pass_through_counts(index_to_voxel.size());
+        std::vector<int> pass_through_counts(keys_by_index.size(), 0);
 
-        // Ray casting
-        #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided)
-        for (size_t i = 0; i < initial_poses.size(); i++) {
-            gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
-            Eigen::Vector3d origin = pose.translation();
-            Eigen::Matrix4d T = pose.matrix();
+        bool used_gpu = false;
+#if defined(MAP_OPTIMIZER_USE_CUDA)
+        if (use_cuda_raycasting) {
+            RCLCPP_INFO(get_logger(), "Raycasting (CUDA) ...");
 
-            for (const auto& pt_local : *pcl_frames[i]) {
-                Eigen::Vector4d pt_global_h = T * Eigen::Vector4d(pt_local.x, pt_local.y, pt_local.z, 1.0);
-                Eigen::Vector3d pt_global = pt_global_h.head<3>();
+            std::vector<Float3> frame_origins;
+            std::vector<float> frame_rotations_rowmajor;
+            std::vector<Float3> points_local;
+            std::vector<int> frame_offsets;
 
-                Eigen::Vector3d direction = pt_global - origin;
-                double distance = direction.norm();
-                direction.normalize();
+            frame_origins.resize(poses.size());
+            frame_rotations_rowmajor.resize(poses.size() * 9);
+            frame_offsets.resize(poses.size() + 1);
+            frame_offsets[0] = 0;
 
-                VoxelKey target_k = {
-                    (int)std::floor(pt_global.x() / voxel_res),
-                    (int)std::floor(pt_global.y() / voxel_res),
-                    (int)std::floor(pt_global.z() / voxel_res)
-                };
-                
-                int target_idx = -1;
-                auto it_target = voxel_to_index.find(target_k);
-                if (it_target != voxel_to_index.end()) {
-                    target_idx = it_target->second;
+            size_t total_points = 0;
+            for (size_t i = 0; i < pcl_frames.size(); i++) {
+                total_points += pcl_frames[i]->size();
+                frame_offsets[i + 1] = (int)total_points;
+            }
+            points_local.reserve(total_points);
+
+            for (size_t i = 0; i < poses.size(); i++) {
+                const gtsam::Pose3 pose = poses[i];
+                const Eigen::Matrix3d R = pose.rotation().matrix();
+                const auto t = pose.translation();
+                frame_origins[i] = Float3{(float)t.x(), (float)t.y(), (float)t.z()};
+
+                // Row-major
+                float* R9 = frame_rotations_rowmajor.data() + i * 9;
+                R9[0] = (float)R(0, 0);
+                R9[1] = (float)R(0, 1);
+                R9[2] = (float)R(0, 2);
+                R9[3] = (float)R(1, 0);
+                R9[4] = (float)R(1, 1);
+                R9[5] = (float)R(1, 2);
+                R9[6] = (float)R(2, 0);
+                R9[7] = (float)R(2, 1);
+                R9[8] = (float)R(2, 2);
+
+                for (const auto& pt_local : *pcl_frames[i]) {
+                    points_local.push_back(Float3{pt_local.x, pt_local.y, pt_local.z});
+                }
+            }
+
+            std::string cuda_error;
+            std::vector<int> cuda_counts;
+            if (raycasting_cuda_compute_counts(keys_by_index,
+                                               (float)voxel_res,
+                                               frame_origins,
+                                               frame_rotations_rowmajor,
+                                               points_local,
+                                               frame_offsets,
+                                               cuda_counts,
+                                               &cuda_error)) {
+                pass_through_counts = std::move(cuda_counts);
+                used_gpu = true;
+                RCLCPP_INFO(get_logger(), "Raycasting (CUDA) done.");
+            } else {
+                RCLCPP_WARN(get_logger(), "CUDA raycasting failed (%s). Falling back to CPU.", cuda_error.c_str());
+            }
+        }
+#else
+        if (use_cuda_raycasting) {
+            RCLCPP_WARN(get_logger(), "use_cuda_raycasting=true but CUDA support was not compiled. Falling back to CPU.");
+        }
+#endif
+
+        if (!used_gpu) {
+            const int num_threads = std::max(1, node_params.num_threads);
+            std::vector<std::unordered_map<int, int>> thread_local_counts(num_threads);
+            for (auto& m : thread_local_counts) {
+                m.reserve(16384);
+            }
+
+            std::atomic<int> processed_frames = 0;
+
+            // Ray casting (voxel DDA). Use thread-local accumulation to avoid atomic contention.
+            #pragma omp parallel for num_threads(num_threads) schedule(guided)
+            for (size_t i = 0; i < poses.size(); i++) {
+                const gtsam::Pose3 pose = poses[i];
+                const Eigen::Matrix3d R = pose.rotation().matrix();
+                const Eigen::Vector3d t(pose.translation().x(), pose.translation().y(), pose.translation().z());
+                const Eigen::Vector3d origin = t;
+
+                auto& local_counts = thread_local_counts[omp_get_thread_num()];
+                for (const auto& pt_local : *pcl_frames[i]) {
+                    const Eigen::Vector3d pl(pt_local.x, pt_local.y, pt_local.z);
+                    const Eigen::Vector3d pt_global = R * pl + t;
+                    traverse_voxels_dda(origin, pt_global, voxel_res, inv_voxel_res, voxel_to_index, local_counts);
                 }
 
-                int last_idx = -1;
-                for (double d = 0.0; d < distance - voxel_res; d += voxel_res / 2.0) {
-                    Eigen::Vector3d current_pos = origin + direction * d;
-                    VoxelKey k = {
-                        (int)std::floor(current_pos.x() / voxel_res),
-                        (int)std::floor(current_pos.y() / voxel_res),
-                        (int)std::floor(current_pos.z() / voxel_res)
-                    };
+                processed_frames.fetch_add(1);
+                if (omp_get_thread_num() == 0) {
+                    RCLCPP_INFO(
+                        get_logger(), "Raycasting progress: %.1f%% (%d / %zu)",
+                        100.0 * processed_frames.load() / poses.size(), processed_frames.load(), poses.size()
+                    );
+                }
+            }
 
-                    auto it = voxel_to_index.find(k);
-                    if (it != voxel_to_index.end()) {
-                        int idx = it->second;
-                        if (idx != target_idx && idx != last_idx) {
-                            pass_through_counts[idx].fetch_add(1);
-                            last_idx = idx;
-                        }
-                    }
+            // Merge thread-local counts
+            for (const auto& local : thread_local_counts) {
+                for (const auto& kv : local) {
+                    pass_through_counts[kv.first] += kv.second;
                 }
             }
         }
@@ -383,12 +560,14 @@ int main(int argc, char* argv[]) {
         // Filter
         pcl::PointCloud<pcl::PointXYZ>::Ptr filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         for (const auto& pt : *merged) {
-            VoxelKey k = {
-                (int)std::floor(pt.x / voxel_res),
-                (int)std::floor(pt.y / voxel_res),
-                (int)std::floor(pt.z / voxel_res)
-            };
-            if (pass_through_counts[voxel_to_index[k]] <= node_params.pass_through_threshold) {
+            VoxelKey k = voxel_key_from_xyz(pt.x, pt.y, pt.z, inv_voxel_res);
+            auto it = voxel_to_index.find(k);
+            if (it == voxel_to_index.end()) {
+                // Shouldn't happen since voxel map is built from merged, but keep safe.
+                filtered->push_back(pt);
+                continue;
+            }
+            if (pass_through_counts[it->second] <= node_params.pass_through_threshold) {
                 filtered->push_back(pt);
             }
         }
@@ -410,6 +589,19 @@ int main(int argc, char* argv[]) {
         sor.filter(*downsampled);
         RCLCPP_INFO(get_logger(), "Downsampling done. Kept %zu / %zu points", downsampled->size(), merged->size());
         *merged = *downsampled;
+    }
+
+    // Remove radius outliers
+    if (node_params.enable_radius_outlier_removal) {
+        RCLCPP_INFO(get_logger(), "Removing radius outliers...");
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::RadiusOutlierRemoval<pcl::PointXYZ> ror;
+        ror.setInputCloud(merged);
+        ror.setRadiusSearch(node_params.radius_search);
+        ror.setMinNeighborsInRadius(node_params.min_neighbors_in_radius);
+        ror.filter(*filtered);
+        RCLCPP_INFO(get_logger(), "Radius outlier removal done. Kept %zu / %zu points", filtered->size(), merged->size());
+        *merged = *filtered;
     }
 
     // Remove statistical outliers
@@ -447,8 +639,8 @@ int main(int argc, char* argv[]) {
     // Save optimized poses
     std::string pose_output_path = data_path + "/optimized_poses.txt";
     std::ofstream out_poses(pose_output_path);
-    for(size_t i = 0; i < initial_poses.size(); i++) {
-        gtsam::Pose3 pose = result.at<gtsam::Pose3>(X(i));
+    for(size_t i = 0; i < poses.size(); i++) {
+        const gtsam::Pose3 pose = poses[i];
         auto q = pose.rotation().toQuaternion();
         auto t = pose.translation();
         // se3(x,y,z,qx,qy,qz,qw)

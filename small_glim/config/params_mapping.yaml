@@ -3,7 +3,7 @@
     mapping:
       # General
       num_threads: 4 # Number of threads for registration
-      enable_optimization: true # False for disable submap optimization (use only odom data)
+      enable_optimization: false # False for disable submap optimization (use only odom data)
       downsample_resolution: 0.1 # Downsample resolution when saving
 
       # Keyframe update strategy

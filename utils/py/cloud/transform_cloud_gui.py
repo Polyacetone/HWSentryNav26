@@ -30,8 +30,9 @@ class PointCloudApp:
         # 添加几何体到场景
         self.widget3d.scene.add_geometry("point_cloud", self.current_cloud, self.mat)
         
-        # 添加坐标轴
-        self.axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0, origin=[0, 0, 0])
+        # 添加坐标轴 (可调整大小)
+        self.axis_size = 1.0
+        self.axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=self.axis_size, origin=[0, 0, 0])
         self.widget3d.scene.add_geometry("axis", self.axis, rendering.MaterialRecord())
 
         # 设置相机
@@ -124,6 +125,19 @@ class PointCloudApp:
 
         self.panel.add_child(gui.Label(""))
         
+        # Axis size slider
+        self.panel.add_child(gui.Label("Axis"))
+        h_axis = gui.Horiz(5)
+        h_axis.add_child(gui.Label("Size:"))
+        sld_axis = gui.Slider(gui.Slider.DOUBLE)
+        sld_axis.set_limits(1.0, 10.0)
+        # 使用 double_value 设置初始值（部分 Open3D 版本不支持 set_value）
+        sld_axis.double_value = self.axis_size
+        sld_axis.set_on_value_changed(self.on_axis_size)
+        self.inputs['axis_size'] = sld_axis
+        h_axis.add_child(sld_axis)
+        self.panel.add_child(h_axis)
+        
         btn_reset = gui.Button("Reset Transform")
         btn_reset.set_on_clicked(self.reset_transform)
         self.panel.add_child(btn_reset)
@@ -198,6 +212,12 @@ class PointCloudApp:
         self.inputs['ry'].double_value = 0.0
         self.inputs['rz'].double_value = 0.0
         
+        # 恢复轴大小为默认值并更新 UI
+        self.axis_size = 1.0
+        if 'axis_size' in self.inputs:
+            self.inputs['axis_size'].double_value = self.axis_size
+        self.update_axis()
+        
         self.apply_transform()
 
     def apply_transform(self):
@@ -222,6 +242,23 @@ class PointCloudApp:
         # 通知场景数据已更新
         self.widget3d.scene.remove_geometry("point_cloud")
         self.widget3d.scene.add_geometry("point_cloud", transformed_cloud, self.mat)
+
+    def on_axis_size(self, val):
+        """滑块回调：调整轴的大小并更新场景"""
+        self.axis_size = val
+        self.update_axis()
+
+    def update_axis(self):
+        """更新坐标轴几何并重绘场景"""
+        if self.widget3d.scene.has_geometry("axis"):
+            self.widget3d.scene.remove_geometry("axis")
+        self.axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=self.axis_size, origin=[0, 0, 0])
+        self.widget3d.scene.add_geometry("axis", self.axis, rendering.MaterialRecord())
+        try:
+            self.widget3d.force_redraw()
+        except Exception:
+            # 某些 Open3D 版本可能没有 force_redraw，忽略即可
+            pass
 
     def run(self):
         self.app.run()

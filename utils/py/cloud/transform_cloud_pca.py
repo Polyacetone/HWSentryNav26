@@ -53,24 +53,45 @@ def align_pointcloud_by_pca(pcd, enforce_up=True):
     h0_xy = project_to_xy(h0)
     h1_xy = project_to_xy(h1)
 
-    # 10. 正交化（Gram-Schmidt）
-    h0_final = h0_xy
-    h1_temp = h1_xy - np.dot(h1_xy, h0_final) * h0_final
-    if np.linalg.norm(h1_temp) < 1e-6:
-        h1_final = np.cross(local_z, h0_final)
-    else:
-        h1_final = h1_temp / np.linalg.norm(h1_temp)
-
-    # 11. 按原始特征值大小决定 x/y（长边为 x）
+    # 10. 构建水平基并保证为右手系（避免镜像）
+    # 按特征值选择主要水平方向作为 local_x 的候选（长边为 x）
     if eigenvalues[horiz_idx[0]] >= eigenvalues[horiz_idx[1]]:
-        local_x = h0_final
-        local_y = h1_final
+        primary_h = h0_xy
     else:
-        local_x = h1_final
-        local_y = h0_final
+        primary_h = h1_xy
 
-    # 12. 构建旋转矩阵（列：x, y, z）
+    # 如果投影太小，使用默认方向
+    if np.linalg.norm(primary_h) < 1e-8:
+        primary_h = np.array([1.0, 0.0, 0.0])
+
+    local_x = primary_h / np.linalg.norm(primary_h)
+
+    # local_y = cross(local_z, local_x) 确保右手系（x × y = z）
+    local_y = np.cross(local_z, local_x)
+    norm_y = np.linalg.norm(local_y)
+    if norm_y < 1e-8:
+        # 退化情况，尝试使用世界 x 轴生成一个正交方向
+        tmp = np.array([1.0, 0.0, 0.0])
+        if abs(np.dot(tmp, local_z)) > 0.9:
+            tmp = np.array([0.0, 1.0, 0.0])
+        local_y = np.cross(local_z, tmp)
+        norm_y = np.linalg.norm(local_y)
+        if norm_y < 1e-8:
+            # 最后兜底
+            local_y = np.array([0.0, 1.0, 0.0])
+            norm_y = 1.0
+    local_y = local_y / norm_y
+
+    # 重新正交化 local_x，防止数值误差，确保正交且右手系
+    local_x = np.cross(local_y, local_z)
+    local_x = local_x / np.linalg.norm(local_x)
+
+    # 12. 构建旋转矩阵（列：x, y, z）并确保行列式为 +1（无镜像）
     R_new = np.column_stack((local_x, local_y, local_z))
+    if np.linalg.det(R_new) < 0:
+        # 翻转 y 轴以修正为右手系
+        local_y = -local_y
+        R_new = np.column_stack((local_x, local_y, local_z))
 
     # 13. 构建变换矩阵：先旋转（使主轴对齐坐标系），再平移（质心到原点）
     # 注意：点云原始坐标 = centroid + R_new @ p_local
