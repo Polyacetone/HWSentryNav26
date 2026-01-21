@@ -58,7 +58,7 @@ private:
 
 	void ensure_output_dir();
 	void save_keyframe_raw(const EstimationFrame& frame);
-	void append_pose(const Eigen::Isometry3d& T_world_lidar);
+	void append_pose(const Eigen::Isometry3d& T_world_frame);
 	void integrate_into_map(const EstimationFrame& frame);
 	void downsample_map_if_needed();
 	void save_final_map();
@@ -79,7 +79,7 @@ private:
 	std::thread worker_;
 
 	bool has_last_keyframe_{false};
-	Eigen::Isometry3d last_keyframe_T_world_lidar_{Eigen::Isometry3d::Identity()};
+	Eigen::Isometry3d last_keyframe_T_world_frame_{Eigen::Isometry3d::Identity()};
 	std::size_t keyframe_count_{0};
 
 	std::ofstream poses_ofs_;

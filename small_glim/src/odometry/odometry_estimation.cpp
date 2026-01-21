@@ -35,7 +35,7 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
         imu_bias = Eigen::Map<const Eigen::Matrix<double, 6, 1>>(bias.data());
     } else {
         logger::fatal("odometry_estimation", "sensors.imu_bias need 6 parameters");
-        exit(EXIT_FAILURE);
+        std::exit(EXIT_FAILURE);
     }
 
     // odometry config
@@ -61,7 +61,7 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
         registration_type = RegistrationType::VGICP;
     } else {
         logger::fatal("odometry_estimation", "unknown registration type for odometry_estimation: {}", reg_type);
-        exit(EXIT_FAILURE);
+        std::exit(EXIT_FAILURE);
     }
     keyframe_window_size = config->param<int>("odometry_estimation.keyframe_window_size");
     keyframe_delta = config->param<int>("odometry_estimation.keyframe_delta");

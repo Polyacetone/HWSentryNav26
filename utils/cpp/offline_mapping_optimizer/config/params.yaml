@@ -1,15 +1,28 @@
 /**:
   ros__parameters:
     # Global
-    data_path: "2026-01-21T00:51:25"
-    num_threads: 20
+    data_path: "mapping_2026-01-21T20:50:43"
+    num_threads: 16
 
     # Factor graph optimization
     enable_factor_graph_optimization: false
-    max_iterations: 500
+    max_iterations: 100
+    outer_iterations: 3
+    min_frame_points: 100
     k_neighbors: 10
-    loop_dist_thres: 1.0
-    gicp_max_correspondence_distance: 2.0
+    gicp_max_correspondence_distance: 0.1
+
+    # Overlap-gated global-map optimization
+    # Global map is voxelized, and each frame only adds a registration factor when overlap is high.
+    map_voxel_resolution: 0.1
+
+    # Optional: also add overlap-gated frame-frame GICP factors
+    enable_pairwise_factors: true
+    loop_dist_thres: 3.0
+    pairwise_voxel_resolution: 0.1
+    pairwise_overlap_threshold: 0.5
+    # Limit loop closures per frame (0 = unlimited)
+    max_loops_per_frame: 0
 
     # Raycasting filter
     enable_raycasting_filter: true
@@ -17,7 +30,7 @@
     # If CUDA is not compiled in, the node will fall back to CPU automatically.
     use_cuda_raycasting: true
     voxel_resolution: 0.02
-    pass_through_threshold: 1
+    pass_through_threshold: 2
 
     # Downsample
     enable_downsample: true
