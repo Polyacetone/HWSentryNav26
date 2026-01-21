@@ -1,4 +1,4 @@
-#include <map_optimizer/raycasting_cuda.hpp>
+#include <offline_mapping_optimizer/raycasting_cuda.hpp>
 
 #include <cuda_runtime.h>
 

@@ -223,8 +223,8 @@ int OdometryEstimationCPU::select_target_update_frame(const int preferred) const
     if (is_valid(preferred)) return preferred;
 
     // Search nearby frames (prefer closest in time/index).
-    constexpr int kSearchRadius = 5;
-    for (int d = 1; d <= kSearchRadius; d++) {
+    constexpr int search_radius = 5;
+    for (int d = 1; d <= search_radius; d++) {
         const int left = preferred - d;
         const int right = preferred + d;
         if (is_valid(left)) return left;

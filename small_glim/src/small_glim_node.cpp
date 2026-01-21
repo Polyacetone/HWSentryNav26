@@ -1,4 +1,3 @@
-#include <filesystem>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -29,11 +28,8 @@ public:
     int points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
 
     void pub_odometry(const EstimationFrame::ConstPtr frame);
-    void pub_cloud(
-        const EstimationFrame::ConstPtr frame,
-        const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher
-    );
-    void wait(bool auto_quit = false);
+    void pub_cloud(const EstimationFrame::ConstPtr frame, const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher);
+    void wait();
 
 private:
     std::unique_ptr<tf2_ros::Buffer> tf_buffer;
@@ -49,8 +45,7 @@ private:
     double imu_time_offset;
     double points_time_offset;
     double acc_scale;
-    bool dump_on_unload;
-    bool save_raw_mapping_frames;
+    bool enable_mapping;
     bool enable_tf_publish;
 
     std::string intensity_field, ring_field;
@@ -82,11 +77,8 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
         get_logger().set_level(rclcpp::Logger::Level::Debug);
     }
 
-    dump_on_unload = config->param<bool>("node.dump_on_unload");
-    save_raw_mapping_frames = config->param<bool>("node.save_raw_mapping_frames");
     enable_tf_publish = config->param<bool>("node.enable_tf_publish");
-
-    bool enable_mapping = config->param<bool>("node.enable_mapping");
+    enable_mapping = config->param<bool>("node.enable_mapping");
     if (enable_mapping) {
         mapping = std::make_unique<AsyncMapping>(config);
     }
@@ -132,19 +124,19 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 }
 
 SmallGlimNode::~SmallGlimNode() {
-    logger::debug("node", "quit");
-    if (dump_on_unload) {
-        using namespace std::chrono;
-        auto local_time = zoned_time(current_zone(), floor<seconds>(system_clock::now()));
-        std::string timestr = std::format("{:%FT%H:%M:%S}", local_time);
-        wait(true);
-        if (mapping) {
-            mapping->save(timestr + ".pcd");
-            if (save_raw_mapping_frames) {
-                std::filesystem::create_directory(timestr);
-                mapping->save_raw_frames(timestr);
-            }
+    logger::info("node", "waiting for odometry estimation");
+    odometry_estimation->join();
+    if (enable_mapping) {
+        std::vector<EstimationFrame::ConstPtr> estimation_results;
+        std::vector<EstimationFrame::ConstPtr> target_ivox_frames;
+        std::vector<EstimationFrame::ConstPtr> marginalized_frames;
+        odometry_estimation->get_results(estimation_results, target_ivox_frames, marginalized_frames);
+        for (const auto& marginalized_frame: marginalized_frames) {
+            mapping->insert_frame(marginalized_frame);
         }
+        logger::info("node", "waiting for mapping");
+        mapping->request_finish();
+        mapping->join();
     }
 }
 
@@ -186,9 +178,9 @@ void SmallGlimNode::timer_callback() {
     if (!target_ivox_frames.empty()) {
         pub_cloud(target_ivox_frames.back(), ivox_cloud_pub);
     }
-    if (mapping) {
-        for (const auto& frame: marginalized_frames) {
-            mapping->insert_frame(frame);
+    if (enable_mapping) {
+        for (const auto& marginalized_frame: marginalized_frames) {
+            mapping->insert_frame(marginalized_frame);
         }
     }
 }
@@ -200,12 +192,12 @@ void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
     const Eigen::Isometry3d T_lidar_imu = frame->T_lidar_imu;
 
     if (enable_tf_publish) {
-        geometry_msgs::msg::TransformStamped tf_imu_to_lidar;
-        tf_imu_to_lidar.header.frame_id = "lidar_link";
-        tf_imu_to_lidar.child_frame_id = "imu_link";
-        tf_imu_to_lidar.header.stamp = stamp;
-        utils::convert(T_lidar_imu, tf_imu_to_lidar.transform);
-        tf_static_broadcaster->sendTransform(tf_imu_to_lidar);
+        geometry_msgs::msg::TransformStamped tf_lidar_to_imu;
+        tf_lidar_to_imu.header.frame_id = "imu_link";
+        tf_lidar_to_imu.child_frame_id = "lidar_link";
+        tf_lidar_to_imu.header.stamp = stamp;
+        utils::convert(T_lidar_imu.inverse(), tf_lidar_to_imu.transform);
+        tf_static_broadcaster->sendTransform(tf_lidar_to_imu);
         geometry_msgs::msg::TransformStamped tf_imu_to_odom;
         tf_imu_to_odom.header.frame_id = "odom";
         tf_imu_to_odom.child_frame_id = "imu_link";
@@ -260,22 +252,6 @@ void SmallGlimNode::pub_cloud(
         std::memcpy(msg.data.data() + i * 12, pt.data(), sizeof(pt));
     }
     publisher->publish(msg);
-}
-
-void SmallGlimNode::wait(bool auto_quit) {
-    logger::info("node", "waiting for odometry estimation");
-    odometry_estimation->join();
-    if (mapping) {
-        std::vector<EstimationFrame::ConstPtr> estimation_results;
-        std::vector<EstimationFrame::ConstPtr> target_ivox_frames;
-        std::vector<EstimationFrame::ConstPtr> marginalized_frames;
-        odometry_estimation->get_results(estimation_results, target_ivox_frames, marginalized_frames);
-        for (const auto& marginalized_frame: marginalized_frames) {
-            mapping->insert_frame(marginalized_frame);
-        }
-        logger::info("node", "waiting for local mapping");
-        mapping->join();
-    }
 }
 
 }

@@ -3,13 +3,13 @@
 #include <string>
 #include <vector>
 
-#include <map_optimizer/voxel_key.hpp>
+#include <offline_mapping_optimizer/voxel_key.hpp>
 
 // Minimal POD (avoid pulling CUDA headers into non-CUDA translation units).
 struct Float3 {
-  float x;
-  float y;
-  float z;
+    float x;
+    float y;
+    float z;
 };
 
 // Computes pass-through counts for each occupied voxel (indexed by keys_by_index).
@@ -21,11 +21,13 @@ struct Float3 {
 // Output:
 // - out_counts: resized to N and filled
 // Returns false on any CUDA error; error (if non-null) will contain a message.
-bool raycasting_cuda_compute_counts(const std::vector<VoxelKey>& keys_by_index,
-                                   float voxel_res,
-                                   const std::vector<Float3>& frame_origins,
-                                   const std::vector<float>& frame_rotations_rowmajor,
-                                   const std::vector<Float3>& points_local,
-                                   const std::vector<int>& frame_offsets,
-                                   std::vector<int>& out_counts,
-                                   std::string* error);
+bool raycasting_cuda_compute_counts(
+    const std::vector<VoxelKey>& keys_by_index,
+    float voxel_res,
+    const std::vector<Float3>& frame_origins,
+    const std::vector<float>& frame_rotations_rowmajor,
+    const std::vector<Float3>& points_local,
+    const std::vector<int>& frame_offsets,
+    std::vector<int>& out_counts,
+    std::string* error
+);

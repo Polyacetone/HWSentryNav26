@@ -21,7 +21,7 @@
 #include <gtsam_points/types/point_cloud_cpu.hpp>
 #include <gtsam_points/ann/kdtree.hpp>
 
-#include <map_optimizer/voxel_key.hpp>
+#include <offline_mapping_optimizer/voxel_key.hpp>
 
 #include <regex>
 
@@ -33,7 +33,7 @@
 #include <omp.h>
 
 #if defined(MAP_OPTIMIZER_USE_CUDA)
-#include <map_optimizer/raycasting_cuda.hpp>
+    #include <offline_mapping_optimizer/raycasting_cuda.hpp>
 #endif
 
 using gtsam::symbol_shorthand::X;
@@ -171,7 +171,7 @@ struct {
 } node_params;
 
 rclcpp::Logger get_logger() {
-    return rclcpp::get_logger("map_optimizer");
+    return rclcpp::get_logger("offline_mapping_optimizer");
 }
 
 gtsam::Pose3 parse_pose(const std::string& line) {
@@ -190,11 +190,7 @@ gtsam::Pose3 parse_pose(const std::string& line) {
     throw std::runtime_error("Failed to parse pose: " + line);
 }
 
-std::vector<int> find_neighbors(
-    const Eigen::Vector4d* points,
-    const int num_points,
-    const int k
-) {
+std::vector<int> find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) {
     gtsam_points::KdTree tree(points, num_points);
     std::vector<int> neighbors(num_points * k);
     const auto perpoint_task = [&](int i) {
@@ -203,7 +199,7 @@ std::vector<int> find_neighbors(
         tree.knn_search(points[i].data(), k, k_indices.data(), k_sq_dists.data());
         std::copy(k_indices.begin(), k_indices.end(), neighbors.begin() + i * k);
     };
-    #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 8)
+#pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 8)
     for (int i = 0; i < num_points; i++) {
         perpoint_task(i);
     }
@@ -213,8 +209,10 @@ std::vector<int> find_neighbors(
 Eigen::Matrix4d regularize(const Eigen::Matrix4d& cov, Eigen::Vector3d* eigenvalues, Eigen::Matrix3d* eigenvectors) {
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig;
     eig.computeDirect(cov.block<3, 3>(0, 0));
-    if (eigenvalues) *eigenvalues = eig.eigenvalues();
-    if (eigenvectors) *eigenvectors = eig.eigenvectors();
+    if (eigenvalues)
+        *eigenvalues = eig.eigenvalues();
+    if (eigenvectors)
+        *eigenvectors = eig.eigenvectors();
     Eigen::Vector3d values(1e-3, 1.0, 1.0);
     Eigen::Matrix4d c = Eigen::Matrix4d::Zero();
     c.block<3, 3>(0, 0) = eig.eigenvectors() * values.asDiagonal() * eig.eigenvectors().transpose();
@@ -238,7 +236,7 @@ void estimate_cov(
 
     // Precompute pt * pt.transpose()
     std::vector<Eigen::Matrix4d> pt_cross(points.size());
-    #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 64)
+#pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 64)
     for (int i = 0; i < points.size(); i++) {
         pt_cross[i] = points[i] * points[i].transpose();
     }
@@ -270,8 +268,8 @@ void estimate_cov(
         }
     };
 
-    // Calculate covariances
-    #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 8)
+// Calculate covariances
+#pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 8)
     for (int i = 0; i < points.size(); i++) {
         calc_cov(i);
     }
@@ -280,7 +278,7 @@ void estimate_cov(
 gtsam_points::PointCloudCPU::Ptr pcl_to_gtsam_points(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pcl_cloud) {
     std::vector<Eigen::Vector4d> points;
     points.reserve(pcl_cloud->size());
-    for (const auto& pt : *pcl_cloud) {
+    for (const auto& pt: *pcl_cloud) {
         points.emplace_back(pt.x, pt.y, pt.z, 1.0);
     }
     auto frame = std::make_shared<gtsam_points::PointCloudCPU>(points);
@@ -295,7 +293,7 @@ gtsam_points::PointCloudCPU::Ptr pcl_to_gtsam_points(const pcl::PointCloud<pcl::
 
 int main(int argc, char* argv[]) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<rclcpp::Node>("map_optimizer");
+    auto node = std::make_shared<rclcpp::Node>("offline_mapping_optimizer");
     node_params = {
         (int)node->declare_parameter<int>("num_threads"),
         (int)node->declare_parameter<int>("max_iterations"),
@@ -333,7 +331,8 @@ int main(int argc, char* argv[]) {
     }
     std::string line;
     while (std::getline(poses_file, line)) {
-        if (line.empty()) continue;
+        if (line.empty())
+            continue;
         try {
             poses.push_back(parse_pose(line));
         } catch (const std::exception& e) {
@@ -376,9 +375,8 @@ int main(int argc, char* argv[]) {
                 graph.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), poses[0], prior_noise));
             } else {
                 // GICP factor (sequential)
-                auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
-                    X(i-1), X(i), frames[i-1], frames[i]
-                );
+                auto factor =
+                    gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(X(i - 1), X(i), frames[i - 1], frames[i]);
                 factor->set_num_threads(node_params.num_threads);
                 factor->set_max_correspondence_distance(node_params.gicp_max_correspondence_distance);
                 graph.add(factor);
@@ -391,9 +389,8 @@ int main(int argc, char* argv[]) {
             for (size_t j = i + 2; j < poses.size(); j++) {
                 double dist = (poses[i].translation() - poses[j].translation()).norm();
                 if (dist < node_params.loop_dist_thres) {
-                    auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
-                        X(i), X(j), frames[i], frames[j]
-                    );
+                    auto factor =
+                        gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(X(i), X(j), frames[i], frames[j]);
                     factor->set_num_threads(node_params.num_threads);
                     factor->set_max_correspondence_distance(node_params.gicp_max_correspondence_distance);
                     graph.add(factor);
@@ -437,7 +434,7 @@ int main(int argc, char* argv[]) {
 
         // Build voxel map from merged cloud (unique voxels only)
         keys_by_index.reserve(std::max<size_t>(1024, merged->size() / 16));
-        for (const auto& pt : *merged) {
+        for (const auto& pt: *merged) {
             VoxelKey k = voxel_key_from_xyz(pt.x, pt.y, pt.z, inv_voxel_res);
             const int new_index = (int)voxel_to_index.size();
             auto [it, inserted] = voxel_to_index.emplace(k, new_index);
@@ -474,7 +471,7 @@ int main(int argc, char* argv[]) {
                 const gtsam::Pose3 pose = poses[i];
                 const Eigen::Matrix3d R = pose.rotation().matrix();
                 const auto t = pose.translation();
-                frame_origins[i] = Float3{(float)t.x(), (float)t.y(), (float)t.z()};
+                frame_origins[i] = Float3 {(float)t.x(), (float)t.y(), (float)t.z()};
 
                 // Row-major
                 float* R9 = frame_rotations_rowmajor.data() + i * 9;
@@ -488,21 +485,24 @@ int main(int argc, char* argv[]) {
                 R9[7] = (float)R(2, 1);
                 R9[8] = (float)R(2, 2);
 
-                for (const auto& pt_local : *pcl_frames[i]) {
-                    points_local.push_back(Float3{pt_local.x, pt_local.y, pt_local.z});
+                for (const auto& pt_local: *pcl_frames[i]) {
+                    points_local.push_back(Float3 {pt_local.x, pt_local.y, pt_local.z});
                 }
             }
 
             std::string cuda_error;
             std::vector<int> cuda_counts;
-            if (raycasting_cuda_compute_counts(keys_by_index,
-                                               (float)voxel_res,
-                                               frame_origins,
-                                               frame_rotations_rowmajor,
-                                               points_local,
-                                               frame_offsets,
-                                               cuda_counts,
-                                               &cuda_error)) {
+            if (raycasting_cuda_compute_counts(
+                    keys_by_index,
+                    (float)voxel_res,
+                    frame_origins,
+                    frame_rotations_rowmajor,
+                    points_local,
+                    frame_offsets,
+                    cuda_counts,
+                    &cuda_error
+                ))
+            {
                 pass_through_counts = std::move(cuda_counts);
                 used_gpu = true;
                 RCLCPP_INFO(get_logger(), "Raycasting (CUDA) done.");
@@ -512,21 +512,24 @@ int main(int argc, char* argv[]) {
         }
 #else
         if (use_cuda_raycasting) {
-            RCLCPP_WARN(get_logger(), "use_cuda_raycasting=true but CUDA support was not compiled. Falling back to CPU.");
+            RCLCPP_WARN(
+                get_logger(),
+                "use_cuda_raycasting=true but CUDA support was not compiled. Falling back to CPU."
+            );
         }
 #endif
 
         if (!used_gpu) {
             const int num_threads = std::max(1, node_params.num_threads);
             std::vector<std::unordered_map<int, int>> thread_local_counts(num_threads);
-            for (auto& m : thread_local_counts) {
+            for (auto& m: thread_local_counts) {
                 m.reserve(16384);
             }
 
             std::atomic<int> processed_frames = 0;
 
-            // Ray casting (voxel DDA). Use thread-local accumulation to avoid atomic contention.
-            #pragma omp parallel for num_threads(num_threads) schedule(guided)
+// Ray casting (voxel DDA). Use thread-local accumulation to avoid atomic contention.
+#pragma omp parallel for num_threads(num_threads) schedule(guided)
             for (size_t i = 0; i < poses.size(); i++) {
                 const gtsam::Pose3 pose = poses[i];
                 const Eigen::Matrix3d R = pose.rotation().matrix();
@@ -534,7 +537,7 @@ int main(int argc, char* argv[]) {
                 const Eigen::Vector3d origin = t;
 
                 auto& local_counts = thread_local_counts[omp_get_thread_num()];
-                for (const auto& pt_local : *pcl_frames[i]) {
+                for (const auto& pt_local: *pcl_frames[i]) {
                     const Eigen::Vector3d pl(pt_local.x, pt_local.y, pt_local.z);
                     const Eigen::Vector3d pt_global = R * pl + t;
                     traverse_voxels_dda(origin, pt_global, voxel_res, inv_voxel_res, voxel_to_index, local_counts);
@@ -543,15 +546,18 @@ int main(int argc, char* argv[]) {
                 processed_frames.fetch_add(1);
                 if (omp_get_thread_num() == 0) {
                     RCLCPP_INFO(
-                        get_logger(), "Raycasting progress: %.1f%% (%d / %zu)",
-                        100.0 * processed_frames.load() / poses.size(), processed_frames.load(), poses.size()
+                        get_logger(),
+                        "Raycasting progress: %.1f%% (%d / %zu)",
+                        100.0 * processed_frames.load() / poses.size(),
+                        processed_frames.load(),
+                        poses.size()
                     );
                 }
             }
 
             // Merge thread-local counts
-            for (const auto& local : thread_local_counts) {
-                for (const auto& kv : local) {
+            for (const auto& local: thread_local_counts) {
+                for (const auto& kv: local) {
                     pass_through_counts[kv.first] += kv.second;
                 }
             }
@@ -559,7 +565,7 @@ int main(int argc, char* argv[]) {
 
         // Filter
         pcl::PointCloud<pcl::PointXYZ>::Ptr filtered = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-        for (const auto& pt : *merged) {
+        for (const auto& pt: *merged) {
             VoxelKey k = voxel_key_from_xyz(pt.x, pt.y, pt.z, inv_voxel_res);
             auto it = voxel_to_index.find(k);
             if (it == voxel_to_index.end()) {
@@ -600,7 +606,12 @@ int main(int argc, char* argv[]) {
         ror.setRadiusSearch(node_params.radius_search);
         ror.setMinNeighborsInRadius(node_params.min_neighbors_in_radius);
         ror.filter(*filtered);
-        RCLCPP_INFO(get_logger(), "Radius outlier removal done. Kept %zu / %zu points", filtered->size(), merged->size());
+        RCLCPP_INFO(
+            get_logger(),
+            "Radius outlier removal done. Kept %zu / %zu points",
+            filtered->size(),
+            merged->size()
+        );
         *merged = *filtered;
     }
 
@@ -613,7 +624,12 @@ int main(int argc, char* argv[]) {
         sor.setMeanK(node_params.mean_k);
         sor.setStddevMulThresh(node_params.std_dev_mul_thresh);
         sor.filter(*filtered);
-        RCLCPP_INFO(get_logger(), "Statistical outlier removal done. Kept %zu / %zu points", filtered->size(), merged->size());
+        RCLCPP_INFO(
+            get_logger(),
+            "Statistical outlier removal done. Kept %zu / %zu points",
+            filtered->size(),
+            merged->size()
+        );
         *merged = *filtered;
     }
 
@@ -635,17 +651,17 @@ int main(int argc, char* argv[]) {
     std::string pcd_output_path = data_path + "/optimized_map.pcd";
     pcl::io::savePCDFileBinary(pcd_output_path, *merged);
     RCLCPP_INFO(get_logger(), "Saved optimized map to %s", pcd_output_path.c_str());
-    
+
     // Save optimized poses
     std::string pose_output_path = data_path + "/optimized_poses.txt";
     std::ofstream out_poses(pose_output_path);
-    for(size_t i = 0; i < poses.size(); i++) {
+    for (size_t i = 0; i < poses.size(); i++) {
         const gtsam::Pose3 pose = poses[i];
         auto q = pose.rotation().toQuaternion();
         auto t = pose.translation();
         // se3(x,y,z,qx,qy,qz,qw)
-        out_poses << "se3(" << t.x() << "," << t.y() << "," << t.z() << "," 
-            << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << ")" << std::endl;
+        out_poses << "se3(" << t.x() << "," << t.y() << "," << t.z() << "," << q.x() << "," << q.y() << "," << q.z()
+                  << "," << q.w() << ")" << std::endl;
     }
     RCLCPP_INFO(get_logger(), "Saved optimized poses to %s", pose_output_path.c_str());
 }

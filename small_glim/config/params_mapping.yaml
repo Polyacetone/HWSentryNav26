@@ -1,21 +1,14 @@
 /**:
   ros__parameters:
     mapping:
-      # General
-      num_threads: 4 # Number of threads for registration
-      enable_optimization: false # False for disable submap optimization (use only odom data)
-      downsample_resolution: 0.1 # Downsample resolution when saving
+      # Output
+      save_raw_mapping_frames: true
+      output_root: "."
 
-      # Keyframe update strategy
-      keyframe_update_strategy: "DISPLACEMENT" # DISPLACEMENT or OVERLAP
-      keyframe_update_min_dist: 1.0 # Threshold for "DISPLACEMENT" strategy
-      keyframe_update_min_rot: 0.5 # Threshold for "DISPLACEMENT" strategy
-      max_keyframe_overlap: 0.5 # Threshold for "OVERLAP" strategy
+      # Keyframe selection (relative to last keyframe)
+      keyframe_trans_thresh: 1.0
+      keyframe_rot_thresh: 1.0
 
-      # Registration error factors
-      registration_type: "VGICP" # GICP or VGICP
-      keyframe_randomsampling_rate: 1.0 # Random sampling rate for registration error factors (1.0 = use all points)
-      max_correspondence_distance: 1.0 # Maximum correspondence distance (GICP)
-      keyframe_voxel_resolution: 0.25 # Voxel resolution for registration error factors (VGICP)
-      keyframe_voxelmap_levels: 2 # Multi-resolution voxelmap levels (must be >= 1) (VGICP)
-      keyframe_voxelmap_scaling_factor: 2.0 # Multi-resolution voxelmap scaling factor (VGICP)
+      # Incremental map integration
+      downsample_every_n_keyframes: 10000
+      map_voxel_leaf_size: 0.05

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(map_optimizer)
+project(offline_mapping_optimizer)
 set(EXECUTABLE_NAME ${PROJECT_NAME}_node)
 
 option(MAP_OPTIMIZER_USE_CUDA "Enable CUDA-accelerated raycasting" ON)
