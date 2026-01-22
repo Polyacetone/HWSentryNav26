@@ -2,27 +2,32 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser
 from PIL import Image, ImageTk, ImageDraw
 import os
+import math  # 新增：用于向量计算
 
 class MapEditorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Cost Map Editor")
-        self.root.geometry("1000x700")
+        self.root.title("Cost Map Editor - Vector Line Support")
+        self.root.geometry("1100x700") # 稍微加宽一点以容纳新按钮
 
         # State variables
         self.image_path = None
         self.original_image = None  # PIL Image
         self.display_image = None   # PIL Image for display (scaled)
         self.tk_image = None        # ImageTk for canvas
-        self.draw_color = (255, 0, 0) # Default red
-        self.mode = "pixel"         # "pixel" or "rect"
+        self.draw_color = (255, 0, 0) # Default red (Pixel/Rect mode default)
+        
+        # Mode variables
+        self.mode = "pixel"         # "pixel", "rect", "line"
+        self.line_width = 1         # 直线宽度
+        
         self.scale = 1.0
         self.history = []           # Undo history
         
         # Mouse drag variables
         self.start_x = None
         self.start_y = None
-        self.rect_id = None
+        self.temp_draw_id = None    # 用于存储临时画的矩形或直线的ID
 
         # Status bar widgets
         self.status_coord_label = None
@@ -30,15 +35,74 @@ class MapEditorApp:
 
         self._init_ui()
 
+    # ---- Coordinate transforms (image <-> displayed canvas) ----
+    # Original image coords: origin top-left, +x right, +y down.
+    # Display: we show vertically flipped for intuitive view.
+    # Mouse/status: origin bottom-left, +x right, +y up (visually),
+    # but the numeric coordinate shown equals the original image (x, y)
+    # after applying the display flip mapping.
+    def _img_size(self):
+        if self.original_image is None:
+            return 0, 0
+        return self.original_image.size
+
+    def image_to_display_row(self, y_img: int) -> int:
+        """Map image y (top-left origin) to displayed image row (top-left origin)."""
+        _, h = self._img_size()
+        return (h - 1) - y_img
+
+    def display_row_to_image(self, y_disp_row: int) -> int:
+        """Inverse of image_to_display_row."""
+        _, h = self._img_size()
+        return (h - 1) - y_disp_row
+
+    def image_to_canvas_xy(self, x_img: int, y_img: int, *, center: bool = False):
+        """Convert image pixel coords to canvas coords (in screen pixels)."""
+        y_disp_row = self.image_to_display_row(y_img)
+        off = 0.5 if center else 0.0
+        return (x_img + off) * self.scale, (y_disp_row + off) * self.scale
+
+    def canvas_to_image_xy(self, event):
+        """Convert a canvas mouse event to image pixel coords."""
+        if self.original_image is None:
+            return None
+        w, h = self._img_size()
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        x_disp = int(cx / self.scale)
+        y_disp_row = int(cy / self.scale)
+        x_img = x_disp
+        y_img = self.display_row_to_image(y_disp_row)
+
+        if x_img < 0 or y_img < 0 or x_img >= w or y_img >= h:
+            return None
+        return x_img, y_img
+
+    def canvas_to_display_xy(self, event):
+        """User-facing coords: origin bottom-left, +y up (matches what they see)."""
+        if self.original_image is None:
+            return None
+        w, h = self._img_size()
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        x_disp = int(cx / self.scale)
+        y_disp_row = int(cy / self.scale)
+        x_u = x_disp
+        y_u = (h - 1) - y_disp_row
+        if x_u < 0 or y_u < 0 or x_u >= w or y_u >= h:
+            return None
+        return x_u, y_u
+
     def _init_ui(self):
         # --- Toolbar ---
         toolbar = tk.Frame(self.root, bd=1, relief=tk.RAISED)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        btn_open = tk.Button(toolbar, text="Open Image", command=self.open_image)
+        # File Operations
+        btn_open = tk.Button(toolbar, text="Open", command=self.open_image)
         btn_open.pack(side=tk.LEFT, padx=2, pady=2)
 
-        btn_save = tk.Button(toolbar, text="Save Image", command=self.save_image)
+        btn_save = tk.Button(toolbar, text="Save", command=self.save_image)
         btn_save.pack(side=tk.LEFT, padx=2, pady=2)
 
         tk.Frame(toolbar, width=10).pack(side=tk.LEFT) # Spacer
@@ -48,26 +112,53 @@ class MapEditorApp:
 
         tk.Frame(toolbar, width=10).pack(side=tk.LEFT) # Spacer
 
-        btn_zoom_in = tk.Button(toolbar, text="Zoom In (+)", command=self.zoom_in)
-        btn_zoom_in.pack(side=tk.LEFT, padx=2, pady=2)
+        # Zoom
+        btn_zoom_in = tk.Button(toolbar, text="Z+", width=3, command=self.zoom_in)
+        btn_zoom_in.pack(side=tk.LEFT, padx=1, pady=2)
 
-        btn_zoom_out = tk.Button(toolbar, text="Zoom Out (-)", command=self.zoom_out)
-        btn_zoom_out.pack(side=tk.LEFT, padx=2, pady=2)
+        btn_zoom_out = tk.Button(toolbar, text="Z-", width=3, command=self.zoom_out)
+        btn_zoom_out.pack(side=tk.LEFT, padx=1, pady=2)
 
-        tk.Frame(toolbar, width=20).pack(side=tk.LEFT) # Spacer
+        tk.Frame(toolbar, width=15).pack(side=tk.LEFT) # Spacer
 
+        # --- Modes ---
         self.mode_var = tk.StringVar(value="pixel")
-        rb_pixel = tk.Radiobutton(toolbar, text="Pixel Mode", variable=self.mode_var, 
-                                  value="pixel", command=self.set_mode)
-        rb_pixel.pack(side=tk.LEFT, padx=5)
         
-        rb_rect = tk.Radiobutton(toolbar, text="Rectangle Mode", variable=self.mode_var, 
+        # Mode: Pixel
+        rb_pixel = tk.Radiobutton(toolbar, text="Pixel", variable=self.mode_var, 
+                                  value="pixel", command=self.set_mode)
+        rb_pixel.pack(side=tk.LEFT, padx=2)
+        
+        # Mode: Rect
+        rb_rect = tk.Radiobutton(toolbar, text="Rect", variable=self.mode_var, 
                                  value="rect", command=self.set_mode)
-        rb_rect.pack(side=tk.LEFT, padx=5)
+        rb_rect.pack(side=tk.LEFT, padx=2)
 
-        tk.Frame(toolbar, width=20).pack(side=tk.LEFT) # Spacer
+        # Mode: Line (New Function)
+        rb_line = tk.Radiobutton(toolbar, text="Vector Line", variable=self.mode_var, 
+                                 value="line", command=self.set_mode)
+        rb_line.pack(side=tk.LEFT, padx=2)
 
-        self.color_btn = tk.Button(toolbar, text="Select Color", bg="#FF0000", fg="white", 
+        tk.Frame(toolbar, width=10).pack(side=tk.LEFT) # Spacer
+
+        # --- Line Settings (Width & Direction) ---
+        lbl_width = tk.Label(toolbar, text="Width:")
+        lbl_width.pack(side=tk.LEFT, padx=1)
+        
+        self.spin_width = tk.Spinbox(toolbar, from_=1, to=50, width=3, command=self.update_line_width)
+        self.spin_width.pack(side=tk.LEFT, padx=2)
+        self.spin_width.delete(0, "end")
+        self.spin_width.insert(0, 1)
+
+        # Direction Invert Checkbox
+        self.invert_dir_var = tk.BooleanVar(value=False)
+        self.chk_invert = tk.Checkbutton(toolbar, text="Invert Dir", variable=self.invert_dir_var)
+        self.chk_invert.pack(side=tk.LEFT, padx=5)
+
+        tk.Frame(toolbar, width=10).pack(side=tk.LEFT) # Spacer
+
+        # --- Color Picker (Only for Pixel/Rect mode) ---
+        self.color_btn = tk.Button(toolbar, text="Color", bg="#FF0000", fg="white", width=5,
                                    command=self.choose_color)
         self.color_btn.pack(side=tk.LEFT, padx=5)
 
@@ -75,7 +166,6 @@ class MapEditorApp:
         self.canvas_frame = tk.Frame(self.root)
         self.canvas_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Scrollbars
         self.v_scroll = tk.Scrollbar(self.canvas_frame, orient=tk.VERTICAL)
         self.h_scroll = tk.Scrollbar(self.canvas_frame, orient=tk.HORIZONTAL)
         
@@ -94,26 +184,39 @@ class MapEditorApp:
         status_bar = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.status_coord_label = tk.Label(status_bar, text="X:-, Y:-", anchor="w")
+        self.status_coord_label = tk.Label(status_bar, text="X:-, Y:-", anchor="w", width=15)
         self.status_coord_label.pack(side=tk.LEFT, padx=5)
 
         self.status_color_label = tk.Label(status_bar, text="B:-, G:-, R:-", anchor="w")
         self.status_color_label.pack(side=tk.LEFT, padx=15)
+        
+        self.status_info_label = tk.Label(status_bar, text="Ready", anchor="w", fg="blue")
+        self.status_info_label.pack(side=tk.RIGHT, padx=15)
 
         # Event Bindings
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
-        # 鼠标移动时更新状态栏
         self.canvas.bind("<Motion>", self.on_mouse_move)
-        # 鼠标离开画布时清空状态栏
         self.canvas.bind("<Leave>", self.on_mouse_leave)
         
-        # Bind Ctrl+Z for undo
         self.root.bind("<Control-z>", lambda event: self.undo())
 
     def set_mode(self):
         self.mode = self.mode_var.get()
+        if self.mode == "line":
+            self.status_info_label.config(text="Mode: Vector Line (Color determined by direction)")
+            self.color_btn.config(state=tk.DISABLED) # Disable manual color in line mode
+        else:
+            self.status_info_label.config(text=f"Mode: {self.mode.capitalize()}")
+            self.color_btn.config(state=tk.NORMAL)
+
+    def update_line_width(self):
+        try:
+            w = int(self.spin_width.get())
+            self.line_width = max(1, w)
+        except ValueError:
+            self.line_width = 1
 
     def zoom_in(self):
         self.scale *= 1.5
@@ -132,13 +235,12 @@ class MapEditorApp:
     def save_state(self):
         if self.original_image:
             self.history.append(self.original_image.copy())
-            # Limit history to prevent memory issues
             if len(self.history) > 20:
                 self.history.pop(0)
 
     def choose_color(self):
         color = colorchooser.askcolor(title="Choose Drawing Color", color=self.rgb_to_hex(self.draw_color))
-        if color[1]: # color is ((r, g, b), "#hex")
+        if color[1]:
             self.draw_color = tuple(map(int, color[0]))
             self.color_btn.config(bg=color[1])
 
@@ -155,8 +257,8 @@ class MapEditorApp:
         try:
             self.image_path = file_path
             self.original_image = Image.open(file_path).convert("RGB")
-            self.history = [] # Clear history on new image
-            self.scale = 1.0  # Reset scale
+            self.history = []
+            self.scale = 1.0
             self.refresh_canvas()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open image: {e}")
@@ -182,13 +284,13 @@ class MapEditorApp:
         if self.original_image is None:
             return
 
-        # Scale image for display
         w, h = self.original_image.size
         new_w = int(w * self.scale)
         new_h = int(h * self.scale)
         
-        # Use Nearest Neighbor to keep pixel edges sharp
-        self.display_image = self.original_image.resize((new_w, new_h), Image.NEAREST)
+        # Display is only for visualization: vertically flip for intuitive coordinate view.
+        disp = self.original_image.transpose(Image.FLIP_TOP_BOTTOM)
+        self.display_image = disp.resize((new_w, new_h), Image.NEAREST)
         self.tk_image = ImageTk.PhotoImage(self.display_image)
         
         self.canvas.delete("all")
@@ -196,115 +298,210 @@ class MapEditorApp:
         self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
 
     def get_image_coords(self, event):
-        # Convert canvas coordinates back to original image coordinates
-        cx = self.canvas.canvasx(event.x)
-        cy = self.canvas.canvasy(event.y)
-        return int(cx / self.scale), int(cy / self.scale)
+        # Backward-compatible name: now returns original image coords.
+        xy = self.canvas_to_image_xy(event)
+        if xy is None:
+            return -1, -1
+        return xy
 
     def on_mouse_move(self, event):
-        """更新状态栏中的坐标和颜色信息"""
         if self.original_image is None:
             return
 
-        x, y = self.get_image_coords(event)
-        w, h = self.original_image.size
+        # User-facing status coords: origin bottom-left, y up.
+        disp_xy = self.canvas_to_display_xy(event)
+        if disp_xy is None:
+            if self.status_coord_label:
+                self.status_coord_label.config(text="X:-, Y:-")
+            if self.status_color_label:
+                self.status_color_label.config(text="B:-, G:-, R:-")
+            return
 
-        # 更新坐标显示（即使在图像外也显示坐标）
-        if self.status_coord_label is not None:
-            self.status_coord_label.config(text=f"X:{x}, Y:{y}")
+        x_u, y_u = disp_xy
+        # Underlying image coords for reading pixel are the same (x, y_u)
+        x, y = x_u, y_u
+        w, h = self._img_size()
 
-        # 如果在图像范围内，显示像素颜色；否则显示空
+        if self.status_coord_label:
+            self.status_coord_label.config(text=f"X:{x_u}, Y:{y_u}")
+
         if 0 <= x < w and 0 <= y < h:
             try:
                 r, g, b = self.original_image.getpixel((x, y))
-                if self.status_color_label is not None:
+                if self.status_color_label:
+                    # 显示顺序按照用户习惯 B, G, R
                     self.status_color_label.config(text=f"B:{b}, G:{g}, R:{r}")
             except Exception:
-                if self.status_color_label is not None:
-                    self.status_color_label.config(text="B:-, G:-, R:-")
+                pass
         else:
-            if self.status_color_label is not None:
+            if self.status_color_label:
                 self.status_color_label.config(text="B:-, G:-, R:-")
 
     def on_mouse_leave(self, event):
-        """鼠标离开画布时清空状态栏"""
-        if self.status_coord_label is not None:
+        if self.status_coord_label:
             self.status_coord_label.config(text="X:-, Y:-")
-        if self.status_color_label is not None:
+        if self.status_color_label:
             self.status_color_label.config(text="B:-, G:-, R:-")
 
     def on_mouse_down(self, event):
         if self.original_image is None:
             return
 
-        self.save_state() # Save state before modification
-
-        x, y = self.get_image_coords(event)
-        
-        # Check bounds
-        w, h = self.original_image.size
-        if x < 0 or y < 0 or x >= w or y >= h:
+        xy = self.canvas_to_image_xy(event)
+        if xy is None:
             return
 
+        self.save_state()
+
+        x, y = xy
+        w, h = self._img_size()
+        
         if self.mode == "pixel":
             self.paint_pixel(x, y)
-        elif self.mode == "rect":
+        elif self.mode == "rect" or self.mode == "line":
             self.start_x = x
             self.start_y = y
-            # Create a temporary rectangle on canvas for visual feedback (scaled coords)
-            sx, sy = x * self.scale, y * self.scale
-            self.rect_id = self.canvas.create_rectangle(sx, sy, sx, sy, outline="blue", width=2)
+            # Initialize temp drawing
+            sx, sy = self.image_to_canvas_xy(x, y, center=False)
+            if self.mode == "rect":
+                self.temp_draw_id = self.canvas.create_rectangle(sx, sy, sx, sy, outline="blue", width=2)
+            elif self.mode == "line":
+                # Line drawing preview
+                cx, cy = self.image_to_canvas_xy(x, y, center=True)
+                self.temp_draw_id = self.canvas.create_line(
+                    cx,
+                    cy,
+                    cx,
+                    cy,
+                    fill="cyan",
+                    width=max(1, self.line_width * self.scale),
+                )
 
     def on_mouse_drag(self, event):
         if self.original_image is None:
             return
 
-        x, y = self.get_image_coords(event)
-        w, h = self.original_image.size
-        
-        # Clamp coordinates
-        x = max(0, min(w-1, x))
-        y = max(0, min(h-1, y))
+        xy = self.canvas_to_image_xy(event)
+        if xy is None:
+            # Clamp to nearest edge for smoother preview when dragging out of bounds
+            w, h = self._img_size()
+            cx = self.canvas.canvasx(event.x)
+            cy = self.canvas.canvasy(event.y)
+            x_disp = int(cx / self.scale)
+            y_disp_row = int(cy / self.scale)
+            x_disp = max(0, min(w - 1, x_disp))
+            y_disp_row = max(0, min(h - 1, y_disp_row))
+            x = x_disp
+            y = self.display_row_to_image(y_disp_row)
+        else:
+            x, y = xy
 
         if self.mode == "pixel":
             self.paint_pixel(x, y)
-        elif self.mode == "rect" and self.rect_id:
-            # Update visual rect (scaled coords)
-            sx, sy = self.start_x * self.scale, self.start_y * self.scale
-            ex, ey = (x + 1) * self.scale, (y + 1) * self.scale
-            self.canvas.coords(self.rect_id, sx, sy, ex, ey)
+        
+        elif self.mode == "rect" and self.temp_draw_id:
+            x0, x1 = min(self.start_x, x), max(self.start_x, x)
+            y0, y1 = min(self.start_y, y), max(self.start_y, y)
+
+            # Pixel-edge aligned rectangle: [x0, y0]..[x1, y1] inclusive
+            left = x0 * self.scale
+            right = (x1 + 1) * self.scale
+            top = self.image_to_display_row(y1) * self.scale
+            bottom = (self.image_to_display_row(y0) + 1) * self.scale
+            self.canvas.coords(self.temp_draw_id, left, top, right, bottom)
+            
+        elif self.mode == "line" and self.temp_draw_id:
+            # Update line preview coordinates
+            sx, sy = self.image_to_canvas_xy(self.start_x, self.start_y, center=True)
+            ex, ey = self.image_to_canvas_xy(x, y, center=True)
+            self.canvas.coords(self.temp_draw_id, sx, sy, ex, ey)
 
     def on_mouse_up(self, event):
-        if self.mode == "rect" and self.rect_id:
-            x, y = self.get_image_coords(event)
-            w, h = self.original_image.size
-            x = max(0, min(w-1, x))
-            y = max(0, min(h-1, y))
+        if self.original_image is None:
+            return
 
-            # Finalize rectangle on the actual image
+        xy = self.canvas_to_image_xy(event)
+        if xy is None:
+            w, h = self._img_size()
+            cx = self.canvas.canvasx(event.x)
+            cy = self.canvas.canvasy(event.y)
+            x_disp = int(cx / self.scale)
+            y_disp_row = int(cy / self.scale)
+            x_disp = max(0, min(w - 1, x_disp))
+            y_disp_row = max(0, min(h - 1, y_disp_row))
+            x = x_disp
+            y = self.display_row_to_image(y_disp_row)
+        else:
+            x, y = xy
+
+        if self.mode == "rect" and self.temp_draw_id:
             draw = ImageDraw.Draw(self.original_image)
-            # Ensure coordinates are top-left to bottom-right
             x0, y0 = min(self.start_x, x), min(self.start_y, y)
             x1, y1 = max(self.start_x, x), max(self.start_y, y)
-            
             draw.rectangle([x0, y0, x1, y1], fill=self.draw_color, outline=None)
             
-            # Remove UI rectangle and refresh image
-            self.canvas.delete(self.rect_id)
-            self.rect_id = None
-            self.start_x = None
-            self.start_y = None
+            self.canvas.delete(self.temp_draw_id)
+            self.temp_draw_id = None
+            self.refresh_canvas()
+            
+        elif self.mode == "line" and self.temp_draw_id:
+            # 1. 计算向量
+            dx = x - self.start_x
+            dy = y - self.start_y
+            
+            # 2. 处理反向
+            if self.invert_dir_var.get():
+                dx = -dx
+                dy = -dy
+            
+            # 3. 计算颜色
+            # 计算长度
+            length = math.sqrt(dx*dx + dy*dy)
+            
+            # 默认中性色 (当长度为0时，也就是只点了一下没有拖拽)
+            vec_color = (0, 128, 128) # R=0, G=128, B=128 (Neutral X)
+            
+            if length > 0:
+                # 归一化并向左旋转90度
+                nx = -dy / length
+                ny = dx / length
+                
+                # 映射到 [1, 255]，中心 128
+                # 需求: B对应X正方向(255)，G对应Y方向(假设Y正为下，通常图像坐标Y向下为正)
+                # 映射公式: val = 128 + dir * 127
+                
+                val_x = int(128 + nx * 127)
+                val_y = int(128 + ny * 127)
+                
+                # 钳制范围
+                val_x = max(1, min(255, val_x))
+                val_y = max(1, min(255, val_y))
+                
+                # 组合颜色 (R, G, B)
+                # PIL使用RGB顺序。
+                # 你的需求: Blue=X, Green=Y. Red暂定为0.
+                vec_color = (0, val_y, val_x)
+            
+            # 4. 在原图上画线
+            draw = ImageDraw.Draw(self.original_image)
+            # 确保使用 self.line_width
+            draw.line([(self.start_x, self.start_y), (x, y)], fill=vec_color, width=self.line_width)
+            
+            # 5. 清理 UI
+            self.canvas.delete(self.temp_draw_id)
+            self.temp_draw_id = None
+            
+            # 6. 更新状态栏信息告诉用户刚才画的颜色
+            self.status_info_label.config(text=f"Line Drawn. Color: B={vec_color[2]}, G={vec_color[1]}")
+            
             self.refresh_canvas()
 
     def paint_pixel(self, x, y):
-        # Direct pixel access is faster than ImageDraw for single pixels
         try:
             self.original_image.putpixel((x, y), self.draw_color)
-            # Optimization: Draw a small rectangle on canvas to mimic the change immediately
-            # Must account for scale
-            sx, sy = x * self.scale, y * self.scale
+            sx, sy = self.image_to_canvas_xy(x, y, center=False)
             self.canvas.create_rectangle(sx, sy, sx + self.scale, sy + self.scale, 
-                                       outline="", fill=self.rgb_to_hex(self.draw_color))
+                                         outline="", fill=self.rgb_to_hex(self.draw_color))
         except IndexError:
             pass
 

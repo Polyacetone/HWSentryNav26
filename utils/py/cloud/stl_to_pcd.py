@@ -1,5 +1,4 @@
 import open3d as o3d
-import argparse
 import os
 import sys
 import numpy as np
@@ -66,20 +65,15 @@ def stl_to_pcd(stl_path, pcd_path, num_points=100000, visualize=False, scale=1.0
         o3d.visualization.draw_geometries([pcd, coordinate_frame], window_name="STL to PCD Result")
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert STL mesh to PCD point cloud using Open3D.")
-    
-    parser.add_argument("input", help="Path to input STL file")
-    parser.add_argument("output", help="Path to output PCD file")
-    parser.add_argument("-n", "--num_points", type=int, default=100000, 
-                        help="Number of points to sample (default: 100000)")
-    parser.add_argument("-v", "--visualize", action="store_true", 
-                        help="Visualize the point cloud after conversion")
-    parser.add_argument("-s", "--scale", type=float, default=1.0,
-                        help="Scale factor to apply to sampled points (default: 1.0)")
+    input_filename = input("请输入 STL 文件路径: ")
+    output_filename = os.path.splitext(os.path.basename(input_filename))[0] + ".pcd"
+    num_points = int(input("请输入采样点数量 (默认 100000): ") or "100000")
+    visualize_input = input("是否可视化结果？(y/n, 默认 n): ") or "n"
+    visualize = visualize_input.lower() == 'y'
+    scale_input = input("请输入缩放因子 (默认 1.0): ")
+    scale = float(scale_input) if scale_input else 1.0
 
-    args = parser.parse_args()
-
-    stl_to_pcd(args.input, args.output, args.num_points, args.visualize, args.scale)
+    stl_to_pcd(input_filename, output_filename, num_points, visualize, scale)
 
 if __name__ == "__main__":
     main()

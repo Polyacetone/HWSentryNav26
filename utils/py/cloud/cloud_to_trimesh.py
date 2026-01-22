@@ -35,8 +35,8 @@ def poisson_reconstruct(pcd, depth=9, scale=1.1, quantile=0.01):
 
 def main():
     config = {
-        "input": "base_cropped.pcd", # 输入点云文件路径
-        "output": "base_cropped.ply", # 输出网格文件路径（可选）
+        "input": "RMUL2026.pcd", # 输入点云文件路径
+        "output": "RMUL2026.ply", # 输出网格文件路径（可选）
         "voxel_size": 0.1, # 下采样体素大小（米）
         "depth": 12, # 泊松重建树深度
         "scale": 1.1, # 泊松重建缩放比例

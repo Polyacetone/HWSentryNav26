@@ -116,8 +116,8 @@ def generate_navigation_map(
 # 使用示例
 if __name__ == "__main__":
     # 参数设置 (根据机器人性能调整)
-    STEP_THRESHOLD = 5       # 台阶阈值
-    MAX_HEIGHT = 20         # 机器人最大越障高度
+    STEP_THRESHOLD = 10       # 台阶阈值
+    MAX_HEIGHT = 40         # 机器人最大越障高度
     COST_COEFF = 0.5          # 代价系数
     
     # 生成导航地图
