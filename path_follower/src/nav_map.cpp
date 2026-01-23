@@ -65,7 +65,7 @@ double CostMap::interpolate(const Eigen::Vector2d& grid_coord) const {
 }
 
 Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
-    constexpr int samples = 3;
+    constexpr int samples = 2;
     const int x = static_cast<int>(grid_coord.x());
     const int y = static_cast<int>(grid_coord.y());
 
@@ -91,7 +91,7 @@ std::vector<Eigen::Vector2d> convert_direction_map(const cv::Mat& mat) {
                 vec.emplace_back(0, 0);
             } else {
                 Eigen::Vector2d dir(val[0] - 128.0, val[1] - 128.0);
-                vec.emplace_back(dir.normalized());
+                vec.emplace_back(dir / 128.0);
             }
         }
     }

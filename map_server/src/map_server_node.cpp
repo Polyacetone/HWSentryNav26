@@ -35,9 +35,12 @@ private:
         double downsample_voxel_size;
         double distance_threshold;
         int cell_obstacle_point_threshold;
-        int dilate_kernel_size;
-        int gaussian_blur_kernel_size;
-        double gaussian_blur_sigma;
+        struct {
+            double inflation_radius;
+            double inscribed_radius;
+            double cost_scaling_factor;
+            int obstacle_threshold;
+        } cost_map_inflation_params;
     } local_map_params_;
 
     cv::Mat global_direction_map_, global_cost_map_;
@@ -61,6 +64,7 @@ private:
     small_gicp::PointCloud::Ptr preprocess_cloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) const;
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
     cv::Mat dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const;
+    cv::Mat inflate_cost_map(const cv::Mat& cost_map) const;
     void pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher) const;
     void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp, const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher) const;
     void pub_cloud(const small_gicp::PointCloud& cloud, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher) const;
@@ -81,9 +85,12 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .downsample_voxel_size = declare_parameter<double>("local_map.downsample_voxel_size"),
         .distance_threshold = declare_parameter<double>("local_map.distance_threshold"),
         .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
-        .dilate_kernel_size = (int)declare_parameter<int>("local_map.dilate_kernel_size"),
-        .gaussian_blur_kernel_size = (int)declare_parameter<int>("local_map.gaussian_blur_kernel_size"),
-        .gaussian_blur_sigma = declare_parameter<double>("local_map.gaussian_blur_sigma")
+        .cost_map_inflation_params = {
+            .inflation_radius = declare_parameter<double>("local_map.cost_map_inflation.inflation_radius"),
+            .inscribed_radius = declare_parameter<double>("local_map.cost_map_inflation.inscribed_radius"),
+            .cost_scaling_factor = declare_parameter<double>("local_map.cost_map_inflation.cost_scaling_factor"),
+            .obstacle_threshold = (int)declare_parameter<int>("local_map.cost_map_inflation.obstacle_threshold"),
+        }
     };
     enable_debug_ = declare_parameter<bool>("debug.enable");
     if (enable_debug_) {
@@ -269,9 +276,7 @@ cv::Mat MapServerNode::dynamic_obstacle_analysis(const small_gicp::PointCloud& d
             local_cost_map.at<uint8_t>(map_y, map_x) = 255; // 标记为动态障碍物
         }
     }
-    cv::dilate(local_cost_map, local_cost_map, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(local_map_params_.dilate_kernel_size, local_map_params_.dilate_kernel_size)));
-    cv::GaussianBlur(local_cost_map, local_cost_map, cv::Size(local_map_params_.gaussian_blur_kernel_size, local_map_params_.gaussian_blur_kernel_size), local_map_params_.gaussian_blur_sigma);
-    return local_cost_map;
+    return inflate_cost_map(local_cost_map);
 }
 
 small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const {
@@ -286,6 +291,58 @@ small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::
         );
     }
     return small_gicp_cloud;
+}
+
+cv::Mat MapServerNode::inflate_cost_map(const cv::Mat& cost_map) const {
+    CV_Assert(cost_map.type() == CV_8UC1);
+    const float inflation_radius = static_cast<float>(local_map_params_.cost_map_inflation_params.inflation_radius);
+    const float inscribed_radius = static_cast<float>(local_map_params_.cost_map_inflation_params.inscribed_radius);
+    const float cost_scaling_factor = static_cast<float>(local_map_params_.cost_map_inflation_params.cost_scaling_factor);
+    const int obstacle_threshold = local_map_params_.cost_map_inflation_params.obstacle_threshold;
+
+    // Step 1: 创建二值障碍物掩码（1=障碍，0=非障碍）
+    cv::Mat obstacle_mask;
+    cv::threshold(cost_map, obstacle_mask, obstacle_threshold - 1, 1, cv::THRESH_BINARY);
+
+    // Step 2: 计算每个像素到最近障碍物的欧氏距离（单位：像素）
+    cv::Mat dist;
+    cv::distanceTransform(1 - obstacle_mask, dist, cv::DIST_L2, 3); // distanceTransform 要求前景为0
+
+    // Step 3: 将距离转为米
+    dist.convertTo(dist, CV_32F, map_resolution_); // dist now in meters
+
+    // Step 4: 初始化输出图为输入图（保留原始障碍物和自由区域）
+    cv::Mat cost_map_out = cost_map.clone();
+
+    // Step 5: 遍历所有像素，计算膨胀代价
+    for (int i = 0; i < cost_map_out.rows; i++) {
+        const float* dist_row = dist.ptr<float>(i);
+        uint8_t* out_row = cost_map_out.ptr<uint8_t>(i);
+        const uint8_t* in_row = cost_map.ptr<uint8_t>(i);
+
+        for (int j = 0; j < cost_map_out.cols; j++) {
+            // 跳过已知障碍物
+            if (in_row[j] >= obstacle_threshold) continue;
+            const float d = dist_row[j]; // 到最近障碍物的距离（米）
+
+            // 仅在膨胀半径内处理
+            if (d <= inflation_radius && d > 0) {
+                uint8_t new_cost;
+                if (d <= inscribed_radius) {
+                    // 机器人本体无法进入的区域 → 设为高代价
+                    new_cost = 255;
+                } else {
+                    new_cost = 254 * std::exp(-cost_scaling_factor * (d - inscribed_radius));
+                }
+                // 只在原代价较低时更新（保留更高优先级的代价）
+                if (new_cost > out_row[j]) {
+                    out_row[j] = new_cost;
+                }
+            }
+        }
+    }
+
+    return cost_map_out;
 }
 
 void MapServerNode::pub_direction_map(

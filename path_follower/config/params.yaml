@@ -66,7 +66,7 @@
           acc_max: 2.5 # 最大加速度软约束 (m/s²)
           alpha_max: 7.2 # 最大角加速度软约束 (rad/s²)
           vel_max_on_step: 1.0 # 台阶区域最大速度软约束 (m/s)
-          v_omega_product_max: 3.5 # |v*omega| 软约束上限
+          v_omega_product_max: 3.5 # |v*omega| 最大值软约束 (m/s * rad/s)
           step_exit_speed_min: 0.8 # 在台阶上时，为退出台阶要求的最小线速度 (m/s)
         weights: # 权重
           q_v: 0.3 # 线速度正则

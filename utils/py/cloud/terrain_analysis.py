@@ -336,7 +336,7 @@ if __name__ == "__main__":
     analyzer = TerrainAnalyzer()
     try:
         # 请替换为你的点云文件路径
-        nav_map = analyzer.analyze_terrain("RMUL2026.pcd") 
+        nav_map = analyzer.analyze_terrain("RMUC2026.pcd") 
         print("处理完成。")
     except Exception as e:
         print(f"发生错误: {e}")

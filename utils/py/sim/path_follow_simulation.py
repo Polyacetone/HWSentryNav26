@@ -143,12 +143,12 @@ class SimulationNode(Node):
         if self.timer_count % 10 == 0:
             # moving sphere parameters
             radius = 0.2
-            cx = 14.0
-            cz = 1.0
+            cx = 6.5
+            cz = 0.3
             # time in seconds (timer runs at 0.01s)
             t = self.timer_count * 0.01
             period = 10.0
-            cy = 5.5 + 0.5 * math.sin(2.0 * math.pi * t / period)
+            cy = 6.0 + 0.5 * math.sin(2.0 * math.pi * t / period)
 
             # sample sphere surface with grid in spherical coordinates
             num_theta = 20

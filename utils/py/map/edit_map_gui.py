@@ -7,8 +7,8 @@ import math  # 新增：用于向量计算
 class MapEditorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Cost Map Editor - Vector Line Support")
-        self.root.geometry("1100x700") # 稍微加宽一点以容纳新按钮
+        self.root.title("Cost Map Editor")
+        self.root.geometry("1500x1000") # 稍微加宽一点以容纳新按钮
 
         # State variables
         self.image_path = None
@@ -20,6 +20,7 @@ class MapEditorApp:
         # Mode variables
         self.mode = "pixel"         # "pixel", "rect", "line"
         self.line_width = 1         # 直线宽度
+        self.line_color_mode = "vector"  # "vector" (dir-based) | "fixed" (use selected color)
         
         self.scale = 1.0
         self.history = []           # Undo history
@@ -135,7 +136,7 @@ class MapEditorApp:
         rb_rect.pack(side=tk.LEFT, padx=2)
 
         # Mode: Line (New Function)
-        rb_line = tk.Radiobutton(toolbar, text="Vector Line", variable=self.mode_var, 
+        rb_line = tk.Radiobutton(toolbar, text="Line", variable=self.mode_var, 
                                  value="line", command=self.set_mode)
         rb_line.pack(side=tk.LEFT, padx=2)
 
@@ -149,6 +150,27 @@ class MapEditorApp:
         self.spin_width.pack(side=tk.LEFT, padx=2)
         self.spin_width.delete(0, "end")
         self.spin_width.insert(0, 1)
+
+        # Line color mode (direction-based vs fixed color)
+        self.line_color_mode_var = tk.StringVar(value="vector")
+
+        self.rb_line_vector = tk.Radiobutton(
+            toolbar,
+            text="Dir Color",
+            variable=self.line_color_mode_var,
+            value="vector",
+            command=self.update_line_color_mode,
+        )
+        self.rb_line_vector.pack(side=tk.LEFT, padx=4)
+
+        self.rb_line_fixed = tk.Radiobutton(
+            toolbar,
+            text="Fixed Color",
+            variable=self.line_color_mode_var,
+            value="fixed",
+            command=self.update_line_color_mode,
+        )
+        self.rb_line_fixed.pack(side=tk.LEFT, padx=2)
 
         # Direction Invert Checkbox
         self.invert_dir_var = tk.BooleanVar(value=False)
@@ -202,14 +224,49 @@ class MapEditorApp:
         
         self.root.bind("<Control-z>", lambda event: self.undo())
 
+        # Initialize control states for the default mode (pixel)
+        self.set_mode()
+
     def set_mode(self):
         self.mode = self.mode_var.get()
         if self.mode == "line":
-            self.status_info_label.config(text="Mode: Vector Line (Color determined by direction)")
-            self.color_btn.config(state=tk.DISABLED) # Disable manual color in line mode
+            self._set_line_controls_state(tk.NORMAL)
+            self.update_line_color_mode()
         else:
+            self._set_line_controls_state(tk.DISABLED)
             self.status_info_label.config(text=f"Mode: {self.mode.capitalize()}")
             self.color_btn.config(state=tk.NORMAL)
+
+    def _set_line_controls_state(self, state):
+        # Widgets that only apply in line mode
+        try:
+            self.spin_width.config(state=state)
+        except Exception:
+            pass
+        try:
+            self.rb_line_vector.config(state=state)
+            self.rb_line_fixed.config(state=state)
+        except Exception:
+            pass
+        try:
+            self.chk_invert.config(state=state)
+        except Exception:
+            pass
+
+    def update_line_color_mode(self):
+        # Only meaningful in line mode
+        self.line_color_mode = self.line_color_mode_var.get()
+        if self.mode != "line":
+            return
+
+        if self.line_color_mode == "fixed":
+            self.color_btn.config(state=tk.NORMAL)
+            self.chk_invert.config(state=tk.DISABLED)
+            self.status_info_label.config(text="Mode: Line (Fixed Color)")
+        else:
+            self.color_btn.config(state=tk.DISABLED)
+            self.chk_invert.config(state=tk.NORMAL)
+            self.status_info_label.config(text="Mode: Line (Dir Color)")
 
     def update_line_width(self):
         try:
@@ -368,12 +425,15 @@ class MapEditorApp:
             elif self.mode == "line":
                 # Line drawing preview
                 cx, cy = self.image_to_canvas_xy(x, y, center=True)
+                preview_color = "cyan"
+                if self.line_color_mode == "fixed":
+                    preview_color = self.rgb_to_hex(self.draw_color)
                 self.temp_draw_id = self.canvas.create_line(
                     cx,
                     cy,
                     cx,
                     cy,
-                    fill="cyan",
+                    fill=preview_color,
                     width=max(1, self.line_width * self.scale),
                 )
 
@@ -445,55 +505,55 @@ class MapEditorApp:
             self.refresh_canvas()
             
         elif self.mode == "line" and self.temp_draw_id:
-            # 1. 计算向量
-            dx = x - self.start_x
-            dy = y - self.start_y
-            
-            # 2. 处理反向
-            if self.invert_dir_var.get():
-                dx = -dx
-                dy = -dy
-            
-            # 3. 计算颜色
-            # 计算长度
-            length = math.sqrt(dx*dx + dy*dy)
-            
-            # 默认中性色 (当长度为0时，也就是只点了一下没有拖拽)
-            vec_color = (0, 128, 128) # R=0, G=128, B=128 (Neutral X)
-            
-            if length > 0:
-                # 归一化并向左旋转90度
-                nx = -dy / length
-                ny = dx / length
-                
-                # 映射到 [1, 255]，中心 128
-                # 需求: B对应X正方向(255)，G对应Y方向(假设Y正为下，通常图像坐标Y向下为正)
-                # 映射公式: val = 128 + dir * 127
-                
-                val_x = int(128 + nx * 127)
-                val_y = int(128 + ny * 127)
-                
-                # 钳制范围
-                val_x = max(1, min(255, val_x))
-                val_y = max(1, min(255, val_y))
-                
-                # 组合颜色 (R, G, B)
-                # PIL使用RGB顺序。
-                # 你的需求: Blue=X, Green=Y. Red暂定为0.
-                vec_color = (0, val_y, val_x)
-            
+            if self.line_color_mode == "fixed":
+                line_color = tuple(self.draw_color)
+            else:
+                # 1. 计算向量
+                dx = x - self.start_x
+                dy = y - self.start_y
+
+                # 2. 处理反向
+                if self.invert_dir_var.get():
+                    dx = -dx
+                    dy = -dy
+
+                # 3. 计算颜色
+                length = math.sqrt(dx * dx + dy * dy)
+
+                # 默认中性色 (当长度为0时，也就是只点了一下没有拖拽)
+                line_color = (0, 128, 128)  # R=0, G=128, B=128
+
+                if length > 0:
+                    # 归一化并向左旋转90度
+                    nx = -dy / length
+                    ny = dx / length
+
+                    # 映射到 [1, 255]，中心 128
+                    # 需求: B对应X正方向(255)，G对应Y方向(Y正为下，图像坐标Y向下为正)
+                    # 映射公式: val = 128 + dir * 127
+                    val_x = int(128 + nx * 127)
+                    val_y = int(128 + ny * 127)
+
+                    # 钳制范围
+                    val_x = max(1, min(255, val_x))
+                    val_y = max(1, min(255, val_y))
+
+                    # 组合颜色 (R, G, B) - Blue=X, Green=Y, Red=0
+                    line_color = (0, val_y, val_x)
+
             # 4. 在原图上画线
             draw = ImageDraw.Draw(self.original_image)
-            # 确保使用 self.line_width
-            draw.line([(self.start_x, self.start_y), (x, y)], fill=vec_color, width=self.line_width)
-            
+            draw.line([(self.start_x, self.start_y), (x, y)], fill=line_color, width=self.line_width)
+
             # 5. 清理 UI
             self.canvas.delete(self.temp_draw_id)
             self.temp_draw_id = None
-            
+
             # 6. 更新状态栏信息告诉用户刚才画的颜色
-            self.status_info_label.config(text=f"Line Drawn. Color: B={vec_color[2]}, G={vec_color[1]}")
-            
+            self.status_info_label.config(
+                text=f"Line Drawn. Color: B={line_color[2]}, G={line_color[1]}, R={line_color[0]}"
+            )
+
             self.refresh_canvas()
 
     def paint_pixel(self, x, y):
