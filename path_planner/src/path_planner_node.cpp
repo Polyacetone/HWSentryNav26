@@ -31,11 +31,14 @@ private:
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
 
     CostMap::ConstPtr global_cost_map_;
+    ESDFMap::ConstPtr global_esdf_map_;
     DirectionMap::ConstPtr global_direction_map_;
     AStarPlanner::ConstPtr path_planner_;
     BSplineOptimizer::ConstPtr path_optimizer_;
     double lazy_distance_;
     bool enable_debug_;
+
+    int esdf_obstacle_threshold_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     void goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
@@ -67,10 +70,17 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         declare_parameter<int>("path_planner.downsampled_waypoint_max_interval"),
         declare_parameter<int>("path_planner.feasible_threshold")
     );
+
+    // ESDF obstacle threshold: 默认复用 A* 的可行阈值
+    esdf_obstacle_threshold_ = declare_parameter<int>("path_optimizer.esdf.obstacle_threshold");
+
     path_optimizer_ = std::make_shared<BSplineOptimizer>(
         declare_parameter<double>("path_optimizer.smoothness_weight"),
         declare_parameter<double>("path_optimizer.uniform_speed_weight"),
         declare_parameter<double>("path_optimizer.obstacle_weight"),
+        declare_parameter<double>("path_optimizer.esdf.collision_weight"),
+        declare_parameter<double>("path_optimizer.esdf.safe_distance_m"),
+        declare_parameter<double>("path_optimizer.esdf.smooth_eps_m"),
         declare_parameter<double>("path_optimizer.direction_weight"),
         declare_parameter<double>("path_optimizer.start_end_weight"),
         declare_parameter<double>("path_optimizer.num_samples_per_length"),
@@ -81,6 +91,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         global_cost_map_sub_topic, 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
             global_cost_map_ = std::make_shared<CostMap>(*msg);
+            global_esdf_map_ = std::make_shared<ESDFMap>(ESDFMap::from_cost_map(*global_cost_map_, esdf_obstacle_threshold_));
             RCLCPP_INFO(get_logger(), "Received global cost map: size=(%d, %d), resolution=%.2f", global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution);
             global_cost_map_sub_.reset();  // 全局代价地图只需要接收一次
         }
@@ -113,7 +124,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
 }
 
 void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg) {
-    if (!global_cost_map_ || !global_direction_map_) { // 确保地图已经准备好
+    if (!global_cost_map_ || !global_direction_map_ || !global_esdf_map_) { // 确保地图已经准备好
         RCLCPP_ERROR(get_logger(), "Map not ready yet!");
         publish_path({}, {}, {});
         return;
@@ -175,7 +186,7 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
     // 优化路径，输入输出均为格点坐标系
     std::vector<Eigen::Vector2d> control_points, optimized_path;
     const auto optimize_result = path_optimizer_->optimize(
-        *global_cost_map_,
+        *global_esdf_map_,
         *global_direction_map_,
         rough_path,
         start_grid,

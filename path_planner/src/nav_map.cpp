@@ -1,5 +1,10 @@
 #include <path_planner/nav_map.hpp>
 
+#include <algorithm>
+#include <stdexcept>
+
+#include <opencv2/imgproc.hpp>
+
 namespace path_planner {
 CostMap::CostMap(
     const int width,
@@ -75,6 +80,117 @@ Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
         sum_grad.y() += (at({x, y + i}) - at({x, y - i})) / (i * 2.0);
     }
     return sum_grad / samples;
+}
+
+ESDFMap::ESDFMap(
+    const int width,
+    const int height,
+    const double resolution,
+    const double origin_x,
+    const double origin_y,
+    std::vector<float> signed_distance_m
+): width(width),
+   height(height),
+   resolution(resolution),
+   origin_x(origin_x),
+   origin_y(origin_y),
+   signed_distance_m(std::move(signed_distance_m)) {
+    if (static_cast<int>(this->signed_distance_m.size()) != width * height) {
+        throw std::runtime_error("ESDFMap signed_distance_m size mismatch");
+    }
+}
+
+ESDFMap ESDFMap::from_cost_map(const CostMap& cost_map, const int obstacle_threshold) {
+    // OpenCV distanceTransform: 计算每个非零像素到最近零像素的距离（像素单位）
+    // 我们将障碍物视为 0，自由空间视为 255，得到“到障碍物的距离”
+    cv::Mat free_mask(cost_map.height, cost_map.width, CV_8U);
+    cv::Mat occ_mask(cost_map.height, cost_map.width, CV_8U);
+
+    for (int y = 0; y < cost_map.height; y++) {
+        for (int x = 0; x < cost_map.width; x++) {
+            const uint8_t v = cost_map.data[y * cost_map.width + x];
+            const bool is_obstacle = v > obstacle_threshold;
+            free_mask.at<uint8_t>(y, x) = is_obstacle ? 0 : 255;
+            occ_mask.at<uint8_t>(y, x) = is_obstacle ? 255 : 0;
+        }
+    }
+
+    cv::Mat dist_out_px, dist_in_px;
+    cv::distanceTransform(free_mask, dist_out_px, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+    cv::distanceTransform(occ_mask, dist_in_px, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+
+    std::vector<float> sdf_m;
+    sdf_m.resize(static_cast<size_t>(cost_map.width) * static_cast<size_t>(cost_map.height));
+    for (int y = 0; y < cost_map.height; y++) {
+        for (int x = 0; x < cost_map.width; x++) {
+            const float dout = dist_out_px.at<float>(y, x);
+            const float din = dist_in_px.at<float>(y, x);
+            const float sdf_px = dout - din; // outside: +, inside obstacle: -
+            sdf_m[static_cast<size_t>(y) * cost_map.width + x] = sdf_px * static_cast<float>(cost_map.resolution);
+        }
+    }
+
+    return ESDFMap(cost_map.width, cost_map.height, cost_map.resolution, cost_map.origin_x, cost_map.origin_y, std::move(sdf_m));
+}
+
+Eigen::Vector2d ESDFMap::map_coord_to_grid(const Eigen::Vector2d& map_coord) const {
+    return {(map_coord.x() - origin_x) / resolution, (map_coord.y() - origin_y) / resolution};
+}
+
+Eigen::Vector2d ESDFMap::grid_coord_to_map(const Eigen::Vector2d& grid_coord) const {
+    return {grid_coord.x() * resolution + origin_x, grid_coord.y() * resolution + origin_y};
+}
+
+bool ESDFMap::is_valid_coord(const Eigen::Vector2i& grid_coord) const {
+    return grid_coord.x() >= 0 && grid_coord.x() < width && grid_coord.y() >= 0 && grid_coord.y() < height;
+}
+
+bool ESDFMap::is_valid_coord(const Eigen::Vector2d& grid_coord) const {
+    // bilinear 插值需要 (x0,y0),(x1,y1) 都有效
+    return grid_coord.x() >= 0 && grid_coord.x() + 1 <= width && grid_coord.y() >= 0 && grid_coord.y() + 1 <= height;
+}
+
+float ESDFMap::at(const Eigen::Vector2i& grid_coord) const {
+    if (!is_valid_coord(grid_coord)) {
+        // 越界按强碰撞处理：返回很大的负距离
+        return -1e3f;
+    }
+    return signed_distance_m[static_cast<size_t>(grid_coord.y()) * width + grid_coord.x()];
+}
+
+double ESDFMap::interpolate(const Eigen::Vector2d& grid_coord) const {
+    if (!is_valid_coord(grid_coord)) return static_cast<double>(-1e3);
+    const int x0 = static_cast<int>(grid_coord.x());
+    const int y0 = static_cast<int>(grid_coord.y());
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+    const double dx = grid_coord.x() - x0;
+    const double dy = grid_coord.y() - y0;
+    const double f00 = at({x0, y0});
+    const double f10 = at({x1, y0});
+    const double f01 = at({x0, y1});
+    const double f11 = at({x1, y1});
+    return (1 - dx) * (1 - dy) * f00 + dx * (1 - dy) * f10 + (1 - dx) * dy * f01 + dx * dy * f11;
+}
+
+Eigen::Vector2d ESDFMap::gradient(const Eigen::Vector2d& grid_coord) const {
+    if (!is_valid_coord(grid_coord)) return {0.0, 0.0};
+    const int x0 = static_cast<int>(grid_coord.x());
+    const int y0 = static_cast<int>(grid_coord.y());
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+    const double dx = grid_coord.x() - x0;
+    const double dy = grid_coord.y() - y0;
+
+    const double f00 = at({x0, y0});
+    const double f10 = at({x1, y0});
+    const double f01 = at({x0, y1});
+    const double f11 = at({x1, y1});
+
+    // bilinear 插值对 (x,y) 的解析梯度（单位：m / cell）
+    const double dfdx = (1 - dy) * (f10 - f00) + dy * (f11 - f01);
+    const double dfdy = (1 - dx) * (f01 - f00) + dx * (f11 - f10);
+    return {dfdx, dfdy};
 }
 
 std::vector<Eigen::Vector2d> convert_direction_map(const cv::Mat& mat) {

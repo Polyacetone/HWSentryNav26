@@ -56,8 +56,8 @@
           alpha_limit: 10.0 # 超过角加速度上限的惩罚
           vel_max_on_step: 3.0 # 台阶区域限速权重
           v_omega_product: 10.0 # 超过 |v*omega| 上限的惩罚
-          obstacle: 1.0 # 避障权重（全局+局部）
-          direction: 1.0 # 台阶方向对齐权重
+          obstacle: 2.0 # 避障权重（全局+局部）
+          direction: 2.0 # 台阶方向对齐权重
       stop: # 停止模式
         limits: # 运动限制
           vel_max: 2.8 # 最大线速度硬约束 (m/s)
@@ -75,8 +75,8 @@
           alpha_limit: 10.0 # 超过角加速度上限惩罚
           vel_max_on_step: 3.0 # 台阶区域限速惩罚
           v_omega_product: 10.0 # 超过 |v*omega| 上限惩罚
-          obstacle: 1.0 # 避障惩罚
+          obstacle: 2.0 # 避障惩罚
           obstacle_terminal: 6.0 # 终端避障惩罚（防止停在障碍上）
-          direction: 1.0 # 在台阶上要求朝向与台阶方向对齐
+          direction: 2.0 # 在台阶上要求朝向与台阶方向对齐
           step_exit: 6.0 # 在台阶上不允许停下（推动退出台阶）
           step_terminal: 6.0 # 终端台阶惩罚（防止停在台阶上）

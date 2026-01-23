@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
-    map_resolution: 0.2 # 地图的每格大小，单位m
-    num_threads: 4 # 用于点云处理的线程数
+    map_resolution: 0.1 # 地图的每格大小，单位m
+    num_threads: 2 # 用于点云处理的线程数
 
     debug:
       enable: true # 是否启用调试模式
@@ -12,8 +12,8 @@
     global_map:
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
-      map_filename: "RMUC2026_navmap_final.png" # 全局先验地图路径
-      cloud_filename: "RMUC2026_aligned.pcd" # 全局点云路径
+      map_filename: "RMUL2026.png" # 全局先验地图路径
+      cloud_filename: "RMUL2026.pcd" # 全局点云路径
       downsample_voxel_size: 0.1 # 全局点云下采样体素大小，单位m
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
     

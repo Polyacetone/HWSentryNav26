@@ -2,7 +2,7 @@
   ros__parameters:
     map_cloud_filename: "1897new.pcd"
     source_cloud_sub_topic: "/small_glim/ivox_cloud"
-    num_threads: 4 # 用于gicp对齐的线程数
+    num_threads: 2 # 用于gicp对齐的线程数
     enable_debug: false # 是否开启调试信息输出
     initial_transform: [5.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0] # 初始位姿，((x,y,z),(x,y,z,w))
 

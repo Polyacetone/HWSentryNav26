@@ -15,31 +15,79 @@ class ObstacleCostFunction : public ceres::CostFunction {
 public:
     explicit ObstacleCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
-        const CostMap& cost_map,
-        const double weight
-    ): pos_evaluator_(pos_evaluator), cost_map_(cost_map), weight_(weight) {
+        const ESDFMap& esdf_map,
+        const double clearance_weight,
+        const double collision_weight,
+        const double safe_distance_m,
+        const double smooth_eps_m
+    ): pos_evaluator_(pos_evaluator),
+       esdf_map_(esdf_map),
+       clearance_weight_(clearance_weight),
+       collision_weight_(collision_weight),
+       safe_distance_m_(safe_distance_m),
+       smooth_eps_m_(smooth_eps_m) {
         // 设置参数块，每个控制点是2维向量
         mutable_parameter_block_sizes()->clear();
         for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
             mutable_parameter_block_sizes()->push_back(2);
         }
-        set_num_residuals(1);
+        // r0: clearance hinge, r1: hard collision
+        set_num_residuals(2);
     }
 
     bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override {
         Eigen::Vector2d point;
         pos_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], point.data());
-        const double cost = cost_map_.interpolate(point);
-        residuals[0] = weight_ * cost;
+
+        const double d = esdf_map_.interpolate(point);            // signed distance (m)
+        const Eigen::Vector2d dd_dxy = esdf_map_.gradient(point); // ∂d/∂(x,y) in grid coords
+
+        // smooth hinge (C1):
+        // phi(x) = 0                    , x <= 0
+        //        = x^2 / (2*eps)        , 0 < x < eps
+        //        = x - eps/2            , x >= eps
+        // phi'(x) = 0, x<=0; x/eps, 0<x<eps; 1, x>=eps
+        const auto smooth_hinge = [](double x, double eps) -> double {
+            if (x <= 0.0) return 0.0;
+            if (x < eps) return 0.5 * x * x / eps;
+            return x - 0.5 * eps;
+        };
+        const auto smooth_hinge_grad = [](double x, double eps) -> double {
+            if (x <= 0.0) return 0.0;
+            if (x < eps) return x / eps;
+            return 1.0;
+        };
+
+        // 距离上限截断：仅在 d < safe_distance_m_ 的范围内产生排斥
+        const double x_clearance = safe_distance_m_ - d;
+        const double x_collision = -d;
+
+        residuals[0] = clearance_weight_ * smooth_hinge(x_clearance, smooth_eps_m_);
+        residuals[1] = collision_weight_ * smooth_hinge(x_collision, smooth_eps_m_);
+
         if (jacobians) {
-            const Eigen::Vector2d cost_gradient = cost_map_.gradient(point);
+            const double g_clear = smooth_hinge_grad(x_clearance, smooth_eps_m_);
+            const double g_coll = smooth_hinge_grad(x_collision, smooth_eps_m_);
+
             for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
-                if (jacobians[i]) {
-                    // ∂L/∂P_i = N_i,p(u) * ∂L/∂V
-                    Eigen::Vector2d jac = weight_ * pos_evaluator_.basisVals_[i] * cost_gradient;
-                    jacobians[i][0] = jac.x();  // 对控制点x分量的导数
-                    jacobians[i][1] = jac.y();  // 对控制点y分量的导数
-                }
+                if (!jacobians[i]) continue;
+
+                // point = sum_i N_i * P_i     => ∂point/∂P_i = N_i * I
+                // d = d(point)                => ∂d/∂P_i = N_i * ∂d/∂point
+                // r_clear = w * (d_safe - d)  => ∂r/∂P_i = -w * ∂d/∂P_i
+                // r_coll  = w * (-d)          => ∂r/∂P_i = -w * ∂d/∂P_i
+                const double basis = pos_evaluator_.basisVals_[i];
+                const Eigen::Vector2d dd_dpi = basis * dd_dxy;
+
+                // jacobians[i] layout: [dr0/dx, dr0/dy, dr1/dx, dr1/dy]
+                // r0 = w0 * phi(safe - d) => dr0/dd = -w0 * phi'(x_clear)
+                // r1 = w1 * phi(-d)       => dr1/dd = -w1 * phi'(x_coll)
+                const Eigen::Vector2d j0 = (-clearance_weight_ * g_clear) * dd_dpi;
+                const Eigen::Vector2d j1 = (-collision_weight_ * g_coll) * dd_dpi;
+                jacobians[i][0] = j0.x();
+                jacobians[i][1] = j0.y();
+                jacobians[i][2] = j1.x();
+                jacobians[i][3] = j1.y();
             }
         }
         return true;
@@ -47,8 +95,11 @@ public:
 
 private:
     const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
-    const CostMap& cost_map_;
-    const double weight_;
+    const ESDFMap& esdf_map_;
+    const double clearance_weight_;
+    const double collision_weight_;
+    const double safe_distance_m_;
+    const double smooth_eps_m_;
 };
 
 // 方向代价涉及离散的方向地图，需要手动求导
@@ -169,6 +220,9 @@ BSplineOptimizer::BSplineOptimizer(
     const double smoothness_weight,
     const double length_weight,
     const double obstacle_weight,
+    const double esdf_collision_weight,
+    const double esdf_safe_distance_m,
+    const double esdf_smooth_eps_m,
     const double direction_weight,
     const double start_end_weight,
     const double num_samples_per_length,
@@ -177,13 +231,16 @@ BSplineOptimizer::BSplineOptimizer(
     smoothness_weight_(smoothness_weight),
     uniform_speed_weight_(length_weight),
     obstacle_weight_(obstacle_weight),
+    esdf_collision_weight_(esdf_collision_weight),
+    esdf_safe_distance_m_(esdf_safe_distance_m),
+    esdf_smooth_eps_m_(esdf_smooth_eps_m),
     direction_weight_(direction_weight),
     start_end_weight_(start_end_weight),
     num_samples_per_length_(num_samples_per_length),
     max_iterations_(max_iterations) {}
 
 std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> BSplineOptimizer::optimize(
-    const CostMap& cost_map,
+    const ESDFMap& esdf_map,
     const DirectionMap& direction_map,
     const std::vector<Eigen::Vector2d>& init_path,
     const Eigen::Vector2d& start_grid,
@@ -211,9 +268,9 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator = spline_ceres.getEvaluator(data);
         const ubs::UniformBSplineCeresEvaluator<Spline> vel_evaluator = spline_ceres.getEvaluator(data, {1});
 
-        // 对于每个采样点添加障碍物代价
+        // 对于每个采样点添加障碍物（ESDF）代价
         problem.AddResidualBlock(
-            new ObstacleCostFunction(pos_evaluator, cost_map, obstacle_weight_),
+            new ObstacleCostFunction(pos_evaluator, esdf_map, obstacle_weight_, esdf_collision_weight_, esdf_safe_distance_m_, esdf_smooth_eps_m_),
             nullptr,
             parameter_pointers
         );

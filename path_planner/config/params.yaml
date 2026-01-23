@@ -20,8 +20,14 @@
     path_optimizer:
       smoothness_weight: 0.1 # 平滑代价权重
       uniform_speed_weight: 0.1 # 速度均匀代价权重
-      obstacle_weight: 5.0 # 障碍物代价权重
+      obstacle_weight: 500.0 # 障碍物代价权重
       direction_weight: 2.0 # 方向代价权重
       start_end_weight: 1000.0 # 起终点保持代价权重
       num_samples_per_length: 2.0 # 每长度采样点个数，用于计算障碍物代价等（以格子为单位）
       max_iterations: 200 # 优化的最大迭代次数
+
+      esdf:
+        obstacle_threshold: 100 # ESDF 计算中将 > threshold 的格子视为障碍物（默认等同 feasible_threshold）
+        safe_distance_m: 0.5 # 期望与障碍物保持的最小距离（米），小于该距离将产生排斥
+        collision_weight: 1000.0 # 当轨迹进入障碍物（signed distance < 0）时的强惩罚权重
+        smooth_eps_m: 0.1 # smooth hinge 的平滑宽度（米），越小越接近硬 hinge
