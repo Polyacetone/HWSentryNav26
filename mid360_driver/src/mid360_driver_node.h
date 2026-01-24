@@ -18,49 +18,42 @@ namespace mid360_driver {
 
     class LidarPublisher {
     private:
-        std::mutex mutex;
+        std::vector<Point> points_wait_to_publish;
+        std::vector<ImuMsg> imu_wait_to_publish;
         std::vector<Point> points_to_publish;
         std::vector<ImuMsg> imu_to_publish;
-        std::vector<Point> points_to_publish_temp;
-        std::vector<ImuMsg> imu_to_publish_temp;
         bool is_init = false;
-        std::string lidar_topic;
-        std::string imu_topic;
         std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pointcloud_publisher;
         std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Imu>> imu_publisher;
+        double filter_distance;
 
     public:
         LidarPublisher() = default;
-
-        void set_topic(const std::string &lidar_topic, const std::string &imu_topic);
-
-        void set_topic_with_lidar_ip(const std::string &lidar_topic, const std::string &imu_topic, const asio::ip::address &lidar_ip);
-
-        void make_sure_init(rclcpp::Node &node);
-
+        void make_sure_init(rclcpp::Node &node, const std::string &lidar_topic, const std::string &imu_topic);
+        void make_sure_init(rclcpp::Node &node, const std::string &lidar_topic, const std::string &imu_topic, const asio::ip::address &lidar_ip);
         void on_receive_pointcloud(const std::vector<Point> &points);
-
         void on_receive_imu(const ImuMsg &imu_msg);
-
-        void publish_pointcloud(const std::string &frame_id);
-
-        void publish_imu(const std::string &frame_id);
+        void prepare_pointcloud_to_publish();
+        void prepare_imu_to_publish();
+        void publish_pointcloud(const std::string &frame_id) const;
+        void publish_imu(const std::string &frame_id) const;
     };
 
     class Mid360DriverNode : public rclcpp::Node {
     private:
         asio::io_context io_context;
-        std::thread livox_driver_thread;
+        std::mutex mutex;
+        std::thread io_thread;
         std::unique_ptr<mid360_driver::Mid360Driver> mid360_driver;
         LidarPublisher lidar_publisher;
-        std::unordered_map<asio::ip::address, LidarPublisher> muti_lidar_publisher;
+        std::unordered_map<asio::ip::address, LidarPublisher, IpAddressHasher> muti_lidar_publisher;
+        std::vector<std::pair<asio::ip::address, LidarPublisher *>> muti_lidar_publisher_temp;
         rclcpp::TimerBase::SharedPtr publish_pointcloud_timer;
         rclcpp::TimerBase::SharedPtr publish_imu_timer;
 
     public:
         explicit Mid360DriverNode(const rclcpp::NodeOptions &options);
-
-        ~Mid360DriverNode();
+        ~Mid360DriverNode() override;
     };
 
 }// namespace mid360_driver

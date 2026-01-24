@@ -75,6 +75,29 @@ namespace mid360_driver {
 
 #pragma pack()
 
+    void combine_4_bytes(std::size_t &seed, const unsigned char *bytes) {
+        const std::size_t bytes_hash =
+                (static_cast<std::size_t>(bytes[0]) << 24) |
+                (static_cast<std::size_t>(bytes[1]) << 16) |
+                (static_cast<std::size_t>(bytes[2]) << 8) |
+                (static_cast<std::size_t>(bytes[3]));
+        seed ^= bytes_hash + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    }
+
+    std::size_t IpAddressHasher::operator()(const asio::ip::address &addr) const noexcept {
+        if (addr.is_v4()) {
+            return std::hash<unsigned int>()(addr.to_v4().to_uint());
+        } else {
+            const asio::ip::address_v6::bytes_type bytes = addr.to_v6().to_bytes();
+            std::size_t result = static_cast<std::size_t>(addr.to_v6().scope_id());
+            combine_4_bytes(result, &bytes[0]);
+            combine_4_bytes(result, &bytes[4]);
+            combine_4_bytes(result, &bytes[8]);
+            combine_4_bytes(result, &bytes[12]);
+            return result;
+        }
+    }
+
     Mid360Driver::Mid360Driver(asio::io_context &io_context,
                                const asio::ip::address &host_ip,
                                const std::function<void(const asio::ip::address &lidar_ip, const std::vector<Point> &points)> &on_receive_pointcloud,
@@ -120,11 +143,11 @@ namespace mid360_driver {
             if (header.time_type == TimestampType::kTimestampTypeNoSync) {
                 auto [iter, inserted] = delta_time_map.try_emplace(sender_endpoint.address());
                 if (inserted) {
-                    header_timestamp += iter->second;
-                } else {
                     auto now = static_cast<double>(std::chrono::high_resolution_clock::now().time_since_epoch().count()) * 1e-9;
                     iter->second = now - header_timestamp;
                     header_timestamp = now;
+                } else {
+                    header_timestamp += iter->second;
                 }
             }
             points.clear();
@@ -198,11 +221,11 @@ namespace mid360_driver {
             if (header.time_type == TimestampType::kTimestampTypeNoSync) {
                 auto [iter, inserted] = delta_time_map.try_emplace(sender_endpoint.address());
                 if (inserted) {
-                    header_timestamp += iter->second;
-                } else {
                     auto now = static_cast<double>(std::chrono::high_resolution_clock::now().time_since_epoch().count()) * 1e-9;
                     iter->second = now - header_timestamp;
                     header_timestamp = now;
+                } else {
+                    header_timestamp += iter->second;
                 }
             }
             const auto &raw_imu = *reinterpret_cast<const Imu *>(buffer + sizeof(DataHeader));
