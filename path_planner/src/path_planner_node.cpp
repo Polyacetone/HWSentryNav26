@@ -36,6 +36,8 @@ private:
     BSplineOptimizer::ConstPtr path_optimizer_;
     double lazy_distance_;
     bool enable_debug_;
+    int goal_occupied_threshold_;
+    double goal_on_step_threshold_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     void goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
@@ -53,6 +55,8 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     lazy_distance_ = declare_parameter<double>("lazy_distance");
     enable_debug_ = declare_parameter<bool>("debug.enable");
+    goal_occupied_threshold_ = declare_parameter<int>("goal_occupied_threshold");
+    goal_on_step_threshold_ = declare_parameter<double>("goal_on_step_threshold");
     if (enable_debug_) {
         std::string rough_path_pub_topic = declare_parameter<std::string>("debug.rough_path_pub_topic");
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(rough_path_pub_topic, 1);
@@ -72,6 +76,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         declare_parameter<double>("path_optimizer.uniform_speed_weight"),
         declare_parameter<double>("path_optimizer.obstacle_weight"),
         declare_parameter<double>("path_optimizer.direction_weight"),
+        declare_parameter<double>("path_optimizer.step_weight"),
         declare_parameter<double>("path_optimizer.start_end_weight"),
         declare_parameter<double>("path_optimizer.num_samples_per_length"),
         declare_parameter<int>("path_optimizer.max_iterations")
@@ -138,13 +143,37 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
         return;
     }
 
+    const Eigen::Vector2d start_grid = global_cost_map_->map_coord_to_grid(start_map);
+    const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_map);
+
+    if (!global_cost_map_->is_valid_coord(start_grid)) {
+        RCLCPP_WARN(get_logger(), "Start (%.2f, %.2f) is out of bound!", start_map.x(), start_map.y());
+        publish_path({}, {}, {});
+        return;
+    }
+
+    if (!global_cost_map_->is_valid_coord(goal_grid)) {
+        RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is out of bound!", goal_map.x(), goal_map.y());
+        publish_path({}, {}, {});
+        return;
+    }
+
+    if (global_cost_map_->interpolate(goal_grid) > goal_occupied_threshold_) {
+        RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is occupied!", goal_map.x(), goal_map.y());
+        publish_path({}, {}, {});
+        return;
+    }
+
+    if (global_direction_map_->interpolate(goal_grid).norm() > goal_on_step_threshold_) {
+        RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is on step!", goal_map.x(), goal_map.y());
+        publish_path({}, {}, {});
+        return;
+    }
+
     RCLCPP_INFO(
         get_logger(), "New valid goal: Src(%.2f, %.2f) -> Dst(%.2f, %.2f)",
         start_map.x(), start_map.y(), goal_map.x(), goal_map.y()
     );
-
-    const Eigen::Vector2d start_grid = global_cost_map_->map_coord_to_grid(start_map);
-    const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_map);
 
     auto start_time = std::chrono::high_resolution_clock::now();
     

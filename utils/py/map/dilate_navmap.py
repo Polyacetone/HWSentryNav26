@@ -136,12 +136,21 @@ def inflate_navigation_map(img, robot_radius, cutoff_radius, decay_alpha=0.5):
     out_img[~is_covered, 0] = 0
     out_img[~is_covered, 1] = 0
 
+    # 对台阶方向场模长非常小的区域，设置方向为(0,0)，同时根据方向模长设置障碍物以防误导
+    # small_mag_mask = np.sqrt(final_vx**2 + final_vy**2) < 20
+    # out_img[small_mag_mask, 0] = 0
+    # out_img[small_mag_mask, 1] = 0
+    # out_img[small_mag_mask, 2] = np.maximum(
+    #     out_img[small_mag_mask, 2],
+    #     (np.sqrt(final_vx**2 + final_vy**2)[small_mag_mask] * 0.8).astype(np.uint8)
+    # )
+
     return out_img
 
 if __name__ == "__main__":
     original_map = cv2.imread("RMUC2026.png")
-    robot_radius = 2  # 像素
+    robot_radius = 1  # 像素
     cutoff_radius = 4  # 像素
-    decay_alpha = 0.6  # 衰减系数
+    decay_alpha = 0.8  # 衰减系数
     inflated_map = inflate_navigation_map(original_map, robot_radius, cutoff_radius, decay_alpha)
     cv2.imwrite("RMUC2026_inflated.png", inflated_map)

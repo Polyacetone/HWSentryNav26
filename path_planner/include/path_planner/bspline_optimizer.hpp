@@ -17,6 +17,7 @@ public:
         const double uniform_speed_weight,
         const double obstacle_weight,
         const double direction_weight,
+        const double step_weight,
         const double start_end_weight,
         const double num_samples_per_length,
         const int max_iterations
@@ -36,6 +37,7 @@ private:
     const double uniform_speed_weight_;
     const double obstacle_weight_;
     const double direction_weight_;
+    const double step_weight_;
     const double start_end_weight_;
     const double num_samples_per_length_;
     const int max_iterations_;

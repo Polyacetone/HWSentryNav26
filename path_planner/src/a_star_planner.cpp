@@ -47,10 +47,10 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
         return std::unexpected("Start and goal too close");
     }
     if (!costmap.is_valid_coord(start_grid)) {
-        return std::unexpected("Invalid start pose");
+        return std::unexpected("Invalid start point");
     }
     if (!costmap.is_valid_coord(goal_grid)) {
-        return std::unexpected("Invalid goal pose");
+        return std::unexpected("Invalid goal point");
     }
     const auto cmp = [](const Node::Ptr& n1, const Node::Ptr& n2) { return n1->f() > n2->f(); };
     std::priority_queue<Node::Ptr, std::vector<Node::Ptr>, decltype(cmp)> open_fwd(cmp), open_bwd(cmp);

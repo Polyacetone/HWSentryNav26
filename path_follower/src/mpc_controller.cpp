@@ -213,20 +213,22 @@ struct FollowMPCCostFunctor {
             // 归一化到 [0,1]，并进行惩罚
             residuals[res_idx++] = T(params_.follow_weights.obstacle_weight) * (cost / T(255.0));
 
-            // 对齐台阶方向（方向地图在障碍附近/台阶上才有意义；无方向则不惩罚）
+            // 对齐台阶方向（方向地图在台阶上才有意义，无方向则不惩罚）
             const auto dir = interpolate_direction_map(direction_map_, x, y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-9));
-            const auto dir_normalized = dir / dir_norm;
             const Eigen::Matrix<T, 2, 1> heading(cos(theta), sin(theta));
-            const T heading_dot_dir = heading.dot(dir_normalized);
-            // 惩罚 1 - |cos|，即鼓励朝向与方向场对齐（允许正反向都对齐）
-            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * (T(1.0) - ceres::abs(heading_dot_dir));
+            const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
+            // 代价定义为速度与期望方向的叉积绝对值
+            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * ceres::abs(heading_cross_dir);
 
-            // 台阶区域限速：当方向场非0（台阶）时，惩罚超过 step_speed_max 的速度
+            // 经过台阶惩罚：基于方向场模长（越大越像台阶/边缘），鼓励在不需要时远离台阶区域
+            residuals[res_idx++] = T(params_.follow_weights.step_weight) * dir_norm;
+
+            // 台阶区域速度保持：当方向场非0（台阶）时，速度保持为vel_on_step
             // 使用 direction norm 做软开关，避免边界插值处不连续
             const T gate_step = ceres::fmin(T(1.0), dir_norm * 2.0); // [0,1]
-            const T v_excess_step = ceres::fmax(T(0.0), v - T(params_.follow_limits.vel_max_on_step));
-            residuals[res_idx++] = T(params_.follow_weights.vel_max_on_step_weight) * gate_step * v_excess_step;
+            const T v_diff_step_sq = ceres::pow((v - T(params_.follow_limits.vel_on_step)), 2);
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * gate_step * v_diff_step_sq;
 
             // 终点减速：基于剩余弧长在 goal_slow_down_distance 内逐渐限速
             // 设计为软约束形式：只惩罚 v 超过 v_limit_goal(remaining_distance)
@@ -334,13 +336,9 @@ struct StopMPCCostFunctor {
             // 朝向必须对齐台阶方向（允许正反向）
             residuals[res_idx++] = T(params_.stop_weights.direction_weight) * gate_step * (T(1.0) - ceres::abs(heading_dot_dir));
 
-            // 8) 台阶区域最大速度（软约束）
-            const T v_excess_step = ceres::fmax(T(0.0), v - T(params_.stop_limits.vel_max_on_step));
-            residuals[res_idx++] = T(params_.stop_weights.vel_max_on_step_weight) * gate_step * v_excess_step;
-
-            // 9) 台阶退出：在台阶上时不允许停下
-            const T v_lack_step = ceres::fmax(T(0.0), T(params_.stop_limits.step_exit_speed_min) - v);
-            residuals[res_idx++] = T(params_.stop_weights.step_exit_weight) * gate_step * v_lack_step;
+            // 8) 台阶区域速度保持（软约束）
+            const T v_diff_step_sq = ceres::pow((v - T(params_.stop_limits.vel_on_step)), 2);
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * v_diff_step_sq;
 
             last_v = v;
             last_omega = omega;
@@ -441,8 +439,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         cost_function->AddParameterBlock(2);
     }
 
-    // residual 总数：每步 14 个
-    cost_function->SetNumResiduals(14 * params_.horizon);
+    // residual 总数：每步 15 个
+    cost_function->SetNumResiduals(15 * params_.horizon);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon + num_pts));

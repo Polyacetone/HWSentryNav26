@@ -14,7 +14,7 @@ struct MPCFollowLimits {
     double omega_min;
     double acc_max;
     double alpha_max;
-    double vel_max_on_step;
+    double vel_on_step;
     double v_omega_product_max;
 
     double slow_down_distance;
@@ -32,10 +32,11 @@ struct MPCFollowWeights {
     double r_domega;
     double acc_limit_weight;
     double alpha_limit_weight;
-    double vel_max_on_step_weight;
+    double vel_on_step_weight;
     double v_omega_product_weight;
     double obstacle_weight;
     double direction_weight;
+    double step_weight;
 };
 
 struct MPCFollowProjection {
@@ -51,10 +52,8 @@ struct MPCStopLimits {
 
     double acc_max;
     double alpha_max;
-    double vel_max_on_step;
+    double vel_on_step;
     double v_omega_product_max;
-
-    double step_exit_speed_min;
 };
 
 struct MPCStopWeights {
@@ -63,13 +62,12 @@ struct MPCStopWeights {
 
     double acc_limit_weight;
     double alpha_limit_weight;
-    double vel_max_on_step_weight;
+    double vel_on_step_weight;
     double v_omega_product_weight;
 
     double obstacle_weight;
     double obstacle_terminal_weight;
     double direction_weight;
-    double step_exit_weight;
     double step_terminal_weight;
 };
 

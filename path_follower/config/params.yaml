@@ -39,25 +39,26 @@
           omega_min: -7.2 # 最小角速度 (rad/s)
           acc_max: 2.5 # 最大加速度 (m/s²)
           alpha_max: 7.2 # 最大角加速度 (rad/s²)
-          vel_max_on_step: 1.0 # 台阶区域最大速度 (m/s)
+          vel_on_step: 1.0 # 台阶区域期望速度 (m/s)
           v_omega_product_max: 3.5 # |v*omega| 最大值软约束 (m/s * rad/s)
           slow_down_distance: 1.0 # 距离终点剩余弧长小于该值时开始减速 (m)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
         weights: # 权重
           q_y: 0.4 # 横向误差权重
           q_theta: 0.1 # 航向误差权重
-          q_u: 1.0 # 进度项权重
+          q_u: 2.0 # 进度项权重
           q_v_final: 0.3 # 终点减速权重
           r_v: 0.03 # 线速度正则
           r_omega: 0.03 # 角速度正则
           r_dv: 0.1 # 线速度平滑
-          r_domega: 0.1 # 角速度平滑
+          r_domega: 0.06 # 角速度平滑
           acc_limit: 10.0 # 超过加速度上限的惩罚
           alpha_limit: 10.0 # 超过角加速度上限的惩罚
-          vel_max_on_step: 3.0 # 台阶区域限速权重
-          v_omega_product: 10.0 # 超过 |v*omega| 上限的惩罚
+          vel_on_step: 3.0 # 台阶区域速度保持权重
+          v_omega_product: 20.0 # 超过 |v*omega| 上限的惩罚
           obstacle: 2.0 # 避障权重（全局+局部）
           direction: 2.0 # 台阶方向对齐权重
+          step: 0.2 # 经过台阶惩罚（基于方向场模长）
       stop: # 停止模式
         limits: # 运动限制
           vel_max: 2.8 # 最大线速度硬约束 (m/s)
@@ -65,18 +66,16 @@
           omega_min: -7.2 # 最小角速度硬约束 (rad/s)
           acc_max: 2.5 # 最大加速度软约束 (m/s²)
           alpha_max: 7.2 # 最大角加速度软约束 (rad/s²)
-          vel_max_on_step: 1.0 # 台阶区域最大速度软约束 (m/s)
+          vel_on_step: 1.0 # 台阶区域期望速度 (m/s)
           v_omega_product_max: 3.5 # |v*omega| 最大值软约束 (m/s * rad/s)
-          step_exit_speed_min: 0.8 # 在台阶上时，为退出台阶要求的最小线速度 (m/s)
         weights: # 权重
           q_v: 0.3 # 线速度正则
           q_omega: 0.3 # 角速度正则
           acc_limit: 10.0 # 超过加速度上限惩罚
           alpha_limit: 10.0 # 超过角加速度上限惩罚
-          vel_max_on_step: 3.0 # 台阶区域限速惩罚
-          v_omega_product: 10.0 # 超过 |v*omega| 上限惩罚
+          vel_on_step: 3.0 # 台阶区域速度保持权重
+          v_omega_product: 20.0 # 超过 |v*omega| 上限惩罚
           obstacle: 2.0 # 避障惩罚
           obstacle_terminal: 6.0 # 终端避障惩罚（防止停在障碍上）
           direction: 2.0 # 在台阶上要求朝向与台阶方向对齐
-          step_exit: 6.0 # 在台阶上不允许停下（推动退出台阶）
           step_terminal: 6.0 # 终端台阶惩罚（防止停在台阶上）

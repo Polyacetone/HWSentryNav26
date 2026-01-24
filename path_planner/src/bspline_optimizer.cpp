@@ -114,6 +114,58 @@ private:
     const double weight_;
 };
 
+// 台阶惩罚：基于方向场模长（越大越像台阶/边缘），鼓励路径远离台阶
+// 方向场来自离散图，使用有限差分近似对位置的梯度，从而能对控制点产生可用梯度
+class StepFieldMagnitudeCostFunction : public ceres::CostFunction {
+public:
+    explicit StepFieldMagnitudeCostFunction(
+        const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
+        const DirectionMap& direction_map,
+        const double weight
+    ): pos_evaluator_(pos_evaluator), direction_map_(direction_map), weight_(weight) {
+        mutable_parameter_block_sizes()->clear();
+        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+            mutable_parameter_block_sizes()->push_back(2);
+        }
+        set_num_residuals(1);
+    }
+
+    bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override {
+        Eigen::Vector2d pos;
+        pos_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], pos.data());
+
+        const double mag = direction_map_.interpolate(pos).norm();
+        residuals[0] = weight_ * mag;
+
+        if (jacobians) {
+            constexpr double eps = 0.25; // grid 坐标系下的差分步长
+            const auto mag_at = [&](const Eigen::Vector2d& p) {
+                return direction_map_.interpolate(p).norm();
+            };
+
+            const double mag_xp = mag_at(pos + Eigen::Vector2d(eps, 0.0));
+            const double mag_xm = mag_at(pos - Eigen::Vector2d(eps, 0.0));
+            const double mag_yp = mag_at(pos + Eigen::Vector2d(0.0, eps));
+            const double mag_ym = mag_at(pos - Eigen::Vector2d(0.0, eps));
+
+            const Eigen::Vector2d grad((mag_xp - mag_xm) / (2.0 * eps), (mag_yp - mag_ym) / (2.0 * eps));
+            for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+                if (jacobians[i]) {
+                    Eigen::Vector2d jac = weight_ * pos_evaluator_.basisVals_[i] * grad;
+                    jacobians[i][0] = jac.x();
+                    jacobians[i][1] = jac.y();
+                }
+            }
+        }
+        return true;
+    }
+
+private:
+    const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
+    const DirectionMap& direction_map_;
+    const double weight_;
+};
+
 // 起终点保持代价，自动求导
 class StartEndPositionCostFunction {
 public:
@@ -170,6 +222,7 @@ BSplineOptimizer::BSplineOptimizer(
     const double length_weight,
     const double obstacle_weight,
     const double direction_weight,
+    const double step_weight,
     const double start_end_weight,
     const double num_samples_per_length,
     const int max_iterations
@@ -178,6 +231,7 @@ BSplineOptimizer::BSplineOptimizer(
     uniform_speed_weight_(length_weight),
     obstacle_weight_(obstacle_weight),
     direction_weight_(direction_weight),
+    step_weight_(step_weight),
     start_end_weight_(start_end_weight),
     num_samples_per_length_(num_samples_per_length),
     max_iterations_(max_iterations) {}
@@ -221,6 +275,13 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         // 对于每个采样点添加方向代价
         problem.AddResidualBlock(
             new DirectionCostFunction(pos_evaluator, vel_evaluator, direction_map, direction_weight_),
+            nullptr,
+            parameter_pointers
+        );
+
+        // 对于每个采样点添加台阶模长惩罚（避免路径被台阶吸引）
+        problem.AddResidualBlock(
+            new StepFieldMagnitudeCostFunction(pos_evaluator, direction_map, step_weight_),
             nullptr,
             parameter_pointers
         );
