@@ -10,5 +10,5 @@
       keyframe_rot_thresh: 1.0
 
       # Incremental map integration
-      downsample_every_n_keyframes: 10000
+      downsample_every_n_keyframes: 1000
       map_voxel_leaf_size: 0.05

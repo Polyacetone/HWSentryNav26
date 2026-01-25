@@ -73,8 +73,8 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 
     bool debug = config->param<bool>("node.debug");
     if (debug) {
-        logger::info("node", "enable debug printing");
         get_logger().set_level(rclcpp::Logger::Level::Debug);
+        logger::debug("node", "enable debug printing");
     }
 
     enable_tf_publish = config->param<bool>("node.enable_tf_publish");

@@ -10,47 +10,82 @@
 
 namespace offline_mapping_optimizer {
 
-struct PoseOptimizerParams {
-  int num_threads;
+struct LocalSubmapParams {
+    // Split frames into submaps by a sliding window: [start, start + submap_size)
+    int submap_size;
 
-  // LM iterations per outer iteration
-  int max_iterations;
+    // Fix the first frame pose in each submap to its initial estimate.
+    double first_frame_prior_precision;
 
-  // Outer iterations: build global map -> optimize -> rebuild map ...
-  int outer_iterations;
+    // Odometry-based BetweenFactor between consecutive frames.
+    bool enable_odometry_between;
+    double odom_between_sigma; // isotropic sigma in se(3) tangent
 
-  // Skip frames with too few points (sparse frames are unstable)
-  int min_frame_points;
+    // VGICP registration error factors inside each submap.
+    bool enable_vgicp_factors;
+    int keyframe_stride; // 1 = use every frame as keyframe
+    int max_vgicp_pairs_per_keyframe; // 0 = unlimited
+    int vgicp_num_threads;
 
-  // Global map voxel resolution used for overlap gating + GICP-to-map target (iVox)
-  double map_voxel_resolution;
+    // Voxelmap pyramid used as VGICP target.
+    double voxel_resolution;
+    int voxelmap_levels;
+    double voxelmap_scaling_factor;
 
-  // Add a frame-to-map registration factor only if overlap >= threshold.
-  // Set <= 0 to disable this gating.
-  double map_overlap_threshold;
+    // Optional gating: add a VGICP factor only when overlap is high.
+    // Set <= 0 to disable.
+    double min_overlap;
 
-  // Optional: add pairwise (frame-frame) GICP factors only if overlap >= threshold
-  bool enable_pairwise_factors;
-  double pairwise_voxel_resolution;
-  double pairwise_overlap_threshold;
+    // Skip frames with too few points.
+    int min_frame_points;
 
-  // Loop candidate distance threshold (in initial/updated pose space)
-  double loop_dist_thres;
-  int max_loops_per_frame;  // 0 means unlimited
-
-  double gicp_max_correspondence_distance;
+    // Local optimizer settings
+    bool enable_optimization;
+    int max_iterations;
 };
 
-// Iterative offline optimization:
-// 1) Build a global voxel map from current poses.
-// 2) For each frame, add a frame-to-map registration factor (GICP-to-map) if overlap is high.
-// 3) Optionally add pairwise frame-frame GICP factors (also overlap-gated).
-// 4) Optimize all poses and repeat.
-std::vector<gtsam::Pose3> optimize_poses_iterative(
-  const std::vector<gtsam::Pose3>& initial_poses,
-  const std::vector<gtsam_points::PointCloudCPU::Ptr>& frames,
-  const PoseOptimizerParams& params,
-  const rclcpp::Logger& logger
+struct GlobalSubmapGraphParams {
+    bool enable_optimization;
+    int max_iterations;
+
+    // Fix the first submap origin pose.
+    double first_submap_prior_precision;
+
+    // Adjacent submap VGICP alignment.
+    bool enable_adjacent_vgicp;
+    int vgicp_num_threads;
+
+    // Optional odometry-like BetweenFactor between adjacent submaps (derived from initial submap origins).
+    bool enable_odometry_between;
+    double odom_between_sigma;
+
+    // Loop candidates and gating.
+    bool enable_loop_closures;
+    double max_loop_distance;
+    double min_loop_overlap;
+    int max_loop_edges_per_submap; // 0 = unlimited
+
+    // Voxelmap pyramid for each submap (built from its merged local map in submap frame).
+    double voxel_resolution;
+    int voxelmap_levels;
+    double voxelmap_scaling_factor;
+};
+
+struct OfflineMappingOptimizationParams {
+    int num_threads;
+    LocalSubmapParams local;
+    GlobalSubmapGraphParams global;
+};
+
+// Two-stage offline mapping optimization:
+// 1) Local: split frames into submaps, add prior + odometry between + optional intra-submap VGICP, optimize each submap.
+// 2) Global: treat each optimized submap as a node, add adjacent + loop VGICP (and optional odom between), optimize submap origins.
+// Returns optimized poses for ALL original frames.
+std::vector<gtsam::Pose3> optimize_poses_submap_graph(
+    const std::vector<gtsam::Pose3>& initial_poses,
+    const std::vector<gtsam_points::PointCloudCPU::Ptr>& frames,
+    const OfflineMappingOptimizationParams& params,
+    const rclcpp::Logger& logger
 );
 
-}  // namespace offline_mapping_optimizer
+} // namespace offline_mapping_optimizer

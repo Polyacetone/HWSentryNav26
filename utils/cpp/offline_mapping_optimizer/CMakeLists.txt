@@ -15,7 +15,7 @@ add_compile_options(-O3)
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-file(GLOB_RECURSE sources "src/*.cpp")
+file(GLOB sources "src/*.cpp")
 ament_auto_add_executable(${EXECUTABLE_NAME} ${sources})
 
 target_include_directories(${EXECUTABLE_NAME} PRIVATE include)

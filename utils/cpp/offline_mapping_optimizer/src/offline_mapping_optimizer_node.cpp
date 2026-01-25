@@ -24,20 +24,42 @@
 
 struct {
     int num_threads;
-    int max_iterations;
-    int outer_iterations;
-    int min_frame_points;
 
     bool enable_factor_graph_optimization;
     int k_neighbors;
-    double loop_dist_thres;
-    double gicp_max_correspondence_distance;
 
-    double map_voxel_resolution;
-    bool enable_pairwise_factors;
-    double pairwise_voxel_resolution;
-    double pairwise_overlap_threshold;
-    int max_loops_per_frame;
+    // Local submap optimization
+    int local_submap_size;
+    double local_first_frame_prior_precision;
+    bool local_enable_odometry_between;
+    double local_odom_between_sigma;
+    bool local_enable_vgicp_factors;
+    int local_keyframe_stride;
+    int local_max_vgicp_pairs_per_keyframe;
+    int local_vgicp_num_threads;
+    double local_voxel_resolution;
+    int local_voxelmap_levels;
+    double local_voxelmap_scaling_factor;
+    double local_min_overlap;
+    int local_min_frame_points;
+    bool local_enable_optimization;
+    int local_max_iterations;
+
+    // Global submap graph optimization
+    bool global_enable_optimization;
+    int global_max_iterations;
+    double global_first_submap_prior_precision;
+    bool global_enable_adjacent_vgicp;
+    int global_vgicp_num_threads;
+    bool global_enable_odometry_between;
+    double global_odom_between_sigma;
+    bool global_enable_loop_closures;
+    double global_max_loop_distance;
+    double global_min_loop_overlap;
+    int global_max_loop_edges_per_submap;
+    double global_voxel_resolution;
+    int global_voxelmap_levels;
+    double global_voxelmap_scaling_factor;
 
     bool enable_raycasting_filter;
     double voxel_resolution;
@@ -80,7 +102,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
     std::vector<std::pair<std::uint64_t, size_t>> coord_pt;
     coord_pt.reserve(input.size());
 
-    for (size_t i = 0; i < input.size(); ++i) {
+    for (size_t i = 0; i < input.size(); i++) {
         const auto& p = input.points[i];
         // Skip NaN points
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
@@ -114,7 +136,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
     size_t i = 0;
     while (i < coord_pt.size()) {
         if (coord_pt[i].first == invalid_coord) {
-            ++i;
+            i++;
             continue;
         }
 
@@ -126,8 +148,8 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
         while (i < coord_pt.size() && coord_pt[i].first == current_voxel) {
             const auto& p = input.points[coord_pt[i].second];
             sum += Eigen::Vector3d(p.x, p.y, p.z);
-            ++count;
-            ++i;
+            count++;
+            i++;
         }
 
         // Compute centroid
@@ -247,17 +269,40 @@ void estimate_cov(
 
 gtsam_points::PointCloudCPU::Ptr pcl_to_gtsam_points(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pcl_cloud) {
     std::vector<Eigen::Vector4d> points;
-    points.reserve(pcl_cloud->size());
-    for (const auto& pt: *pcl_cloud) {
-        points.emplace_back(pt.x, pt.y, pt.z, 1.0);
+    points.reserve(pcl_cloud ? pcl_cloud->size() : 0);
+    if (pcl_cloud) {
+        for (const auto& pt: *pcl_cloud) {
+            if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+                continue;
+            }
+            points.emplace_back(pt.x, pt.y, pt.z, 1.0);
+        }
     }
-    auto frame = std::make_shared<gtsam_points::PointCloudCPU>(points);
-    std::vector<int> neighbors = find_neighbors(frame->points, frame->size(), node_params.k_neighbors);
+
+    // IMPORTANT: Ensure the point cloud owns its memory.
+    // The PointCloudCPU(pointer, n) constructor may not deep-copy depending on build;
+    // using add_points() guarantees points are stored in points_storage.
+    auto frame = std::make_shared<gtsam_points::PointCloudCPU>();
+    frame->add_points(points);
+    if (frame->size() == 0) {
+        return frame;
+    }
+
+    // Clamp k to a safe range for knn/covariance estimation.
+    // VGICP is sensitive to invalid covariances; for tiny frames, skip cov estimation.
+    int k = std::max(1, node_params.k_neighbors);
+    if (frame->size() <= 2) {
+        return frame;
+    }
+    k = std::min<int>(k, frame->size() - 1);
+
+    std::vector<int> neighbors = find_neighbors(frame->points, frame->size(), k);
     std::vector<Eigen::Vector4d> normals;
     std::vector<Eigen::Matrix4d> covs;
-    estimate_cov(points, neighbors, node_params.k_neighbors, normals, covs);
+    estimate_cov(points, neighbors, k, normals, covs);
     frame->add_covs(covs);
     frame->add_normals(normals);
+
     return frame;
 }
 
@@ -266,18 +311,42 @@ int main(int argc, char* argv[]) {
     auto node = std::make_shared<rclcpp::Node>("offline_mapping_optimizer");
     node_params = {
         (int)node->declare_parameter<int>("num_threads"),
-        (int)node->declare_parameter<int>("max_iterations"),
-        (int)node->declare_parameter<int>("outer_iterations"),
-        (int)node->declare_parameter<int>("min_frame_points"),
         node->declare_parameter<bool>("enable_factor_graph_optimization"),
         (int)node->declare_parameter<int>("k_neighbors"),
-        node->declare_parameter<double>("loop_dist_thres"),
-        node->declare_parameter<double>("gicp_max_correspondence_distance"),
-        node->declare_parameter<double>("map_voxel_resolution"),
-        node->declare_parameter<bool>("enable_pairwise_factors"),
-        node->declare_parameter<double>("pairwise_voxel_resolution"),
-        node->declare_parameter<double>("pairwise_overlap_threshold"),
-        (int)node->declare_parameter<int>("max_loops_per_frame"),
+
+        // Local submap optimization
+        (int)node->declare_parameter<int>("local_submap_size"),
+        node->declare_parameter<double>("local_first_frame_prior_precision"),
+        node->declare_parameter<bool>("local_enable_odometry_between"),
+        node->declare_parameter<double>("local_odom_between_sigma"),
+        node->declare_parameter<bool>("local_enable_vgicp_factors"),
+        (int)node->declare_parameter<int>("local_keyframe_stride"),
+        (int)node->declare_parameter<int>("local_max_vgicp_pairs_per_keyframe"),
+        (int)node->declare_parameter<int>("local_vgicp_num_threads"),
+        node->declare_parameter<double>("local_voxel_resolution"),
+        (int)node->declare_parameter<int>("local_voxelmap_levels"),
+        node->declare_parameter<double>("local_voxelmap_scaling_factor"),
+        node->declare_parameter<double>("local_min_overlap"),
+        (int)node->declare_parameter<int>("local_min_frame_points"),
+        node->declare_parameter<bool>("local_enable_optimization"),
+        (int)node->declare_parameter<int>("local_max_iterations"),
+
+        // Global submap graph optimization
+        node->declare_parameter<bool>("global_enable_optimization"),
+        (int)node->declare_parameter<int>("global_max_iterations"),
+        node->declare_parameter<double>("global_first_submap_prior_precision"),
+        node->declare_parameter<bool>("global_enable_adjacent_vgicp"),
+        (int)node->declare_parameter<int>("global_vgicp_num_threads"),
+        node->declare_parameter<bool>("global_enable_odometry_between"),
+        node->declare_parameter<double>("global_odom_between_sigma"),
+        node->declare_parameter<bool>("global_enable_loop_closures"),
+        node->declare_parameter<double>("global_max_loop_distance"),
+        node->declare_parameter<double>("global_min_loop_overlap"),
+        (int)node->declare_parameter<int>("global_max_loop_edges_per_submap"),
+        node->declare_parameter<double>("global_voxel_resolution"),
+        (int)node->declare_parameter<int>("global_voxelmap_levels"),
+        node->declare_parameter<double>("global_voxelmap_scaling_factor"),
+
         node->declare_parameter<bool>("enable_raycasting_filter"),
         node->declare_parameter<double>("voxel_resolution"),
         (int)node->declare_parameter<int>("pass_through_threshold"),
@@ -294,7 +363,7 @@ int main(int argc, char* argv[]) {
         (int)node->declare_parameter<int>("polynomial_order")
     };
     std::string data_path = node->declare_parameter<std::string>("data_path");
-    bool use_cuda_raycasting = node->declare_parameter<bool>("use_cuda_raycasting", true);
+    bool use_cuda_raycasting = node->declare_parameter<bool>("use_cuda_raycasting");
     std::vector<gtsam::Pose3> poses;
     std::vector<gtsam_points::PointCloudCPU::Ptr> frames;
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> pcl_frames;
@@ -339,21 +408,42 @@ int main(int argc, char* argv[]) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr merged = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
     if (node_params.enable_factor_graph_optimization) {
-        offline_mapping_optimizer::PoseOptimizerParams opt;
+        offline_mapping_optimizer::OfflineMappingOptimizationParams opt;
         opt.num_threads = node_params.num_threads;
-        opt.max_iterations = node_params.max_iterations;
-        opt.outer_iterations = node_params.outer_iterations;
-        opt.min_frame_points = node_params.min_frame_points;
-        opt.map_voxel_resolution = node_params.map_voxel_resolution;
-        opt.enable_pairwise_factors = node_params.enable_pairwise_factors;
-        opt.pairwise_voxel_resolution = node_params.pairwise_voxel_resolution;
-        opt.pairwise_overlap_threshold = node_params.pairwise_overlap_threshold;
-        opt.loop_dist_thres = node_params.loop_dist_thres;
-        opt.max_loops_per_frame = node_params.max_loops_per_frame;
-        opt.gicp_max_correspondence_distance = node_params.gicp_max_correspondence_distance;
+
+        opt.local.submap_size = node_params.local_submap_size;
+        opt.local.first_frame_prior_precision = node_params.local_first_frame_prior_precision;
+        opt.local.enable_odometry_between = node_params.local_enable_odometry_between;
+        opt.local.odom_between_sigma = node_params.local_odom_between_sigma;
+        opt.local.enable_vgicp_factors = node_params.local_enable_vgicp_factors;
+        opt.local.keyframe_stride = node_params.local_keyframe_stride;
+        opt.local.max_vgicp_pairs_per_keyframe = node_params.local_max_vgicp_pairs_per_keyframe;
+        opt.local.vgicp_num_threads = node_params.local_vgicp_num_threads;
+        opt.local.voxel_resolution = node_params.local_voxel_resolution;
+        opt.local.voxelmap_levels = node_params.local_voxelmap_levels;
+        opt.local.voxelmap_scaling_factor = node_params.local_voxelmap_scaling_factor;
+        opt.local.min_overlap = node_params.local_min_overlap;
+        opt.local.min_frame_points = node_params.local_min_frame_points;
+        opt.local.enable_optimization = node_params.local_enable_optimization;
+        opt.local.max_iterations = node_params.local_max_iterations;
+
+        opt.global.enable_optimization = node_params.global_enable_optimization;
+        opt.global.max_iterations = node_params.global_max_iterations;
+        opt.global.first_submap_prior_precision = node_params.global_first_submap_prior_precision;
+        opt.global.enable_adjacent_vgicp = node_params.global_enable_adjacent_vgicp;
+        opt.global.vgicp_num_threads = node_params.global_vgicp_num_threads;
+        opt.global.enable_odometry_between = node_params.global_enable_odometry_between;
+        opt.global.odom_between_sigma = node_params.global_odom_between_sigma;
+        opt.global.enable_loop_closures = node_params.global_enable_loop_closures;
+        opt.global.max_loop_distance = node_params.global_max_loop_distance;
+        opt.global.min_loop_overlap = node_params.global_min_loop_overlap;
+        opt.global.max_loop_edges_per_submap = node_params.global_max_loop_edges_per_submap;
+        opt.global.voxel_resolution = node_params.global_voxel_resolution;
+        opt.global.voxelmap_levels = node_params.global_voxelmap_levels;
+        opt.global.voxelmap_scaling_factor = node_params.global_voxelmap_scaling_factor;
 
         RCLCPP_INFO(get_logger(), "Optimizing poses...");
-        poses = offline_mapping_optimizer::optimize_poses_iterative(poses, frames, opt, get_logger());
+        poses = offline_mapping_optimizer::optimize_poses_submap_graph(poses, frames, opt, get_logger());
         RCLCPP_INFO(get_logger(), "Pose optimization done");
     }
 

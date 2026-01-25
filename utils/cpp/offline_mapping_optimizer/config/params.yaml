@@ -1,52 +1,80 @@
 /**:
   ros__parameters:
     # Global
-    data_path: "mapping_2026-01-21T20:50:43"
-    num_threads: 16
+    data_path: "mapping_2026-01-25T23:37:50"
+    num_threads: 20
 
-    # Factor graph optimization
-    enable_factor_graph_optimization: false
-    max_iterations: 100
-    outer_iterations: 3
-    min_frame_points: 100
+    # ======== Factor graph optimization ========
+    enable_factor_graph_optimization: true
     k_neighbors: 10
-    gicp_max_correspondence_distance: 0.1
 
-    # Overlap-gated global-map optimization
-    # Global map is voxelized, and each frame only adds a registration factor when overlap is high.
-    map_voxel_resolution: 0.1
+    # --- Local submap optimization ---
+    local_enable_optimization: true
+    local_max_iterations: 100
+    local_submap_size: 30 # Split frames into submaps of [local_submap_size] frames
+    local_first_frame_prior_precision: 1e10 # Fix the first frame in each submap (strong prior on its initial pose)
 
-    # Optional: also add overlap-gated frame-frame GICP factors
-    enable_pairwise_factors: true
-    loop_dist_thres: 3.0
-    pairwise_voxel_resolution: 0.1
-    pairwise_overlap_threshold: 0.5
-    # Limit loop closures per frame (0 = unlimited)
-    max_loops_per_frame: 0
+    # Odometry BetweenFactor (from initial poses) inside each submap
+    local_enable_odometry_between: true
+    local_odom_between_sigma: 0.5
 
-    # Raycasting filter
+    # VGICP registration error factors inside submap
+    local_enable_vgicp_factors: true
+    local_keyframe_stride: 1
+    local_max_vgicp_pairs_per_keyframe: 0  # 0 = unlimited
+    local_vgicp_num_threads: 20
+    local_voxel_resolution: 0.1
+    local_voxelmap_levels: 3
+    local_voxelmap_scaling_factor: 3.0
+    local_min_overlap: 0.0 # <=0 disables overlap gating
+    local_min_frame_points: 0
+
+    # --- Global submap graph optimization ---
+    # If false, only local submap optimization is applied.
+    global_enable_optimization: true
+    global_max_iterations: 100
+    global_first_submap_prior_precision: 1e10
+
+    # Adjacent submap constraints
+    global_enable_odometry_between: true
+    global_odom_between_sigma: 2.0
+    global_enable_adjacent_vgicp: true
+    global_vgicp_num_threads: 20
+
+    # Loop closures between submaps
+    global_enable_loop_closures: false
+    global_max_loop_distance: 12.0
+    global_min_loop_overlap: 0.3 # <=0 disables overlap gating
+    global_max_loop_edges_per_submap: 0 # 0 = unlimited
+
+    # Submap voxelmap pyramid used in global VGICP
+    global_voxel_resolution: 0.1
+    global_voxelmap_levels: 4
+    global_voxelmap_scaling_factor: 3.0
+
+    # ========== Raycasting filter ==========
     enable_raycasting_filter: true
     # If built with -DMAP_OPTIMIZER_USE_CUDA=ON, enables CUDA raycasting.
     # If CUDA is not compiled in, the node will fall back to CPU automatically.
     use_cuda_raycasting: true
-    voxel_resolution: 0.02
+    voxel_resolution: 0.01
     pass_through_threshold: 2
 
-    # Downsample
+    # ========== Downsample ==========
     enable_downsample: true
-    downsample_leaf_size: 0.05
+    downsample_leaf_size: 0.1
 
-    # Remove radius outliers
+    # ========== Remove radius outliers ==========
     enable_radius_outlier_removal: true
-    radius_search: 0.5
+    radius_search: 0.3
     min_neighbors_in_radius: 2
 
-    # Remove statistical outliers
+    # ========== Remove statistical outliers ==========
     enable_statistical_outlier_removal: false
     mean_k: 10
     std_dev_mul_thresh: 3.0
 
-    # MLS smoothing
+    # ========== MLS smoothing ==========
     enable_mls_smoothing: false
     search_radius: 0.2
     polynomial_order: 1

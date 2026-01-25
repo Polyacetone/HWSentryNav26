@@ -39,7 +39,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
     std::vector<std::pair<std::uint64_t, size_t>> coord_pt;
     coord_pt.reserve(input.size());
 
-    for (size_t i = 0; i < input.size(); ++i) {
+    for (size_t i = 0; i < input.size(); i++) {
         const auto& p = input.points[i];
         // Skip NaN points
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
@@ -73,7 +73,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
     size_t i = 0;
     while (i < coord_pt.size()) {
         if (coord_pt[i].first == invalid_coord) {
-            ++i;
+            i++;
             continue;
         }
 
@@ -85,8 +85,8 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
         while (i < coord_pt.size() && coord_pt[i].first == current_voxel) {
             const auto& p = input.points[coord_pt[i].second];
             sum += Eigen::Vector3d(p.x, p.y, p.z);
-            ++count;
-            ++i;
+            count++;
+            i++;
         }
 
         // Compute centroid
