@@ -50,7 +50,6 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
     use_isam2_dogleg = config->param<bool>("odometry_estimation.use_isam2_dogleg");
     isam2_relinearize_skip = config->param<int>("odometry_estimation.isam2_relinearize_skip");
     isam2_relinearize_thresh = config->param<double>("odometry_estimation.isam2_relinearize_thresh");
-    save_imu_rate_trajectory = config->param<bool>("odometry_estimation.save_imu_rate_trajectory");
     num_threads = config->param<int>("odometry_estimation.num_threads");
 
     // odometry config
@@ -499,14 +498,12 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     new_frame->deskew_acc_saturated_axes = deskew_sat.acc_axes;
     new_frame->deskew_gyro_saturated_axes = deskew_sat.gyro_axes;
 
-    if (params->save_imu_rate_trajectory) {
-        new_frame->imu_rate_trajectory.resize(8, pred_imu_times.size());
-
-        for (int i = 0; i < pred_imu_times.size(); i++) {
-            const Eigen::Vector3d trans = pred_imu_poses[i].translation();
-            const Eigen::Quaterniond quat(pred_imu_poses[i].linear());
-            new_frame->imu_rate_trajectory.col(i) << pred_imu_times[i], trans, quat.x(), quat.y(), quat.z(), quat.w();
-        }
+    // Store IMU-rate trajectory used for deskewing
+    new_frame->imu_rate_trajectory.resize(8, pred_imu_times.size());
+    for (int i = 0; i < pred_imu_times.size(); i++) {
+        const Eigen::Vector3d trans = pred_imu_poses[i].translation();
+        const Eigen::Quaterniond quat(pred_imu_poses[i].linear());
+        new_frame->imu_rate_trajectory.col(i) << pred_imu_times[i], trans, quat.x(), quat.y(), quat.z(), quat.w();
     }
 
     // Deskew and tranform points into IMU frame

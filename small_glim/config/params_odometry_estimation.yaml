@@ -30,5 +30,4 @@
       vgicp_voxelmap_scaling_factor: 2.0 # Multi-resolution voxelmap scaling factor (for VGICP)
 
       # MISC
-      save_imu_rate_trajectory: true # If true, save the IMU rate trajectory
       num_threads: 4 # Number of threads for odometry estimation

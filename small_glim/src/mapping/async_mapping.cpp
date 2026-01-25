@@ -1,27 +1,130 @@
 #include <small_glim/mapping/async_mapping.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <format>
 #include <iomanip>
+#include <iostream>
+#include <limits>
+#include <optional>
 #include <sstream>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include <gtsam/inference/Symbol.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/Values.h>
+#include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/slam/PriorFactor.h>
+
 #include <small_glim/common/convert_to_string.hpp>
 #include <small_glim/common/logger.hpp>
+#include <small_glim/preprocess/cloud_deskewing.hpp>
 
 namespace fs = std::filesystem;
 
 namespace {
+using gtsam::symbol_shorthand::X;
+
 inline Eigen::Array3i fast_floor(const Eigen::Vector3d& pt) {
     Eigen::Array3d arr = pt.array();
     Eigen::Array3i ncoord = arr.cast<int>();
     return ncoord - (arr < ncoord.cast<double>()).cast<int>();
+}
+
+struct ImuTrajectory {
+    std::vector<double> times;
+    std::vector<Eigen::Isometry3d> poses;
+};
+
+std::optional<ImuTrajectory> parse_imu_rate_trajectory(const Eigen::Matrix<double, 8, -1>& traj) {
+    if (traj.cols() < 2) {
+        return std::nullopt;
+    }
+
+    ImuTrajectory out;
+    out.times.resize(traj.cols());
+    out.poses.resize(traj.cols());
+    for (int i = 0; i < traj.cols(); i++) {
+        const Eigen::Matrix<double, 8, 1> imu = traj.col(i);
+        out.times[i] = imu[0];
+        Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+        T.translation() << imu[1], imu[2], imu[3];
+        T.linear() = Eigen::Quaterniond(imu[7], imu[4], imu[5], imu[6]).toRotationMatrix();
+        out.poses[i] = T;
+    }
+
+    // Basic monotonicity check
+    for (std::size_t i = 1; i < out.times.size(); i++) {
+        if (!(out.times[i] > out.times[i - 1])) {
+            return std::nullopt;
+        }
+    }
+
+    return out;
+}
+
+std::optional<ImuTrajectory> optimize_imu_trajectory_with_end_priors(
+    const ImuTrajectory& initial,
+    const Eigen::Isometry3d& T_world_imu_begin,
+    const Eigen::Isometry3d& T_world_imu_end,
+    const int max_iterations
+) {
+    if (initial.times.size() < 2 || initial.times.size() != initial.poses.size()) {
+        return std::nullopt;
+    }
+
+    gtsam::Values values;
+    for (int i = 0; i < static_cast<int>(initial.times.size()); i++) {
+        values.insert(X(i), gtsam::Pose3(initial.poses[i].matrix()));
+    }
+
+    gtsam::NonlinearFactorGraph graph;
+    graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
+        X(0),
+        gtsam::Pose3(T_world_imu_begin.matrix()),
+        gtsam::noiseModel::Isotropic::Sigma(6, 1e-5)
+    );
+    graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
+        X(static_cast<int>(initial.times.size() - 1)),
+        gtsam::Pose3(T_world_imu_end.matrix()),
+        gtsam::noiseModel::Isotropic::Sigma(6, 1e-5)
+    );
+
+    const double total_dt = std::max(1e-6, initial.times.back() - initial.times.front());
+    for (int i = 1; i < static_cast<int>(initial.times.size()); i++) {
+        const double dt_norm = (initial.times[i] - initial.times[i - 1]) / total_dt;
+        const Eigen::Isometry3d T_last_curr = initial.poses[i - 1].inverse() * initial.poses[i];
+        graph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+            X(i - 1),
+            X(i),
+            gtsam::Pose3(T_last_curr.matrix()),
+            gtsam::noiseModel::Isotropic::Sigma(6, dt_norm + 1e-2)
+        );
+    }
+
+    gtsam::LevenbergMarquardtParams lm_params;
+    lm_params.setAbsoluteErrorTol(1e-6);
+    lm_params.setRelativeErrorTol(1e-6);
+    lm_params.setMaxIterations(std::max(1, max_iterations));
+
+    gtsam::Values optimized = gtsam::LevenbergMarquardtOptimizer(graph, values, lm_params).optimize();
+
+    ImuTrajectory out;
+    out.times = initial.times;
+    out.poses.resize(initial.poses.size());
+    for (int i = 0; i < static_cast<int>(out.poses.size()); i++) {
+        out.poses[i] = Eigen::Isometry3d(optimized.at<gtsam::Pose3>(X(i)).matrix());
+    }
+
+    return out;
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl::PointXYZ>& input, double leaf_size) {
@@ -105,6 +208,10 @@ namespace small_glim {
 AsyncMappingParams::AsyncMappingParams(const Config::Ptr& config) {
     save_raw_mapping_frames = config->param<bool>("mapping.save_raw_mapping_frames");
     output_root = config->param<std::string>("mapping.output_root");
+
+    enable_imu_refine = config->param<bool>("mapping.enable_imu_refine");
+    imu_refine_max_iterations = config->param<int>("mapping.imu_refine_max_iterations");
+
     keyframe_trans_thresh = config->param<double>("mapping.keyframe_trans_thresh");
     keyframe_rot_thresh = config->param<double>("mapping.keyframe_rot_thresh");
     map_voxel_leaf_size = config->param<double>("mapping.map_voxel_leaf_size");
@@ -157,6 +264,8 @@ void AsyncMapping::join() {
 }
 
 void AsyncMapping::worker_loop() {
+    std::deque<EstimationFrame::ConstPtr> delayed_frames;
+
     while (true) {
         EstimationFrame::ConstPtr frame;
         {
@@ -170,25 +279,22 @@ void AsyncMapping::worker_loop() {
             }
         }
 
-        if (!frame) {
-            continue;
+        if (frame) {
+            delayed_frames.push_back(frame);
         }
 
-        if (frame->deskew_imu_saturated) {
-            logger::info("mapping", "skip saturated frame (id={}, stamp={:.6f})", frame->id, frame->stamp);
-            continue;
+        while (delayed_frames.size() >= 2) {
+            const auto current = delayed_frames.front();
+            const auto next = delayed_frames[1];
+            process_frame(*current, next.get());
+            delayed_frames.pop_front();
         }
+    }
 
-        if (!frame->frame || frame->frame->size() <= 0) {
-            logger::warn("mapping", "skip empty frame (id={}, stamp={:.6f})", frame->id, frame->stamp);
-            continue;
-        }
-
-        if (!is_keyframe(*frame)) {
-            continue;
-        }
-
-        accept_keyframe(*frame);
+    // Flush the last frame(s) without a "next" constraint
+    while (!delayed_frames.empty()) {
+        process_frame(*delayed_frames.front(), nullptr);
+        delayed_frames.pop_front();
     }
 
     downsample_map_if_needed();
@@ -199,34 +305,65 @@ void AsyncMapping::worker_loop() {
     }
 }
 
+void AsyncMapping::process_frame(const EstimationFrame& frame, const EstimationFrame* next_frame) {
+    if (frame.deskew_imu_saturated) {
+        logger::info("mapping", "skip saturated frame (id={}, stamp={:.6f})", frame.id, frame.stamp);
+        return;
+    }
+
+    const bool has_points = frame.frame && frame.frame->size() > 0;
+    const bool has_raw = frame.raw_frame && !frame.raw_frame->points.empty();
+    if (!has_points && !has_raw) {
+        logger::warn("mapping", "skip empty frame (id={}, stamp={:.6f})", frame.id, frame.stamp);
+        return;
+    }
+
+    if (!is_keyframe(frame)) {
+        return;
+    }
+
+    auto cloud_imu = build_keyframe_cloud_imu(frame, next_frame);
+    if (!cloud_imu || cloud_imu->empty()) {
+        logger::warn("mapping", "skip keyframe because cloud is empty (id={}, stamp={:.6f})", frame.id, frame.stamp);
+        return;
+    }
+
+    accept_keyframe(frame, *cloud_imu);
+}
+
 bool AsyncMapping::is_keyframe(const EstimationFrame& frame) const {
-    const Eigen::Isometry3d T_world_frame = frame.T_world_frame();
+    const Eigen::Isometry3d T_world_imu = frame.T_world_imu;
 
     if (!has_last_keyframe_) {
         return true;
     }
 
-    const Eigen::Isometry3d T_last_curr = last_keyframe_T_world_frame_.inverse() * T_world_frame;
+    const Eigen::Isometry3d T_last_curr = last_keyframe_T_world_frame_.inverse() * T_world_imu;
     const double trans = T_last_curr.translation().norm();
     const double rot_deg = rotation_angle_deg(T_last_curr.linear());
 
     return (trans > params_.keyframe_trans_thresh) || (rot_deg > params_.keyframe_rot_thresh);
 }
 
-void AsyncMapping::accept_keyframe(const EstimationFrame& frame) {
-    const Eigen::Isometry3d T_world_frame = frame.T_world_frame();
-
-    if (params_.save_raw_mapping_frames) {
-        save_keyframe_raw(frame);
-        append_pose(T_world_frame);
+void AsyncMapping::accept_keyframe(const EstimationFrame& frame, const pcl::PointCloud<pcl::PointXYZ>& keyframe_cloud_imu) {
+    if (frame.frame_type != FrameType::IMU) {
+        logger::fatal("mapping", "only IMU frames are supported for mapping; skip frame_id={}", frame.id);
+        std::exit(EXIT_FAILURE);
     }
 
-    integrate_into_map(frame);
+    const Eigen::Isometry3d T_world_imu = frame.T_world_imu;
+
+    if (params_.save_raw_mapping_frames) {
+        save_keyframe_raw_cloud(keyframe_cloud_imu);
+        append_pose(T_world_imu);
+    }
+
+    integrate_cloud_into_map(keyframe_cloud_imu, T_world_imu);
     keyframes_since_downsample_++;
     downsample_map_if_needed();
 
     has_last_keyframe_ = true;
-    last_keyframe_T_world_frame_ = T_world_frame;
+    last_keyframe_T_world_frame_ = T_world_imu;
     keyframe_count_++;
 
     logger::debug(
@@ -248,39 +385,102 @@ void AsyncMapping::ensure_output_dir() {
     }
 }
 
-void AsyncMapping::save_keyframe_raw(const EstimationFrame& frame) {
-    pcl::PointCloud<pcl::PointXYZ> cloud;
-    cloud.reserve(frame.frame->size());
-    const auto& points = frame.frame->points;
-    for (int i = 0; i < frame.frame->size(); i++) {
-        Eigen::Vector4d p = points[i];
-        cloud.emplace_back(p.x(), p.y(), p.z());
-    }
-
+void AsyncMapping::save_keyframe_raw_cloud(const pcl::PointCloud<pcl::PointXYZ>& cloud_imu) const {
     const fs::path filepath = fs::path(output_dir_) / std::format("frame_{}.pcd", keyframe_count_);
-    if (pcl::io::savePCDFileBinary(filepath.string(), cloud) != 0) {
+    if (pcl::io::savePCDFileBinary(filepath.string(), cloud_imu) != 0) {
         logger::warn("mapping", "failed to save {}", filepath.string());
     }
 }
 
-void AsyncMapping::append_pose(const Eigen::Isometry3d& T_world_frame) {
-    poses_ofs_ << convert_to_string(T_world_frame) << "\n";
+void AsyncMapping::append_pose(const Eigen::Isometry3d& T_world_imu) {
+    poses_ofs_ << convert_to_string(T_world_imu) << "\n";
 }
 
-void AsyncMapping::integrate_into_map(const EstimationFrame& frame) {
-    if (frame.frame_type != FrameType::IMU) {
-        logger::fatal("mapping", "only IMU frames are supported for raw saving; skip frame_id={}", frame.id);
-        std::exit(EXIT_FAILURE);
+void AsyncMapping::integrate_cloud_into_map(const pcl::PointCloud<pcl::PointXYZ>& cloud_imu, const Eigen::Isometry3d& T_world_imu) {
+    map_cloud_->reserve(map_cloud_->size() + cloud_imu.size());
+    for (const auto& p_imu : cloud_imu.points) {
+        const Eigen::Vector3d p_world = T_world_imu * Eigen::Vector3d(p_imu.x, p_imu.y, p_imu.z);
+        map_cloud_->emplace_back(static_cast<float>(p_world.x()), static_cast<float>(p_world.y()), static_cast<float>(p_world.z()));
+    }
+}
+
+std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> AsyncMapping::build_keyframe_cloud_imu(
+    const EstimationFrame& frame,
+    const EstimationFrame* next_frame
+) {
+    // Prefer refined redeskewing (raw_frame + imu_rate_trajectory + next_frame constraint)
+    if (params_.enable_imu_refine && next_frame && frame.raw_frame) {
+        if (frame.imu_rate_trajectory.cols() >= 2 && next_frame->stamp > frame.stamp) {
+            // Only apply end prior if trajectory end is reasonably close to next frame stamp.
+            const auto traj_opt = parse_imu_rate_trajectory(frame.imu_rate_trajectory);
+            if (traj_opt) {
+                const double end_mismatch = std::abs(traj_opt->times.back() - next_frame->stamp);
+                if (end_mismatch < 0.05) {
+                    try {
+                        const auto optimized = optimize_imu_trajectory_with_end_priors(
+                            *traj_opt,
+                            frame.T_world_imu,
+                            next_frame->T_world_imu,
+                            params_.imu_refine_max_iterations
+                        );
+                        if (optimized) {
+                            if (frame.raw_frame->scan_end_time > optimized->times.back() + 1e-3) {
+                                logger::warn(
+                                    "mapping",
+                                    "imu_refine trajectory does not cover scan duration (frame_id={} imu_end={:.6f} scan_end={:.6f}); fallback",
+                                    frame.id,
+                                    optimized->times.back(),
+                                    frame.raw_frame->scan_end_time
+                                );
+                            } else {
+                                CloudDeskewing deskewing;
+                                const Eigen::Isometry3d T_imu_lidar = frame.T_lidar_imu.inverse();
+                                auto deskewed_lidar = deskewing.deskew(
+                                    T_imu_lidar,
+                                    optimized->times,
+                                    optimized->poses,
+                                    frame.raw_frame->stamp,
+                                    frame.raw_frame->times,
+                                    frame.raw_frame->points
+                                );
+
+                                auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+                                cloud->reserve(deskewed_lidar.size());
+                                for (const auto& p_lidar : deskewed_lidar) {
+                                    const Eigen::Vector4d p_imu = T_imu_lidar * p_lidar;
+                                    cloud->emplace_back(static_cast<float>(p_imu.x()), static_cast<float>(p_imu.y()), static_cast<float>(p_imu.z()));
+                                }
+                                return cloud;
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        logger::warn("mapping", "imu_refine failed (frame_id={}): {}", frame.id, e.what());
+                    }
+                } else {
+                    logger::debug(
+                        "mapping",
+                        "skip imu_refine due to end stamp mismatch (frame_id={} traj_end={:.6f} next_stamp={:.6f})",
+                        frame.id,
+                        traj_opt->times.back(),
+                        next_frame->stamp
+                    );
+                }
+            }
+        }
     }
 
-    const auto& points = frame.frame->points;
-    map_cloud_->reserve(map_cloud_->size() + frame.frame->size());
-    const Eigen::Isometry3d T_world_frame = frame.T_world_frame();
-    for (int i = 0; i < frame.frame->size(); i++) {
-        Eigen::Vector4d p = points[i];
-        p = T_world_frame * p;
-        map_cloud_->emplace_back(p.x(), p.y(), p.z());
+    // Fallback: use existing deskewed estimation cloud (expected to be in IMU frame)
+    if (!frame.frame || frame.frame->size() <= 0) {
+        return std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     }
+    auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    cloud->reserve(frame.frame->size());
+    const auto& points = frame.frame->points;
+    for (int i = 0; i < frame.frame->size(); i++) {
+        const Eigen::Vector4d p = points[i];
+        cloud->emplace_back(static_cast<float>(p.x()), static_cast<float>(p.y()), static_cast<float>(p.z()));
+    }
+    return cloud;
 }
 
 void AsyncMapping::downsample_map_if_needed() {

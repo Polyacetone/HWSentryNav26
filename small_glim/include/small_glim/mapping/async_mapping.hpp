@@ -27,6 +27,9 @@ struct AsyncMappingParams {
 	bool save_raw_mapping_frames;
 	std::string output_root;
 
+	bool enable_imu_refine;
+	int imu_refine_max_iterations;
+
 	double keyframe_trans_thresh;
 	double keyframe_rot_thresh;
 
@@ -52,14 +55,20 @@ public:
 
 private:
 	void worker_loop();
+	void process_frame(const EstimationFrame& frame, const EstimationFrame* next_frame);
 
 	bool is_keyframe(const EstimationFrame& frame) const;
-	void accept_keyframe(const EstimationFrame& frame);
+	void accept_keyframe(const EstimationFrame& frame, const pcl::PointCloud<pcl::PointXYZ>& keyframe_cloud_imu);
 
 	void ensure_output_dir();
-	void save_keyframe_raw(const EstimationFrame& frame);
-	void append_pose(const Eigen::Isometry3d& T_world_frame);
-	void integrate_into_map(const EstimationFrame& frame);
+	std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> build_keyframe_cloud_imu(
+		const EstimationFrame& frame,
+		const EstimationFrame* next_frame
+	);
+
+	void save_keyframe_raw_cloud(const pcl::PointCloud<pcl::PointXYZ>& cloud_imu) const;
+	void append_pose(const Eigen::Isometry3d& T_world_imu);
+	void integrate_cloud_into_map(const pcl::PointCloud<pcl::PointXYZ>& cloud_imu, const Eigen::Isometry3d& T_world_imu);
 	void downsample_map_if_needed();
 	void save_final_map();
 

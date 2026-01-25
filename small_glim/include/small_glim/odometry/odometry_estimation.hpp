@@ -50,10 +50,8 @@ public:
     double isam2_relinearize_skip;
     double isam2_relinearize_thresh;
 
-    // Logging params
-    bool save_imu_rate_trajectory;
-
-    int num_threads;                  // Number of threads for preprocessing and per-factor parallelism
+    // MISC
+    int num_threads; // Number of threads for preprocessing and per-factor parallelism
 
     // Registration params
     enum class RegistrationType { GICP, VGICP } registration_type; ///< Registration type (GICP or VGICP)
