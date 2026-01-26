@@ -1,20 +1,20 @@
 #include <offline_mapping_optimizer/raycasting_filter.hpp>
 
 #include <rclcpp/rclcpp.hpp>
-
 #include <offline_mapping_optimizer/voxel_key.hpp>
-
 #include <atomic>
 #include <limits>
-#include <unordered_map>
 #include <algorithm>
 #include <vector>
-#include <rclcpp/logging.hpp>
-
-#include <omp.h>
 
 #if defined(MAP_OPTIMIZER_USE_CUDA)
     #include <offline_mapping_optimizer/raycasting_cuda.hpp>
+#endif
+
+#if defined(MAP_OPTIMIZER_USE_ABSL)
+    #include <absl/container/flat_hash_map.h>
+#else
+    #include <unordered_map>
 #endif
 
 namespace offline_mapping_optimizer {
@@ -23,6 +23,16 @@ namespace {
     // Amanatides & Woo style voxel traversal (3D DDA).
     // Traverses voxels from origin toward end_pt, excluding the end voxel.
     // For each traversed voxel that exists in voxel_to_index, increments the per-thread counter map.
+#if defined(MAP_OPTIMIZER_USE_ABSL)
+    inline void traverse_voxels_dda(
+        const Eigen::Vector3d& origin,
+        const Eigen::Vector3d& end_pt,
+        const double voxel_res,
+        const double inv_voxel_res,
+        const absl::flat_hash_map<VoxelKey, int, VoxelKeyHash>& voxel_to_index,
+        absl::flat_hash_map<int, int>& local_counts
+    )
+#else
     inline void traverse_voxels_dda(
         const Eigen::Vector3d& origin,
         const Eigen::Vector3d& end_pt,
@@ -30,7 +40,9 @@ namespace {
         const double inv_voxel_res,
         const std::unordered_map<VoxelKey, int, VoxelKeyHash>& voxel_to_index,
         std::unordered_map<int, int>& local_counts
-    ) {
+    )
+#endif
+    {
         Eigen::Vector3d delta = end_pt - origin;
         const double distance = delta.norm();
         if (distance <= 1e-9)
@@ -133,7 +145,11 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr remove_dynamic_objects_raycasting(
     const double voxel_res = voxel_resolution;
     const double inv_voxel_res = 1.0 / voxel_res;
 
+#if defined(MAP_OPTIMIZER_USE_ABSL)
+    absl::flat_hash_map<VoxelKey, int, VoxelKeyHash> voxel_to_index;
+#else
     std::unordered_map<VoxelKey, int, VoxelKeyHash> voxel_to_index;
+#endif
     std::vector<VoxelKey> keys_by_index;
 
     // Build voxel index (parallel key generation -> sort/unique -> serial hash map build)
@@ -142,6 +158,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr remove_dynamic_objects_raycasting(
         std::vector<VoxelKey> all_keys;
         all_keys.resize(merged->size());
 
+        RCLCPP_INFO(logger, "Building voxel index...");
 #pragma omp parallel for num_threads(threads) schedule(static)
         for (int i = 0; i < static_cast<int>(merged->size()); i++) {
             const auto& pt = merged->points[i];
@@ -149,16 +166,18 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr remove_dynamic_objects_raycasting(
         }
 
         auto less_key = [](const VoxelKey& a, const VoxelKey& b) {
-            if (a.x != b.x)
-                return a.x < b.x;
-            if (a.y != b.y)
-                return a.y < b.y;
+            if (a.x != b.x) return a.x < b.x;
+            if (a.y != b.y) return a.y < b.y;
             return a.z < b.z;
         };
 
+        RCLCPP_INFO(logger, "Sorting voxel keys...");
         std::sort(all_keys.begin(), all_keys.end(), less_key);
+
+        RCLCPP_INFO(logger, "Unique voxel keys...");
         all_keys.erase(std::unique(all_keys.begin(), all_keys.end()), all_keys.end());
 
+        RCLCPP_INFO(logger, "Building voxel hash map...");
         keys_by_index = std::move(all_keys);
         voxel_to_index.reserve(keys_by_index.size() + keys_by_index.size() / 3 + 1);
         for (int idx = 0; idx < static_cast<int>(keys_by_index.size()); idx++) {
@@ -240,7 +259,11 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr remove_dynamic_objects_raycasting(
 
     if (!used_gpu) {
         const int threads = std::max(1, num_threads);
+#if defined(MAP_OPTIMIZER_USE_ABSL)
+        std::vector<absl::flat_hash_map<int, int>> thread_local_counts(threads);
+#else
         std::vector<std::unordered_map<int, int>> thread_local_counts(threads);
+#endif
         for (auto& m: thread_local_counts) {
             m.reserve(16384);
         }

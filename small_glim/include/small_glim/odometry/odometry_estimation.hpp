@@ -84,7 +84,6 @@ private:
         const std::shared_ptr<gtsam::ImuFactor>& imu_factor,
         gtsam::Values& new_values
     );
-    void fallback_smoother();
     void update_target(const int current, const Eigen::Isometry3d& T_target_imu);
     int select_target_update_frame(const int preferred) const;
     void update_frames(const int current, const gtsam::NonlinearFactorGraph& new_factors);

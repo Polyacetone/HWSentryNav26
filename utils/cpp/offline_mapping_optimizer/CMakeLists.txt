@@ -3,6 +3,7 @@ project(offline_mapping_optimizer)
 set(EXECUTABLE_NAME ${PROJECT_NAME}_node)
 
 option(MAP_OPTIMIZER_USE_CUDA "Enable CUDA-accelerated raycasting" ON)
+option(MAP_OPTIMIZER_USE_ABSL "Enable absl library usage" ON)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")
@@ -52,6 +53,12 @@ if(MAP_OPTIMIZER_USE_CUDA)
   if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.18")
     set_property(TARGET ${EXECUTABLE_NAME} PROPERTY CUDA_ARCHITECTURES native)
   endif()
+endif()
+
+if(MAP_OPTIMIZER_USE_ABSL)
+  find_package(absl REQUIRED)
+  target_link_libraries(${EXECUTABLE_NAME} absl::base absl::flat_hash_map)
+  target_compile_definitions(${EXECUTABLE_NAME} PRIVATE MAP_OPTIMIZER_USE_ABSL=1)
 endif()
 
 ament_auto_package(

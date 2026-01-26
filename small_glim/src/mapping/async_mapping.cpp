@@ -506,7 +506,7 @@ void AsyncMapping::downsample_map_if_needed() {
 
 void AsyncMapping::save_final_map() {
     if (map_cloud_->empty()) {
-        logger::warn("mapping", "final map is empty; skip saving mapping.pcd");
+        logger::warn("mapping", "final map is empty, skip saving mapping.pcd");
         return;
     }
 

@@ -10,7 +10,7 @@
       imu_bias_noise: 1e-5 # Bias randomwalk noise
       imu_acc_saturation_thresh: 39.0 # Accelerometer saturation threshold
       imu_gyro_saturation_thresh: 34.5 # Gyroscope saturation threshold
-      imu_saturation_mult: 5.0 # Covariance multiplier when saturated
+      imu_saturation_mult: 1.0 # Covariance multiplier when saturated
 
       # LiDAR
       global_shutter_lidar: false # If true, fill per-point timestamps with zero and disable points deskewing

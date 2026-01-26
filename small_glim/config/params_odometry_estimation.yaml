@@ -15,8 +15,8 @@
 
       # Registration
       registration_type: "VGICP" # Registration type (GICP or VGICP)
-      keyframe_window_size: 2 # Keyframe window size for pairwise registration
-      keyframe_delta: 10 # Keyframe delta
+      keyframe_window_size: 3 # Keyframe window size for pairwise registration
+      keyframe_delta: 5 # Keyframe delta
       lru_thresh: 100 # LRU cache threshold
       target_downsampling_rate: 0.1 # Downsampling rate for points to be inserted into the target
 
@@ -25,9 +25,9 @@
       ivox_min_dist: 0.2 # Minimum distance between points in an iVox cell
 
       # VGICP
-      vgicp_resolution: 0.5 # Voxelmap resolution (for VGICP)
-      vgicp_voxelmap_levels: 1 # Multi-resolution voxelmap levesl (for VGICP)
+      vgicp_resolution: 0.25 # Voxelmap resolution (for VGICP)
+      vgicp_voxelmap_levels: 2 # Multi-resolution voxelmap levels (for VGICP)
       vgicp_voxelmap_scaling_factor: 2.0 # Multi-resolution voxelmap scaling factor (for VGICP)
 
       # MISC
-      num_threads: 4 # Number of threads for odometry estimation
+      num_threads: 6 # Number of threads for odometry estimation

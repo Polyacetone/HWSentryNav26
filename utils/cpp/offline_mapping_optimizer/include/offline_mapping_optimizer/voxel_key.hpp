@@ -2,7 +2,6 @@
 
 #include <cmath>
 #include <cstddef>
-#include <functional>
 
 #ifdef __CUDACC__
     #define MAP_OPTIMIZER_HOSTDEV __host__ __device__
@@ -22,7 +21,7 @@ struct VoxelKey {
 
 struct VoxelKeyHash {
     std::size_t operator()(const VoxelKey& k) const {
-        return ((std::hash<int>()(k.x) ^ (std::hash<int>()(k.y) << 1)) >> 1) ^ (std::hash<int>()(k.z) << 1);
+        return (k.x * 73856093u) ^ (k.y * 19349663u) ^ (k.z * 83492791u);
     }
 };
 

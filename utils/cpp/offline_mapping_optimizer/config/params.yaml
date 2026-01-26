@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     # Global
-    data_path: "mapping_2026-01-25T23:37:50"
+    data_path: "mapping_2026-01-26T19:19:22"
     num_threads: 20
 
     # ======== Factor graph optimization ========
@@ -11,12 +11,12 @@
     # --- Local submap optimization ---
     local_enable_optimization: true
     local_max_iterations: 100
-    local_submap_size: 30 # Split frames into submaps of [local_submap_size] frames
+    local_submap_size: 20 # Split frames into submaps of [local_submap_size] frames
     local_first_frame_prior_precision: 1e10 # Fix the first frame in each submap (strong prior on its initial pose)
 
     # Odometry BetweenFactor (from initial poses) inside each submap
     local_enable_odometry_between: true
-    local_odom_between_sigma: 0.5
+    local_odom_between_sigma: 0.1
 
     # VGICP registration error factors inside submap
     local_enable_vgicp_factors: true
@@ -25,7 +25,7 @@
     local_vgicp_num_threads: 20
     local_voxel_resolution: 0.1
     local_voxelmap_levels: 3
-    local_voxelmap_scaling_factor: 3.0
+    local_voxelmap_scaling_factor: 2.0
     local_min_overlap: 0.0 # <=0 disables overlap gating
     local_min_frame_points: 0
 
@@ -37,20 +37,20 @@
 
     # Adjacent submap constraints
     global_enable_odometry_between: true
-    global_odom_between_sigma: 2.0
+    global_odom_between_sigma: 0.1
     global_enable_adjacent_vgicp: true
     global_vgicp_num_threads: 20
 
     # Loop closures between submaps
-    global_enable_loop_closures: false
+    global_enable_loop_closures: true
     global_max_loop_distance: 12.0
     global_min_loop_overlap: 0.3 # <=0 disables overlap gating
     global_max_loop_edges_per_submap: 0 # 0 = unlimited
 
     # Submap voxelmap pyramid used in global VGICP
     global_voxel_resolution: 0.1
-    global_voxelmap_levels: 4
-    global_voxelmap_scaling_factor: 3.0
+    global_voxelmap_levels: 3
+    global_voxelmap_scaling_factor: 2.0
 
     # ========== Raycasting filter ==========
     enable_raycasting_filter: true
@@ -62,19 +62,19 @@
 
     # ========== Downsample ==========
     enable_downsample: true
-    downsample_leaf_size: 0.1
+    downsample_leaf_size: 0.05
 
     # ========== Remove radius outliers ==========
-    enable_radius_outlier_removal: true
+    enable_radius_outlier_removal: false
     radius_search: 0.3
     min_neighbors_in_radius: 2
 
     # ========== Remove statistical outliers ==========
-    enable_statistical_outlier_removal: false
-    mean_k: 10
-    std_dev_mul_thresh: 3.0
+    enable_statistical_outlier_removal: true
+    mean_k: 20
+    std_dev_mul_thresh: 2.0
 
     # ========== MLS smoothing ==========
-    enable_mls_smoothing: false
-    search_radius: 0.2
+    enable_mls_smoothing: true
+    search_radius: 0.1
     polynomial_order: 1

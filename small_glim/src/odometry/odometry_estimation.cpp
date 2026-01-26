@@ -207,8 +207,6 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
     return factors;
 }
 
-void OdometryEstimationCPU::fallback_smoother() {}
-
 int OdometryEstimationCPU::select_target_update_frame(const int preferred) const {
     if (preferred < 0 || preferred >= static_cast<int>(frames.size())) return -1;
 
@@ -674,7 +672,6 @@ void OdometryEstimationCPU::update_frames(
             logger::error("odom_estimation", "caught {}", e.what());
             logger::error("odom_estimation", "current={}", current);
             logger::error("odom_estimation", "marginalized_cursor={}", marginalized_cursor);
-            fallback_smoother();
             break;
         }
     }
