@@ -13,16 +13,18 @@
       enable: true
       predicted_path_pub_topic: "/path_follower/debug/predicted_path"
 
-    step_ahead:
+    step_ahead_flag: # 台阶标志位参数
       window_back: 0.1 # 当前在全局路径上的后方窗口 (m)
-      window_front: 1.2 # 当前在全局路径上的前方窗口 (m)
+      window_front: 1.0 # 当前在全局路径上的前方窗口 (m)
       sample_step: 0.05 # 沿样条弧长采样间隔 (m)
 
-    spin_switch:
-      vel_to_spin_threshold: 0.1 # 切到小陀螺前，线速度需小于该阈值 (m/s)
-      omega_to_follow_threshold: 6.0 # 从小陀螺回到跟随前，角速度需小于该阈值 (rad/s)
+    control_fsm: # 控制状态机参数
+      follow_to_spin_vel_max: 0.1 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
+      spin_to_follow_omega_max: 4.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
+      to_idle_vel_max: 0.1 # 切到空闲前，线速度需小于该阈值 (m/s)
+      to_idle_omega_max: 0.1 # 切到空闲前，角速度需小于该阈值 (rad/s)
 
-    mpc:
+    mpc: # MPC控制器参数
       general: # 通用参数
         horizon: 10 # 预测步数
         dt: 0.1 # 预测时间间隔
@@ -44,8 +46,8 @@
           slow_down_distance: 1.0 # 距离终点剩余弧长小于该值时开始减速 (m)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
         weights: # 权重
-          q_y: 0.4 # 横向误差权重
-          q_theta: 0.1 # 航向误差权重
+          q_y: 0.6 # 横向误差权重
+          q_theta: 0.3 # 航向误差权重
           q_u: 2.0 # 进度项权重
           q_v_final: 0.3 # 终点减速权重
           r_v: 0.03 # 线速度正则

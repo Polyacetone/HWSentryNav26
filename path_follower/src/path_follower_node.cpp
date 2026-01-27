@@ -17,6 +17,7 @@
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
 #include <path_follower/nav_map.hpp>
+#include <path_follower/control_fsm.hpp>
 #include <path_follower/mpc_controller.hpp>
 #include <path_follower/utils.hpp>
 
@@ -31,8 +32,10 @@ private:
     void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
     void control_timer_callback();
-    void publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin);
+    void handle_stop_state() const;
+    void handle_follow_state();
     bool get_current_pose(Eigen::Vector3d& current_pose) const;
+    void publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const;
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& current_pose_map, const double u0);
 
@@ -63,11 +66,10 @@ private:
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 
-    enum class ControlState { FOLLOW, STOPPING_TO_SPIN, SPIN, STOPPING_TO_FOLLOW } control_state_ = ControlState::FOLLOW;
-    double vel_to_spin_threshold_;
-    double omega_to_follow_threshold_;
+    std::unique_ptr<ControlFsm> control_fsm_;
+    ControlFsm::State last_fsm_state_ = ControlFsm::State::IDLE; // 用于打印日志
 
-    Eigen::Vector2d current_state_ = Eigen::Vector2d::Zero();
+    Eigen::Vector2d current_status_ = Eigen::Vector2d::Zero();
 
     std::optional<SplineD> global_path_;
     double last_reference_u_ = 0.0;
@@ -147,12 +149,17 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     };
     mpc_controller_ = std::make_unique<MPCController>(params_);
 
-    vel_to_spin_threshold_ = declare_parameter<double>("spin_switch.vel_to_spin_threshold");
-    omega_to_follow_threshold_ = declare_parameter<double>("spin_switch.omega_to_follow_threshold");
+    control_fsm_ = std::make_unique<ControlFsm>(ControlFsm::Params{
+        .follow_to_spin_vel_max = declare_parameter<double>("control_fsm.follow_to_spin_vel_max"),
+        .spin_to_follow_omega_max = declare_parameter<double>("control_fsm.spin_to_follow_omega_max"),
+        .to_idle_vel_max = declare_parameter<double>("control_fsm.to_idle_vel_max"),
+        .to_idle_omega_max = declare_parameter<double>("control_fsm.to_idle_omega_max")
+    });
+    last_fsm_state_ = control_fsm_->state();
 
-    step_check_back_ = declare_parameter<double>("step_ahead.window_back");
-    step_check_front_ = declare_parameter<double>("step_ahead.window_front");
-    step_check_sample_step_ = declare_parameter<double>("step_ahead.sample_step");
+    step_check_back_ = declare_parameter<double>("step_ahead_flag.window_back");
+    step_check_front_ = declare_parameter<double>("step_ahead_flag.window_front");
+    step_check_sample_step_ = declare_parameter<double>("step_ahead_flag.sample_step");
 
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("global_cost_map_sub_topic"), 1,
@@ -219,8 +226,8 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
-    current_state_.x() = msg->velocity;
-    current_state_.y() = msg->palstance;
+    current_status_.x() = msg->velocity;
+    current_status_.y() = msg->palstance;
 }
 
 void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -249,112 +256,85 @@ void PathFollowerNode::control_timer_callback() {
         return;
     }
 
-    const bool spin_requested = (spin_state_ != SpinState::STOP);
-    const bool can_spin = spin_high_priority_ || (!global_path_.has_value());
-    const bool should_spin = spin_requested && can_spin;
+    ControlFsm::Inputs fsm_inputs;
+    fsm_inputs.has_path = global_path_.has_value();
+    fsm_inputs.spin_requested = (spin_state_ != SpinState::STOP);
+    fsm_inputs.spin_high_priority = spin_high_priority_;
+    fsm_inputs.velocity = current_status_.x();
+    fsm_inputs.palstance = current_status_.y();
+    control_fsm_->update(fsm_inputs);
 
-    // 更新控制状态机
-    if (should_spin) {
-        if (control_state_ == ControlState::FOLLOW || control_state_ == ControlState::STOPPING_TO_FOLLOW) {
-            RCLCPP_INFO(get_logger(), "Stopping to spin");
-            control_state_ = ControlState::STOPPING_TO_SPIN;
+    const auto fsm_state = control_fsm_->state();
+    if (fsm_state != last_fsm_state_) {
+        const auto dest = control_fsm_->destination();
+        const char* state_str = (fsm_state == ControlFsm::State::IDLE) ? "IDLE" :
+            (fsm_state == ControlFsm::State::FOLLOW) ? "FOLLOW" :
+            (fsm_state == ControlFsm::State::SPIN) ? "SPIN" : "STOPPING";
+        const char* dest_str = (dest == ControlFsm::Destination::IDLE) ? "IDLE" :
+            (dest == ControlFsm::Destination::FOLLOW) ? "FOLLOW" : "SPIN";
+        if (fsm_state == ControlFsm::State::STOPPING) {
+            RCLCPP_INFO(get_logger(), "Control FSM -> %s (dest=%s)", state_str, dest_str);
+        } else {
+            RCLCPP_INFO(get_logger(), "Control FSM -> %s", state_str);
         }
-    } else {
-        if (control_state_ == ControlState::SPIN || control_state_ == ControlState::STOPPING_TO_SPIN) {
-            RCLCPP_INFO(get_logger(), "Stopping to follow");
-            control_state_ = ControlState::STOPPING_TO_FOLLOW;
-        }
+        last_fsm_state_ = fsm_state;
     }
 
-    // 小陀螺模式
-    if (control_state_ == ControlState::SPIN) {
-        const bool slow_spin = (spin_state_ == SpinState::SPIN_SLOW);
-        const bool fast_spin = (spin_state_ == SpinState::SPIN_FAST);
-        publish_chassis_cmd(0.0, 0.0, false, false, slow_spin, fast_spin);
-        return;
-    }
-
-    Eigen::Vector3d current_pose;
-    if (!get_current_pose(current_pose)) return;
-
-    // 路径跟随切换到旋转，需要先停下来
-    if (control_state_ == ControlState::STOPPING_TO_SPIN) {
-        if (std::abs(current_state_.x()) < vel_to_spin_threshold_) {
-            RCLCPP_INFO(get_logger(), "Finished stopping, start spinning");
-            control_state_ = ControlState::SPIN;
+    switch (fsm_state) {
+        case ControlFsm::State::IDLE: { // 闲置模式：无路径且无需小陀螺
+            publish_chassis_cmd(0.0, 0.0, false, false, false, false);
+            break;
+        }
+        case ControlFsm::State::FOLLOW: { // 路径跟随模式
+            handle_follow_state();
+            break;
+        }
+        case ControlFsm::State::SPIN: { // 小陀螺模式：速度/角速度由电控负责（通过slow_spin/fast_spin标志）
             const bool slow_spin = (spin_state_ == SpinState::SPIN_SLOW);
             const bool fast_spin = (spin_state_ == SpinState::SPIN_FAST);
             publish_chassis_cmd(0.0, 0.0, false, false, slow_spin, fast_spin);
-            return;
+            break;
         }
-
-        auto start_time = std::chrono::high_resolution_clock::now();
-
-        const auto result = mpc_controller_->stop(
-            current_pose,
-            current_state_,
-            *merged_cost_map_,
-            *global_direction_map_
-        );
-        if (!result) {
-            RCLCPP_ERROR(get_logger(), "MPCController(Stop) solve failed: %s", result.error().c_str());
-            publish_chassis_cmd(0, 0, false, false, false, false);
-            return;
+        case ControlFsm::State::STOPPING: { // 过渡停止模式：用于Follow<->Spin以及路径丢失等场景，保证指令平滑
+            handle_stop_state();
+            break;
         }
+    }
+}
 
-        const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
-        if (solve_ms > params_.dt * 500.0) {
-            RCLCPP_WARN(get_logger(), "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
-        } else {
-            RCLCPP_DEBUG(get_logger(), "MPCController(Stop) solve time: %.2f ms", solve_ms);
-        }
+void PathFollowerNode::handle_stop_state() const {
+    Eigen::Vector3d current_pose;
+    if (!get_current_pose(current_pose)) return;
 
-        publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), false, false, false, false);
-        if (enable_debug_) {
-            debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
-        }
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    const auto result = mpc_controller_->stop(
+        current_pose,
+        current_status_,
+        *merged_cost_map_,
+        *global_direction_map_
+    );
+    if (!result) {
+        RCLCPP_ERROR(get_logger(), "MPCController(Stop) solve failed: %s", result.error().c_str());
         return;
     }
 
-    // 旋转切换到路径跟随，需要先停下来
-    if (control_state_ == ControlState::STOPPING_TO_FOLLOW) {
-        if (std::abs(current_state_.y()) < omega_to_follow_threshold_) {
-            RCLCPP_INFO(get_logger(), "Finished stopping, start following");
-            control_state_ = ControlState::FOLLOW;
-        } else {
-            auto start_time = std::chrono::high_resolution_clock::now();
-            const auto result = mpc_controller_->stop(
-                current_pose,
-                current_state_,
-                *merged_cost_map_,
-                *global_direction_map_
-            );
-            if (!result) {
-                RCLCPP_ERROR(get_logger(), "MPCController(Stop) solve failed: %s", result.error().c_str());
-                publish_chassis_cmd(0, 0, false, false, false, false);
-                return;
-            }
-
-            const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
-            if (solve_ms > params_.dt * 500.0) {
-                RCLCPP_WARN(get_logger(), "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
-            } else {
-                RCLCPP_DEBUG(get_logger(), "MPCController(Stop) solve time: %.2f ms", solve_ms);
-            }
-
-            publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), false, false, false, false);
-            if (enable_debug_) {
-                debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
-            }
-            return;
-        }
+    const double solve_ms = (std::chrono::high_resolution_clock::now() - start_time).count() / 1e6;
+    if (solve_ms > params_.dt * 500.0) {
+        RCLCPP_WARN(get_logger(), "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
+    } else {
+        RCLCPP_DEBUG(get_logger(), "MPCController(Stop) solve time: %.2f ms", solve_ms);
     }
 
-    // 跟随模式
-    if (!global_path_) {
-        publish_chassis_cmd(0.0, 0.0, false, false, false, false);
-        return;
+    publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), false, false, false, false);
+    if (enable_debug_) {
+        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
     }
+}
+
+void PathFollowerNode::handle_follow_state() {
+    Eigen::Vector3d current_pose;
+    if (!get_current_pose(current_pose)) return;
 
     const double u0 = project_to_spline_u(
         *global_path_,
@@ -366,35 +346,32 @@ void PathFollowerNode::control_timer_callback() {
     );
     last_reference_u_ = u0;
 
-    // 如果已经到达目标点且不需要旋转，直接停止
-    if (!should_spin && control_state_ == ControlState::FOLLOW && u0 >= stop_threshold_) {
-        RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", current_pose.x(), current_pose.y());
-        publish_chassis_cmd(0, 0, false, false, false, false);
-        global_path_ = std::nullopt;
-        last_reference_u_ = 0.0;
-        return;
-    }
-
     auto start_time = std::chrono::high_resolution_clock::now();
 
     const auto result = mpc_controller_->follow_path(
         *global_path_,
         current_pose,
-        current_state_,
+        current_status_,
         *merged_cost_map_,
         *global_direction_map_
     );
     if (!result) {
         RCLCPP_ERROR(get_logger(), "MPCController(Follow) solve failed: %s", result.error().c_str());
-        publish_chassis_cmd(0, 0, false, false, false, false);
         return;
     }
 
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+    const double solve_ms = (std::chrono::high_resolution_clock::now() - start_time).count() / 1e6;
     if (solve_ms > params_.dt * 500.0) {
         RCLCPP_WARN(get_logger(), "MPCController(Follow) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
     } else {
         RCLCPP_DEBUG(get_logger(), "MPCController(Follow) solve time: %.2f ms", solve_ms);
+    }
+
+    // 如果已经到达目标点，则清除路径，准备进入闲置状态
+    if (u0 >= stop_threshold_) {
+        RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", current_pose.x(), current_pose.y());
+        global_path_ = std::nullopt;
+        last_reference_u_ = 0.0;
     }
 
     const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose, u0);
@@ -459,7 +436,7 @@ std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vec
     return {step_up, step_down};
 }
 
-void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) {
+void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = velocity;
     msg.palstance = palstance;

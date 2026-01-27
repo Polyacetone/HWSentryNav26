@@ -13,10 +13,10 @@ class TF2LookupNode(Node):
     def lookup_transform(self):
         try:
             transform: TransformStamped = self.tf_buffer.lookup_transform(
-                'base_footprint', 'side_mid360', rclpy.time.Time()
+                'map', 'hjy', rclpy.time.Time()
             )
             self.get_logger().info(
-                f'Found transform from map to base_link: \n'
+                f'Found transform from hjy to map: \n'
                 f'translation={transform.transform.translation}\n'
                 f'rotation={transform.transform.rotation}\n\n'
             )

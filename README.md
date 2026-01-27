@@ -23,6 +23,9 @@
 ### Asio
 推荐使用apt安装：`sudo apt install libasio-dev ros-jazzy-asio-cmake-module`。
 
+### Boost
+推荐使用apt安装：`sudo apt install libboost-all-dev`。
+
 ### GTSAM
 可能需要按照以下步骤自行构建。
 ```bash

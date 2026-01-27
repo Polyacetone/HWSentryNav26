@@ -545,8 +545,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         cost_function->AddParameterBlock(2);
     }
 
-    // 每步 9 个 residual + terminal 2 个
-    cost_function->SetNumResiduals(9 * params_.horizon + 2);
+    // 每步 8 个 residual + terminal 2 个
+    cost_function->SetNumResiduals(8 * params_.horizon + 2);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
