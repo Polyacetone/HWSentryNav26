@@ -2,6 +2,8 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2_ros/buffer.hpp>
+#include <tf2_ros/transform_listener.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
 
 #include <pcl/common/io.h>
@@ -30,25 +32,36 @@ private:
     double downsample_resolution_map_, downsample_resolution_lidar_, gicp_max_correspondence_distance_;
     double fitness_score_max_dist_, fitness_score_threshold_;
     double odom_to_map_no_filter_distance_, odom_to_map_no_filter_angle_;
-    bool enable_debug_;
+    bool enable_debug_, enable_gicp_registration_;
 
     PointCloud::Ptr map_cloud_ = std::make_shared<PointCloud>();
     KdTree<PointCloud>::Ptr map_kd_tree_;
+    PointCloud::Ptr source_cloud_;
     std::unique_ptr<utils::EMAFilter<Eigen::Isometry3d>> odom_to_map_;
+    std::optional<Eigen::Isometry3d> last_imu_world_to_map_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+    rclcpp::TimerBase::SharedPtr registration_timer_;
 
+    void registration_timer_callback();
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+    void perform_gicp_registration();
     void update_and_publish(const Eigen::Isometry3d& transform, const rclcpp::Time& stamp) const;
     double calc_fitness_score(const PointCloud::Ptr source_down, const Eigen::Isometry3d& transform) const;
+    std::optional<Eigen::Isometry3d> lookup_tf(const std::string& parent_frame, const std::string& child_frame) const;
     small_gicp::PointCloud::Ptr convert_pointcloud2_to_small_gicp(sensor_msgs::msg::PointCloud2::SharedPtr msg) const;
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
 };
 
 OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("odom_localizer", options) {
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     num_threads_ = declare_parameter<int>("num_threads");
     enable_debug_ = declare_parameter<bool>("enable_debug");
+    enable_gicp_registration_ = declare_parameter<bool>("enable_gicp_registration");
     cov_num_neighbors_map_ = declare_parameter<int>("cov_num_neighbors_map");
     cov_num_neighbors_lidar_ = declare_parameter<int>("cov_num_neighbors_lidar");
     gicp_max_iterations_ = declare_parameter<int>("gicp_max_iterations");
@@ -76,41 +89,74 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
 
-    auto map_cloud_pcl = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-    if (pcl::io::loadPCDFile(map_cloud_path, *map_cloud_pcl) == -1) {
-        throw std::runtime_error("Failed to load map PCD: " + map_cloud_path);
-    }
-    map_cloud_ = convert_pcl_to_small_gicp(map_cloud_pcl);
-    RCLCPP_INFO(get_logger(), "Loaded map point cloud with %zu points", map_cloud_->size());
+    if (enable_gicp_registration_) {
+        auto map_cloud_pcl = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        if (pcl::io::loadPCDFile(map_cloud_path, *map_cloud_pcl) == -1) {
+            throw std::runtime_error("Failed to load map PCD: " + map_cloud_path);
+        }
+        map_cloud_ = convert_pcl_to_small_gicp(map_cloud_pcl);
+        RCLCPP_INFO(get_logger(), "Loaded map point cloud with %zu points", map_cloud_->size());
 
-    if (downsample_resolution_map_ > 0) {
-        map_cloud_ = voxelgrid_sampling_omp(*map_cloud_, downsample_resolution_map_, num_threads_);
-        RCLCPP_INFO(get_logger(), "Downsampled map point cloud to %zu points", map_cloud_->size());
+        if (downsample_resolution_map_ > 0) {
+            map_cloud_ = voxelgrid_sampling_omp(*map_cloud_, downsample_resolution_map_, num_threads_);
+            RCLCPP_INFO(get_logger(), "Downsampled map point cloud to %zu points", map_cloud_->size());
+        }
+        map_kd_tree_ = std::make_shared<KdTree<PointCloud>>(map_cloud_, KdTreeBuilderOMP(num_threads_));
+        estimate_covariances_omp(*map_cloud_, *map_kd_tree_, cov_num_neighbors_map_, num_threads_);
+
+        cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+            source_cloud_sub_topic,
+            rclcpp::QoS(1),
+            [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { cloud_callback(msg); }
+        );
+    } else {
+        RCLCPP_INFO(get_logger(), "GICP registration disabled, only publishing initial transform");
+        RCLCPP_INFO(get_logger(), "Initial odom->map T=(%.3f, %.3f, %.3f)", 
+            initial.translation().x(),
+            initial.translation().y(),
+            initial.translation().z()
+        );
     }
-    map_kd_tree_ = std::make_shared<KdTree<PointCloud>>(map_cloud_, KdTreeBuilderOMP(num_threads_));
-    estimate_covariances_omp(*map_cloud_, *map_kd_tree_, cov_num_neighbors_map_, num_threads_);
 
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
-    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        source_cloud_sub_topic,
-        rclcpp::QoS(1),
-        [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { cloud_callback(msg); }
+    double registration_rate = declare_parameter<double>("registration_rate");
+    registration_timer_ = create_wall_timer(
+        std::chrono::duration<double>(1.0 / registration_rate),
+        [this]() { registration_timer_callback(); }
     );
 }
 
 void OdomLocalizerNode::cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-    auto source = convert_pointcloud2_to_small_gicp(msg);
-    if (source->points.size() < 100) {
-        RCLCPP_INFO(get_logger(), "Received point cloud has too few points (%zu), skipping frame", source->points.size());
+    source_cloud_ = convert_pointcloud2_to_small_gicp(msg);
+}
+
+void OdomLocalizerNode::registration_timer_callback() {
+    if (!enable_gicp_registration_) { // 仅发布initial_transform
+        update_and_publish(odom_to_map_->value(), now());
         return;
     }
 
+    if (!source_cloud_) {
+        return;
+    }
+
+    if (source_cloud_->points.size() < 100) {
+        RCLCPP_WARN(get_logger(), "Received point cloud has too few points (%zu), skipping frame", source_cloud_->points.size());
+        return;
+    }
+
+    perform_gicp_registration();
+
+    last_imu_world_to_map_ = lookup_tf("map", "imu_world");
+}
+
+void OdomLocalizerNode::perform_gicp_registration() {
     KdTree<PointCloud>::Ptr source_kd_tree;
     if (downsample_resolution_lidar_ > 0) {
-        source = voxelgrid_sampling_omp(*source, downsample_resolution_lidar_, num_threads_);
+        source_cloud_ = voxelgrid_sampling_omp(*source_cloud_, downsample_resolution_lidar_, num_threads_);
     }
-    source_kd_tree = std::make_shared<KdTree<PointCloud>>(source, KdTreeBuilderOMP(num_threads_));
-    estimate_covariances_omp(*source, *source_kd_tree, cov_num_neighbors_lidar_, num_threads_);
+    source_kd_tree = std::make_shared<KdTree<PointCloud>>(source_cloud_, KdTreeBuilderOMP(num_threads_));
+    estimate_covariances_omp(*source_cloud_, *source_kd_tree, cov_num_neighbors_lidar_, num_threads_);
 
     Registration<GICPFactor, ParallelReductionOMP> reg;
     reg.reduction.num_threads = num_threads_;
@@ -120,24 +166,35 @@ void OdomLocalizerNode::cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr 
     float min_fitness_score = std::numeric_limits<float>::max();
     const auto align = [&](const Eigen::Isometry3d& init) {
         const auto result = reg.align(
-            *map_cloud_, *source, *map_kd_tree_, init
+            *map_cloud_, *source_cloud_, *map_kd_tree_, init
         );
         if (result.converged) {
-            const float fitness_score = calc_fitness_score(source, result.T_target_source);
+            const float fitness_score = calc_fitness_score(source_cloud_, result.T_target_source);
             min_fitness_score = std::min(min_fitness_score, fitness_score);
             RCLCPP_DEBUG(get_logger(), "Fitness score: %.4f", fitness_score);
             if (fitness_score < fitness_score_threshold_) {
-                update_and_publish(result.T_target_source, msg->header.stamp);
+                update_and_publish(result.T_target_source, now());
                 return true;
             }
         }
         return false;
     };
 
-    // 尝试使用之前的odom_to_map作为初始值进行对齐
+    // 尝试使用之前的odom_to_map作为初始值进行对齐（基于里程计不漂移的假设）
     if (align(odom_to_map_->value())) {
-        RCLCPP_DEBUG(get_logger(), "GICP succeed using initial: previous odom to map");
+        RCLCPP_INFO(get_logger(), "GICP succeed using initial: previous odom to map");
         return;
+    }
+
+    // 尝试使用之前的imu_world_to_map计算得到的odom_to_map进行对齐（基于车体位置（imu_world）在map下是连续的假设）
+    const auto imu_world_to_odom = lookup_tf("odom", "imu_world");
+    if (last_imu_world_to_map_ && imu_world_to_odom) {
+        const Eigen::Isometry3d imu_world_to_map = *last_imu_world_to_map_;
+        const Eigen::Isometry3d odom_to_map = imu_world_to_map * imu_world_to_odom->inverse();
+        if (align(odom_to_map)) {
+            RCLCPP_INFO(get_logger(), "GICP succeed using initial: imu_world to map");
+            return;
+        }
     }
 
     if (min_fitness_score == std::numeric_limits<float>::max()) {
@@ -191,6 +248,17 @@ double OdomLocalizerNode::calc_fitness_score(
     }
     if (num_points > 0) return sum_dist / num_points;
     else return std::numeric_limits<double>::max();
+}
+
+std::optional<Eigen::Isometry3d> OdomLocalizerNode::lookup_tf(const std::string& parent_frame, const std::string& child_frame) const {
+    geometry_msgs::msg::TransformStamped tf;
+    try {
+        tf = tf_buffer_->lookupTransform(parent_frame, child_frame, tf2::TimePointZero);
+    } catch (const tf2::TransformException& ex) {
+        RCLCPP_ERROR(get_logger(), "Could not transform %s to %s: %s", child_frame.c_str(), parent_frame.c_str(), ex.what());
+        return std::nullopt;
+    }
+    return utils::convert_to<Eigen::Isometry3d>(tf.transform);
 }
 
 small_gicp::PointCloud::Ptr OdomLocalizerNode::convert_pointcloud2_to_small_gicp(sensor_msgs::msg::PointCloud2::SharedPtr msg) const {
