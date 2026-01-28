@@ -18,6 +18,8 @@ public:
         const double obstacle_weight,
         const double direction_weight,
         const double step_weight,
+        const double step_norm_threshold,
+        const double step_norm_transition,
         const double start_end_weight,
         const double num_samples_per_length,
         const int max_iterations
@@ -38,6 +40,8 @@ private:
     const double obstacle_weight_;
     const double direction_weight_;
     const double step_weight_;
+    const double step_norm_threshold_;
+    const double step_norm_transition_;
     const double start_end_weight_;
     const double num_samples_per_length_;
     const int max_iterations_;

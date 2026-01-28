@@ -43,6 +43,20 @@ inline T interpolate_cost_map(const CostMap& cost_map, const T& x_map, const T& 
     return (T(1.0) - dx) * (T(1.0) - dy) * T(c00) + dx * (T(1.0) - dy) * T(c10) + (T(1.0) - dx) * dy * T(c01) + dx * dy * T(c11);
 }
 
+// --------- smoothstep 门控（Jet 友好） ---------
+
+template <typename T>
+inline T smoothstep01(const T& t_in) {
+    const T t = ceres::fmin(T(1.0), ceres::fmax(T(0.0), t_in));
+    return t * t * (T(3.0) - T(2.0) * t);
+}
+
+template <typename T>
+inline T smoothstep(const T& x, const T& edge0, const T& edge1) {
+    const T denom = ceres::fmax(T(1e-12), edge1 - edge0);
+    return smoothstep01((x - edge0) / denom);
+}
+
 template <typename T>
 inline Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_map, const T& x_map, const T& y_map) {
     const T gx = (x_map - T(dir_map.origin_x)) / T(dir_map.resolution);
@@ -216,19 +230,27 @@ struct FollowMPCCostFunctor {
             // 对齐台阶方向（方向地图在台阶上才有意义，无方向则不惩罚）
             const auto dir = interpolate_direction_map(direction_map_, x, y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-9));
+
+            // 台阶门控：dir_norm 小时几乎为 0，超过阈值后快速饱和到 1
+            const T step_gate = smoothstep(
+                dir_norm,
+                T(params_.follow_limits.step_norm_threshold),
+                T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
+            );
+
             const Eigen::Matrix<T, 2, 1> heading(cos(theta), sin(theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
             // 代价定义为速度与期望方向的叉积绝对值
-            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * ceres::abs(heading_cross_dir);
+            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * step_gate * ceres::abs(heading_cross_dir);
 
             // 经过台阶惩罚：基于方向场模长（越大越像台阶/边缘），鼓励在不需要时远离台阶区域
-            residuals[res_idx++] = T(params_.follow_weights.step_weight) * dir_norm;
+            // 改为：模长超过阈值的区域近似等价惩罚（提前“看到”台阶），并在边界处保留可用梯度
+            residuals[res_idx++] = T(params_.follow_weights.step_weight) * step_gate;
 
             // 台阶区域速度保持：当方向场非0（台阶）时，速度保持为vel_on_step
             // 使用 direction norm 做软开关，避免边界插值处不连续
-            const T gate_step = ceres::fmin(T(1.0), dir_norm * 2.0); // [0,1]
             const T v_diff_step_sq = ceres::pow((v - T(params_.follow_limits.vel_on_step)), 2);
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * gate_step * v_diff_step_sq;
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * step_gate * v_diff_step_sq;
 
             // 终点减速：基于剩余弧长在 goal_slow_down_distance 内逐渐限速
             // 设计为软约束形式：只惩罚 v 超过 v_limit_goal(remaining_distance)

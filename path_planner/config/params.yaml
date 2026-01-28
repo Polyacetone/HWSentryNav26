@@ -6,7 +6,7 @@
     control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
     lazy_distance: 1.0 # 如果目标点距离当前点小于该值，则不进行路径规划（单位：米）
     goal_occupied_threshold: 50 # 如果目标点所在格子的代价值大于该阈值，则认为目标点不可达
-    goal_on_step_threshold: 0.2 # 如果目标点所在格子的方向场模长大于该阈值，则认为目标点在台阶上不可达
+    goal_on_step_threshold: 0.1 # 如果目标点所在格子的方向场模长大于该阈值，则认为目标点在台阶上不可达
 
     debug:
       enable: true # 是否启用调试模式
@@ -24,7 +24,9 @@
       uniform_speed_weight: 0.2 # 速度均匀代价权重
       obstacle_weight: 4.0 # 障碍物代价权重
       direction_weight: 4.0 # 方向代价权重
-      step_weight: 0.5 # 经过台阶惩罚（基于方向场模长）
+      step_weight: 0.3 # 经过台阶惩罚（基于方向场模长）
+      step_norm_threshold: 0.01 # 台阶方向场模长阈值（>=该值视为台阶区域）
+      step_norm_transition: 0.05 # smoothstep 过渡宽度（避免硬阈值带来的不稳定）
       start_end_weight: 1000.0 # 起终点保持代价权重
       num_samples_per_length: 1.5 # 每长度采样点个数，用于计算障碍物代价等（以格子为单位）
       max_iterations: 100 # 优化的最大迭代次数

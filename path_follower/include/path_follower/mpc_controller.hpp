@@ -19,6 +19,9 @@ struct MPCFollowLimits {
 
     double slow_down_distance;
     int slow_down_num_samples;
+
+    double step_norm_threshold;
+    double step_norm_transition;
 };
 
 struct MPCFollowWeights {

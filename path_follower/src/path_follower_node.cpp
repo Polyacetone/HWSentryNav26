@@ -101,7 +101,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .vel_on_step = declare_parameter<double>("mpc.follow_path.limits.vel_on_step"),
             .v_omega_product_max = declare_parameter<double>("mpc.follow_path.limits.v_omega_product_max"),
             .slow_down_distance = declare_parameter<double>("mpc.follow_path.limits.slow_down_distance"),
-            .slow_down_num_samples = (int)declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples")
+            .slow_down_num_samples = (int)declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples"),
+            .step_norm_threshold = declare_parameter<double>("mpc.follow_path.limits.step_norm_threshold"),
+            .step_norm_transition = declare_parameter<double>("mpc.follow_path.limits.step_norm_transition")
         },
         .follow_weights = {
             .q_y = declare_parameter<double>("mpc.follow_path.weights.q_y"),

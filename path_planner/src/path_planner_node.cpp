@@ -77,6 +77,8 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         declare_parameter<double>("path_optimizer.obstacle_weight"),
         declare_parameter<double>("path_optimizer.direction_weight"),
         declare_parameter<double>("path_optimizer.step_weight"),
+        declare_parameter<double>("path_optimizer.step_norm_threshold"),
+        declare_parameter<double>("path_optimizer.step_norm_transition"),
         declare_parameter<double>("path_optimizer.start_end_weight"),
         declare_parameter<double>("path_optimizer.num_samples_per_length"),
         declare_parameter<int>("path_optimizer.max_iterations")

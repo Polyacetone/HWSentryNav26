@@ -45,6 +45,8 @@
           v_omega_product_max: 3.5 # |v*omega| 最大值软约束 (m/s * rad/s)
           slow_down_distance: 1.0 # 距离终点剩余弧长小于该值时开始减速 (m)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
+          step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
+          step_norm_transition: 0.05 # smoothstep 过渡宽度：越大越“提前看到台阶”但更柔
         weights: # 权重
           q_y: 0.6 # 横向误差权重
           q_theta: 0.3 # 航向误差权重
