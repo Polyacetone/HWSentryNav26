@@ -20,26 +20,29 @@ CloudPreprocessorParams::CloudPreprocessorParams(const Config::Ptr config) {
     outlier_removal_k = config->param<int>("preprocess.outlier_removal_k");
     outlier_std_mul_factor = config->param<double>("preprocess.outlier_std_mul_factor");
     enable_cropbox_filter = config->param<bool>("preprocess.enable_cropbox_filter");
-    crop_bbox_frame = "lidar";
-    crop_bbox_min.setZero();
-    crop_bbox_max.setZero();
 
     if (enable_cropbox_filter) {
         Eigen::Isometry3d T_lidar_imu = config->param<Eigen::Isometry3d>("sensors.T_lidar_imu");
         T_imu_lidar = T_lidar_imu.inverse();
-        crop_bbox_frame = config->param<std::string>("preprocess.crop_bbox_frame");
         crop_bbox_min = config->param<Eigen::Vector3d>("preprocess.crop_bbox_min");
         crop_bbox_max = config->param<Eigen::Vector3d>("preprocess.crop_bbox_max");
-        if (crop_bbox_frame != "lidar" && crop_bbox_frame != "imu") {
-            throw std::runtime_error(
-                std::format("Unsupported crop bbox frame: {}", crop_bbox_frame)
-            );
-        } else if ((crop_bbox_min.array() > crop_bbox_max.array()).any()) {
-            throw std::runtime_error(std::format(
+        std::string crop_bbox_frame_str = config->param<std::string>("preprocess.crop_bbox_frame");
+        if (crop_bbox_frame_str == "lidar") {
+            crop_bbox_frame = CropBBoxFrame::LIDAR;
+        } else if (crop_bbox_frame_str == "imu") {
+            crop_bbox_frame = CropBBoxFrame::IMU;
+        } else {
+            logger::fatal("cloud_preprocess", "Unsupported crop bbox frame: {}", crop_bbox_frame_str);
+            std::exit(EXIT_FAILURE);
+        }
+        if ((crop_bbox_min.array() > crop_bbox_max.array()).any()) {
+            logger::fatal(
+                "cloud_preprocess",
                 "Misconfigured bbox: min=[{}], max=[{}]",
                 convert_to_string(crop_bbox_min),
                 convert_to_string(crop_bbox_max)
-            ));
+            );
+            std::exit(EXIT_FAILURE);
         }
     }
 
@@ -92,11 +95,8 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
 
     for (int i = 0; i < frame->size(); i++) {
         const bool is_finite = frame->points[i].allFinite();
-        const double squared_dist =
-            (Eigen::Vector4d() << frame->points[i].head<3>(), 0.0).finished().squaredNorm();
-        if (squared_dist > squared_distance_near_thresh
-            && squared_dist < squared_distance_far_thresh && is_finite)
-        {
+        const double squared_dist = (Eigen::Vector4d() << frame->points[i].head<3>(), 0.0).finished().squaredNorm();
+        if (squared_dist > squared_distance_near_thresh && squared_dist < squared_distance_far_thresh && is_finite) {
             indices.push_back(i);
         }
     }
@@ -117,7 +117,7 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
 
     // Cropbox filter
     if (params->enable_cropbox_filter) {
-        if (params->crop_bbox_frame == "lidar") {
+        if (params->crop_bbox_frame == CloudPreprocessorParams::CropBBoxFrame::LIDAR) {
             auto is_inside_bbox = [&](const Eigen::Vector3d& p_lidar) {
                 return (p_lidar.array() >= params->crop_bbox_min.array()).all()
                     && (p_lidar.array() <= params->crop_bbox_max.array()).all();
@@ -126,7 +126,7 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
             frame = gtsam_points::filter(frame, [&](const auto& pt) {
                 return !is_inside_bbox(pt.template head<3>());
             });
-        } else if (params->crop_bbox_frame == "imu") {
+        } else if (params->crop_bbox_frame == CloudPreprocessorParams::CropBBoxFrame::IMU) {
             auto is_inside_bbox = [&](const Eigen::Vector3d& p_lidar) {
                 const auto p_imu = params->T_imu_lidar * p_lidar;
                 return (p_imu.array() >= params->crop_bbox_min.array()).all()
@@ -136,8 +136,6 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
             frame = gtsam_points::filter(frame, [&](const auto& pt) {
                 return !is_inside_bbox(pt.template head<3>());
             });
-        } else {
-            throw std::runtime_error(std::format("Unsupported crop bbox frame: {}", params->crop_bbox_frame));
         }
     }
 
@@ -166,7 +164,6 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
     preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params->k_correspondences);
 
     logger::debug("cloud_preprocess", "Preprocessed: {} -> {} points", raw_points->size(), preprocessed->size());
-
     return preprocessed;
 }
 

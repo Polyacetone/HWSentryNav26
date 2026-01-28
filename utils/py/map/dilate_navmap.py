@@ -1,5 +1,5 @@
 import numpy as np
-import cv2
+import cv2, os
 from scipy.ndimage import distance_transform_edt
 
 def inflate_navigation_map(img, robot_radius, cutoff_radius, decay_alpha=0.5):
@@ -148,9 +148,11 @@ def inflate_navigation_map(img, robot_radius, cutoff_radius, decay_alpha=0.5):
     return out_img
 
 if __name__ == "__main__":
-    original_map = cv2.imread("RMUC2026.png")
+    map_path = input("输入原始导航地图路径: ")
+    save_path = os.path.splitext(map_path)[0] + "_inflated.png"
+    original_map = cv2.imread(map_path)
     robot_radius = 1  # 像素
     cutoff_radius = 4  # 像素
     decay_alpha = 0.8  # 衰减系数
     inflated_map = inflate_navigation_map(original_map, robot_radius, cutoff_radius, decay_alpha)
-    cv2.imwrite("RMUC2026_inflated.png", inflated_map)
+    cv2.imwrite(save_path, inflated_map)

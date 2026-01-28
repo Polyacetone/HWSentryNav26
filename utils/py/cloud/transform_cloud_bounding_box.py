@@ -1,7 +1,11 @@
 import open3d as o3d
 import numpy as np
+import os
 
-pcd = o3d.io.read_point_cloud("RMUL2026.pcd")
+pcd_path = input("请输入点云文件路径（.pcd 格式）：")
+save_path = os.path.splitext(pcd_path)[0] + "_aligned.pcd"
+
+pcd = o3d.io.read_point_cloud(pcd_path)
 pcd_clean, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
 
 obb = pcd_clean.get_oriented_bounding_box()
@@ -19,4 +23,4 @@ T[:3, 3] = -R.T @ (center - R @ (extent / 2))
 print(T)
 
 pcd_aligned = pcd_clean.transform(T)
-o3d.io.write_point_cloud("RMUL2026_aligned.pcd", pcd_aligned)
+o3d.io.write_point_cloud(save_path, pcd_aligned)

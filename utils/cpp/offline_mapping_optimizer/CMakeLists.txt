@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 project(offline_mapping_optimizer)
 set(EXECUTABLE_NAME ${PROJECT_NAME}_node)
 
-option(MAP_OPTIMIZER_USE_CUDA "Enable CUDA-accelerated raycasting" ON)
-option(MAP_OPTIMIZER_USE_ABSL "Enable absl library usage" ON)
+option(MAP_OPTIMIZER_USE_CUDA "Enable CUDA-accelerated raycasting" OFF)
+option(MAP_OPTIMIZER_USE_ABSL "Enable absl library usage" OFF)
 
 set(CMAKE_C_COMPILER "gcc-13")
 set(CMAKE_CXX_COMPILER "g++-13")

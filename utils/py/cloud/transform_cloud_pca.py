@@ -1,5 +1,6 @@
 import open3d as o3d
 import numpy as np
+import os
 
 def align_pointcloud_by_pca(pcd, enforce_up=True):
     # 1. 提取点坐标
@@ -102,7 +103,9 @@ def align_pointcloud_by_pca(pcd, enforce_up=True):
 
     return T, R_new, eigenvalues
 
-pcd = o3d.io.read_point_cloud("1897new.pcd")
+pcd_path = input("请输入点云文件路径（.pcd 格式）：")
+save_path = os.path.splitext(pcd_path)[0] + "_aligned.pcd"
+pcd = o3d.io.read_point_cloud(pcd_path)
 
 # 可选：先去离群点（推荐）
 pcd_clean, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
@@ -116,4 +119,4 @@ pcd_aligned = pcd_clean.transform(T_pca)
 print(T_pca)
 
 # 保存
-o3d.io.write_point_cloud("1897new_aligned.pcd", pcd_aligned)
+o3d.io.write_point_cloud(save_path, pcd_aligned)

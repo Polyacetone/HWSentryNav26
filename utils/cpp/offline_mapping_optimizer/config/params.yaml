@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     # Global
-    data_path: "mapping_2026-01-26T19:19:22"
+    data_path: "mapping_2026-01-28T02:10:28"
     num_threads: 20
 
     # ======== Factor graph optimization ========

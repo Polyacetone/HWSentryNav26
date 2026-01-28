@@ -129,4 +129,4 @@ if __name__ == "__main__":
     )
     
     # 保存结果
-    cv2.imwrite("navigation_map.png", navigation_map)
+    cv2.imwrite("nav_map.png", navigation_map)

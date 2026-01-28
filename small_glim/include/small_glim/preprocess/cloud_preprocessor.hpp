@@ -28,7 +28,7 @@ public:
     int outlier_removal_k; ///< Number of neighbors used for outlier removal
     double outlier_std_mul_factor; ///< Statistical outlier removal std dev threshold multiplication factor
     bool enable_cropbox_filter; ///< If true, filter points out points within box
-    std::string crop_bbox_frame; ///< Bounding box reference frame
+    enum class CropBBoxFrame { LIDAR, IMU } crop_bbox_frame; ///< Bounding box reference frame
     Eigen::Vector3d crop_bbox_min; ///< Bounding box min point
     Eigen::Vector3d crop_bbox_max; ///< Bounding box max point
     Eigen::Isometry3d T_imu_lidar; ///< LiDAR-IMU transformation when cropbox is defined in IMU frame

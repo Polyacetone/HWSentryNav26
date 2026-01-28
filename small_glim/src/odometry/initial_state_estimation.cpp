@@ -34,7 +34,10 @@ void InitialStateEstimation::insert_frame(const PreprocessedFrame::ConstPtr raw_
     auto frame = std::make_shared<gtsam_points::PointCloudCPU>(raw_frame->points);
     frame->add_covs(covariance_estimation->estimate(raw_frame->points, raw_frame->neighbors));
 
-    gtsam::Pose3 estimated_T_odom_lidar = gtsam::Pose3::Identity();
+    // Define the odom/world frame to be aligned with the IMU frame at startup.
+    // We achieve this by setting the first LiDAR pose in odom to (T_lidar_imu)^{-1},
+    // so that T_odom_imu = T_odom_lidar * T_lidar_imu becomes identity for the first frame.
+    gtsam::Pose3 estimated_T_odom_lidar = gtsam::Pose3(T_lidar_imu.inverse().matrix());
 
     if (!T_odom_lidar.empty()) {
         gtsam::Pose3 init_T_odom_lidar(T_odom_lidar.back().second.matrix());

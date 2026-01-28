@@ -1,11 +1,11 @@
 /**:
   ros__parameters:
     enable_debug: false # 是否开启调试信息输出
-    registration_rate: 5.0 # odom->map发布频率，单位Hz
-    initial_transform: [5.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0] # 初始位姿，((x,y,z),(x,y,z,w))
+    registration_rate: 2.0 # odom->map发布频率，单位Hz
+    initial_transform: [9.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0] # 初始位姿，((x,y,z),(x,y,z,w))
 
     enable_gicp_registration: true # 是否启用gicp配准（若关闭只发布初始位姿）
-    map_cloud_filename: "1897good.pcd" # 先验地图点云文件路径
+    map_cloud_filename: "1897test.pcd" # 先验地图点云文件路径
     source_cloud_sub_topic: "/small_glim/registered_cloud" # 输入点云订阅话题
     num_threads: 2 # 用于gicp对齐的线程数
 

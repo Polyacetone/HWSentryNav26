@@ -3,7 +3,7 @@
     odometry_estimation:
       # Initialization
       use_init_world_imu: false # If true, parameter init_T_world_imu and init_v_world_imu should be given instead of estimated
-      init_pose_damping_scale: 1e10 # Damping scale for the initial pose (to fix the gauge freedom)
+      init_pose_damping_scale: 1000000000.0 # Damping scale for the initial pose (to fix the gauge freedom)
       initialization_window_size: 1.0 # Initialization window size for the "LOOSE" initialization mode [sec]
       
       # Optimization

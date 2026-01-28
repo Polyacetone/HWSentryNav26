@@ -226,22 +226,22 @@ class TerrainAnalyzer:
         # === 闭合区域填充逻辑 ===
         # 复制一份作为 mask
         # 增加 2 像素的 padding，这是 floodFill 的要求
-        h, w = obstacle_mask.shape
-        mask = np.zeros((h + 2, w + 2), np.uint8)
+        # h, w = obstacle_mask.shape
+        # mask = np.zeros((h + 2, w + 2), np.uint8)
         
         # 从 (0,0) 开始泛洪填充背景。假设 (0,0) 是安全的外部区域。
         # 如果地图边缘全是障碍物，这里可能需要调整起始点。通常假设这一角是空的。
-        im_floodfill = obstacle_mask.copy()
-        cv2.floodFill(im_floodfill, mask, (0,0), 255)
+        # im_floodfill = obstacle_mask.copy()
+        # cv2.floodFill(im_floodfill, mask, (0,0), 255)
         
         # 让我们理清 floodFill 逻辑：
         # 1. 原图: 障碍物=255, 背景=0
         # 2. FloodFill (从0,0, 填成255): 外部背景=255, 障碍物=255, 内部空洞=0 (因为水进不去)
         # 3. Invert FloodFill: 外部背景=0, 障碍物=0, 内部空洞=255
         # 4. Final Result = Original | Inverted FloodFill
-        final_obstacles = obstacle_mask | cv2.bitwise_not(im_floodfill)
+        # final_obstacles = obstacle_mask | cv2.bitwise_not(im_floodfill)
         
-        nav_map[:, :, 2] = final_obstacles
+        nav_map[:, :, 2] = obstacle_mask
         
         # 4. 处理台阶向量通道 (B, G 通道)
         # 计算平均向量
@@ -334,11 +334,6 @@ class TerrainAnalyzer:
 if __name__ == "__main__":
     # 使用示例
     analyzer = TerrainAnalyzer()
-    try:
-        # 请替换为你的点云文件路径
-        nav_map = analyzer.analyze_terrain("RMUC2026.pcd") 
-        print("处理完成。")
-    except Exception as e:
-        print(f"发生错误: {e}")
-        import traceback
-        traceback.print_exc()
+    cloud_path = input("请输入点云文件路径（.pcd 格式）：")
+    nav_map = analyzer.analyze_terrain(cloud_path, output_image_path="nav_map.png") 
+    print("处理完成。")

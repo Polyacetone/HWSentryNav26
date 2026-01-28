@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     lidar_topic: /mid360_driver/lidar
-    lidar_frame: lidar
+    lidar_frame: lidar_link
     imu_topic: /mid360_driver/imu
     imu_frame: lidar_imu
     lidar_publish_time_interval: 0.1 # 雷达点云发布间隔，单位秒
