@@ -12,11 +12,11 @@
     global_map:
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
-      map_filename: "RMUL2026.png" # 全局先验地图路径
-      cloud_filename: "RMUL2026.pcd" # 全局点云路径
+      map_filename: "1897test.png" # 全局先验地图路径
+      cloud_filename: "1897test.pcd" # 全局点云路径
       downsample_voxel_size: 0.05 # 全局点云下采样体素大小，单位m
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
-    
+
     local_map:
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       cost_map_pub_topic: "/map_server/local_cost_map" # 局部代价地图发布话题名称
@@ -27,7 +27,7 @@
       roi_z_min: -1.0 # 局部点云感兴趣区域z轴最小值（以lidar为中心），单位m
       downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m
       distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m
-      cell_obstacle_point_threshold: 5 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
+      cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
       cost_map_inflation: # 局部代价地图膨胀参数
         inflation_radius: 1.0 # 代价地图膨胀半径，单位m
         inscribed_radius: 0.3 # 机器人内切圆半径，单位m

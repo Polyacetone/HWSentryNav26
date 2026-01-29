@@ -5,6 +5,6 @@
     imu_topic: /mid360_driver/imu
     imu_frame: lidar_imu
     lidar_publish_time_interval: 0.1 # 雷达点云发布间隔，单位秒
-    filter_distance: 0.2 # 过滤距离阈值，单位米，距离雷达小于该值的点云会被过滤掉
+    filter_distance: 0.5 # 过滤距离阈值，单位米，距离雷达小于该值的点云会被过滤掉
     host_ip: 192.168.1.50 # 主机ip地址
     is_topic_name_with_lidar_ip: false # 是否在话题名后面加雷达ip，可以用于区分多个雷达

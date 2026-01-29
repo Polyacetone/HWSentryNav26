@@ -4,7 +4,7 @@
     global_direction_map_sub_topic: "/map_server/global_direction_map"
     global_cost_map_sub_topic: "/map_server/global_cost_map"
     local_cost_map_sub_topic: "/map_server/local_cost_map"
-    chassis_status_sub_topic: "/serial/chassis_status"
+    chassis_status_sub_topic: "/serial_bridge/chassis_status"
     spin_cmd_sub_topic: "/decision/spin_cmd"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
     stop_threshold: 0.99 # 停止阈值 (u参数化路径)
@@ -49,7 +49,7 @@
           step_norm_transition: 0.05 # smoothstep 过渡宽度：越大越“提前看到台阶”但更柔
         weights: # 权重
           q_y: 0.6 # 横向误差权重
-          q_theta: 0.3 # 航向误差权重
+          q_theta: 0.2 # 航向误差权重
           q_u: 2.0 # 进度项权重
           q_v_final: 0.3 # 终点减速权重
           r_v: 0.03 # 线速度正则

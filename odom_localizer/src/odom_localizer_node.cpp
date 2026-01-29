@@ -19,6 +19,7 @@
 
 #include <common_utils/convert.hpp>
 #include <common_utils/ema_filter.hpp>
+#include <interfaces/msg/robot_status.hpp>
 
 namespace odom_localizer {
 using namespace small_gicp;
@@ -28,29 +29,35 @@ public:
     explicit OdomLocalizerNode(const rclcpp::NodeOptions& options);
 
 private:
-    int num_threads_, cov_num_neighbors_map_, cov_num_neighbors_lidar_, gicp_max_iterations_;
+    int num_threads_, cov_num_neighbors_map_, cov_num_neighbors_lidar_, gicp_max_iterations_, min_points_lidar_;
     double downsample_resolution_map_, downsample_resolution_lidar_, gicp_max_correspondence_distance_;
-    double fitness_score_max_dist_, fitness_score_threshold_;
     double odom_to_map_no_filter_distance_, odom_to_map_no_filter_angle_;
-    bool enable_debug_, enable_gicp_registration_;
+    double normalized_error_threshold_, overlap_threshold_;
+    double robot_color_wait_timeout_;
+    bool enable_debug_, enable_gicp_registration_, perform_gicp_only_once_;
 
     PointCloud::Ptr map_cloud_ = std::make_shared<PointCloud>();
     KdTree<PointCloud>::Ptr map_kd_tree_;
     PointCloud::Ptr source_cloud_;
     std::unique_ptr<utils::EMAFilter<Eigen::Isometry3d>> odom_to_map_;
     std::optional<Eigen::Isometry3d> last_imu_world_to_map_;
+    bool gicp_performed_ = false, initial_transform_initialized_ = false;
+    std::chrono::steady_clock::time_point initialize_time_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
-    rclcpp::TimerBase::SharedPtr registration_timer_;
+    rclcpp::Subscription<interfaces::msg::RobotStatus>::SharedPtr robot_status_sub_;
+    rclcpp::TimerBase::SharedPtr publish_timer_;
 
-    void registration_timer_callback();
+    void publish_timer_callback();
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-    void perform_gicp_registration();
-    void update_and_publish(const Eigen::Isometry3d& transform, const rclcpp::Time& stamp) const;
-    double calc_fitness_score(const PointCloud::Ptr source_down, const Eigen::Isometry3d& transform) const;
+    void robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg);
+    bool perform_gicp_registration();
+    void publish() const;
+    void set_initial_transform(const std::vector<double>& initial_transform_vec);
+    void update(const Eigen::Isometry3d& transform) const;
     std::optional<Eigen::Isometry3d> lookup_tf(const std::string& parent_frame, const std::string& child_frame) const;
     small_gicp::PointCloud::Ptr convert_pointcloud2_to_small_gicp(sensor_msgs::msg::PointCloud2::SharedPtr msg) const;
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
@@ -61,15 +68,18 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     num_threads_ = declare_parameter<int>("num_threads");
     enable_debug_ = declare_parameter<bool>("enable_debug");
+    robot_color_wait_timeout_ = declare_parameter<double>("robot_color_wait_timeout");
     enable_gicp_registration_ = declare_parameter<bool>("enable_gicp_registration");
+    perform_gicp_only_once_ = declare_parameter<bool>("perform_gicp_only_once");
     cov_num_neighbors_map_ = declare_parameter<int>("cov_num_neighbors_map");
     cov_num_neighbors_lidar_ = declare_parameter<int>("cov_num_neighbors_lidar");
+    min_points_lidar_ = declare_parameter<int>("min_points_lidar");
     gicp_max_iterations_ = declare_parameter<int>("gicp_max_iterations");
     gicp_max_correspondence_distance_ = declare_parameter<double>("gicp_max_correspondence_distance");
     downsample_resolution_map_ = declare_parameter<double>("downsample_resolution_map");
     downsample_resolution_lidar_ = declare_parameter<double>("downsample_resolution_lidar");
-    fitness_score_max_dist_ = declare_parameter<double>("fitness_score_max_dist");
-    fitness_score_threshold_ = declare_parameter<double>("fitness_score_threshold");
+    normalized_error_threshold_ = declare_parameter<double>("normalized_error_threshold");
+    overlap_threshold_ = declare_parameter<double>("overlap_threshold");
     std::string map_cloud_filename = declare_parameter<std::string>("map_cloud_filename");
     std::string map_cloud_path = ament_index_cpp::get_package_share_directory("odom_localizer") + "/maps/" + map_cloud_filename;
     std::string source_cloud_sub_topic = declare_parameter<std::string>("source_cloud_sub_topic");
@@ -77,17 +87,16 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
     odom_to_map_ = std::make_unique<utils::EMAFilter<Eigen::Isometry3d>>(odom_to_map_filter_ratio);
     odom_to_map_no_filter_distance_ = declare_parameter<double>("odom_to_map_no_filter_distance");
     odom_to_map_no_filter_angle_ = declare_parameter<double>("odom_to_map_no_filter_angle");
-    std::vector<double> initial_transform = declare_parameter<std::vector<double>>("initial_transform");
-    if (initial_transform.size() != 7) throw std::invalid_argument("initial_transform requires 7 arguments");
-    Eigen::Isometry3d initial = Eigen::Isometry3d::Identity();
-    initial.translate(Eigen::Vector3d(initial_transform[0], initial_transform[1], initial_transform[2]));
-    initial.rotate(Eigen::Quaterniond(initial_transform[6], initial_transform[3], initial_transform[4], initial_transform[5]));
-    odom_to_map_->initialize(initial);
 
     if (enable_debug_) {
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
+
+    robot_status_sub_ = create_subscription<interfaces::msg::RobotStatus>(
+        declare_parameter<std::string>("robot_status_sub_topic"), 1,
+        [this](interfaces::msg::RobotStatus::SharedPtr msg) { robot_status_callback(msg); }
+    );
 
     if (enable_gicp_registration_) {
         auto map_cloud_pcl = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
@@ -109,30 +118,38 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
             rclcpp::QoS(1),
             [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { cloud_callback(msg); }
         );
-    } else {
-        RCLCPP_INFO(get_logger(), "GICP registration disabled, only publishing initial transform");
-        RCLCPP_INFO(get_logger(), "Initial odom->map T=(%.3f, %.3f, %.3f)", 
-            initial.translation().x(),
-            initial.translation().y(),
-            initial.translation().z()
-        );
     }
 
-    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
-    double registration_rate = declare_parameter<double>("registration_rate");
-    registration_timer_ = create_wall_timer(
-        std::chrono::duration<double>(1.0 / registration_rate),
-        [this]() { registration_timer_callback(); }
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+    double publish_rate = declare_parameter<double>("publish_rate");
+    publish_timer_ = create_wall_timer(
+        std::chrono::duration<double>(1.0 / publish_rate),
+        [this]() { publish_timer_callback(); }
     );
+
+    initialize_time_ = std::chrono::steady_clock::now();
 }
 
 void OdomLocalizerNode::cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     source_cloud_ = convert_pointcloud2_to_small_gicp(msg);
 }
 
-void OdomLocalizerNode::registration_timer_callback() {
-    if (!enable_gicp_registration_) { // 仅发布initial_transform
-        update_and_publish(odom_to_map_->value(), now());
+void OdomLocalizerNode::publish_timer_callback() {
+    // 等待初始变换初始化
+    if (!initial_transform_initialized_) {
+        const auto now_time = std::chrono::steady_clock::now();
+        // 超时未收到机器人颜色，使用默认初始变换
+        if (std::chrono::duration<double>(now_time - initialize_time_).count() > robot_color_wait_timeout_) {
+            RCLCPP_ERROR(get_logger(), "Robot color not initialized within timeout %.2f seconds", robot_color_wait_timeout_);
+            initial_transform_initialized_ = true;
+            set_initial_transform(declare_parameter<std::vector<double>>("initial_transform_default"));
+        }
+        return;
+    }
+
+    if (!enable_gicp_registration_ || (gicp_performed_ && perform_gicp_only_once_)) {
+        // 如果没有启用GICP配准，或者已经完成过一次配准且只进行一次配准，则直接发布当前的odom_to_map
+        publish();
         return;
     }
 
@@ -140,17 +157,29 @@ void OdomLocalizerNode::registration_timer_callback() {
         return;
     }
 
-    if (source_cloud_->points.size() < 100) {
+    if (source_cloud_->points.size() < min_points_lidar_) {
         RCLCPP_WARN(get_logger(), "Received point cloud has too few points (%zu), skipping frame", source_cloud_->points.size());
         return;
     }
 
-    perform_gicp_registration();
+    if (perform_gicp_registration()) {
+        gicp_performed_ = true;
+    }
+    publish();
 
     last_imu_world_to_map_ = lookup_tf("map", "imu_world");
 }
 
-void OdomLocalizerNode::perform_gicp_registration() {
+void OdomLocalizerNode::robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg) {
+    initial_transform_initialized_ = true;
+    if (msg->robot_color) { // true为红色
+        set_initial_transform(declare_parameter<std::vector<double>>("initial_transform_red"));
+    } else { // false为蓝色
+        set_initial_transform(declare_parameter<std::vector<double>>("initial_transform_blue"));
+    }
+}
+
+bool OdomLocalizerNode::perform_gicp_registration() {
     KdTree<PointCloud>::Ptr source_kd_tree;
     if (downsample_resolution_lidar_ > 0) {
         source_cloud_ = voxelgrid_sampling_omp(*source_cloud_, downsample_resolution_lidar_, num_threads_);
@@ -163,27 +192,26 @@ void OdomLocalizerNode::perform_gicp_registration() {
     reg.optimizer.max_iterations = gicp_max_iterations_;
     reg.rejector.max_dist_sq = gicp_max_correspondence_distance_ * gicp_max_correspondence_distance_;
 
-    float min_fitness_score = std::numeric_limits<float>::max();
+    double min_normalized_error = std::numeric_limits<double>::max();
+    double max_overlap = 0.0;
     const auto align = [&](const Eigen::Isometry3d& init) {
-        const auto result = reg.align(
-            *map_cloud_, *source_cloud_, *map_kd_tree_, init
-        );
-        if (result.converged) {
-            const float fitness_score = calc_fitness_score(source_cloud_, result.T_target_source);
-            min_fitness_score = std::min(min_fitness_score, fitness_score);
-            RCLCPP_DEBUG(get_logger(), "Fitness score: %.4f", fitness_score);
-            if (fitness_score < fitness_score_threshold_) {
-                update_and_publish(result.T_target_source, now());
-                return true;
-            }
+        const auto result = reg.align(*map_cloud_, *source_cloud_, *map_kd_tree_, init);
+        const double normalized_error = result.error / result.num_inliers;
+        const double overlap = static_cast<double>(result.num_inliers) / source_cloud_->size();
+        min_normalized_error = std::min(min_normalized_error, normalized_error);
+        max_overlap = std::max(max_overlap, overlap);
+        RCLCPP_DEBUG(get_logger(), "Normalized error: %.4f, Overlap: %.4f", normalized_error, overlap);
+        if (normalized_error < normalized_error_threshold_ && overlap > overlap_threshold_) {
+            update(result.T_target_source);
+            return true;
         }
         return false;
     };
 
     // 尝试使用之前的odom_to_map作为初始值进行对齐（基于里程计不漂移的假设）
     if (align(odom_to_map_->value())) {
-        RCLCPP_INFO(get_logger(), "GICP succeed using initial: previous odom to map");
-        return;
+        RCLCPP_DEBUG(get_logger(), "GICP succeed using initial: previous odom to map");
+        return true;
     }
 
     // 尝试使用之前的imu_world_to_map计算得到的odom_to_map进行对齐（基于车体位置（imu_world）在map下是连续的假设）
@@ -192,20 +220,18 @@ void OdomLocalizerNode::perform_gicp_registration() {
         const Eigen::Isometry3d imu_world_to_map = *last_imu_world_to_map_;
         const Eigen::Isometry3d odom_to_map = imu_world_to_map * imu_world_to_odom->inverse();
         if (align(odom_to_map)) {
-            RCLCPP_INFO(get_logger(), "GICP succeed using initial: imu_world to map");
-            return;
+            RCLCPP_DEBUG(get_logger(), "GICP succeed using initial: imu_world to map");
+            return true;
         }
     }
 
-    if (min_fitness_score == std::numeric_limits<float>::max()) {
-        RCLCPP_WARN(get_logger(), "All GICP attempts failed for this frame! No attempt converged!");
-    } else {
-        RCLCPP_WARN(get_logger(), "All GICP attempts failed for this frame! Minimum fitness score: %.4f", min_fitness_score);
-    }
+    RCLCPP_INFO(get_logger(), "All GICP attempts failed for this frame! Minimum normalized error: %.4f, Maximum overlap: %.4f", min_normalized_error, max_overlap);
+    return false;
 }
 
-void OdomLocalizerNode::update_and_publish(const Eigen::Isometry3d& transform, const rclcpp::Time& stamp) const {
-    if (Eigen::Vector3d(transform.translation() - odom_to_map_->value().translation()).norm() < odom_to_map_no_filter_distance_ &&
+void OdomLocalizerNode::update(const Eigen::Isometry3d& transform) const {
+    if (!perform_gicp_only_once_ &&
+        Eigen::Vector3d(transform.translation() - odom_to_map_->value().translation()).norm() < odom_to_map_no_filter_distance_ &&
         Eigen::AngleAxisd(transform.rotation().inverse() * odom_to_map_->value().rotation()).angle() < odom_to_map_no_filter_angle_) {
         odom_to_map_->update(transform);
         RCLCPP_DEBUG(get_logger(), "Updated odom->map with filtering, current T=(%.3f, %.3f, %.3f)", 
@@ -221,33 +247,26 @@ void OdomLocalizerNode::update_and_publish(const Eigen::Isometry3d& transform, c
             odom_to_map_->value().translation().z()
         );
     }
+}
+
+void OdomLocalizerNode::set_initial_transform(const std::vector<double>& initial_transform_vec) {
+    if (initial_transform_vec.size() != 7) {
+        RCLCPP_FATAL(get_logger(), "Initial transform parameter must have 7 elements");
+        std::exit(EXIT_FAILURE);
+    }
+    Eigen::Isometry3d initial = Eigen::Isometry3d::Identity();
+    initial.translate(Eigen::Vector3d(initial_transform_vec[0], initial_transform_vec[1], initial_transform_vec[2]));
+    initial.rotate(Eigen::Quaterniond(initial_transform_vec[6], initial_transform_vec[3], initial_transform_vec[4], initial_transform_vec[5]));
+    odom_to_map_->initialize(initial);
+}
+
+void OdomLocalizerNode::publish() const {
     geometry_msgs::msg::TransformStamped tf;
-    tf.header.stamp = stamp;
+    tf.header.stamp = now();
     tf.header.frame_id = "map";
     tf.child_frame_id = "odom";
     tf.transform = utils::convert_to<geometry_msgs::msg::Transform>(odom_to_map_->value());
     tf_broadcaster_->sendTransform(tf);
-}
-
-double OdomLocalizerNode::calc_fitness_score(
-    const PointCloud::Ptr source,
-    const Eigen::Isometry3d& transform
-) const {
-    double sum_dist = 0;
-    int num_points = 0;
-    #pragma omp parallel for num_threads(num_threads_) schedule(guided) \
-    reduction(+:num_points) reduction(+:sum_dist)
-    for (int i = 0; i < source->size(); i++) {
-        Eigen::Vector4d query = transform * source->points[i];
-        size_t index; double dist;
-        map_kd_tree_->nearest_neighbor_search(query, &index, &dist);
-        if (dist <= fitness_score_max_dist_) {
-            sum_dist += dist;
-            num_points++;
-        }
-    }
-    if (num_points > 0) return sum_dist / num_points;
-    else return std::numeric_limits<double>::max();
 }
 
 std::optional<Eigen::Isometry3d> OdomLocalizerNode::lookup_tf(const std::string& parent_frame, const std::string& child_frame) const {

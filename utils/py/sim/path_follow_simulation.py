@@ -37,7 +37,7 @@ class SimulationNode(Node):
         self.joint_state_pub = self.create_publisher(JointState, '/serial_bridge/joint_state', 2)
         self.odom_pub = self.create_publisher(Odometry, '/small_glim/odometry', 2)
         self.imu_pub = self.create_publisher(Imu, '/serial_bridge/imu', 2)
-        self.chassis_status_pub = self.create_publisher(ChassisStatus, '/serial/chassis_status', 2)
+        self.chassis_status_pub = self.create_publisher(ChassisStatus, '/serial_bridge/chassis_status', 2)
         self.cloud_publisher = self.create_publisher(PointCloud2, '/small_glim/registered_cloud', 2)
         self.tf_broadcaster = TransformBroadcaster(self)
         

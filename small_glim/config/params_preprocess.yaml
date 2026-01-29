@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     preprocess:
-      distance_near_thresh: 0.2 # Points out of this range will be filtered out
+      distance_near_thresh: 0.5 # Points out of this range will be filtered out
       distance_far_thresh: 100.0 # Points out of this range will be filtered out
       use_random_grid_downsampling: true # If false, use the conventional voxelgrid downsampling
       downsample_resolution: 0.2 # Voxel grid resolution for downsampling

@@ -21,6 +21,7 @@
   <depend>sensor_msgs</depend>
 
   <depend>common_libs</depend>
+  <depend>interfaces</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

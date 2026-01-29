@@ -92,6 +92,7 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
             .obstacle_threshold = (int)declare_parameter<int>("local_map.cost_map_inflation.obstacle_threshold"),
         }
     };
+
     enable_debug_ = declare_parameter<bool>("debug.enable");
     if (enable_debug_) {
         std::string dynamic_points_pub_topic = declare_parameter<std::string>("debug.dynamic_points_pub_topic");
