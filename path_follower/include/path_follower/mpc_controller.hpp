@@ -7,15 +7,32 @@
 
 namespace path_follower {
 
+struct MPCModel {
+    // First-order lag time constants for the closed-loop velocity response.
+    // v_act[k+1] = alpha*v_act[k] + (1-alpha)*v_cmd[k], alpha = exp(-dt/tau_v)
+    double tau_v;
+    double tau_omega;
+};
+
 struct MPCFollowLimits {
     double vel_max;
     double vel_min;
     double omega_max;
     double omega_min;
+
+    // Command slew-rate limits (interface protection). Unit: per second.
+    // Implemented as soft constraint on |v_cmd[k]-v_cmd[k-1]| <= acc_max*dt.
     double acc_max;
     double alpha_max;
+
+    // Physical acceleration limits on actual states (safety). Unit: per second.
+    double phys_acc_max;
+    double phys_alpha_max;
+
     double vel_on_step;
-    double v_omega_product_max;
+
+    // Lateral acceleration limit: |v_act * omega_act| <= a_lat_max
+    double a_lat_max;
 
     double slow_down_distance;
     int slow_down_num_samples;
@@ -33,10 +50,18 @@ struct MPCFollowWeights {
     double r_omega;
     double r_dv;
     double r_domega;
+
+    // Soft constraint weights
+    // - acc/alpha_limit_weight: command slew-rate violation
+    // - phys_*: physical accel violation on actual states
+    // - lat_acc_weight: lateral acceleration violation on actual states
     double acc_limit_weight;
     double alpha_limit_weight;
+    double phys_acc_limit_weight;
+    double phys_alpha_limit_weight;
+    double lat_acc_weight;
+
     double vel_on_step_weight;
-    double v_omega_product_weight;
     double obstacle_weight;
     double direction_weight;
     double step_weight;
@@ -53,10 +78,18 @@ struct MPCStopLimits {
     double omega_max;
     double omega_min;
 
+    // Command slew-rate limits (interface protection). Unit: per second.
     double acc_max;
     double alpha_max;
+
+    // Physical acceleration limits on actual states (safety). Unit: per second.
+    double phys_acc_max;
+    double phys_alpha_max;
+
     double vel_on_step;
-    double v_omega_product_max;
+
+    // Lateral acceleration limit: |v_act * omega_act| <= a_lat_max
+    double a_lat_max;
 };
 
 struct MPCStopWeights {
@@ -65,8 +98,10 @@ struct MPCStopWeights {
 
     double acc_limit_weight;
     double alpha_limit_weight;
+    double phys_acc_limit_weight;
+    double phys_alpha_limit_weight;
+    double lat_acc_weight;
     double vel_on_step_weight;
-    double v_omega_product_weight;
 
     double obstacle_weight;
     double obstacle_terminal_weight;
@@ -78,6 +113,8 @@ struct MPCParams {
     int horizon;
     double dt;
     int max_iterations;
+
+    MPCModel model;
 
     MPCFollowLimits follow_limits;
     MPCFollowWeights follow_weights;
@@ -110,6 +147,7 @@ private:
 
     MPCParams params_;
     std::vector<Eigen::Vector2d> last_controls_;
+    Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 };
 

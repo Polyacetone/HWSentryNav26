@@ -91,6 +91,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         .horizon = (int)declare_parameter<int>("mpc.general.horizon"),
         .dt = declare_parameter<double>("mpc.general.dt"),
         .max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations"),
+        .model = {
+            .tau_v = declare_parameter<double>("mpc.model.tau_v"),
+            .tau_omega = declare_parameter<double>("mpc.model.tau_omega")
+        },
         .follow_limits = {
             .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
             .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
@@ -98,8 +102,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .omega_min = declare_parameter<double>("mpc.follow_path.limits.omega_min"),
             .acc_max = declare_parameter<double>("mpc.follow_path.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.follow_path.limits.alpha_max"),
+            .phys_acc_max = declare_parameter<double>("mpc.follow_path.limits.phys_acc_max"),
+            .phys_alpha_max = declare_parameter<double>("mpc.follow_path.limits.phys_alpha_max"),
             .vel_on_step = declare_parameter<double>("mpc.follow_path.limits.vel_on_step"),
-            .v_omega_product_max = declare_parameter<double>("mpc.follow_path.limits.v_omega_product_max"),
+            .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
             .slow_down_distance = declare_parameter<double>("mpc.follow_path.limits.slow_down_distance"),
             .slow_down_num_samples = (int)declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples"),
             .step_norm_threshold = declare_parameter<double>("mpc.follow_path.limits.step_norm_threshold"),
@@ -116,8 +122,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .r_domega = declare_parameter<double>("mpc.follow_path.weights.r_domega"),
             .acc_limit_weight = declare_parameter<double>("mpc.follow_path.weights.acc_limit"),
             .alpha_limit_weight = declare_parameter<double>("mpc.follow_path.weights.alpha_limit"),
+            .phys_acc_limit_weight = declare_parameter<double>("mpc.follow_path.weights.phys_acc_limit"),
+            .phys_alpha_limit_weight = declare_parameter<double>("mpc.follow_path.weights.phys_alpha_limit"),
+            .lat_acc_weight = declare_parameter<double>("mpc.follow_path.weights.lat_acc"),
             .vel_on_step_weight = declare_parameter<double>("mpc.follow_path.weights.vel_on_step"),
-            .v_omega_product_weight = declare_parameter<double>("mpc.follow_path.weights.v_omega_product"),
             .obstacle_weight = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
             .direction_weight = declare_parameter<double>("mpc.follow_path.weights.direction"),
             .step_weight = declare_parameter<double>("mpc.follow_path.weights.step")
@@ -133,16 +141,20 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .omega_min = declare_parameter<double>("mpc.stop.limits.omega_min"),
             .acc_max = declare_parameter<double>("mpc.stop.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.stop.limits.alpha_max"),
+            .phys_acc_max = declare_parameter<double>("mpc.stop.limits.phys_acc_max"),
+            .phys_alpha_max = declare_parameter<double>("mpc.stop.limits.phys_alpha_max"),
             .vel_on_step = declare_parameter<double>("mpc.stop.limits.vel_on_step"),
-            .v_omega_product_max = declare_parameter<double>("mpc.stop.limits.v_omega_product_max")
+            .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max")
         },
         .stop_weights = {
             .q_v = declare_parameter<double>("mpc.stop.weights.q_v"),
             .q_omega = declare_parameter<double>("mpc.stop.weights.q_omega"),
             .acc_limit_weight = declare_parameter<double>("mpc.stop.weights.acc_limit"),
             .alpha_limit_weight = declare_parameter<double>("mpc.stop.weights.alpha_limit"),
+            .phys_acc_limit_weight = declare_parameter<double>("mpc.stop.weights.phys_acc_limit"),
+            .phys_alpha_limit_weight = declare_parameter<double>("mpc.stop.weights.phys_alpha_limit"),
+            .lat_acc_weight = declare_parameter<double>("mpc.stop.weights.lat_acc"),
             .vel_on_step_weight = declare_parameter<double>("mpc.stop.weights.vel_on_step"),
-            .v_omega_product_weight = declare_parameter<double>("mpc.stop.weights.v_omega_product"),
             .obstacle_weight = declare_parameter<double>("mpc.stop.weights.obstacle"),
             .obstacle_terminal_weight = declare_parameter<double>("mpc.stop.weights.obstacle_terminal"),
             .direction_weight = declare_parameter<double>("mpc.stop.weights.direction"),

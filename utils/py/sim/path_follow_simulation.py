@@ -1,14 +1,18 @@
-import rclpy
-from rclpy.node import Node
-from rclpy.time import Time
-from geometry_msgs.msg import TransformStamped, Quaternion, Vector3
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Imu
-from interfaces.msg import JointState, ChassisStatus, ChassisCmd
-from sensor_msgs.msg import PointCloud2, PointField
-import struct
-from tf2_ros import TransformBroadcaster
 import math
+import random
+import struct
+from collections import deque
+from dataclasses import dataclass
+
+import rclpy
+from rclpy.duration import Duration
+from rclpy.node import Node
+
+from geometry_msgs.msg import Quaternion, TransformStamped
+from interfaces.msg import ChassisCmd, ChassisStatus, JointState
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Imu, PointCloud2, PointField
+from tf2_ros import TransformBroadcaster
 
 def euler_to_quaternion(roll, pitch, yaw):
     qx = math.sin(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) - math.cos(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
@@ -17,21 +21,84 @@ def euler_to_quaternion(roll, pitch, yaw):
     qw = math.cos(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) + math.sin(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
     return Quaternion(x=qx, y=qy, z=qz, w=qw)
 
+@dataclass
+class ControlCommand:
+    stamp: rclpy.time.Time
+    velocity: float
+    palstance: float
+    slow_spin: bool
+    fast_spin: bool
+
+@dataclass
+class ScalarCommand:
+    stamp: rclpy.time.Time
+    value: float
+    slow_spin: bool
+    fast_spin: bool
+
 class SimulationNode(Node):
     def __init__(self):
         super().__init__('simulation_node')
-        
+
+        # Parameters (make simulation less ideal)
+        self.declare_parameter('timer_period_sec', 0.01)
+        self.declare_parameter('cmd_timeout_sec', 0.3)
+        # Separate delays for linear and angular control
+        self.declare_parameter('control_delay_v_sec', 0.03)
+        self.declare_parameter('control_delay_w_sec', 0.03)
+
+        # First-order lag (closed-loop tracking dynamics)
+        # After transport delay, the effective commanded target is tracked with a first-order lag.
+        # Smaller tau -> faster tracking.
+        self.declare_parameter('lag_tau_v_sec', 0.5)
+        self.declare_parameter('lag_tau_w_sec', 0.2)
+
+        self.declare_parameter('velocity_noise_std', 0.02)  # m/s
+        self.declare_parameter('palstance_noise_std', 0.02)  # rad/s
+        self.declare_parameter('accel_limit', 3.0)  # m/s^2
+        self.declare_parameter('ang_accel_limit', 12.5)  # rad/s^2
+        self.declare_parameter('spin_fast_omega', 12.5)  # rad/s
+        self.declare_parameter('spin_slow_omega', 6.0)  # rad/s
+        self.declare_parameter('odom_time_offset_sec', 0.03)
+        self.declare_parameter('random_seed', 0)
+
+        timer_period_sec = float(self.get_parameter('timer_period_sec').value)
+        self._cmd_timeout = Duration(seconds=float(self.get_parameter('cmd_timeout_sec').value))
+        self._control_delay_v = Duration(seconds=float(self.get_parameter('control_delay_v_sec').value))
+        self._control_delay_w = Duration(seconds=float(self.get_parameter('control_delay_w_sec').value))
+
+        self._lag_tau_v = float(self.get_parameter('lag_tau_v_sec').value)
+        self._lag_tau_w = float(self.get_parameter('lag_tau_w_sec').value)
+
+        self._v_noise_std = float(self.get_parameter('velocity_noise_std').value)
+        self._w_noise_std = float(self.get_parameter('palstance_noise_std').value)
+        self._accel_limit = float(self.get_parameter('accel_limit').value)
+        self._ang_accel_limit = float(self.get_parameter('ang_accel_limit').value)
+        self._spin_fast_omega = float(self.get_parameter('spin_fast_omega').value)
+        self._spin_slow_omega = float(self.get_parameter('spin_slow_omega').value)
+        self._odom_time_offset = Duration(seconds=float(self.get_parameter('odom_time_offset_sec').value))
+
+        seed = int(self.get_parameter('random_seed').value)
+        if seed != 0:
+            random.seed(seed)
+
         # State
         self.x = 2.0
         self.y = 5.0
         self.theta = 0.0
         self.v = 0.0
-        self.last_v = 0.0
         self.omega = 0.0
-        self.last_omega = 0.0
-        self.slow_spin = False
-        self.fast_spin = False
-        self.last_recv_time = self.get_clock().now()
+
+        # After delay/noise/spin logic, the target is tracked through a first-order lag.
+        self._v_lagged = 0.0
+        self._w_lagged = 0.0
+
+        # Control pipeline: recv -> (v-delay queue, w-delay queue) -> noisy target -> rate-limited actual
+        self._v_cmd_queue: deque[ScalarCommand] = deque(maxlen=500)
+        self._w_cmd_queue: deque[ScalarCommand] = deque(maxlen=500)
+        self._last_cmd_recv_time = self.get_clock().now()
+        self._applied_v_cmd: ScalarCommand | None = None
+        self._applied_w_cmd: ScalarCommand | None = None
         
         # Publishers
         self.joint_state_pub = self.create_publisher(JointState, '/serial_bridge/joint_state', 2)
@@ -43,66 +110,164 @@ class SimulationNode(Node):
         
         # Subscribers
         self.create_subscription(ChassisCmd, '/path_follower/chassis_cmd', self.cmd_callback, 2)
-        
+
         # Timer
-        self.timer = self.create_timer(0.01, self.timer_callback)
+        self._dt = timer_period_sec
+        self.timer = self.create_timer(self._dt, self.timer_callback)
         self.timer_count = 0
-        
-        self.get_logger().info("Simulation Node Started")
+
+        self.get_logger().info(
+            "Simulation Node Started (delay_v=%.3fs, delay_w=%.3fs, tau_v=%.3fs, tau_w=%.3fs, noise_v_std=%.3f, noise_w_std=%.3f)"
+            % (
+                self._control_delay_v.nanoseconds * 1e-9,
+                self._control_delay_w.nanoseconds * 1e-9,
+                self._lag_tau_v,
+                self._lag_tau_w,
+                self._v_noise_std,
+                self._w_noise_std,
+            )
+        )
 
     def cmd_callback(self, msg):
-        self.last_v = self.v
-        self.last_omega = self.omega
-        self.v = msg.velocity
-        self.omega = msg.palstance
-        self.slow_spin = msg.slow_spin
-        self.fast_spin = msg.fast_spin
-        if self.fast_spin or self.slow_spin: # 小陀螺模式
-            # 强制设定角速度和线速度
-            if self.fast_spin: self.omega = 12.5 * (1 if self.last_omega >= 0 else -1)
-            else: self.omega = 6.0 * (1 if self.last_omega >= 0 else -1)
-            # 限制加速度
-            if abs(self.last_v) / 0.1 > 3.0:
-                print("High acceleration detected before spin: ", abs(self.last_v) / 0.1)
-                self.v = 0.1 * (3.0 * (1 if self.last_v > 0 else -1))
-            else: self.v = 0.0
-            # 限制角加速度
-            if abs(self.omega - self.last_omega) / 0.1 > 12.5:
-                self.omega = 0.1 * (12.5 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
-        else: # 普通模式
-            if abs(self.v - self.last_v) / 0.1 > 3.0: # 限制加速度
-                print("High acceleration detected: ", abs(self.v - self.last_v) / 0.1)
-                self.v = 0.1 * (3.0 * (1 if self.v - self.last_v > 0 else -1)) + self.last_v
-            if abs(self.omega - self.last_omega) / 0.1 > 12.5: # 限制角加速度
-                print("High angular acceleration detected: ", abs(self.omega - self.last_omega) / 0.1)
-                self.omega = 0.1 * (12.5 * (1 if self.omega - self.last_omega > 0 else -1)) + self.last_omega
-            if abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1 > 3.5: # 限制线速度和角速度乘积
-                print("High combined acceleration detected: ", abs(self.v - self.last_v) / 0.1 * abs(self.omega - self.last_omega) / 0.1)
-        self.last_recv_time = self.get_clock().now()
+        now = self.get_clock().now()
+        self._last_cmd_recv_time = now
+        slow_spin = bool(msg.slow_spin)
+        fast_spin = bool(msg.fast_spin)
+        self._v_cmd_queue.append(
+            ScalarCommand(
+                stamp=now,
+                value=float(msg.velocity),
+                slow_spin=slow_spin,
+                fast_spin=fast_spin,
+            )
+        )
+        self._w_cmd_queue.append(
+            ScalarCommand(
+                stamp=now,
+                value=float(msg.palstance),
+                slow_spin=slow_spin,
+                fast_spin=fast_spin,
+            )
+        )
+
+    @staticmethod
+    def _pop_delayed_scalar(
+        queue: deque[ScalarCommand],
+        now: rclpy.time.Time,
+        delay: Duration,
+    ) -> ScalarCommand | None:
+        """Return newest scalar command that has waited at least delay."""
+        if not queue:
+            return None
+
+        ready_time = now - delay
+        chosen: ScalarCommand | None = None
+        while queue and queue[0].stamp <= ready_time:
+            chosen = queue.popleft()
+        return chosen
+
+    def _compute_target_v(self, cmd: ScalarCommand | None) -> float:
+        if cmd is None:
+            target_v = 0.0
+        else:
+            target_v = cmd.value
+            if cmd.fast_spin or cmd.slow_spin:
+                target_v = 0.0
+
+        if self._v_noise_std > 0.0:
+            target_v += random.gauss(0.0, self._v_noise_std)
+        return target_v
+
+    def _compute_target_w(self, cmd: ScalarCommand | None) -> float:
+        if cmd is None:
+            target_w = 0.0
+        else:
+            target_w = cmd.value
+            if cmd.fast_spin or cmd.slow_spin:
+                last_sign = 1.0 if self.omega >= 0.0 else -1.0
+                spin_w = self._spin_fast_omega if cmd.fast_spin else self._spin_slow_omega
+                target_w = spin_w * last_sign
+
+        if self._w_noise_std > 0.0:
+            target_w += random.gauss(0.0, self._w_noise_std)
+        return target_w
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
+    @staticmethod
+    def _first_order_lag(current: float, target: float, tau: float, dt: float) -> float:
+        """First-order lag: y[k+1] = alpha*y[k] + (1-alpha)*u[k], alpha=exp(-dt/tau)."""
+        if dt <= 0.0:
+            return current
+        if tau <= 0.0:
+            return target
+        tau_safe = max(1e-4, tau)
+        alpha = math.exp(-dt / tau_safe)
+        return alpha * current + (1.0 - alpha) * target
+
+    def _rate_limit(self, target_v: float, target_w: float) -> None:
+        """Move actual (v, omega) toward target with acceleration limits."""
+        dt = self._dt
+        if dt <= 0.0:
+            return
+
+        dv_max = self._accel_limit * dt
+        dw_max = self._ang_accel_limit * dt
+
+        dv = self._clamp(target_v - self.v, -dv_max, dv_max)
+        dw = self._clamp(target_w - self.omega, -dw_max, dw_max)
+
+        self.v += dv
+        self.omega += dw
 
     def timer_callback(self):
         self.timer_count += 1
-        if self.get_clock().now() - self.last_recv_time > rclpy.duration.Duration(seconds=0.3):
-            self.v = 0.0
-            self.omega = 0.0
-            self.last_v = 0.0
-            self.last_omega = 0.0
+        now = self.get_clock().now()
 
-        # Update state
-        self.x += self.v * math.cos(self.theta) * 0.01
-        self.y += self.v * math.sin(self.theta) * 0.01
-        self.theta += self.omega * 0.01
+        # If command stream is lost, stop (also clear queued delayed commands)
+        if now - self._last_cmd_recv_time > self._cmd_timeout:
+            self._v_cmd_queue.clear()
+            self._w_cmd_queue.clear()
+            self._applied_v_cmd = None
+            self._applied_w_cmd = None
+
+        # Apply delayed control (hold last applied scalar cmd if no new delayed cmd ready)
+        new_v_cmd = self._pop_delayed_scalar(self._v_cmd_queue, now, self._control_delay_v)
+        if new_v_cmd is not None:
+            self._applied_v_cmd = new_v_cmd
+
+        new_w_cmd = self._pop_delayed_scalar(self._w_cmd_queue, now, self._control_delay_w)
+        if new_w_cmd is not None:
+            self._applied_w_cmd = new_w_cmd
+
+        target_v = self._compute_target_v(self._applied_v_cmd)
+        target_w = self._compute_target_w(self._applied_w_cmd)
+
+        # Closed-loop tracking lag (WIP-like "soft" response)
+        self._v_lagged = self._first_order_lag(self._v_lagged, target_v, self._lag_tau_v, self._dt)
+        self._w_lagged = self._first_order_lag(self._w_lagged, target_w, self._lag_tau_w, self._dt)
+
+        # Physical actuation limits (torque/friction) still apply on top
+        self._rate_limit(self._v_lagged, self._w_lagged)
+
+        # Update state using actual velocity
+        dt = self._dt
+        self.x += self.v * math.cos(self.theta) * dt
+        self.y += self.v * math.sin(self.theta) * dt
+        self.theta += self.omega * dt
         
         # Publish Imu (imu_link in imu_world)
         imu_msg = Imu()
-        imu_msg.header.stamp = self.get_clock().now().to_msg()
+        imu_msg.header.stamp = now.to_msg()
         imu_msg.header.frame_id = "imu_world"
         imu_msg.orientation = euler_to_quaternion(0, 0, self.theta)
         self.imu_pub.publish(imu_msg)
         
         # Publish JointState (Fixed)
         joint_msg = JointState()
-        joint_msg.stamp = self.get_clock().now().to_msg()
+        joint_msg.stamp = now.to_msg()
         joint_msg.yaw_angle = 0.0
         joint_msg.pitch_angle = 0.0
         self.joint_state_pub.publish(joint_msg)
@@ -115,22 +280,22 @@ class SimulationNode(Node):
         self.chassis_status_pub.publish(status_msg)
         
         # Publish map -> odom TF
-        t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id = "map"
-        t.child_frame_id = "odom"
-        t.transform.translation.x = 0.0
-        t.transform.translation.y = 0.0
-        t.transform.translation.z = 0.0
-        t.transform.rotation.w = 1.0
-        t.transform.rotation.x = 0.0
-        t.transform.rotation.y = 0.0
-        t.transform.rotation.z = 0.0
-        self.tf_broadcaster.sendTransform(t)
+        tf_msg = TransformStamped()
+        tf_msg.header.stamp = now.to_msg()
+        tf_msg.header.frame_id = "map"
+        tf_msg.child_frame_id = "odom"
+        tf_msg.transform.translation.x = 0.0
+        tf_msg.transform.translation.y = 0.0
+        tf_msg.transform.translation.z = 0.0
+        tf_msg.transform.rotation.w = 1.0
+        tf_msg.transform.rotation.x = 0.0
+        tf_msg.transform.rotation.y = 0.0
+        tf_msg.transform.rotation.z = 0.0
+        self.tf_broadcaster.sendTransform(tf_msg)
 
         # Publish Odometry (imu_link in odom)
         odom_msg = Odometry()
-        odom_msg.header.stamp = (self.get_clock().now() - rclpy.duration.Duration(seconds=0.03)).to_msg()
+        odom_msg.header.stamp = (now - self._odom_time_offset).to_msg()
         odom_msg.header.frame_id = "odom"
         odom_msg.child_frame_id = "imu_link" # As expected by tf_maintainer logic
         odom_msg.pose.pose.position.x = self.x
@@ -145,10 +310,10 @@ class SimulationNode(Node):
             radius = 0.2
             cx = 6.5
             cz = 0.3
-            # time in seconds (timer runs at 0.01s)
-            t = self.timer_count * 0.01
+            # time in seconds
+            sim_time_sec = self.timer_count * self._dt
             period = 10.0
-            cy = 6.0 + 0.5 * math.sin(2.0 * math.pi * t / period)
+            cy = 6.0 + 0.5 * math.sin(2.0 * math.pi * sim_time_sec / period)
 
             # sample sphere surface with grid in spherical coordinates
             num_theta = 20
@@ -164,7 +329,7 @@ class SimulationNode(Node):
                     points.append((px, py, pz))
 
             cloud_msg = PointCloud2()
-            cloud_msg.header.stamp = self.get_clock().now().to_msg()
+            cloud_msg.header.stamp = now.to_msg()
             cloud_msg.header.frame_id = "odom"
             cloud_msg.height = 1
             cloud_msg.width = len(points)

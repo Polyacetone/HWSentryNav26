@@ -13,6 +13,11 @@ inline double scalar_value(double v) { return v; }
 template <typename S, int N>
 inline double scalar_value(const ceres::Jet<S, N>& v) { return static_cast<double>(v.a); }
 
+inline double stable_alpha(double dt, double tau) {
+    const double tau_safe = std::max(1e-4, tau);
+    return std::exp(-dt / tau_safe);
+}
+
 // --------- cost map / direction map 的可微插值 ---------
 
 template <typename T>
@@ -130,6 +135,7 @@ struct FollowMPCCostFunctor {
         const Eigen::Vector3d& start_pose,
         const double u0,
         const Eigen::Vector2d& start_state,
+        const Eigen::Vector2d& start_cmd,
         const MPCParams& params,
         const CostMap& merged_cost_map,
         const DirectionMap& direction_map
@@ -138,9 +144,12 @@ struct FollowMPCCostFunctor {
         start_pose_(start_pose),
         u0_(u0),
         start_state_(start_state),
+        start_cmd_(start_cmd),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map) {}
+        direction_map_(direction_map),
+        alpha_v_(stable_alpha(params.dt, params.model.tau_v)),
+        alpha_omega_(stable_alpha(params.dt, params.model.tau_omega)) {}
 
     template <typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -153,8 +162,15 @@ struct FollowMPCCostFunctor {
         T theta = T(start_pose_.z());
         T u = T(u0_);
 
-        T last_v = T(start_state_.x());
-        T last_omega = T(start_state_.y());
+        // 实际状态（用于展开和物理约束）
+        T v_act = T(start_state_.x());
+        T omega_act = T(start_state_.y());
+        T last_v_act = v_act;
+        T last_omega_act = omega_act;
+
+        // 命令历史（用于接口保护/斜率约束）
+        T last_v_cmd = T(start_cmd_.x());
+        T last_omega_cmd = T(start_cmd_.y());
 
         int res_idx = 0;
 
@@ -163,15 +179,22 @@ struct FollowMPCCostFunctor {
 
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
-            const T v = uk[0];
-            const T omega = uk[1];
-            const T dv = v - last_v;
-            const T domega = omega - last_omega;
+            const T v_cmd = uk[0];
+            const T omega_cmd = uk[1];
+            const T dv_cmd = v_cmd - last_v_cmd;
+            const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            // 单车模型动力学
-            x += v * cos(theta) * T(params_.dt);
-            y += v * sin(theta) * T(params_.dt);
-            theta += omega * T(params_.dt);
+            // 一阶滞后：命令 -> 实际
+            const T v_act_next = T(alpha_v_) * v_act + (T(1.0) - T(alpha_v_)) * v_cmd;
+            const T omega_act_next = T(alpha_omega_) * omega_act + (T(1.0) - T(alpha_omega_)) * omega_cmd;
+
+            const T dv_act = v_act_next - v_act;
+            const T domega_act = omega_act_next - omega_act;
+
+            // 展开（使用实际状态）
+            x += v_act_next * cos(theta) * T(params_.dt);
+            y += v_act_next * sin(theta) * T(params_.dt);
+            theta += omega_act_next * T(params_.dt);
 
             // 参考点（由u决定）
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -202,25 +225,34 @@ struct FollowMPCCostFunctor {
             // 推进项（鼓励u增长）
             residuals[res_idx++] = T(params_.follow_weights.q_u) * (T(1.0) - u);
 
-            // 控制正则
-            residuals[res_idx++] = T(params_.follow_weights.r_v) * v;
-            residuals[res_idx++] = T(params_.follow_weights.r_omega) * omega;
+            // 对命令的正则化
+            residuals[res_idx++] = T(params_.follow_weights.r_v) * v_cmd;
+            residuals[res_idx++] = T(params_.follow_weights.r_omega) * omega_cmd;
 
-            // 控制平滑
-            residuals[res_idx++] = T(params_.follow_weights.r_dv) * dv;
-            residuals[res_idx++] = T(params_.follow_weights.r_domega) * domega;
+            // 对命令的平滑性约束
+            residuals[res_idx++] = T(params_.follow_weights.r_dv) * dv_cmd;
+            residuals[res_idx++] = T(params_.follow_weights.r_domega) * domega_cmd;
 
-            // 软加速度限制
-            const T dv_limit = T(params_.follow_limits.acc_max * params_.dt);
-            const T domega_limit = T(params_.follow_limits.alpha_max * params_.dt);
-            const T dv_excess = ceres::fmax(T(0.0), ceres::abs(dv) - dv_limit);
-            const T domega_excess = ceres::fmax(T(0.0), ceres::abs(domega) - domega_limit);
-            residuals[res_idx++] = T(params_.follow_weights.acc_limit_weight) * dv_excess;
-            residuals[res_idx++] = T(params_.follow_weights.alpha_limit_weight) * domega_excess;
+            // 命令斜率限制（接口保护）
+            const T dv_cmd_limit = T(params_.follow_limits.acc_max * params_.dt);
+            const T domega_cmd_limit = T(params_.follow_limits.alpha_max * params_.dt);
+            const T dv_cmd_excess = ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
+            const T domega_cmd_excess = ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
+            residuals[res_idx++] = T(params_.follow_weights.acc_limit_weight) * dv_cmd_excess;
+            residuals[res_idx++] = T(params_.follow_weights.alpha_limit_weight) * domega_cmd_excess;
 
-            // 限制 |v * omega| 软约束
-            const T vomega_excess = ceres::fmax(T(0.0), ceres::abs(v * omega) - T(params_.follow_limits.v_omega_product_max));
-            residuals[res_idx++] = T(params_.follow_weights.v_omega_product_weight) * vomega_excess;
+            // 物理加速度限制（约束实际状态的安全）
+            const T dv_act_limit = T(params_.follow_limits.phys_acc_max * params_.dt);
+            const T domega_act_limit = T(params_.follow_limits.phys_alpha_max * params_.dt);
+            const T dv_act_excess = ceres::fmax(T(0.0), ceres::abs(dv_act) - dv_act_limit);
+            const T domega_act_excess = ceres::fmax(T(0.0), ceres::abs(domega_act) - domega_act_limit);
+            residuals[res_idx++] = T(params_.follow_weights.phys_acc_limit_weight) * dv_act_excess;
+            residuals[res_idx++] = T(params_.follow_weights.phys_alpha_limit_weight) * domega_act_excess;
+
+            // 横向稳定（防倾覆/防干扰）：|v_act * omega_act| <= a_lat_max
+            const T a_lat = ceres::abs(v_act_next * omega_act_next);
+            const T a_lat_excess = ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
+            residuals[res_idx++] = T(params_.follow_weights.lat_acc_weight) * a_lat_excess;
 
             // 避障（使用合并代价地图：全局+局部）
             const T cost = interpolate_cost_map(merged_cost_map_, x, y);
@@ -243,14 +275,12 @@ struct FollowMPCCostFunctor {
             // 代价定义为速度与期望方向的叉积绝对值
             residuals[res_idx++] = T(params_.follow_weights.direction_weight) * step_gate * ceres::abs(heading_cross_dir);
 
-            // 经过台阶惩罚：基于方向场模长（越大越像台阶/边缘），鼓励在不需要时远离台阶区域
-            // 改为：模长超过阈值的区域近似等价惩罚（提前“看到”台阶），并在边界处保留可用梯度
+            // 经过台阶惩罚：模长超过阈值的区域近似等价惩罚（提前“看到”台阶），并在边界处保留可用梯度
             residuals[res_idx++] = T(params_.follow_weights.step_weight) * step_gate;
 
             // 台阶区域速度保持：当方向场非0（台阶）时，速度保持为vel_on_step
             // 使用 direction norm 做软开关，避免边界插值处不连续
-            const T v_diff_step_sq = ceres::pow((v - T(params_.follow_limits.vel_on_step)), 2);
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * step_gate * v_diff_step_sq;
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * step_gate * (v_act_next - T(params_.follow_limits.vel_on_step));
 
             // 终点减速：基于剩余弧长在 goal_slow_down_distance 内逐渐限速
             // 设计为软约束形式：只惩罚 v 超过 v_limit_goal(remaining_distance)
@@ -260,20 +290,24 @@ struct FollowMPCCostFunctor {
             const T gate_goal = ceres::fmin(T(1.0), ceres::fmax(T(0.0), (slow_dist - s_remain) / (slow_dist + T(1e-6))));
             // v_limit_goal: far -> vel_max, near -> vel_min
             const T v_limit_goal = T(params_.follow_limits.vel_min) + (T(params_.follow_limits.vel_max) - T(params_.follow_limits.vel_min)) * s_remain_ratio;
-            const T v_excess_goal = ceres::fmax(T(0.0), v - v_limit_goal);
+            const T v_excess_goal = ceres::fmax(T(0.0), v_act_next - v_limit_goal);
             residuals[res_idx++] = T(params_.follow_weights.q_v_final) * gate_goal * v_excess_goal;
 
             // 进度动力学（将 ds/dt 转成 du/dt）
             T denom = T(1.0) - kappa * ey;
             const T denom_abs = ceres::abs(denom);
             denom = denom / (denom_abs + T(1e-6)) * ceres::fmax(denom_abs, T(0.1));
-            const T dsdt = v * cos(etheta) / denom;
+            const T dsdt = v_act_next * cos(etheta) / denom;
             const T dudt = dsdt / dsdu;
             u += dudt * T(params_.dt);
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
 
-            last_v = v;
-            last_omega = omega;
+            v_act = v_act_next;
+            omega_act = omega_act_next;
+            last_v_act = v_act;
+            last_omega_act = omega_act;
+            last_v_cmd = v_cmd;
+            last_omega_cmd = omega_cmd;
         }
 
         return true;
@@ -284,23 +318,31 @@ struct FollowMPCCostFunctor {
     const Eigen::Vector3d& start_pose_;
     const double u0_;
     const Eigen::Vector2d& start_state_;
+    const Eigen::Vector2d& start_cmd_;
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
+
+    const double alpha_v_;
+    const double alpha_omega_;
 };
 
 struct StopMPCCostFunctor {
     StopMPCCostFunctor(
         const Eigen::Vector3d& start_pose,
         const Eigen::Vector2d& start_state,
+        const Eigen::Vector2d& start_cmd,
         const MPCParams& params,
         const CostMap& merged_cost_map,
         const DirectionMap& direction_map
     ) : start_pose_(start_pose),
         start_state_(start_state),
+        start_cmd_(start_cmd),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map) {}
+        direction_map_(direction_map),
+        alpha_v_(stable_alpha(params.dt, params.model.tau_v)),
+        alpha_omega_(stable_alpha(params.dt, params.model.tau_omega)) {}
 
     template <typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -308,41 +350,56 @@ struct StopMPCCostFunctor {
         T y = T(start_pose_.y());
         T theta = T(start_pose_.z());
 
-        T last_v = T(start_state_.x());
-        T last_omega = T(start_state_.y());
+        T v_act = T(start_state_.x());
+        T omega_act = T(start_state_.y());
+
+        T last_v_cmd = T(start_cmd_.x());
+        T last_omega_cmd = T(start_cmd_.y());
 
         int res_idx = 0;
 
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
-            const T v = uk[0];
-            const T omega = uk[1];
-            const T dv = v - last_v;
-            const T domega = omega - last_omega;
+            const T v_cmd = uk[0];
+            const T omega_cmd = uk[1];
+            const T dv_cmd = v_cmd - last_v_cmd;
+            const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            // 单车模型动力学
-            x += v * cos(theta) * T(params_.dt);
-            y += v * sin(theta) * T(params_.dt);
-            theta += omega * T(params_.dt);
+            const T v_act_next = T(alpha_v_) * v_act + (T(1.0) - T(alpha_v_)) * v_cmd;
+            const T omega_act_next = T(alpha_omega_) * omega_act + (T(1.0) - T(alpha_omega_)) * omega_cmd;
 
-            // 1) 线速度正则（希望停止）
-            residuals[res_idx++] = T(params_.stop_weights.q_v) * v;
-            // 2) 角速度正则（希望停止）
-            residuals[res_idx++] = T(params_.stop_weights.q_omega) * omega;
+            const T dv_act = v_act_next - v_act;
+            const T domega_act = omega_act_next - omega_act;
 
-            // 3) 最大加速度（软约束）
-            const T dv_limit = T(params_.stop_limits.acc_max * params_.dt);
-            const T dv_excess = ceres::fmax(T(0.0), ceres::abs(dv) - dv_limit);
-            residuals[res_idx++] = T(params_.stop_weights.acc_limit_weight) * dv_excess;
+            // 展开（使用实际状态）
+            x += v_act_next * cos(theta) * T(params_.dt);
+            y += v_act_next * sin(theta) * T(params_.dt);
+            theta += omega_act_next * T(params_.dt);
 
-            // 4) 最大角加速度（软约束）
-            const T domega_limit = T(params_.stop_limits.alpha_max * params_.dt);
-            const T domega_excess = ceres::fmax(T(0.0), ceres::abs(domega) - domega_limit);
-            residuals[res_idx++] = T(params_.stop_weights.alpha_limit_weight) * domega_excess;
+            // 1) 实际速度正则化（希望物理上停止）
+            residuals[res_idx++] = T(params_.stop_weights.q_v) * v_act_next;
+            residuals[res_idx++] = T(params_.stop_weights.q_omega) * omega_act_next;
 
-            // 5) 最大速度乘以角速度（软约束）
-            const T vomega_excess = ceres::fmax(T(0.0), ceres::abs(v * omega) - T(params_.stop_limits.v_omega_product_max));
-            residuals[res_idx++] = T(params_.stop_weights.v_omega_product_weight) * vomega_excess;
+            // 2) 命令斜率限制（接口保护）
+            const T dv_cmd_limit = T(params_.stop_limits.acc_max * params_.dt);
+            const T domega_cmd_limit = T(params_.stop_limits.alpha_max * params_.dt);
+            const T dv_cmd_excess = ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
+            const T domega_cmd_excess = ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
+            residuals[res_idx++] = T(params_.stop_weights.acc_limit_weight) * dv_cmd_excess;
+            residuals[res_idx++] = T(params_.stop_weights.alpha_limit_weight) * domega_cmd_excess;
+
+            // 3) 物理加速度限制（约束实际状态的安全）
+            const T dv_act_limit = T(params_.stop_limits.phys_acc_max * params_.dt);
+            const T domega_act_limit = T(params_.stop_limits.phys_alpha_max * params_.dt);
+            const T dv_act_excess = ceres::fmax(T(0.0), ceres::abs(dv_act) - dv_act_limit);
+            const T domega_act_excess = ceres::fmax(T(0.0), ceres::abs(domega_act) - domega_act_limit);
+            residuals[res_idx++] = T(params_.stop_weights.phys_acc_limit_weight) * dv_act_excess;
+            residuals[res_idx++] = T(params_.stop_weights.phys_alpha_limit_weight) * domega_act_excess;
+
+            // 4) 横向稳定（防倾覆/防干扰）
+            const T a_lat = ceres::abs(v_act_next * omega_act_next);
+            const T a_lat_excess = ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
+            residuals[res_idx++] = T(params_.stop_weights.lat_acc_weight) * a_lat_excess;
 
             // 6) 避障代价：如果在障碍物中，需要推动其退出
             const T cost = interpolate_cost_map(merged_cost_map_, x, y);
@@ -359,11 +416,12 @@ struct StopMPCCostFunctor {
             residuals[res_idx++] = T(params_.stop_weights.direction_weight) * gate_step * (T(1.0) - ceres::abs(heading_dot_dir));
 
             // 8) 台阶区域速度保持（软约束）
-            const T v_diff_step_sq = ceres::pow((v - T(params_.stop_limits.vel_on_step)), 2);
-            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * v_diff_step_sq;
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * (v_act_next - T(params_.stop_limits.vel_on_step));
 
-            last_v = v;
-            last_omega = omega;
+            v_act = v_act_next;
+            omega_act = omega_act_next;
+            last_v_cmd = v_cmd;
+            last_omega_cmd = omega_cmd;
         }
 
         // 避免停在障碍物或台阶上
@@ -380,9 +438,13 @@ struct StopMPCCostFunctor {
 
     const Eigen::Vector3d& start_pose_;
     const Eigen::Vector2d& start_state_;
+    const Eigen::Vector2d& start_cmd_;
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
+
+    const double alpha_v_;
+    const double alpha_omega_;
 };
 
 }
@@ -447,6 +509,7 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
             current_pose_map,
             u0,
             current_state,
+            last_cmd_,
             params_,
             merged_cost_map,
             global_direction_map
@@ -461,8 +524,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         cost_function->AddParameterBlock(2);
     }
 
-    // residual 总数：每步 15 个
-    cost_function->SetNumResiduals(15 * params_.horizon);
+    // 残差总数：每步 17 个
+    cost_function->SetNumResiduals(17 * params_.horizon);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon + num_pts));
@@ -501,6 +564,7 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
 
     // 输出第一步控制
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    last_cmd_ = cmd_v_omega;
 
     // 保存 warm start
     last_controls_.resize(static_cast<size_t>(params_.horizon));
@@ -516,12 +580,20 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     predicted_path_map.reserve(static_cast<size_t>(params_.horizon + 1));
     Eigen::Vector3d pose = current_pose_map;
     predicted_path_map.push_back(pose.head<2>());
+
+    double v_act = current_state.x();
+    double omega_act = current_state.y();
+    const double alpha_v = stable_alpha(params_.dt, params_.model.tau_v);
+    const double alpha_omega = stable_alpha(params_.dt, params_.model.tau_omega);
+
     for (int i = 0; i < params_.horizon; i++) {
-        const double v = controls[static_cast<size_t>(i)][0];
-        const double w = controls[static_cast<size_t>(i)][1];
-        pose.x() += v * std::cos(pose.z()) * params_.dt;
-        pose.y() += v * std::sin(pose.z()) * params_.dt;
-        pose.z() += w * params_.dt;
+        const double v_cmd = controls[static_cast<size_t>(i)][0];
+        const double w_cmd = controls[static_cast<size_t>(i)][1];
+        v_act = alpha_v * v_act + (1.0 - alpha_v) * v_cmd;
+        omega_act = alpha_omega * omega_act + (1.0 - alpha_omega) * w_cmd;
+        pose.x() += v_act * std::cos(pose.z()) * params_.dt;
+        pose.y() += v_act * std::sin(pose.z()) * params_.dt;
+        pose.z() += omega_act * params_.dt;
         predicted_path_map.push_back(pose.head<2>());
     }
 
@@ -557,6 +629,7 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         new StopMPCCostFunctor(
             current_pose_map,
             current_state,
+            last_cmd_,
             params_,
             merged_cost_map,
             global_direction_map
@@ -567,8 +640,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         cost_function->AddParameterBlock(2);
     }
 
-    // 每步 8 个 residual + terminal 2 个
-    cost_function->SetNumResiduals(8 * params_.horizon + 2);
+    // 每步 10 个残差 + 终端 2 个
+    cost_function->SetNumResiduals(10 * params_.horizon + 2);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
@@ -600,6 +673,7 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     }
 
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    last_cmd_ = cmd_v_omega;
 
     // 保存 warm start
     last_controls_.resize(static_cast<size_t>(params_.horizon));
@@ -615,12 +689,20 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     predicted_path_map.reserve(static_cast<size_t>(params_.horizon + 1));
     Eigen::Vector3d pose = current_pose_map;
     predicted_path_map.push_back(pose.head<2>());
+
+    double v_act = current_state.x();
+    double omega_act = current_state.y();
+    const double alpha_v = stable_alpha(params_.dt, params_.model.tau_v);
+    const double alpha_omega = stable_alpha(params_.dt, params_.model.tau_omega);
+
     for (int i = 0; i < params_.horizon; i++) {
-        const double v = controls[static_cast<size_t>(i)][0];
-        const double w = controls[static_cast<size_t>(i)][1];
-        pose.x() += v * std::cos(pose.z()) * params_.dt;
-        pose.y() += v * std::sin(pose.z()) * params_.dt;
-        pose.z() += w * params_.dt;
+        const double v_cmd = controls[static_cast<size_t>(i)][0];
+        const double w_cmd = controls[static_cast<size_t>(i)][1];
+        v_act = alpha_v * v_act + (1.0 - alpha_v) * v_cmd;
+        omega_act = alpha_omega * omega_act + (1.0 - alpha_omega) * w_cmd;
+        pose.x() += v_act * std::cos(pose.z()) * params_.dt;
+        pose.y() += v_act * std::sin(pose.z()) * params_.dt;
+        pose.z() += omega_act * params_.dt;
         predicted_path_map.push_back(pose.head<2>());
     }
 
