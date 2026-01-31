@@ -280,7 +280,8 @@ struct FollowMPCCostFunctor {
 
             // 台阶区域速度保持：当方向场非0（台阶）时，速度保持为vel_on_step
             // 使用 direction norm 做软开关，避免边界插值处不连续
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * step_gate * (v_act_next - T(params_.follow_limits.vel_on_step));
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * step_gate *
+                (v_act_next - T(params_.follow_limits.vel_on_step)) * (v_act_next - T(params_.follow_limits.vel_on_step));
 
             // 终点减速：基于剩余弧长在 goal_slow_down_distance 内逐渐限速
             // 设计为软约束形式：只惩罚 v 超过 v_limit_goal(remaining_distance)
@@ -416,7 +417,8 @@ struct StopMPCCostFunctor {
             residuals[res_idx++] = T(params_.stop_weights.direction_weight) * gate_step * (T(1.0) - ceres::abs(heading_dot_dir));
 
             // 8) 台阶区域速度保持（软约束）
-            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * (v_act_next - T(params_.stop_limits.vel_on_step));
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step *
+                (v_act_next - T(params_.stop_limits.vel_on_step)) * (v_act_next - T(params_.stop_limits.vel_on_step));
 
             v_act = v_act_next;
             omega_act = omega_act_next;

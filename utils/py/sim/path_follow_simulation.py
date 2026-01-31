@@ -47,11 +47,19 @@ class SimulationNode(Node):
         self.declare_parameter('control_delay_v_sec', 0.03)
         self.declare_parameter('control_delay_w_sec', 0.03)
 
-        # First-order lag (closed-loop tracking dynamics)
+        # Angular channel: first-order lag (closed-loop tracking dynamics)
         # After transport delay, the effective commanded target is tracked with a first-order lag.
         # Smaller tau -> faster tracking.
-        self.declare_parameter('lag_tau_v_sec', 0.5)
         self.declare_parameter('lag_tau_w_sec', 0.2)
+
+        # Linear channel: second-order surrogate model (inverted pendulum under LQR)
+        #   v_dot = a
+        #   a_dot = (1/tau) * ( K*(vcmd - v) - a )
+        # where a is an "agent acceleration" state (pitch-equivalent surrogate).
+        # tau is the pitch build-up time constant you observed (~1s scale).
+        # K is the LQR sensitivity from velocity error to pitch command.
+        self.declare_parameter('linear_tau_sec', 0.2)
+        self.declare_parameter('linear_gain_k', 4.0)
 
         self.declare_parameter('velocity_noise_std', 0.02)  # m/s
         self.declare_parameter('palstance_noise_std', 0.02)  # rad/s
@@ -67,8 +75,10 @@ class SimulationNode(Node):
         self._control_delay_v = Duration(seconds=float(self.get_parameter('control_delay_v_sec').value))
         self._control_delay_w = Duration(seconds=float(self.get_parameter('control_delay_w_sec').value))
 
-        self._lag_tau_v = float(self.get_parameter('lag_tau_v_sec').value)
         self._lag_tau_w = float(self.get_parameter('lag_tau_w_sec').value)
+
+        self._linear_tau = float(self.get_parameter('linear_tau_sec').value)
+        self._linear_k = float(self.get_parameter('linear_gain_k').value)
 
         self._v_noise_std = float(self.get_parameter('velocity_noise_std').value)
         self._w_noise_std = float(self.get_parameter('palstance_noise_std').value)
@@ -87,10 +97,10 @@ class SimulationNode(Node):
         self.y = 5.0
         self.theta = 0.0
         self.v = 0.0
+        self.a = 0.0
         self.omega = 0.0
 
-        # After delay/noise/spin logic, the target is tracked through a first-order lag.
-        self._v_lagged = 0.0
+        # Angular target is tracked through a first-order lag.
         self._w_lagged = 0.0
 
         # Control pipeline: recv -> (v-delay queue, w-delay queue) -> noisy target -> rate-limited actual
@@ -99,7 +109,7 @@ class SimulationNode(Node):
         self._last_cmd_recv_time = self.get_clock().now()
         self._applied_v_cmd: ScalarCommand | None = None
         self._applied_w_cmd: ScalarCommand | None = None
-        
+
         # Publishers
         self.joint_state_pub = self.create_publisher(JointState, '/serial_bridge/joint_state', 2)
         self.odom_pub = self.create_publisher(Odometry, '/small_glim/odometry', 2)
@@ -107,7 +117,7 @@ class SimulationNode(Node):
         self.chassis_status_pub = self.create_publisher(ChassisStatus, '/serial_bridge/chassis_status', 2)
         self.cloud_publisher = self.create_publisher(PointCloud2, '/small_glim/registered_cloud', 2)
         self.tf_broadcaster = TransformBroadcaster(self)
-        
+
         # Subscribers
         self.create_subscription(ChassisCmd, '/path_follower/chassis_cmd', self.cmd_callback, 2)
 
@@ -117,11 +127,12 @@ class SimulationNode(Node):
         self.timer_count = 0
 
         self.get_logger().info(
-            "Simulation Node Started (delay_v=%.3fs, delay_w=%.3fs, tau_v=%.3fs, tau_w=%.3fs, noise_v_std=%.3f, noise_w_std=%.3f)"
+            "Simulation Node Started (delay_v=%.3fs, delay_w=%.3fs, linear_tau=%.3fs, linear_k=%.3f, tau_w=%.3fs, noise_v_std=%.3f, noise_w_std=%.3f)"
             % (
                 self._control_delay_v.nanoseconds * 1e-9,
                 self._control_delay_w.nanoseconds * 1e-9,
-                self._lag_tau_v,
+                self._linear_tau,
+                self._linear_k,
                 self._lag_tau_w,
                 self._v_noise_std,
                 self._w_noise_std,
@@ -207,20 +218,39 @@ class SimulationNode(Node):
         alpha = math.exp(-dt / tau_safe)
         return alpha * current + (1.0 - alpha) * target
 
-    def _rate_limit(self, target_v: float, target_w: float) -> None:
-        """Move actual (v, omega) toward target with acceleration limits."""
+    def _rate_limit_omega(self, target_w: float) -> None:
+        """Move actual omega toward target with angular acceleration limits."""
+        dt = self._dt
+        if dt <= 0.0:
+            return
+        dw_max = self._ang_accel_limit * dt
+        dw = self._clamp(target_w - self.omega, -dw_max, dw_max)
+        self.omega += dw
+
+    def _update_linear_second_order(self, v_cmd: float) -> None:
+        """Second-order linear dynamics with surrogate acceleration state.
+
+        Continuous model:
+            v_dot = a
+            a_dot = (1/tau) * ( K*(v_cmd - v) - a )
+
+        Discretization: explicit Euler. Also applies accel saturation via `accel_limit`.
+        """
         dt = self._dt
         if dt <= 0.0:
             return
 
-        dv_max = self._accel_limit * dt
-        dw_max = self._ang_accel_limit * dt
+        # tau<=0 -> instantaneous a follows K*(error)
+        if self._linear_tau <= 0.0:
+            a_target = self._linear_k * (v_cmd - self.v)
+            self.a = self._clamp(a_target, -self._accel_limit, self._accel_limit)
+        else:
+            inv_tau = 1.0 / max(1e-4, self._linear_tau)
+            a_dot = inv_tau * (self._linear_k * (v_cmd - self.v) - self.a)
+            self.a += a_dot * dt
+            self.a = self._clamp(self.a, -self._accel_limit, self._accel_limit)
 
-        dv = self._clamp(target_v - self.v, -dv_max, dv_max)
-        dw = self._clamp(target_w - self.omega, -dw_max, dw_max)
-
-        self.v += dv
-        self.omega += dw
+        self.v += self.a * dt
 
     def timer_callback(self):
         self.timer_count += 1
@@ -242,43 +272,43 @@ class SimulationNode(Node):
         if new_w_cmd is not None:
             self._applied_w_cmd = new_w_cmd
 
-        target_v = self._compute_target_v(self._applied_v_cmd)
+        target_v_cmd = self._compute_target_v(self._applied_v_cmd)
         target_w = self._compute_target_w(self._applied_w_cmd)
 
-        # Closed-loop tracking lag (WIP-like "soft" response)
-        self._v_lagged = self._first_order_lag(self._v_lagged, target_v, self._lag_tau_v, self._dt)
-        self._w_lagged = self._first_order_lag(self._w_lagged, target_w, self._lag_tau_w, self._dt)
+        # Linear channel: second-order model after transport delay (+noise, +spin gating)
+        self._update_linear_second_order(target_v_cmd)
 
-        # Physical actuation limits (torque/friction) still apply on top
-        self._rate_limit(self._v_lagged, self._w_lagged)
+        # Angular channel: first-order lag + angular acceleration limits
+        self._w_lagged = self._first_order_lag(self._w_lagged, target_w, self._lag_tau_w, self._dt)
+        self._rate_limit_omega(self._w_lagged)
 
         # Update state using actual velocity
         dt = self._dt
         self.x += self.v * math.cos(self.theta) * dt
         self.y += self.v * math.sin(self.theta) * dt
         self.theta += self.omega * dt
-        
+
         # Publish Imu (imu_link in imu_world)
         imu_msg = Imu()
         imu_msg.header.stamp = now.to_msg()
         imu_msg.header.frame_id = "imu_world"
         imu_msg.orientation = euler_to_quaternion(0, 0, self.theta)
         self.imu_pub.publish(imu_msg)
-        
+
         # Publish JointState (Fixed)
         joint_msg = JointState()
         joint_msg.stamp = now.to_msg()
         joint_msg.yaw_angle = 0.0
         joint_msg.pitch_angle = 0.0
         self.joint_state_pub.publish(joint_msg)
-        
+
         # Publish ChassisStatus
         status_msg = ChassisStatus()
         status_msg.velocity = self.v
         status_msg.palstance = self.omega
         status_msg.leg_mode = 4 # Mature mode
         self.chassis_status_pub.publish(status_msg)
-        
+
         # Publish map -> odom TF
         tf_msg = TransformStamped()
         tf_msg.header.stamp = now.to_msg()
@@ -352,7 +382,7 @@ class SimulationNode(Node):
 
             cloud_msg.data = bytes(data)
             self.cloud_publisher.publish(cloud_msg)
-    
+
 def main(args=None):
     rclpy.init(args=args)
     node = SimulationNode()

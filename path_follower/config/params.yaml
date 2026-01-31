@@ -26,7 +26,7 @@
 
     mpc: # MPC控制器参数
       general: # 通用参数
-        horizon: 15 # 预测步数
+        horizon: 10 # 预测步数
         dt: 0.1 # 预测时间间隔
         max_iterations: 50 # 最大迭代次数
       model: # 底层闭环等效模型（First-Order Lag）
@@ -38,7 +38,7 @@
           search_window: 0.1 # 局部搜索窗口大小（0~1）
           max_correspondence_distance: 1.0 # 最大对应点距离 (m)
         limits: # 运动限制
-          vel_max: 2.0 # 最大速度 (m/s)
+          vel_max: 2.8 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
@@ -48,15 +48,15 @@
           phys_alpha_max: 12.0 # 物理角加速度限制：最大 domega_act/dt (rad/s²)
           vel_on_step: 1.0 # 台阶区域期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
-          slow_down_distance: 2.0 # 距离终点剩余弧长小于该值时开始减速 (m)
+          slow_down_distance: 1.2 # 距离终点剩余弧长小于该值时开始减速 (m)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
           step_norm_transition: 0.05 # smoothstep 过渡宽度：越大越“提前看到台阶”但更柔
         weights: # 权重
           q_y: 0.4 # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u: 2.0 # 进度项权重
-          q_v_final: 0.3 # 终点减速权重
+          q_u: 1.5 # 进度项权重
+          q_v_final: 0.6 # 终点减速权重
           r_v: 0.03 # 线速度正则
           r_omega: 0.1 # 角速度正则
           r_dv: 0.1 # 线速度平滑
@@ -69,10 +69,10 @@
           vel_on_step: 3.0 # 台阶区域速度保持权重
           obstacle: 2.0 # 避障权重（全局+局部）
           direction: 2.0 # 台阶方向对齐权重
-          step: 0.1 # 经过台阶惩罚
+          step: 0.02 # 经过台阶惩罚
       stop: # 停止模式
         limits: # 运动限制
-          vel_max: 2.0 # 最大线速度硬约束 (m/s)
+          vel_max: 2.8 # 最大线速度硬约束 (m/s)
           omega_max: 7.2 # 最大角速度硬约束 (rad/s)
           omega_min: -7.2 # 最小角速度硬约束 (rad/s)
           acc_max: 2.0 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
