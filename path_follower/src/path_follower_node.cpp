@@ -70,6 +70,7 @@ private:
     ControlFsm::State last_fsm_state_ = ControlFsm::State::IDLE; // 用于打印日志
 
     Eigen::Vector2d current_status_ = Eigen::Vector2d::Zero();
+    double prev_velocity_ = 0.0; // 上一时刻的线速度，用于估计v_dot
 
     std::optional<SplineD> global_path_;
     double last_reference_u_ = 0.0;
@@ -92,7 +93,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         .dt = declare_parameter<double>("mpc.general.dt"),
         .max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations"),
         .model = {
-            .tau_v = declare_parameter<double>("mpc.model.tau_v"),
+            .wn_v = declare_parameter<double>("mpc.model.wn_v"),
+            .zeta_v = declare_parameter<double>("mpc.model.zeta_v"),
             .tau_omega = declare_parameter<double>("mpc.model.tau_omega")
         },
         .follow_limits = {
@@ -240,6 +242,7 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
+    prev_velocity_ = current_status_.x(); // 保存上一时刻速度
     current_status_.x() = msg->velocity;
     current_status_.y() = msg->palstance;
 }
@@ -322,9 +325,15 @@ void PathFollowerNode::handle_stop_state() const {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
+    const RobotStatus current_status = {
+        .v = current_status_.x(),
+        .v_dot = (current_status_.x() - prev_velocity_) / params_.dt,
+        .omega = current_status_.y()
+    };
+
     const auto result = mpc_controller_->stop(
         current_pose,
-        current_status_,
+        current_status,
         *merged_cost_map_,
         *global_direction_map_
     );
@@ -362,10 +371,16 @@ void PathFollowerNode::handle_follow_state() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
+    const RobotStatus current_status = {
+        .v = current_status_.x(),
+        .v_dot = (current_status_.x() - prev_velocity_) / params_.dt,
+        .omega = current_status_.y()
+    };
+
     const auto result = mpc_controller_->follow_path(
         *global_path_,
         current_pose,
-        current_status_,
+        current_status,
         *merged_cost_map_,
         *global_direction_map_
     );

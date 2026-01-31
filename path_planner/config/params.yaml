@@ -20,7 +20,7 @@
       feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
 
     path_optimizer:
-      smoothness_weight: 0.2 # 平滑代价权重
+      smoothness_weight: 0.3 # 平滑代价权重
       uniform_speed_weight: 0.2 # 速度均匀代价权重
       obstacle_weight: 4.0 # 障碍物代价权重
       direction_weight: 4.0 # 方向代价权重

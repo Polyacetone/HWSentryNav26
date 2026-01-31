@@ -19,19 +19,20 @@
       sample_step: 0.05 # 沿样条弧长采样间隔 (m)
 
     control_fsm: # 控制状态机参数
-      follow_to_spin_vel_max: 0.1 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
+      follow_to_spin_vel_max: 0.2 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
       spin_to_follow_omega_max: 4.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
-      to_idle_vel_max: 0.1 # 切到空闲前，线速度需小于该阈值 (m/s)
-      to_idle_omega_max: 0.1 # 切到空闲前，角速度需小于该阈值 (rad/s)
+      to_idle_vel_max: 0.2 # 切到空闲前，线速度需小于该阈值 (m/s)
+      to_idle_omega_max: 0.2 # 切到空闲前，角速度需小于该阈值 (rad/s)
 
     mpc: # MPC控制器参数
       general: # 通用参数
-        horizon: 10 # 预测步数
+        horizon: 12 # 预测步数
         dt: 0.1 # 预测时间间隔
         max_iterations: 50 # 最大迭代次数
-      model: # 底层闭环等效模型（First-Order Lag）
-        tau_v: 0.5 # 线速度时间常数 (s)
-        tau_omega: 0.2 # 角速度时间常数 (s)
+      model: # 底层闭环等效模型（混合模型：线速度二阶欠阻尼 + 角速度一阶滞后）
+        wn_v: 4.08 # 线速度自然频率 (rad/s)
+        zeta_v: 0.716 # 线速度阻尼比
+        tau_omega: 0.157 # 角速度时间常数 (s)
       follow_path: # 路径跟随模式
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数
@@ -42,25 +43,25 @@
           vel_min: 0.1 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
-          acc_max: 2.0 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
-          alpha_max: 9.6 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
+          acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
+          alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           phys_acc_max: 2.5 # 物理加速度限制：最大 dv_act/dt (m/s²)
           phys_alpha_max: 12.0 # 物理角加速度限制：最大 domega_act/dt (rad/s²)
           vel_on_step: 1.0 # 台阶区域期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
-          slow_down_distance: 1.2 # 距离终点剩余弧长小于该值时开始减速 (m)
+          slow_down_distance: 1.4 # 距离终点剩余弧长小于该值时开始减速 (m)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
-          step_norm_transition: 0.05 # smoothstep 过渡宽度：越大越“提前看到台阶”但更柔
+          step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
-          q_y: 0.4 # 横向误差权重
+          q_y: 0.35 # 横向误差权重
           q_theta: 0.2 # 航向误差权重
           q_u: 1.5 # 进度项权重
-          q_v_final: 0.6 # 终点减速权重
+          q_v_final: 0.8 # 终点减速权重
           r_v: 0.03 # 线速度正则
-          r_omega: 0.1 # 角速度正则
-          r_dv: 0.1 # 线速度平滑
-          r_domega: 0.06 # 角速度平滑
+          r_omega: 0.08 # 角速度正则
+          r_dv: 0.06 # 线速度平滑
+          r_domega: 0.15 # 角速度平滑
           acc_limit: 10.0 # 指令变化率超限惩罚（dv_cmd）
           alpha_limit: 10.0 # 指令变化率超限惩罚（domega_cmd）
           phys_acc_limit: 5.0 # 物理加速度超限惩罚（dv_act）
@@ -69,14 +70,14 @@
           vel_on_step: 3.0 # 台阶区域速度保持权重
           obstacle: 2.0 # 避障权重（全局+局部）
           direction: 2.0 # 台阶方向对齐权重
-          step: 0.02 # 经过台阶惩罚
+          step: 0.01 # 经过台阶惩罚
       stop: # 停止模式
         limits: # 运动限制
           vel_max: 2.8 # 最大线速度硬约束 (m/s)
           omega_max: 7.2 # 最大角速度硬约束 (rad/s)
           omega_min: -7.2 # 最小角速度硬约束 (rad/s)
-          acc_max: 2.0 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
-          alpha_max: 9.6 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
+          acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
+          alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           phys_acc_max: 2.5 # 物理加速度限制：最大 dv_act/dt (m/s²)
           phys_alpha_max: 12.0 # 物理角加速度限制：最大 domega_act/dt (rad/s²)
           vel_on_step: 1.0 # 台阶区域期望速度 (m/s)

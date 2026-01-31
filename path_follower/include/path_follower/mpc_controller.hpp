@@ -7,11 +7,23 @@
 
 namespace path_follower {
 
-struct MPCModel {
-    // First-order lag time constants for the closed-loop velocity response.
-    // v_act[k+1] = alpha*v_act[k] + (1-alpha)*v_cmd[k], alpha = exp(-dt/tau_v)
-    double tau_v;
-    double tau_omega;
+struct HybridModel {
+    // 线速度二阶系统参数
+    double wn_v;        // 自然频率 (rad/s)
+    double zeta_v;      // 阻尼比
+
+    // 角速度一阶系统参数
+    double tau_omega;   // 时间常数 (s)
+
+    // 预计算值
+    double wn_v_sq() const { return wn_v * wn_v; }
+    double two_zeta_wn_v() const { return 2.0 * zeta_v * wn_v; }
+};
+
+struct RobotStatus {
+    double v;       // 线速度 (m/s)
+    double v_dot;   // 线加速度 (m/s^2)
+    double omega;   // 角速度 (rad/s)
 };
 
 struct MPCFollowLimits {
@@ -20,18 +32,13 @@ struct MPCFollowLimits {
     double omega_max;
     double omega_min;
 
-    // Command slew-rate limits (interface protection). Unit: per second.
-    // Implemented as soft constraint on |v_cmd[k]-v_cmd[k-1]| <= acc_max*dt.
     double acc_max;
     double alpha_max;
 
-    // Physical acceleration limits on actual states (safety). Unit: per second.
     double phys_acc_max;
     double phys_alpha_max;
 
     double vel_on_step;
-
-    // Lateral acceleration limit: |v_act * omega_act| <= a_lat_max
     double a_lat_max;
 
     double slow_down_distance;
@@ -51,10 +58,6 @@ struct MPCFollowWeights {
     double r_dv;
     double r_domega;
 
-    // Soft constraint weights
-    // - acc/alpha_limit_weight: command slew-rate violation
-    // - phys_*: physical accel violation on actual states
-    // - lat_acc_weight: lateral acceleration violation on actual states
     double acc_limit_weight;
     double alpha_limit_weight;
     double phys_acc_limit_weight;
@@ -78,17 +81,12 @@ struct MPCStopLimits {
     double omega_max;
     double omega_min;
 
-    // Command slew-rate limits (interface protection). Unit: per second.
     double acc_max;
     double alpha_max;
-
-    // Physical acceleration limits on actual states (safety). Unit: per second.
     double phys_acc_max;
     double phys_alpha_max;
 
     double vel_on_step;
-
-    // Lateral acceleration limit: |v_act * omega_act| <= a_lat_max
     double a_lat_max;
 };
 
@@ -114,7 +112,7 @@ struct MPCParams {
     double dt;
     int max_iterations;
 
-    MPCModel model;
+    HybridModel model;
 
     MPCFollowLimits follow_limits;
     MPCFollowWeights follow_weights;
@@ -131,20 +129,19 @@ public:
     std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
         const SplineD& global_path,
         const Eigen::Vector3d& current_pose_map,
-        const Eigen::Vector2d& current_state,
+        const RobotStatus& current_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );
 
     std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> stop(
         const Eigen::Vector3d& current_pose_map,
-        const Eigen::Vector2d& current_state,
+        const RobotStatus& current_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );
 
 private:
-
     MPCParams params_;
     std::vector<Eigen::Vector2d> last_controls_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
