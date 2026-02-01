@@ -32,10 +32,12 @@ private:
     void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
     void control_timer_callback();
-    void handle_stop_state() const;
+    void handle_stop_state();
     void handle_follow_state();
     bool get_current_pose(Eigen::Vector3d& current_pose) const;
-    void publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const;
+    std::optional<double> get_map_to_imu_world_yaw() const;
+    std::optional<double> get_current_phi_imu_world() const;
+    void publish_chassis_cmd(double velocity, double phi, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const;
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& current_pose_map, const double u0);
 
@@ -70,7 +72,10 @@ private:
     ControlFsm::State last_fsm_state_ = ControlFsm::State::IDLE; // 用于打印日志
 
     Eigen::Vector2d current_status_ = Eigen::Vector2d::Zero();
-    double prev_velocity_ = 0.0; // 上一时刻的线速度，用于估计v_dot
+
+    // 最近一次发布的 phi 指令（imu_world系，[-pi, pi]），用于在 TF 短暂不可用时保持角度不跳 0
+    double last_phi_cmd_ = 0.0;
+    bool has_last_phi_cmd_ = false;
 
     std::optional<SplineD> global_path_;
     double last_reference_u_ = 0.0;
@@ -293,7 +298,6 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
-    prev_velocity_ = current_status_.x(); // 保存上一时刻速度
     current_status_.x() = msg->velocity;
     current_status_.y() = msg->palstance;
 }
@@ -319,8 +323,13 @@ void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGri
 }
 
 void PathFollowerNode::control_timer_callback() {
+    // 地图未就绪时也尽量保持 phi 为当前角度，避免 Idle 下 phi 回到 0
     if (!merged_cost_map_ || !global_direction_map_) {
-        publish_chassis_cmd(0.0, 0.0, false, false, false, false);
+        double hold_phi = has_last_phi_cmd_ ? last_phi_cmd_ : 0.0;
+        if (const auto phi_now = get_current_phi_imu_world()) {
+            hold_phi = *phi_now;
+        }
+        publish_chassis_cmd(0.0, hold_phi, 0.0, false, false, false, false);
         return;
     }
 
@@ -350,7 +359,12 @@ void PathFollowerNode::control_timer_callback() {
 
     switch (fsm_state) {
         case ControlFsm::State::IDLE: { // 闲置模式：无路径且无需小陀螺
-            publish_chassis_cmd(0.0, 0.0, false, false, false, false);
+            // Idle也持续发送当前角度（imu_world系），避免电控误以为目标角度为0
+            double hold_phi = has_last_phi_cmd_ ? last_phi_cmd_ : 0.0;
+            if (const auto phi_now = get_current_phi_imu_world()) {
+                hold_phi = *phi_now;
+            }
+            publish_chassis_cmd(0.0, hold_phi, 0.0, false, false, false, false);
             break;
         }
         case ControlFsm::State::FOLLOW: { // 路径跟随模式
@@ -360,7 +374,7 @@ void PathFollowerNode::control_timer_callback() {
         case ControlFsm::State::SPIN: { // 小陀螺模式：速度/角速度由电控负责（通过slow_spin/fast_spin标志）
             const bool slow_spin = (spin_state_ == SpinState::SPIN_SLOW);
             const bool fast_spin = (spin_state_ == SpinState::SPIN_FAST);
-            publish_chassis_cmd(0.0, 0.0, false, false, slow_spin, fast_spin);
+            publish_chassis_cmd(0.0, 0.0, 0.0, false, false, slow_spin, fast_spin);
             break;
         }
         case ControlFsm::State::STOPPING: { // 过渡停止模式：用于Follow<->Spin以及路径丢失等场景，保证指令平滑
@@ -370,7 +384,7 @@ void PathFollowerNode::control_timer_callback() {
     }
 }
 
-void PathFollowerNode::handle_stop_state() const {
+void PathFollowerNode::handle_stop_state() {
     Eigen::Vector3d current_pose;
     if (!get_current_pose(current_pose)) return;
 
@@ -378,7 +392,6 @@ void PathFollowerNode::handle_stop_state() const {
 
     const RobotStatus current_status = {
         .v = current_status_.x(),
-        .v_dot = (current_status_.x() - prev_velocity_) / params_.dt,
         .omega = current_status_.y()
     };
 
@@ -400,9 +413,18 @@ void PathFollowerNode::handle_stop_state() const {
         RCLCPP_DEBUG(get_logger(), "MPCController(Stop) solve time: %.2f ms", solve_ms);
     }
 
-    publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), false, false, false, false);
+    // 将 map 系下的期望角度转换到 imu_world 系
+    double phi_imu_world = 0.0;
+    const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
+    if (map_to_imu_world_yaw) {
+        phi_imu_world = result->theta_map - *map_to_imu_world_yaw;
+        // 角度归一化到 [-pi, pi]
+        phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world));
+    }
+
+    publish_chassis_cmd(result->cmd.x(), phi_imu_world, result->cmd.y(), false, false, false, false);
     if (enable_debug_) {
-        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
+        debug_predicted_path_pub_->publish(path_to_nav_msg(result->predicted_path));
     }
 }
 
@@ -424,7 +446,6 @@ void PathFollowerNode::handle_follow_state() {
 
     const RobotStatus current_status = {
         .v = current_status_.x(),
-        .v_dot = (current_status_.x() - prev_velocity_) / params_.dt,
         .omega = current_status_.y()
     };
 
@@ -454,10 +475,19 @@ void PathFollowerNode::handle_follow_state() {
         last_reference_u_ = 0.0;
     }
 
+    // 将 map 系下的期望角度转换到 imu_world 系
+    double phi_imu_world = 0.0;
+    const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
+    if (map_to_imu_world_yaw) {
+        phi_imu_world = result->theta_map - *map_to_imu_world_yaw;
+        // 角度归一化到 [-pi, pi]
+        phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world));
+    }
+
     const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose, u0);
-    publish_chassis_cmd(std::get<0>(*result).x(), std::get<0>(*result).y(), step_up_ahead, step_down_ahead, false, false);
+    publish_chassis_cmd(result->cmd.x(), phi_imu_world, result->cmd.y(), step_up_ahead, step_down_ahead, false, false);
     if (enable_debug_) {
-        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
+        debug_predicted_path_pub_->publish(path_to_nav_msg(result->predicted_path));
     }
 }
 
@@ -516,15 +546,40 @@ std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vec
     return {step_up, step_down};
 }
 
-void PathFollowerNode::publish_chassis_cmd(double velocity, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const {
+void PathFollowerNode::publish_chassis_cmd(double velocity, double phi, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = velocity;
+    msg.phi = phi;
     msg.palstance = palstance;
     msg.step_up_ahead = step_up_ahead;
     msg.step_down_ahead = step_down_ahead;
     msg.slow_spin = slow_spin;
     msg.fast_spin = fast_spin;
     chassis_cmd_pub_->publish(msg);
+
+    // 仅在非小陀螺模式下更新 last_phi（小陀螺期望全 0，不应覆盖缓存）
+    if (!slow_spin && !fast_spin) {
+        // 归一化到 [-pi, pi]
+        const double phi_norm = std::atan2(std::sin(phi), std::cos(phi));
+        const_cast<PathFollowerNode*>(this)->last_phi_cmd_ = phi_norm;
+        const_cast<PathFollowerNode*>(this)->has_last_phi_cmd_ = true;
+    }
+}
+
+std::optional<double> PathFollowerNode::get_current_phi_imu_world() const {
+    Eigen::Vector3d current_pose_map;
+    if (!get_current_pose(current_pose_map)) {
+        return std::nullopt;
+    }
+
+    const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
+    if (!map_to_imu_world_yaw) {
+        return std::nullopt;
+    }
+
+    double phi_imu_world = current_pose_map.z() - *map_to_imu_world_yaw;
+    phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world));
+    return phi_imu_world;
 }
 
 bool PathFollowerNode::get_current_pose(Eigen::Vector3d& current_pose) const {
@@ -545,6 +600,25 @@ bool PathFollowerNode::get_current_pose(Eigen::Vector3d& current_pose) const {
     }
     current_pose.z() = atan2(x_axis.y(), x_axis.x());
     return true;
+}
+
+std::optional<double> PathFollowerNode::get_map_to_imu_world_yaw() const {
+    geometry_msgs::msg::TransformStamped tf;
+    try {
+        tf = tf_buffer_->lookupTransform("imu_world", "map", tf2::TimePointZero);
+    } catch (const tf2::TransformException& ex) {
+        RCLCPP_WARN(get_logger(), "Could not transform map to imu_world: %s", ex.what());
+        return std::nullopt;
+    }
+
+    // 提取 map 到 imu_world 的 yaw 角
+    const Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
+    const Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
+    if (x_axis.norm() < 1e-6) {
+        RCLCPP_WARN(get_logger(), "Invalid map to imu_world orientation");
+        return std::nullopt;
+    }
+    return std::atan2(x_axis.y(), x_axis.x());
 }
 
 nav_msgs::msg::Path PathFollowerNode::path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const {

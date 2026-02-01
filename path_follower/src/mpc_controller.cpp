@@ -508,7 +508,7 @@ MPCController::MPCController(const MPCParams& params): params_(params) {
     last_controls_.assign(std::max(1, params_.horizon), Eigen::Vector2d::Zero());
 }
 
-std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCController::follow_path(
+std::expected<MPCOutput, std::string> MPCController::follow_path(
     const SplineD& global_path,
     const Eigen::Vector3d& current_pose_map,
     const RobotStatus& current_status,
@@ -640,7 +640,17 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     x_state(IDX_DPHI) = current_status.omega;
     x_state(IDX_PHI) = pose.z();
 
-    for (int i = 0; i < params_.horizon; i++) {
+    // 执行第一步预测，获取期望角度
+    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1]);
+    const double theta_map_predicted = x_state(IDX_PHI);  // 第一步预测后的期望角度
+    const double v_first = x_state(IDX_DS);
+    pose.x() += v_first * std::cos(theta_map_predicted) * params_.dt;
+    pose.y() += v_first * std::sin(theta_map_predicted) * params_.dt;
+    pose.z() = theta_map_predicted;
+    predicted_path_map.push_back(pose.head<2>());
+
+    // 继续后续步骤的预测
+    for (int i = 1; i < params_.horizon; i++) {
         const double v_cmd = controls[i][0];
         const double w_cmd = controls[i][1];
 
@@ -654,10 +664,10 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         predicted_path_map.push_back(pose.head<2>());
     }
 
-    return std::tuple {cmd_v_omega, predicted_path_map};
+    return MPCOutput{cmd_v_omega, theta_map_predicted, predicted_path_map};
 }
 
-std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCController::stop(
+std::expected<MPCOutput, std::string> MPCController::stop(
     const Eigen::Vector3d& current_pose_map,
     const RobotStatus& current_status,
     const CostMap& merged_cost_map,
@@ -749,7 +759,17 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     x_state(IDX_DPHI) = current_status.omega;
     x_state(IDX_PHI) = pose.z();
 
-    for (int i = 0; i < params_.horizon; i++) {
+    // 执行第一步预测，获取期望角度
+    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1]);
+    const double theta_map_predicted = x_state(IDX_PHI);  // 第一步预测后的期望角度
+    const double v_first = x_state(IDX_DS);
+    pose.x() += v_first * std::cos(theta_map_predicted) * params_.dt;
+    pose.y() += v_first * std::sin(theta_map_predicted) * params_.dt;
+    pose.z() = theta_map_predicted;
+    predicted_path_map.push_back(pose.head<2>());
+
+    // 继续后续步骤的预测
+    for (int i = 1; i < params_.horizon; i++) {
         const double v_cmd = controls[i][0];
         const double w_cmd = controls[i][1];
 
@@ -763,7 +783,7 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         predicted_path_map.push_back(pose.head<2>());
     }
 
-    return std::tuple {cmd_v_omega, predicted_path_map};
+    return MPCOutput{cmd_v_omega, theta_map_predicted, predicted_path_map};
 }
 
 }

@@ -18,7 +18,6 @@ struct LQRModel {
 
 struct RobotStatus {
     double v;       // 线速度 (m/s)
-    double v_dot;   // 线加速度 (m/s^2)
     double omega;   // 角速度 (rad/s)
 };
 
@@ -118,11 +117,18 @@ struct MPCParams {
     MPCStopWeights stop_weights;
 };
 
+/// MPC 控制输出结构
+struct MPCOutput {
+    Eigen::Vector2d cmd;                           ///< 控制指令 (v, omega)
+    double theta_map;                              ///< 预测的期望角度 (map 系, rad)
+    std::vector<Eigen::Vector2d> predicted_path;   ///< 预测轨迹
+};
+
 class MPCController {
 public:
     explicit MPCController(const MPCParams& params);
 
-    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
+    std::expected<MPCOutput, std::string> follow_path(
         const SplineD& global_path,
         const Eigen::Vector3d& current_pose_map,
         const RobotStatus& current_status,
@@ -130,7 +136,7 @@ public:
         const DirectionMap& global_direction_map
     );
 
-    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> stop(
+    std::expected<MPCOutput, std::string> stop(
         const Eigen::Vector3d& current_pose_map,
         const RobotStatus& current_status,
         const CostMap& merged_cost_map,

@@ -43,6 +43,20 @@ from sensor_msgs.msg import Imu, PointCloud2
 from tf2_ros import TransformBroadcaster
 
 
+def wrap_to_pi(angle: float) -> float:
+    """归一化角度到 [-pi, pi]。"""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def angle_diff(a: float, b: float) -> float:
+    """返回 a-b 的最短角差，范围 [-pi, pi]。"""
+    return wrap_to_pi(a - b)
+
+
+def is_finite(x: float) -> bool:
+    return math.isfinite(x)
+
+
 # ============================================================================
 # 仿真参数配置 (直接修改这些值来调整仿真行为)
 # ============================================================================
@@ -422,12 +436,13 @@ class WheelLegDynamics:
         
         return B
     
-    def compute_lqr_control(self, v_ref: float, w_ref: float) -> np.ndarray:
+    def compute_lqr_control(self, v_ref: float, w_ref: float, phi_ref: Optional[float] = None) -> np.ndarray:
         """计算LQR控制输入
         
         Args:
             v_ref: 参考线速度 (m/s)
             w_ref: 参考角速度 (rad/s)
+            phi_ref: 参考角度 (rad)，如果为None则使用当前角度
         
         Returns:
             u: 控制输入 [T_w_l, T_w_r, T_b_l, T_b_r]
@@ -447,11 +462,17 @@ class WheelLegDynamics:
         x_ref = np.zeros(10)
         x_ref[self.IDX_S] = self.state[self.IDX_S]  # 位置参考跟随当前位置
         x_ref[self.IDX_DS] = v_ref                   # 速度参考
-        x_ref[self.IDX_PHI] = self.state[self.IDX_PHI]  # 角度参考跟随当前角度
+        # 角度参考：如果提供了phi_ref则使用，否则跟随当前角度
+        if phi_ref is not None:
+            x_ref[self.IDX_PHI] = phi_ref
+        else:
+            x_ref[self.IDX_PHI] = self.state[self.IDX_PHI]
         x_ref[self.IDX_DPHI] = w_ref                 # 角速度参考
         
         # 计算状态误差
         x_error = self.state - x_ref
+        # 角度误差使用最短角差，避免 -pi/pi 附近出现“绕一圈”的误差
+        x_error[self.IDX_PHI] = angle_diff(float(self.state[self.IDX_PHI]), float(x_ref[self.IDX_PHI]))
         
         # 计算控制输入 u = -K * x_error
         u = -self._cached_K @ x_error
@@ -464,19 +485,20 @@ class WheelLegDynamics:
         
         return u
     
-    def step(self, v_ref: float, w_ref: float, dt: float) -> np.ndarray:
+    def step(self, v_ref: float, w_ref: float, dt: float, phi_ref: Optional[float] = None) -> np.ndarray:
         """执行一步仿真
         
         Args:
             v_ref: 参考线速度 (m/s)
             w_ref: 参考角速度 (rad/s)
             dt: 时间步长
+            phi_ref: 参考角度 (rad)，如果为None则使用当前角度
         
         Returns:
             u: 控制输入 [T_w_l, T_w_r, T_b_l, T_b_r]
         """
         # 计算LQR控制
-        u = self.compute_lqr_control(v_ref, w_ref)
+        u = self.compute_lqr_control(v_ref, w_ref, phi_ref)
         
         # 获取当前腿长
         l_l = np.clip(self.params.l_l, self.params.h_min, self.params.h_max)
@@ -572,6 +594,7 @@ class WheelLegSimulationNode(Node):
         # 控制指令状态
         self._cmd_v = 0.0           # 期望线速度
         self._cmd_w = 0.0           # 期望角速度
+        self._cmd_phi: Optional[float] = None  # 期望角度 (imu_world系)
         self._prev_cmd_v = 0.0      # 上一次线速度 (用于计算加速度)
         self._prev_cmd_w = 0.0      # 上一次角速度 (用于计算角加速度)
         self._slow_spin = False
@@ -581,6 +604,7 @@ class WheelLegSimulationNode(Node):
         # 限幅后的控制指令
         self._limited_v = 0.0
         self._limited_w = 0.0
+        self._limited_phi: Optional[float] = None
         
         # 发布器
         self.joint_state_pub = self.create_publisher(JointState, '/serial_bridge/joint_state', 2)
@@ -623,9 +647,22 @@ class WheelLegSimulationNode(Node):
             # 保持当前旋转方向
             last_sign = 1.0 if self.dynamics.palstance >= 0.0 else -1.0
             self._cmd_w = spin_omega * last_sign
+            self._cmd_phi = None  # 小陀螺模式不使用 phi
         else:
             self._cmd_v = float(msg.velocity)
             self._cmd_w = float(msg.palstance)
+
+            # phi（imu_world系）按“只要是有限值就使用”的原则处理：
+            # - 上位机/控制器在 Idle 也会持续发送当前角度，用于保持朝向
+            # - 避免依赖 phi==0 的特殊含义（会导致模式切换时不稳定）
+            phi_in = float(msg.phi)
+            self._cmd_phi = phi_in if is_finite(phi_in) else None
+
+        # 指令有限性兜底，防止 NaN/Inf 扩散到动力学与下游 MPC
+        if not is_finite(self._cmd_v):
+            self._cmd_v = 0.0
+        if not is_finite(self._cmd_w):
+            self._cmd_w = 0.0
         
         # 应用限幅
         self._limited_v, self._limited_w = self._apply_limits(
@@ -633,6 +670,7 @@ class WheelLegSimulationNode(Node):
             self._prev_cmd_v, self._prev_cmd_w,
             self._publish_dt
         )
+        self._limited_phi = self._cmd_phi
         
         self._last_cmd_time = now
     
@@ -648,6 +686,10 @@ class WheelLegSimulationNode(Node):
         4. 最大角加速度
         5. 速度角速度积
         """
+        # 0. 非法值保护
+        if not is_finite(v) or not is_finite(w):
+            return 0.0, 0.0
+
         # 1. 限制速度
         v = np.clip(v, -self.config.MAX_VELOCITY, self.config.MAX_VELOCITY)
         w = np.clip(w, -self.config.MAX_PALSTANCE, self.config.MAX_PALSTANCE)
@@ -684,10 +726,17 @@ class WheelLegSimulationNode(Node):
         if now - self._last_cmd_time > self._cmd_timeout:
             self._limited_v = 0.0
             self._limited_w = 0.0
+            self._limited_phi = None
+
+        # 再做一次有限性检查（防止上游异常或数值问题）
+        if not is_finite(self._limited_v) or not is_finite(self._limited_w):
+            self._limited_v = 0.0
+            self._limited_w = 0.0
+            self._limited_phi = None
         
         # 执行多步LQR仿真
         for _ in range(self._lqr_steps_per_publish):
-            self.dynamics.step(self._limited_v, self._limited_w, self._lqr_dt)
+            self.dynamics.step(self._limited_v, self._limited_w, self._lqr_dt, self._limited_phi)
         
         # 发布消息
         self._publish_messages(now)
@@ -706,7 +755,7 @@ class WheelLegSimulationNode(Node):
         imu_msg = Imu()
         imu_msg.header.stamp = now.to_msg()
         imu_msg.header.frame_id = "imu_world"
-        imu_msg.orientation = euler_to_quaternion(0, 0, self.dynamics.theta)
+        imu_msg.orientation = euler_to_quaternion(0, 0, wrap_to_pi(self.dynamics.theta))
         self.imu_pub.publish(imu_msg)
         
         # 3. 发布 ChassisStatus
@@ -738,7 +787,7 @@ class WheelLegSimulationNode(Node):
         odom_msg.pose.pose.position.x = self.dynamics.x
         odom_msg.pose.pose.position.y = self.dynamics.y
         odom_msg.pose.pose.position.z = 0.0
-        odom_msg.pose.pose.orientation = euler_to_quaternion(0, 0, self.dynamics.theta)
+        odom_msg.pose.pose.orientation = euler_to_quaternion(0, 0, wrap_to_pi(self.dynamics.theta))
         self.odom_pub.publish(odom_msg)
 
         # 6. 发布 PointCloud2 (空点云)

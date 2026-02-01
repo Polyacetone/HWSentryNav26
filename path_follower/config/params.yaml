@@ -26,9 +26,9 @@
 
     mpc: # MPC控制器参数
       general: # 通用参数
-        horizon: 12 # 预测步数
+        horizon: 10 # 预测步数
         dt: 0.1 # 预测时间间隔
-        max_iterations: 40 # 最大迭代次数
+        max_iterations: 30 # 最大迭代次数
       lqr: # LQR预测相关参数，A/B/K矩阵见lqr_matrix.yaml
         dt: 0.001 # LQR小步时长(s)，用于计算每个子步包含多少个LQR小步
         substeps: 10 # 单步MPC内的LQR子步数
@@ -38,7 +38,7 @@
           search_window: 0.1 # 局部搜索窗口大小（0~1）
           max_correspondence_distance: 1.0 # 最大对应点距离 (m)
         limits: # 运动限制
-          vel_max: 2.0 # 最大速度 (m/s)
+          vel_max: 2.8 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
@@ -55,7 +55,7 @@
         weights: # 权重
           q_y: 0.35 # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u: 1.5 # 进度项权重
+          q_u: 2.0 # 进度项权重
           q_v_final: 0.5 # 终点减速权重
           r_v: 0.02 # 线速度正则
           r_omega: 0.02 # 角速度正则
@@ -72,7 +72,7 @@
           step: 0.01 # 经过台阶惩罚
       stop: # 停止模式
         limits: # 运动限制
-          vel_max: 2.0 # 最大线速度硬约束 (m/s)
+          vel_max: 2.8 # 最大线速度硬约束 (m/s)
           omega_max: 7.2 # 最大角速度硬约束 (rad/s)
           omega_min: -7.2 # 最小角速度硬约束 (rad/s)
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
