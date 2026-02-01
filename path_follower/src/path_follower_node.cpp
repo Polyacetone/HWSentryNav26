@@ -1,5 +1,5 @@
 #include <Eigen/Dense>
-#include <cmath>
+#include <unsupported/Eigen/MatrixFunctions>
 #include <rclcpp/rclcpp.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/core.hpp>
@@ -88,15 +88,65 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.predicted_path_pub_topic"), 1);
     }
 
+    const auto load_matrix = [this](const std::string& name, int rows, int cols) {
+        const auto data = declare_parameter<std::vector<double>>(name);
+        if (data.size() != rows * cols) {
+            RCLCPP_FATAL(get_logger(), "Parameter %s size %zu != %d", name.c_str(), data.size(), rows * cols);
+            throw std::runtime_error("Invalid matrix size");
+        }
+        Eigen::MatrixXd mat(rows, cols);
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                mat(r, c) = data[r * cols + c];
+            }
+        }
+        return mat;
+    };
+
+    const int horizon = (int)declare_parameter<int>("mpc.general.horizon");
+    const double mpc_dt = declare_parameter<double>("mpc.general.dt");
+    const int max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations");
+
+    const double lqr_dt = declare_parameter<double>("mpc.lqr.dt");
+    const int substeps = (int)declare_parameter<int>("mpc.lqr.substeps");
+    if (substeps <= 0) {
+        RCLCPP_FATAL(get_logger(), "mpc.lqr.substeps must be > 0, got %d", substeps);
+        throw std::runtime_error("Invalid mpc.lqr.substeps");
+    }
+    const double dt_sub = mpc_dt / substeps;
+
+    const int lqr_steps_per_substep = (lqr_dt > 0.0) ? std::max(1, (int)std::llround(dt_sub / lqr_dt)) : 1;
+    const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
+    if (lqr_dt <= 0.0) {
+        RCLCPP_WARN(get_logger(), "mpc.lqr.dt <= 0, skip LQR-step bookkeeping");
+    } else if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
+        RCLCPP_WARN(
+            get_logger(),
+            "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f). ",
+            dt_sub, lqr_dt, lqr_steps_per_substep, dt_sub_from_lqr
+        );
+    }
+
+    LQRModel lqr_model;
+    lqr_model.substeps = substeps;
+    lqr_model.dt_sub = dt_sub;
+    const Eigen::Matrix<double, 10, 10> A = load_matrix("mpc.lqr.A", 10, 10);
+    const Eigen::Matrix<double, 10, 4> B = load_matrix("mpc.lqr.B", 10, 4);
+    const Eigen::Matrix<double, 4, 10> K = load_matrix("mpc.lqr.K", 4, 10);
+    const Eigen::Matrix<double, 10, 10> Acl = A - B * K;
+    const Eigen::Matrix<double, 10, 10> BK = B * K;
+    Eigen::Matrix<double, 20, 20> M = Eigen::Matrix<double, 20, 20>::Zero();
+    M.block<10, 10>(0, 0) = Acl;
+    M.block<10, 10>(0, 10) = BK;
+    const Eigen::Matrix<double, 20, 20> Mexp = (M * dt_sub).exp();
+    lqr_model.A_cl = Mexp.block<10, 10>(0, 0);
+    lqr_model.B_ref = Mexp.block<10, 10>(0, 10);
+
     params_ = {
-        .horizon = (int)declare_parameter<int>("mpc.general.horizon"),
-        .dt = declare_parameter<double>("mpc.general.dt"),
-        .max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations"),
-        .model = {
-            .wn_v = declare_parameter<double>("mpc.model.wn_v"),
-            .zeta_v = declare_parameter<double>("mpc.model.zeta_v"),
-            .tau_omega = declare_parameter<double>("mpc.model.tau_omega")
-        },
+        .horizon = horizon,
+        .dt = mpc_dt,
+        .max_iterations = max_iterations,
+        .lqr = lqr_model,
         .follow_limits = {
             .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
             .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
@@ -163,6 +213,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .step_terminal_weight = declare_parameter<double>("mpc.stop.weights.step_terminal")
         }
     };
+
     mpc_controller_ = std::make_unique<MPCController>(params_);
 
     control_fsm_ = std::make_unique<ControlFsm>(ControlFsm::Params{

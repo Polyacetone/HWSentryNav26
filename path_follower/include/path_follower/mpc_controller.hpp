@@ -7,17 +7,13 @@
 
 namespace path_follower {
 
-struct HybridModel {
-    // 线速度二阶系统参数
-    double wn_v;        // 自然频率 (rad/s)
-    double zeta_v;      // 阻尼比
-
-    // 角速度一阶系统参数
-    double tau_omega;   // 时间常数 (s)
-
-    // 预计算值
-    double wn_v_sq() const { return wn_v * wn_v; }
-    double two_zeta_wn_v() const { return 2.0 * zeta_v * wn_v; }
+struct LQRModel {
+    // 离散化闭环矩阵（子步）: x_{k+1} = A_cl * x_k + B_ref * x_ref
+    // 其中 A_cl = exp((A - B*K) * dt_sub), B_ref = \int_0^{dt_sub} exp((A - B*K)\tau) d\tau * (B*K)
+    Eigen::Matrix<double, 10, 10> A_cl;   // 离散闭环状态矩阵（子步）
+    Eigen::Matrix<double, 10, 10> B_ref;  // 离散参考输入矩阵（子步）
+    int substeps = 1;                     // 每个 MPC 步内的子步数
+    double dt_sub = 0.0;                  // LQR 子步时长 (s)
 };
 
 struct RobotStatus {
@@ -112,7 +108,7 @@ struct MPCParams {
     double dt;
     int max_iterations;
 
-    HybridModel model;
+    LQRModel lqr;
 
     MPCFollowLimits follow_limits;
     MPCFollowWeights follow_weights;

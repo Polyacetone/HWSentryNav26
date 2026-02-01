@@ -26,13 +26,12 @@
 
     mpc: # MPC控制器参数
       general: # 通用参数
-        horizon: 12 # 预测步数
+        horizon: 10 # 预测步数
         dt: 0.1 # 预测时间间隔
         max_iterations: 50 # 最大迭代次数
-      model: # 底层闭环等效模型（混合模型：线速度二阶欠阻尼 + 角速度一阶滞后）
-        wn_v: 4.08 # 线速度自然频率 (rad/s)
-        zeta_v: 0.716 # 线速度阻尼比
-        tau_omega: 0.157 # 角速度时间常数 (s)
+      lqr: # LQR预测相关参数，A/B/K矩阵见lqr_matrix.yaml
+        dt: 0.001 # LQR小步时长(s)，用于计算每个子步包含多少个LQR小步
+        substeps: 5 # 单步MPC内的LQR子步数
       follow_path: # 路径跟随模式
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数
