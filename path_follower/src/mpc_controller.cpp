@@ -277,6 +277,9 @@ struct FollowMPCCostFunctor {
             const T dsdu = ceres::sqrt(dx * dx + dy * dy) + T(1e-6);
             const T kappa = (dx * ddy - dy * ddx) / (dsdu * dsdu * dsdu);
 
+            const T s_remain = estimate_remaining_arclength(spline, u, params_.follow_limits.slow_down_num_samples);
+            const T slow_dist = T(params_.follow_limits.slow_down_distance);
+
             // Frenet误差
             const T ex = x - pr.x();
             const T ey_world = y - pr.y();
@@ -289,7 +292,9 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.q_theta) * etheta;
 
             // 2. 进度推进
-            residuals[res_idx++] = T(params_.follow_weights.q_u) * (T(1.0) - u);
+            // 使用剩余距离的平滑门控来调整进度权重，避免接近终点时过度推进
+            const T progress_scale = smoothstep(s_remain, T(0.0), slow_dist);
+            residuals[res_idx++] = T(params_.follow_weights.q_u) * progress_scale * (T(1.0) - u);
 
             // 3. 控制正则化
             residuals[res_idx++] = T(params_.follow_weights.r_v) * v_cmd;
@@ -328,19 +333,20 @@ struct FollowMPCCostFunctor {
                 T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
             );
 
+            // 台阶惩罚使用接近门控，避免不必要地接近台阶
+            residuals[res_idx++] = T(params_.follow_weights.step_weight) * step_gate;
+
+            // 台阶方向对齐和台阶区域速度保持使用方向场模长门控
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(theta), ceres::sin(theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * step_gate * ceres::abs(heading_cross_dir);
-            residuals[res_idx++] = T(params_.follow_weights.step_weight) * step_gate;
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * step_gate * (v_act - T(params_.follow_limits.vel_on_step)) * (v_act - T(params_.follow_limits.vel_on_step));
+            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * dir_norm * ceres::abs(heading_cross_dir);
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(v_act - T(params_.follow_limits.vel_on_step));
 
             // 10. 终点减速
-            const T s_remain = estimate_remaining_arclength(spline, u, params_.follow_limits.slow_down_num_samples);
-            const T slow_dist = T(params_.follow_limits.slow_down_distance);
-            const T s_remain_ratio = ceres::fmin(T(1.0), s_remain / (slow_dist + T(1e-6)));
             const T gate_goal = ceres::fmin(T(1.0), ceres::fmax(T(0.0), (slow_dist - s_remain) / (slow_dist + T(1e-6))));
-            const T v_limit_goal = T(params_.follow_limits.vel_min) + (T(params_.follow_limits.vel_max) - T(params_.follow_limits.vel_min)) * s_remain_ratio;
-            residuals[res_idx++] = T(params_.follow_weights.q_v_final) * gate_goal * ceres::fmax(T(0.0), v_act - v_limit_goal);
+            const T deceleration = T(params_.follow_limits.acc_max); // 期望的减速加速度
+            const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
+            residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), v_act - v_dec_profile); // 惩罚超速
 
             // 进度动力学
             T denom = T(1.0) - kappa * ey;
@@ -464,10 +470,10 @@ struct StopMPCCostFunctor {
             const auto dir_normalized = dir / dir_norm;
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(theta), ceres::sin(theta));
             const T heading_dot_dir = heading.dot(dir_normalized);
+            // 这里统一使用接近门控，避免停止模式下不必要地接近台阶
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * ceres::abs(v_act - T(params_.stop_limits.vel_on_step));
             residuals[res_idx++] = T(params_.stop_weights.direction_weight) * gate_step * (T(1.0) - ceres::abs(heading_dot_dir));
-
-            // 7. 台阶区域速度保持
-            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * (v_act - T(params_.stop_limits.vel_on_step)) * (v_act - T(params_.stop_limits.vel_on_step));
+            
             last_v_cmd = v_cmd;
             last_omega_cmd = omega_cmd;
         }
