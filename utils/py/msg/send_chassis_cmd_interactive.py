@@ -181,6 +181,7 @@ class ChassisCmdPublisher(Node):
         self._last_time_s: float | None = None
         self._v_out = 0.0
         self._w_out = 0.0
+        self._theta_out = 0.0
 
         self._mode: str = 'auto'  # 'auto' or 'manual'
         self._active_action: _AutoAction | None = None
@@ -232,11 +233,11 @@ class ChassisCmdPublisher(Node):
         self.get_logger().info('Auto mode:')
         self.get_logger().info('  1: static step test (baseline->step->baseline)')
         self.get_logger().info('  2: moving step test (bias->bias+delta->bias)')
-        self.get_logger().info('  3: sweep(chirp) test (fixed bias velocity + palstance chirp)')
+        self.get_logger().info('  3: sweep(chirp) test (fixed bias velocity + omega chirp)')
         self.get_logger().info('  space: cancel auto action')
         self.get_logger().info('Manual mode:')
         self.get_logger().info('  ↑/↓: velocity +=/-= manual_velocity_step (velocity >= 0)')
-        self.get_logger().info('  ←/→: palstance +=/-= manual_palstance_step')
+        self.get_logger().info('  ←/→: omega +=/-= manual_palstance_step')
         self.get_logger().info('  r: reset manual setpoints to 0')
         self.get_logger().info('  space: stop manual commands (setpoints=0)')
         self.get_logger().info('All outputs are accel/alpha-limited and speed-limited.')
@@ -360,10 +361,11 @@ class ChassisCmdPublisher(Node):
     def _desired_from_manual(self) -> tuple[float, float]:
         return float(self._manual_v_set), float(self._manual_w_set)
 
-    def _publish_cmd(self, velocity: float, palstance: float) -> None:
+    def _publish_cmd(self, velocity: float, omega: float) -> None:
         msg = ChassisCmd()
         msg.velocity = float(velocity)
-        msg.palstance = float(palstance)
+        msg.omega = float(omega)
+        msg.theta = float(self._theta_out)
         msg.step_up_ahead = False
         msg.step_down_ahead = False
         msg.slow_spin = False
@@ -400,6 +402,9 @@ class ChassisCmdPublisher(Node):
         self._v_out = self._slew_limit(self._v_out, v_des, a_max, dt)
         self._w_out = self._slew_limit(self._w_out, w_des, alpha_max, dt)
 
+        # Open-loop angle: integrate omega to get theta (initially 0).
+        self._theta_out += self._w_out * dt
+
         # Safety clamp after slew
         self._v_out = _clamp(self._v_out, -max_v, max_v)
         self._w_out = _clamp(self._w_out, -max_w, max_w)
@@ -416,6 +421,7 @@ def main(args=None):
     finally:
         if bool(node.get_parameter('publish_zero_on_shutdown').value):
             try:
+                node._theta_out = 0.0
                 node._publish_cmd(0.0, 0.0)
             except Exception:
                 pass

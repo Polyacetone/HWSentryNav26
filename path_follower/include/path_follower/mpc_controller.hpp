@@ -12,8 +12,8 @@ struct LQRModel {
     // 其中 A_cl = exp((A - B*K) * dt_sub), B_ref = \int_0^{dt_sub} exp((A - B*K)\tau) d\tau * (B*K)
     Eigen::Matrix<double, 10, 10> A_cl;   // 离散闭环状态矩阵（子步）
     Eigen::Matrix<double, 10, 10> B_ref;  // 离散参考输入矩阵（子步）
-    int substeps;                     // 每个 MPC 步内的子步数
-    double dt_sub;                  // LQR 子步时长 (s)
+    int substeps;                         // 每个 MPC 步内的子步数
+    double dt_sub;                        // LQR 子步时长 (s)
 };
 
 struct MPCFollowLimits {
@@ -24,9 +24,6 @@ struct MPCFollowLimits {
 
     double acc_max;
     double alpha_max;
-
-    double phys_acc_max;
-    double phys_alpha_max;
 
     double vel_on_step;
     double a_lat_max;
@@ -50,8 +47,6 @@ struct MPCFollowWeights {
 
     double acc_limit_weight;
     double alpha_limit_weight;
-    double phys_acc_limit_weight;
-    double phys_alpha_limit_weight;
     double lat_acc_weight;
 
     double vel_on_step_weight;
@@ -73,8 +68,6 @@ struct MPCStopLimits {
 
     double acc_max;
     double alpha_max;
-    double phys_acc_max;
-    double phys_alpha_max;
 
     double vel_on_step;
     double a_lat_max;
@@ -86,8 +79,6 @@ struct MPCStopWeights {
 
     double acc_limit_weight;
     double alpha_limit_weight;
-    double phys_acc_limit_weight;
-    double phys_alpha_limit_weight;
     double lat_acc_weight;
     double vel_on_step_weight;
 

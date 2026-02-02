@@ -14,7 +14,8 @@ class ChassisCmdPublisher(Node):
     def timer_callback(self):
         msg = ChassisCmd()
         msg.velocity = 114.0
-        msg.palstance = 514.0
+        msg.theta = 1.14
+        msg.omega = 514.0
         msg.step_up_ahead = True
         msg.step_down_ahead = False
         msg.slow_spin = True

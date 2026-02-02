@@ -106,7 +106,7 @@ struct StStopping final : sc::state<StStopping, Machine> {
         m.stop_dest = Machine::compute_desired(ev.inputs);
 
         const double v = ev.inputs.velocity;
-        const double w = ev.inputs.palstance;
+        const double w = ev.inputs.omega;
 
         switch (m.stop_dest) {
             case ControlFsm::Destination::SPIN: {

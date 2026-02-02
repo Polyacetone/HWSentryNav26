@@ -5,6 +5,7 @@
 #include <tf2_ros/buffer.hpp>
 #include <tf2_ros/transform_listener.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
+#include <tf2_ros/static_transform_broadcaster.hpp>
 
 #include <pcl/common/io.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -45,6 +46,7 @@ private:
     std::chrono::steady_clock::time_point initialize_time_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
@@ -66,6 +68,8 @@ private:
 OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("odom_localizer", options) {
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+    static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
     num_threads_ = declare_parameter<int>("num_threads");
     enable_debug_ = declare_parameter<bool>("enable_debug");
     robot_color_wait_timeout_ = declare_parameter<double>("robot_color_wait_timeout");
@@ -120,7 +124,6 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
         );
     }
 
-    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
     double publish_rate = declare_parameter<double>("publish_rate");
     publish_timer_ = create_wall_timer(
         std::chrono::duration<double>(1.0 / publish_rate),
@@ -266,7 +269,7 @@ void OdomLocalizerNode::publish() const {
     tf.header.frame_id = "map";
     tf.child_frame_id = "odom";
     tf.transform = utils::convert_to<geometry_msgs::msg::Transform>(odom_to_map_->value());
-    tf_broadcaster_->sendTransform(tf);
+    static_tf_broadcaster_->sendTransform(tf);
 }
 
 std::optional<Eigen::Isometry3d> OdomLocalizerNode::lookup_tf(const std::string& parent_frame, const std::string& child_frame) const {

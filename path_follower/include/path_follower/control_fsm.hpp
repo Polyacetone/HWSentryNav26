@@ -18,7 +18,7 @@ public:
         bool spin_requested;
         bool spin_high_priority;
         double velocity;
-        double palstance;
+        double omega;
     };
 
     enum class State {

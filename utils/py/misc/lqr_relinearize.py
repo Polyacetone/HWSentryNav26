@@ -438,7 +438,7 @@ class WheelLegDynamics:
         return self.state[self.IDX_DS]
     
     @property
-    def palstance(self) -> float:
+    def omega(self) -> float:
         """当前角速度"""
         return self.state[self.IDX_DPHI]
     

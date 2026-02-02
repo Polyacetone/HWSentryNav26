@@ -319,21 +319,15 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.acc_limit_weight) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
             residuals[res_idx++] = T(params_.follow_weights.alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
-            // 6. 物理加速度软约束
-            const T dv_act_limit = T(params_.follow_limits.phys_acc_max * params_.dt);
-            const T domega_act_limit = T(params_.follow_limits.phys_alpha_max * params_.dt);
-            residuals[res_idx++] = T(params_.follow_weights.phys_acc_limit_weight) * ceres::fmax(T(0.0), ceres::abs(dv_act) - dv_act_limit);
-            residuals[res_idx++] = T(params_.follow_weights.phys_alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_act) - domega_act_limit);
-
-            // 7. 侧向加速度约束
+            // 6. 侧向加速度约束
             const T a_lat = ceres::abs(v_act * omega_act);
             residuals[res_idx++] = T(params_.follow_weights.lat_acc_weight) * ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
 
-            // 8. 避障
+            // 7. 避障
             const T cost = interpolate_cost_map(merged_cost_map_, x, y);
             residuals[res_idx++] = T(params_.follow_weights.obstacle_weight) * (cost / T(255.0));
 
-            // 9. 台阶处理
+            // 8. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, x, y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T step_gate = smoothstep(
@@ -351,7 +345,7 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.direction_weight) * dir_norm * ceres::abs(heading_cross_dir);
             residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(v_act - T(params_.follow_limits.vel_on_step));
 
-            // 10. 终点减速
+            // 9. 终点减速
             const T gate_goal = ceres::fmin(T(1.0), ceres::fmax(T(0.0), (slow_dist - s_remain) / (slow_dist + T(1e-6))));
             const T deceleration = T(params_.follow_limits.acc_max * 0.9); // 期望的减速加速度
             const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
@@ -461,21 +455,15 @@ struct StopMPCCostFunctor {
             residuals[res_idx++] = T(params_.stop_weights.acc_limit_weight) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
             residuals[res_idx++] = T(params_.stop_weights.alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
-            // 3. 物理加速度约束
-            const T dv_act_limit = T(params_.stop_limits.phys_acc_max * params_.dt);
-            const T domega_act_limit = T(params_.stop_limits.phys_alpha_max * params_.dt);
-            residuals[res_idx++] = T(params_.stop_weights.phys_acc_limit_weight) * ceres::fmax(T(0.0), ceres::abs(dv_act) - dv_act_limit);
-            residuals[res_idx++] = T(params_.stop_weights.phys_alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_act) - domega_act_limit);
-
-            // 4. 侧向加速度约束
+            // 3. 侧向加速度约束
             const T a_lat = ceres::abs(v_act * omega_act);
             residuals[res_idx++] = T(params_.stop_weights.lat_acc_weight) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
 
-            // 5. 避障
+            // 4. 避障
             const T cost = interpolate_cost_map(merged_cost_map_, x, y);
             residuals[res_idx++] = T(params_.stop_weights.obstacle_weight) * (cost / T(255.0));
 
-            // 6. 台阶处理
+            // 5. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, x, y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T gate_step = ceres::fmin(T(1.0), dir_norm * T(2.0));
@@ -588,8 +576,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         cost_function->AddParameterBlock(2);
     }
 
-    // 每步17个残差
-    cost_function->SetNumResiduals(17 * params_.horizon);
+    // 每步15个残差
+    cost_function->SetNumResiduals(15 * params_.horizon);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(params_.horizon + num_pts);
@@ -726,8 +714,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         cost_function->AddParameterBlock(2);
     }
 
-    // 每步10个残差 + 终端2个
-    cost_function->SetNumResiduals(10 * params_.horizon + 2);
+    // 每步8个残差 + 终端2个
+    cost_function->SetNumResiduals(8 * params_.horizon + 2);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(params_.horizon);

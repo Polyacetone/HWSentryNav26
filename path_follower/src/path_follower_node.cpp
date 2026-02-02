@@ -36,8 +36,8 @@ private:
     void handle_follow_state();
     bool get_current_pose(Eigen::Vector3d& current_pose) const;
     std::optional<double> get_map_to_imu_world_yaw() const;
-    std::optional<double> get_current_phi_imu_world() const;
-    void publish_chassis_cmd(double velocity, double phi, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const;
+    std::optional<double> get_current_theta_imu_world() const;
+    void publish_chassis_cmd(double velocity, double theta, double omega, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const;
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& current_pose_map, const double u0);
 
@@ -72,7 +72,8 @@ private:
 
     std::unique_ptr<ControlFsm> control_fsm_;
     ControlFsm::State last_fsm_state_ = ControlFsm::State::IDLE; // 用于打印日志
-    double last_reference_u_ = 0.0;
+    double last_reference_u_ = 0.0; // 上一次投影到样条曲线的参数u
+    std::optional<double> theta_keep_imu_world_; // 用于Idle状态保持当前角度
 };
 
 PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower", options) {
@@ -154,8 +155,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .omega_min = declare_parameter<double>("mpc.follow_path.limits.omega_min"),
             .acc_max = declare_parameter<double>("mpc.follow_path.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.follow_path.limits.alpha_max"),
-            .phys_acc_max = declare_parameter<double>("mpc.follow_path.limits.phys_acc_max"),
-            .phys_alpha_max = declare_parameter<double>("mpc.follow_path.limits.phys_alpha_max"),
             .vel_on_step = declare_parameter<double>("mpc.follow_path.limits.vel_on_step"),
             .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
             .slow_down_distance = declare_parameter<double>("mpc.follow_path.limits.slow_down_distance"),
@@ -174,8 +173,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .r_domega = declare_parameter<double>("mpc.follow_path.weights.r_domega"),
             .acc_limit_weight = declare_parameter<double>("mpc.follow_path.weights.acc_limit"),
             .alpha_limit_weight = declare_parameter<double>("mpc.follow_path.weights.alpha_limit"),
-            .phys_acc_limit_weight = declare_parameter<double>("mpc.follow_path.weights.phys_acc_limit"),
-            .phys_alpha_limit_weight = declare_parameter<double>("mpc.follow_path.weights.phys_alpha_limit"),
             .lat_acc_weight = declare_parameter<double>("mpc.follow_path.weights.lat_acc"),
             .vel_on_step_weight = declare_parameter<double>("mpc.follow_path.weights.vel_on_step"),
             .obstacle_weight = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
@@ -193,8 +190,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .omega_min = declare_parameter<double>("mpc.stop.limits.omega_min"),
             .acc_max = declare_parameter<double>("mpc.stop.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.stop.limits.alpha_max"),
-            .phys_acc_max = declare_parameter<double>("mpc.stop.limits.phys_acc_max"),
-            .phys_alpha_max = declare_parameter<double>("mpc.stop.limits.phys_alpha_max"),
             .vel_on_step = declare_parameter<double>("mpc.stop.limits.vel_on_step"),
             .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max")
         },
@@ -203,8 +198,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .q_omega = declare_parameter<double>("mpc.stop.weights.q_omega"),
             .acc_limit_weight = declare_parameter<double>("mpc.stop.weights.acc_limit"),
             .alpha_limit_weight = declare_parameter<double>("mpc.stop.weights.alpha_limit"),
-            .phys_acc_limit_weight = declare_parameter<double>("mpc.stop.weights.phys_acc_limit"),
-            .phys_alpha_limit_weight = declare_parameter<double>("mpc.stop.weights.phys_alpha_limit"),
             .lat_acc_weight = declare_parameter<double>("mpc.stop.weights.lat_acc"),
             .vel_on_step_weight = declare_parameter<double>("mpc.stop.weights.vel_on_step"),
             .obstacle_weight = declare_parameter<double>("mpc.stop.weights.obstacle"),
@@ -294,7 +287,7 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
     current_status_.x() = msg->velocity;
-    current_status_.y() = msg->palstance;
+    current_status_.y() = msg->omega;
 }
 
 void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -325,7 +318,7 @@ void PathFollowerNode::control_timer_callback() {
     fsm_inputs.spin_requested = (spin_state_ != SpinState::STOP);
     fsm_inputs.spin_high_priority = spin_high_priority_;
     fsm_inputs.velocity = current_status_.x();
-    fsm_inputs.palstance = current_status_.y();
+    fsm_inputs.omega = current_status_.y();
     control_fsm_->update(fsm_inputs);
 
     const auto fsm_state = control_fsm_->state();
@@ -346,10 +339,10 @@ void PathFollowerNode::control_timer_callback() {
 
     switch (fsm_state) {
         case ControlFsm::State::IDLE: { // 闲置模式：无路径且无需小陀螺
-            // Idle也持续发送当前角度（imu_world系），避免电控误以为目标角度为0
-            const auto phi = get_current_phi_imu_world();
-            if (!phi) break;
-            publish_chassis_cmd(0.0, *phi, 0.0, false, false, false, false);
+            // Idle也持续发送固定角度（imu_world系），避免电控误以为目标角度为0
+            if (!theta_keep_imu_world_) theta_keep_imu_world_ = get_current_theta_imu_world();
+            if (!theta_keep_imu_world_) break;
+            publish_chassis_cmd(0.0, *theta_keep_imu_world_, 0.0, false, false, false, false);
             break;
         }
         case ControlFsm::State::FOLLOW: { // 路径跟随模式
@@ -366,6 +359,11 @@ void PathFollowerNode::control_timer_callback() {
             handle_stop_state();
             break;
         }
+    }
+
+    if (fsm_state != ControlFsm::State::IDLE) {
+        // 离开Idle状态后，清除保持角度
+        theta_keep_imu_world_ = std::nullopt;
     }
 }
 
@@ -394,17 +392,17 @@ void PathFollowerNode::handle_stop_state() {
     }
 
     // 将 map 系下的期望角度转换到 imu_world 系
-    double phi_imu_world = 0.0;
+    double theta_imu_world = 0.0;
     const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
     if (map_to_imu_world_yaw) {
-        phi_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
+        theta_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
         // 角度归一化到 [-pi, pi]
-        phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world));
+        theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world));
     }
 
     publish_chassis_cmd(
         std::get<0>(*result).x(),
-        phi_imu_world,
+        theta_imu_world,
         std::get<0>(*result).z(),
         false, false, false, false
     );
@@ -456,16 +454,16 @@ void PathFollowerNode::handle_follow_state() {
     }
 
     // 将 map 系下的期望角度转换到 imu_world 系
-    double phi_imu_world = 0.0;
+    double theta_imu_world = 0.0;
     const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
     if (!map_to_imu_world_yaw) return;
-    phi_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
-    phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world)); // 角度归一化到 [-pi, pi]
+    theta_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
+    theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world)); // 角度归一化到 [-pi, pi]
 
     const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose, u0);
     publish_chassis_cmd(
         std::get<0>(*result).x(),
-        phi_imu_world,
+        theta_imu_world,
         std::get<0>(*result).z(),
         step_up_ahead, step_down_ahead, false, false
     );
@@ -529,11 +527,11 @@ std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vec
     return {step_up, step_down};
 }
 
-void PathFollowerNode::publish_chassis_cmd(double velocity, double phi, double palstance, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const {
+void PathFollowerNode::publish_chassis_cmd(double velocity, double theta, double omega, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = velocity;
-    msg.phi = phi;
-    msg.palstance = palstance;
+    msg.theta = theta;
+    msg.omega = omega;
     msg.step_up_ahead = step_up_ahead;
     msg.step_down_ahead = step_down_ahead;
     msg.slow_spin = slow_spin;
@@ -541,7 +539,7 @@ void PathFollowerNode::publish_chassis_cmd(double velocity, double phi, double p
     chassis_cmd_pub_->publish(msg);
 }
 
-std::optional<double> PathFollowerNode::get_current_phi_imu_world() const {
+std::optional<double> PathFollowerNode::get_current_theta_imu_world() const {
     Eigen::Vector3d current_pose_map;
     if (!get_current_pose(current_pose_map)) {
         return std::nullopt;
@@ -552,9 +550,9 @@ std::optional<double> PathFollowerNode::get_current_phi_imu_world() const {
         return std::nullopt;
     }
 
-    double phi_imu_world = current_pose_map.z() - *map_to_imu_world_yaw;
-    phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world));
-    return phi_imu_world;
+    double theta_imu_world = current_pose_map.z() - *map_to_imu_world_yaw;
+    theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world));
+    return theta_imu_world;
 }
 
 bool PathFollowerNode::get_current_pose(Eigen::Vector3d& current_pose) const {
