@@ -55,7 +55,7 @@ private:
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 
-    double stop_threshold_;
+    double stop_threshold_dist_, stop_threshold_u_;
     bool enable_debug_;
     double step_check_back_;
     double step_check_front_;
@@ -65,19 +65,13 @@ private:
 
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
+    std::optional<SplineD> global_path_;
+    Eigen::Vector2d current_status_ = Eigen::Vector2d::Zero(); // (v, omega)
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 
     std::unique_ptr<ControlFsm> control_fsm_;
     ControlFsm::State last_fsm_state_ = ControlFsm::State::IDLE; // 用于打印日志
-
-    Eigen::Vector2d current_status_ = Eigen::Vector2d::Zero();
-
-    // 最近一次发布的 phi 指令（imu_world系，[-pi, pi]），用于在 TF 短暂不可用时保持角度不跳 0
-    double last_phi_cmd_ = 0.0;
-    bool has_last_phi_cmd_ = false;
-
-    std::optional<SplineD> global_path_;
     double last_reference_u_ = 0.0;
 };
 
@@ -85,7 +79,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
 
-    stop_threshold_ = declare_parameter<double>("stop_threshold");
+    stop_threshold_dist_ = declare_parameter<double>("stop_threshold_dist");
+    stop_threshold_u_ = declare_parameter<double>("stop_threshold_u");
     enable_debug_ = declare_parameter<bool>("debug.enable");
     if (enable_debug_) {
         get_logger().set_level(rclcpp::Logger::Level::Debug);
@@ -323,15 +318,7 @@ void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGri
 }
 
 void PathFollowerNode::control_timer_callback() {
-    // 地图未就绪时也尽量保持 phi 为当前角度，避免 Idle 下 phi 回到 0
-    if (!merged_cost_map_ || !global_direction_map_) {
-        double hold_phi = has_last_phi_cmd_ ? last_phi_cmd_ : 0.0;
-        if (const auto phi_now = get_current_phi_imu_world()) {
-            hold_phi = *phi_now;
-        }
-        publish_chassis_cmd(0.0, hold_phi, 0.0, false, false, false, false);
-        return;
-    }
+    if (!merged_cost_map_ || !global_direction_map_) return;
 
     ControlFsm::Inputs fsm_inputs;
     fsm_inputs.has_path = global_path_.has_value();
@@ -360,11 +347,9 @@ void PathFollowerNode::control_timer_callback() {
     switch (fsm_state) {
         case ControlFsm::State::IDLE: { // 闲置模式：无路径且无需小陀螺
             // Idle也持续发送当前角度（imu_world系），避免电控误以为目标角度为0
-            double hold_phi = has_last_phi_cmd_ ? last_phi_cmd_ : 0.0;
-            if (const auto phi_now = get_current_phi_imu_world()) {
-                hold_phi = *phi_now;
-            }
-            publish_chassis_cmd(0.0, hold_phi, 0.0, false, false, false, false);
+            const auto phi = get_current_phi_imu_world();
+            if (!phi) break;
+            publish_chassis_cmd(0.0, *phi, 0.0, false, false, false, false);
             break;
         }
         case ControlFsm::State::FOLLOW: { // 路径跟随模式
@@ -390,14 +375,9 @@ void PathFollowerNode::handle_stop_state() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    const RobotStatus current_status = {
-        .v = current_status_.x(),
-        .omega = current_status_.y()
-    };
-
     const auto result = mpc_controller_->stop(
         current_pose,
-        current_status,
+        current_status_,
         *merged_cost_map_,
         *global_direction_map_
     );
@@ -417,14 +397,19 @@ void PathFollowerNode::handle_stop_state() {
     double phi_imu_world = 0.0;
     const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
     if (map_to_imu_world_yaw) {
-        phi_imu_world = result->theta_map - *map_to_imu_world_yaw;
+        phi_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
         // 角度归一化到 [-pi, pi]
         phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world));
     }
 
-    publish_chassis_cmd(result->cmd.x(), phi_imu_world, result->cmd.y(), false, false, false, false);
+    publish_chassis_cmd(
+        std::get<0>(*result).x(),
+        phi_imu_world,
+        std::get<0>(*result).z(),
+        false, false, false, false
+    );
     if (enable_debug_) {
-        debug_predicted_path_pub_->publish(path_to_nav_msg(result->predicted_path));
+        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
     }
 }
 
@@ -444,15 +429,10 @@ void PathFollowerNode::handle_follow_state() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    const RobotStatus current_status = {
-        .v = current_status_.x(),
-        .omega = current_status_.y()
-    };
-
     const auto result = mpc_controller_->follow_path(
         *global_path_,
         current_pose,
-        current_status,
+        current_status_,
         *merged_cost_map_,
         *global_direction_map_
     );
@@ -469,7 +449,7 @@ void PathFollowerNode::handle_follow_state() {
     }
 
     // 如果已经到达目标点，则清除路径，准备进入闲置状态
-    if (u0 >= stop_threshold_) {
+    if ((current_pose.head<2>() - global_path_->evaluate(1.0)).norm() < stop_threshold_dist_ || u0 > stop_threshold_u_) {
         RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", current_pose.x(), current_pose.y());
         global_path_ = std::nullopt;
         last_reference_u_ = 0.0;
@@ -478,16 +458,19 @@ void PathFollowerNode::handle_follow_state() {
     // 将 map 系下的期望角度转换到 imu_world 系
     double phi_imu_world = 0.0;
     const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
-    if (map_to_imu_world_yaw) {
-        phi_imu_world = result->theta_map - *map_to_imu_world_yaw;
-        // 角度归一化到 [-pi, pi]
-        phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world));
-    }
+    if (!map_to_imu_world_yaw) return;
+    phi_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
+    phi_imu_world = std::atan2(std::sin(phi_imu_world), std::cos(phi_imu_world)); // 角度归一化到 [-pi, pi]
 
     const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose, u0);
-    publish_chassis_cmd(result->cmd.x(), phi_imu_world, result->cmd.y(), step_up_ahead, step_down_ahead, false, false);
+    publish_chassis_cmd(
+        std::get<0>(*result).x(),
+        phi_imu_world,
+        std::get<0>(*result).z(),
+        step_up_ahead, step_down_ahead, false, false
+    );
     if (enable_debug_) {
-        debug_predicted_path_pub_->publish(path_to_nav_msg(result->predicted_path));
+        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
     }
 }
 
@@ -556,14 +539,6 @@ void PathFollowerNode::publish_chassis_cmd(double velocity, double phi, double p
     msg.slow_spin = slow_spin;
     msg.fast_spin = fast_spin;
     chassis_cmd_pub_->publish(msg);
-
-    // 仅在非小陀螺模式下更新 last_phi（小陀螺期望全 0，不应覆盖缓存）
-    if (!slow_spin && !fast_spin) {
-        // 归一化到 [-pi, pi]
-        const double phi_norm = std::atan2(std::sin(phi), std::cos(phi));
-        const_cast<PathFollowerNode*>(this)->last_phi_cmd_ = phi_norm;
-        const_cast<PathFollowerNode*>(this)->has_last_phi_cmd_ = true;
-    }
 }
 
 std::optional<double> PathFollowerNode::get_current_phi_imu_world() const {
@@ -607,15 +582,14 @@ std::optional<double> PathFollowerNode::get_map_to_imu_world_yaw() const {
     try {
         tf = tf_buffer_->lookupTransform("imu_world", "map", tf2::TimePointZero);
     } catch (const tf2::TransformException& ex) {
-        RCLCPP_WARN(get_logger(), "Could not transform map to imu_world: %s", ex.what());
+        RCLCPP_ERROR(get_logger(), "Could not transform map to imu_world: %s", ex.what());
         return std::nullopt;
     }
 
-    // 提取 map 到 imu_world 的 yaw 角
     const Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
     const Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
     if (x_axis.norm() < 1e-6) {
-        RCLCPP_WARN(get_logger(), "Invalid map to imu_world orientation");
+        RCLCPP_ERROR(get_logger(), "Invalid map to imu_world orientation");
         return std::nullopt;
     }
     return std::atan2(x_axis.y(), x_axis.x());

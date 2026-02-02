@@ -7,7 +7,9 @@
     chassis_status_sub_topic: "/serial_bridge/chassis_status"
     spin_cmd_sub_topic: "/decision/spin_cmd"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
-    stop_threshold: 0.99 # 停止阈值 (u参数化路径)
+
+    stop_threshold_dist: 1.0 # 停止距离 (m)
+    stop_threshold_u: 0.99 # 停止样条参数u
 
     debug:
       enable: true
@@ -20,7 +22,7 @@
 
     control_fsm: # 控制状态机参数
       follow_to_spin_vel_max: 0.2 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
-      spin_to_follow_omega_max: 4.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
+      spin_to_follow_omega_max: 1.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
       to_idle_vel_max: 0.2 # 切到空闲前，线速度需小于该阈值 (m/s)
       to_idle_omega_max: 0.2 # 切到空闲前，角速度需小于该阈值 (rad/s)
 
@@ -28,7 +30,7 @@
       general: # 通用参数
         horizon: 10 # 预测步数
         dt: 0.1 # 预测时间间隔
-        max_iterations: 30 # 最大迭代次数
+        max_iterations: 50 # 最大迭代次数
       lqr: # LQR预测相关参数，A/B/K矩阵见lqr_matrix.yaml
         dt: 0.001 # LQR小步时长(s)，用于计算每个子步包含多少个LQR小步
         substeps: 10 # 单步MPC内的LQR子步数
@@ -48,13 +50,13 @@
           phys_alpha_max: 12.0 # 物理角加速度限制：最大 domega_act/dt (rad/s²)
           vel_on_step: 0.8 # 台阶区域期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
-          slow_down_distance: 0.8 # 距离终点剩余弧长小于该值时开始减速 (m)
+          slow_down_distance: 1.0 # 距离终点剩余弧长小于该值时开始减速 (m)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
           step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
-          q_y: 0.35 # 横向误差权重
-          q_theta: 0.2 # 航向误差权重
+          q_y: 0.4 # 横向误差权重
+          q_theta: 0.3 # 航向误差权重
           q_u: 2.0 # 进度项权重
           q_v_final: 0.5 # 终点减速权重
           r_v: 0.02 # 线速度正则
@@ -66,7 +68,7 @@
           phys_acc_limit: 5.0 # 物理加速度超限惩罚（dv_act）
           phys_alpha_limit: 5.0 # 物理角加速度超限惩罚（domega_act）
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 3.0 # 台阶区域速度保持权重
+          vel_on_step: 2.0 # 台阶区域速度保持权重
           obstacle: 2.0 # 避障权重（全局+局部）
           direction: 2.0 # 台阶方向对齐权重
           step: 0.01 # 经过台阶惩罚
@@ -89,7 +91,7 @@
           phys_acc_limit: 5.0 # 物理加速度超限惩罚（dv_act）
           phys_alpha_limit: 5.0 # 物理角加速度超限惩罚（domega_act）
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 3.0 # 台阶区域速度保持权重
+          vel_on_step: 2.0 # 台阶区域速度保持权重
           obstacle: 2.0 # 避障惩罚
           obstacle_terminal: 6.0 # 终端避障惩罚（防止停在障碍上）
           direction: 2.0 # 在台阶上要求朝向与台阶方向对齐

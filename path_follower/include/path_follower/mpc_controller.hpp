@@ -12,13 +12,8 @@ struct LQRModel {
     // 其中 A_cl = exp((A - B*K) * dt_sub), B_ref = \int_0^{dt_sub} exp((A - B*K)\tau) d\tau * (B*K)
     Eigen::Matrix<double, 10, 10> A_cl;   // 离散闭环状态矩阵（子步）
     Eigen::Matrix<double, 10, 10> B_ref;  // 离散参考输入矩阵（子步）
-    int substeps = 1;                     // 每个 MPC 步内的子步数
-    double dt_sub = 0.0;                  // LQR 子步时长 (s)
-};
-
-struct RobotStatus {
-    double v;       // 线速度 (m/s)
-    double omega;   // 角速度 (rad/s)
+    int substeps;                     // 每个 MPC 步内的子步数
+    double dt_sub;                  // LQR 子步时长 (s)
 };
 
 struct MPCFollowLimits {
@@ -117,28 +112,21 @@ struct MPCParams {
     MPCStopWeights stop_weights;
 };
 
-/// MPC 控制输出结构
-struct MPCOutput {
-    Eigen::Vector2d cmd;                           ///< 控制指令 (v, omega)
-    double theta_map;                              ///< 预测的期望角度 (map 系, rad)
-    std::vector<Eigen::Vector2d> predicted_path;   ///< 预测轨迹
-};
-
 class MPCController {
 public:
     explicit MPCController(const MPCParams& params);
 
-    std::expected<MPCOutput, std::string> follow_path(
+    std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
         const SplineD& global_path,
         const Eigen::Vector3d& current_pose_map,
-        const RobotStatus& current_status,
+        const Eigen::Vector2d& current_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );
 
-    std::expected<MPCOutput, std::string> stop(
+    std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> stop(
         const Eigen::Vector3d& current_pose_map,
-        const RobotStatus& current_status,
+        const Eigen::Vector2d& current_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );

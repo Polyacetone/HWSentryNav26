@@ -39,6 +39,11 @@ constexpr int IDX_DTHETA_L_R = 7;
 constexpr int IDX_THETA_B = 8;
 constexpr int IDX_DTHETA_B = 9;
 
+template<typename T>
+inline T wrap_to_pi(const T& a) {
+    return ceres::atan2(ceres::sin(a), ceres::cos(a));
+}
+
 /**
  * @brief LQR闭环步进函数（使用预计算的离散闭环矩阵，带子步迭代）
  * 
@@ -58,16 +63,18 @@ inline void lqr_closed_loop_step(
     const LQRModel& model,
     Eigen::Matrix<T, LQR_STATE_SIZE, 1>& x,
     const T& v_ref,
-    const T& w_ref
+    const T& w_ref,
+    const T& theta_ref
 ) {
     // 子步迭代
     for (int i = 0; i < model.substeps; i++) {
         // 构建参考状态（每个子步都更新 s_ref 和 phi_ref）
         Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_ref = Eigen::Matrix<T, LQR_STATE_SIZE, 1>::Zero();
         x_ref(IDX_S) = x(IDX_S);       // s_ref 跟踪当前位置
-        x_ref(IDX_DS) = v_ref;          // ds_ref 是指令速度
-        x_ref(IDX_PHI) = x(IDX_PHI);   // phi_ref 跟踪当前角度
-        x_ref(IDX_DPHI) = w_ref;        // dphi_ref 是指令角速度
+        x_ref(IDX_DS) = v_ref;         // ds_ref 是指令速度
+        // phi_ref：使用理想指令外推得到的下一时刻角度作为参考，并做最短角差处理避免跨 ±pi 跳变
+        x_ref(IDX_PHI) = x(IDX_PHI) + wrap_to_pi(theta_ref - x(IDX_PHI));
+        x_ref(IDX_DPHI) = w_ref;       // dphi_ref 是指令角速度
 
         // 使用预计算的离散闭环矩阵进行状态更新
         x = model.A_cl.cast<T>() * x + model.B_ref.cast<T>() * x_ref;
@@ -191,7 +198,7 @@ struct FollowMPCCostFunctor {
         const int num_control_points,
         const Eigen::Vector3d& start_pose,
         const double u0,
-        const RobotStatus& start_status,
+        const Eigen::Vector2d& start_status,
         const Eigen::Vector2d& start_cmd,
         const MPCParams& params,
         const CostMap& merged_cost_map,
@@ -210,20 +217,18 @@ struct FollowMPCCostFunctor {
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
-        // 初始位姿
-        T x = T(start_pose_.x());
-        T y = T(start_pose_.y());
-        T theta = T(start_pose_.z());
-        T u = T(u0_);
-
-        // 初始动态状态
-        T v_act = T(start_status_.v);
-        T omega_act = T(start_status_.omega);
+        T x = T(start_pose_.x()); // 预测的x坐标
+        T y = T(start_pose_.y()); // 预测的y坐标
+        T theta = T(start_pose_.z()); // 预测的朝向
+        T u = T(u0_); // 参考进度变量
+        T theta_cmd = T(start_pose_.z()); // 基于理想指令外推的朝向，作为LQR参考输入
+        T v_act = T(start_status_.x()); // 预测的线速度
+        T omega_act = T(start_status_.y()); // 预测的角速度
 
         Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_state;
         x_state.setZero();
-        x_state(IDX_DS) = T(start_status_.v);
-        x_state(IDX_DPHI) = T(start_status_.omega);
+        x_state(IDX_DS) = T(start_status_.x());
+        x_state(IDX_DPHI) = T(start_status_.y());
         x_state(IDX_PHI) = T(start_pose_.z());
 
         // 上一时刻指令（用于平滑约束）
@@ -241,6 +246,9 @@ struct FollowMPCCostFunctor {
             const T v_cmd = uk[0];
             const T omega_cmd = uk[1];
 
+            // 基于理想指令外推的下一时刻角度（用于下位机发送与LQR参考输入）
+            const T theta_cmd_next = wrap_to_pi(theta_cmd + omega_cmd * T(params_.dt));
+
             // 指令变化
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
@@ -249,7 +257,7 @@ struct FollowMPCCostFunctor {
             const T v_act_prev = v_act;
             const T omega_act_prev = omega_act;
 
-            lqr_closed_loop_step(lqr_, x_state, v_cmd, omega_cmd);
+            lqr_closed_loop_step(lqr_, x_state, v_cmd, omega_cmd, theta_cmd_next);
             const T v_now = x_state(IDX_DS);
             const T theta_now = x_state(IDX_PHI);
             x += v_now * ceres::cos(theta_now) * T(params_.dt);
@@ -257,6 +265,7 @@ struct FollowMPCCostFunctor {
             theta = theta_now;
             v_act = v_now;
             omega_act = x_state(IDX_DPHI);
+            theta_cmd = theta_cmd_next;
 
             // 实际状态变化（用于物理约束）
             const T dv_act = v_act - v_act_prev;
@@ -326,7 +335,7 @@ struct FollowMPCCostFunctor {
 
             // 9. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, x, y);
-            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-9));
+            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T step_gate = smoothstep(
                 dir_norm,
                 T(params_.follow_limits.step_norm_threshold),
@@ -344,7 +353,7 @@ struct FollowMPCCostFunctor {
 
             // 10. 终点减速
             const T gate_goal = ceres::fmin(T(1.0), ceres::fmax(T(0.0), (slow_dist - s_remain) / (slow_dist + T(1e-6))));
-            const T deceleration = T(params_.follow_limits.acc_max); // 期望的减速加速度
+            const T deceleration = T(params_.follow_limits.acc_max * 0.9); // 期望的减速加速度
             const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
             residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), v_act - v_dec_profile); // 惩罚超速
 
@@ -367,7 +376,7 @@ struct FollowMPCCostFunctor {
     const int num_control_points_;
     const Eigen::Vector3d& start_pose_;
     const double u0_;
-    const RobotStatus& start_status_;
+    const Eigen::Vector2d& start_status_;
     const Eigen::Vector2d& start_cmd_;
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
@@ -383,7 +392,7 @@ struct FollowMPCCostFunctor {
 struct StopMPCCostFunctor {
     StopMPCCostFunctor(
         const Eigen::Vector3d& start_pose,
-        const RobotStatus& start_status,
+        const Eigen::Vector2d& start_status,
         const Eigen::Vector2d& start_cmd,
         const MPCParams& params,
         const CostMap& merged_cost_map,
@@ -402,14 +411,14 @@ struct StopMPCCostFunctor {
         T x = T(start_pose_.x());
         T y = T(start_pose_.y());
         T theta = T(start_pose_.z());
-
-        T v_act = T(start_status_.v);
-        T omega_act = T(start_status_.omega);
+        T theta_cmd = T(start_pose_.z());
+        T v_act = T(start_status_.x());
+        T omega_act = T(start_status_.y());
 
         Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_state;
         x_state.setZero();
-        x_state(IDX_DS) = T(start_status_.v);
-        x_state(IDX_DPHI) = T(start_status_.omega);
+        x_state(IDX_DS) = T(start_status_.x());
+        x_state(IDX_DPHI) = T(start_status_.y());
         x_state(IDX_PHI) = T(start_pose_.z());
 
         T last_v_cmd = T(start_cmd_.x());
@@ -421,13 +430,15 @@ struct StopMPCCostFunctor {
             const T* uk = parameters[k];
             const T v_cmd = uk[0];
             const T omega_cmd = uk[1];
+
+            const T theta_ideal_next = wrap_to_pi(theta_cmd + omega_cmd * T(params_.dt));
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
             const T v_act_prev = v_act;
             const T omega_act_prev = omega_act;
 
-            lqr_closed_loop_step(lqr_, x_state, v_cmd, omega_cmd);
+            lqr_closed_loop_step(lqr_, x_state, v_cmd, omega_cmd, theta_ideal_next);
             const T v_now = x_state(IDX_DS);
             const T theta_now = x_state(IDX_PHI);
             x += v_now * ceres::cos(theta_now) * T(params_.dt);
@@ -435,6 +446,7 @@ struct StopMPCCostFunctor {
             theta = theta_now;
             v_act = v_now;
             omega_act = x_state(IDX_DPHI);
+            theta_cmd = theta_ideal_next;
 
             const T dv_act = v_act - v_act_prev;
             const T domega_act = omega_act - omega_act_prev;
@@ -465,7 +477,7 @@ struct StopMPCCostFunctor {
 
             // 6. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, x, y);
-            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-9));
+            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T gate_step = ceres::fmin(T(1.0), dir_norm * T(2.0));
             const auto dir_normalized = dir / dir_norm;
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(theta), ceres::sin(theta));
@@ -483,7 +495,7 @@ struct StopMPCCostFunctor {
         residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal_weight) * (cost_terminal / T(255.0));
 
         const auto dir_t = interpolate_direction_map(direction_map_, x, y);
-        const T dir_t_norm = ceres::sqrt(dir_t.squaredNorm() + T(1e-9));
+        const T dir_t_norm = ceres::sqrt(dir_t.squaredNorm() + T(1e-10));
         const T gate_step_t = ceres::fmin(T(1.0), dir_t_norm * T(2.0));
         residuals[res_idx++] = T(params_.stop_weights.step_terminal_weight) * gate_step_t;
 
@@ -491,7 +503,7 @@ struct StopMPCCostFunctor {
     }
 
     const Eigen::Vector3d& start_pose_;
-    const RobotStatus& start_status_;
+    const Eigen::Vector2d& start_status_;
     const Eigen::Vector2d& start_cmd_;
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
@@ -508,10 +520,10 @@ MPCController::MPCController(const MPCParams& params): params_(params) {
     last_controls_.assign(std::max(1, params_.horizon), Eigen::Vector2d::Zero());
 }
 
-std::expected<MPCOutput, std::string> MPCController::follow_path(
+std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::follow_path(
     const SplineD& global_path,
     const Eigen::Vector3d& current_pose_map,
-    const RobotStatus& current_status,
+    const Eigen::Vector2d& current_status,
     const CostMap& merged_cost_map,
     const DirectionMap& global_direction_map
 ) {
@@ -548,8 +560,8 @@ std::expected<MPCOutput, std::string> MPCController::follow_path(
         }
     } else {
         for (int i = 0; i < params_.horizon; i++) {
-            controls[i][0] = current_status.v;
-            controls[i][1] = current_status.omega;
+            controls[i][0] = current_status.x();
+            controls[i][1] = current_status.y();
         }
     }
 
@@ -622,6 +634,11 @@ std::expected<MPCOutput, std::string> MPCController::follow_path(
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
     last_cmd_ = cmd_v_omega;
 
+    const double theta_cmd_map = std::atan2(
+        std::sin(current_pose_map.z() + controls[0][1] * params_.dt),
+        std::cos(current_pose_map.z() + controls[0][1] * params_.dt)
+    );
+
     // 保存warm start
     last_controls_.resize(params_.horizon);
     for (int i = 0; i < params_.horizon; i++) {
@@ -636,17 +653,20 @@ std::expected<MPCOutput, std::string> MPCController::follow_path(
     predicted_path_map.push_back(pose.head<2>());
 
     Eigen::Matrix<double, LQR_STATE_SIZE, 1> x_state = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
-    x_state(IDX_DS) = current_status.v;
-    x_state(IDX_DPHI) = current_status.omega;
+    x_state(IDX_DS) = current_status.x();
+    x_state(IDX_DPHI) = current_status.y();
     x_state(IDX_PHI) = pose.z();
 
-    // 执行第一步预测，获取期望角度
-    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1]);
-    const double theta_map_predicted = x_state(IDX_PHI);  // 第一步预测后的期望角度
+    double theta_cmd = pose.z();
+
+    // LQR以理想外推角作为参考输入，约束评估使用LQR实际响应状态
+    theta_cmd = std::atan2(std::sin(theta_cmd + controls[0][1] * params_.dt), std::cos(theta_cmd + controls[0][1] * params_.dt));
+    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1], theta_cmd);
+    const double theta_act_first = x_state(IDX_PHI);
     const double v_first = x_state(IDX_DS);
-    pose.x() += v_first * std::cos(theta_map_predicted) * params_.dt;
-    pose.y() += v_first * std::sin(theta_map_predicted) * params_.dt;
-    pose.z() = theta_map_predicted;
+    pose.x() += v_first * std::cos(theta_act_first) * params_.dt;
+    pose.y() += v_first * std::sin(theta_act_first) * params_.dt;
+    pose.z() = theta_act_first;
     predicted_path_map.push_back(pose.head<2>());
 
     // 继续后续步骤的预测
@@ -654,7 +674,8 @@ std::expected<MPCOutput, std::string> MPCController::follow_path(
         const double v_cmd = controls[i][0];
         const double w_cmd = controls[i][1];
 
-        lqr_closed_loop_step(params_.lqr, x_state, v_cmd, w_cmd);
+        theta_cmd = std::atan2(std::sin(theta_cmd + w_cmd * params_.dt), std::cos(theta_cmd + w_cmd * params_.dt));
+        lqr_closed_loop_step(params_.lqr, x_state, v_cmd, w_cmd, theta_cmd);
         const double v_now = x_state(IDX_DS);
         const double theta_now = x_state(IDX_PHI);
         pose.x() += v_now * std::cos(theta_now) * params_.dt;
@@ -664,12 +685,12 @@ std::expected<MPCOutput, std::string> MPCController::follow_path(
         predicted_path_map.push_back(pose.head<2>());
     }
 
-    return MPCOutput{cmd_v_omega, theta_map_predicted, predicted_path_map};
+    return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 
-std::expected<MPCOutput, std::string> MPCController::stop(
+std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::stop(
     const Eigen::Vector3d& current_pose_map,
-    const RobotStatus& current_status,
+    const Eigen::Vector2d& current_status,
     const CostMap& merged_cost_map,
     const DirectionMap& global_direction_map
 ) {
@@ -685,8 +706,8 @@ std::expected<MPCOutput, std::string> MPCController::stop(
         }
     } else {
         for (int i = 0; i < params_.horizon; i++) {
-            controls[i][0] = std::max(0.0, current_status.v);
-            controls[i][1] = current_status.omega;
+            controls[i][0] = std::max(0.0, current_status.x());
+            controls[i][1] = current_status.y();
         }
     }
 
@@ -741,6 +762,11 @@ std::expected<MPCOutput, std::string> MPCController::stop(
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
     last_cmd_ = cmd_v_omega;
 
+    const double theta_cmd_map = std::atan2(
+        std::sin(current_pose_map.z() + controls[0][1] * params_.dt),
+        std::cos(current_pose_map.z() + controls[0][1] * params_.dt)
+    );
+
     // 保存warm start
     last_controls_.resize(params_.horizon);
     for (int i = 0; i < params_.horizon; i++) {
@@ -755,17 +781,18 @@ std::expected<MPCOutput, std::string> MPCController::stop(
     predicted_path_map.push_back(pose.head<2>());
 
     Eigen::Matrix<double, LQR_STATE_SIZE, 1> x_state = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
-    x_state(IDX_DS) = current_status.v;
-    x_state(IDX_DPHI) = current_status.omega;
+    x_state(IDX_DS) = current_status.x();
+    x_state(IDX_DPHI) = current_status.y();
     x_state(IDX_PHI) = pose.z();
 
-    // 执行第一步预测，获取期望角度
-    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1]);
-    const double theta_map_predicted = x_state(IDX_PHI);  // 第一步预测后的期望角度
+    double theta_cmd = pose.z();
+    theta_cmd = std::atan2(std::sin(theta_cmd + controls[0][1] * params_.dt), std::cos(theta_cmd + controls[0][1] * params_.dt));
+    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1], theta_cmd);
+    const double theta_act_first = x_state(IDX_PHI);
     const double v_first = x_state(IDX_DS);
-    pose.x() += v_first * std::cos(theta_map_predicted) * params_.dt;
-    pose.y() += v_first * std::sin(theta_map_predicted) * params_.dt;
-    pose.z() = theta_map_predicted;
+    pose.x() += v_first * std::cos(theta_act_first) * params_.dt;
+    pose.y() += v_first * std::sin(theta_act_first) * params_.dt;
+    pose.z() = theta_act_first;
     predicted_path_map.push_back(pose.head<2>());
 
     // 继续后续步骤的预测
@@ -773,7 +800,8 @@ std::expected<MPCOutput, std::string> MPCController::stop(
         const double v_cmd = controls[i][0];
         const double w_cmd = controls[i][1];
 
-        lqr_closed_loop_step(params_.lqr, x_state, v_cmd, w_cmd);
+        theta_cmd = std::atan2(std::sin(theta_cmd + w_cmd * params_.dt), std::cos(theta_cmd + w_cmd * params_.dt));
+        lqr_closed_loop_step(params_.lqr, x_state, v_cmd, w_cmd, theta_cmd);
         const double v_now = x_state(IDX_DS);
         const double theta_now = x_state(IDX_PHI);
         pose.x() += v_now * std::cos(theta_now) * params_.dt;
@@ -783,7 +811,7 @@ std::expected<MPCOutput, std::string> MPCController::stop(
         predicted_path_map.push_back(pose.head<2>());
     }
 
-    return MPCOutput{cmd_v_omega, theta_map_predicted, predicted_path_map};
+    return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 
 }
