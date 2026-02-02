@@ -34,12 +34,12 @@ private:
     void control_timer_callback();
     void handle_stop_state();
     void handle_follow_state();
-    bool get_current_pose(Eigen::Vector3d& current_pose) const;
+    bool get_chassis_pose(Eigen::Vector3d& chassis_pose) const;
     std::optional<double> get_map_to_imu_world_yaw() const;
-    std::optional<double> get_current_theta_imu_world() const;
+    std::optional<double> get_chassis_theta_imu_world() const;
     void publish_chassis_cmd(double velocity, double theta, double omega, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const;
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
-    std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& current_pose_map, const double u0);
+    std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& chassis_pose_map, const double u0);
 
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr control_points_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
@@ -66,7 +66,7 @@ private:
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
-    Eigen::Vector2d current_status_ = Eigen::Vector2d::Zero(); // (v, omega)
+    Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero(); // (v, omega)
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 
@@ -157,7 +157,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .alpha_max = declare_parameter<double>("mpc.follow_path.limits.alpha_max"),
             .vel_on_step = declare_parameter<double>("mpc.follow_path.limits.vel_on_step"),
             .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
-            .slow_down_distance = declare_parameter<double>("mpc.follow_path.limits.slow_down_distance"),
+            .slow_down_deceleration = declare_parameter<double>("mpc.follow_path.limits.slow_down_deceleration"),
             .slow_down_num_samples = (int)declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples"),
             .step_norm_threshold = declare_parameter<double>("mpc.follow_path.limits.step_norm_threshold"),
             .step_norm_transition = declare_parameter<double>("mpc.follow_path.limits.step_norm_transition")
@@ -286,8 +286,8 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
-    current_status_.x() = msg->velocity;
-    current_status_.y() = msg->omega;
+    chassis_status_.x() = msg->velocity;
+    chassis_status_.y() = msg->omega;
 }
 
 void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -317,8 +317,8 @@ void PathFollowerNode::control_timer_callback() {
     fsm_inputs.has_path = global_path_.has_value();
     fsm_inputs.spin_requested = (spin_state_ != SpinState::STOP);
     fsm_inputs.spin_high_priority = spin_high_priority_;
-    fsm_inputs.velocity = current_status_.x();
-    fsm_inputs.omega = current_status_.y();
+    fsm_inputs.velocity = chassis_status_.x();
+    fsm_inputs.omega = chassis_status_.y();
     control_fsm_->update(fsm_inputs);
 
     const auto fsm_state = control_fsm_->state();
@@ -340,7 +340,7 @@ void PathFollowerNode::control_timer_callback() {
     switch (fsm_state) {
         case ControlFsm::State::IDLE: { // 闲置模式：无路径且无需小陀螺
             // Idle也持续发送固定角度（imu_world系），避免电控误以为目标角度为0
-            if (!theta_keep_imu_world_) theta_keep_imu_world_ = get_current_theta_imu_world();
+            if (!theta_keep_imu_world_) theta_keep_imu_world_ = get_chassis_theta_imu_world();
             if (!theta_keep_imu_world_) break;
             publish_chassis_cmd(0.0, *theta_keep_imu_world_, 0.0, false, false, false, false);
             break;
@@ -368,14 +368,14 @@ void PathFollowerNode::control_timer_callback() {
 }
 
 void PathFollowerNode::handle_stop_state() {
-    Eigen::Vector3d current_pose;
-    if (!get_current_pose(current_pose)) return;
+    Eigen::Vector3d chassis_pose;
+    if (!get_chassis_pose(chassis_pose)) return;
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
     const auto result = mpc_controller_->stop(
-        current_pose,
-        current_status_,
+        chassis_pose,
+        chassis_status_,
         *merged_cost_map_,
         *global_direction_map_
     );
@@ -394,11 +394,9 @@ void PathFollowerNode::handle_stop_state() {
     // 将 map 系下的期望角度转换到 imu_world 系
     double theta_imu_world = 0.0;
     const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
-    if (map_to_imu_world_yaw) {
-        theta_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
-        // 角度归一化到 [-pi, pi]
-        theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world));
-    }
+    if (!map_to_imu_world_yaw) return;
+    theta_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
+    theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world)); // 角度归一化到 [-pi, pi]
 
     publish_chassis_cmd(
         std::get<0>(*result).x(),
@@ -412,12 +410,12 @@ void PathFollowerNode::handle_stop_state() {
 }
 
 void PathFollowerNode::handle_follow_state() {
-    Eigen::Vector3d current_pose;
-    if (!get_current_pose(current_pose)) return;
+    Eigen::Vector3d chassis_pose;
+    if (!get_chassis_pose(chassis_pose)) return;
 
     const double u0 = project_to_spline_u(
         *global_path_,
-        current_pose.head<2>(),
+        chassis_pose.head<2>(),
         last_reference_u_,
         params_.follow_projection.proj_num_samples,
         params_.follow_projection.proj_search_window,
@@ -429,8 +427,8 @@ void PathFollowerNode::handle_follow_state() {
 
     const auto result = mpc_controller_->follow_path(
         *global_path_,
-        current_pose,
-        current_status_,
+        chassis_pose,
+        chassis_status_,
         *merged_cost_map_,
         *global_direction_map_
     );
@@ -447,8 +445,8 @@ void PathFollowerNode::handle_follow_state() {
     }
 
     // 如果已经到达目标点，则清除路径，准备进入闲置状态
-    if ((current_pose.head<2>() - global_path_->evaluate(1.0)).norm() < stop_threshold_dist_ || u0 > stop_threshold_u_) {
-        RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", current_pose.x(), current_pose.y());
+    if ((chassis_pose.head<2>() - global_path_->evaluate(1.0)).norm() < stop_threshold_dist_ || u0 > stop_threshold_u_) {
+        RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", chassis_pose.x(), chassis_pose.y());
         global_path_ = std::nullopt;
         last_reference_u_ = 0.0;
     }
@@ -460,7 +458,7 @@ void PathFollowerNode::handle_follow_state() {
     theta_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
     theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world)); // 角度归一化到 [-pi, pi]
 
-    const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(current_pose, u0);
+    const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(chassis_pose, u0);
     publish_chassis_cmd(
         std::get<0>(*result).x(),
         theta_imu_world,
@@ -472,7 +470,7 @@ void PathFollowerNode::handle_follow_state() {
     }
 }
 
-std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vector3d& current_pose_map, const double u0) {
+std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vector3d& chassis_pose_map, const double u0) {
     constexpr double dir_norm_threshold = 0.8;
     constexpr double dot_threshold = 0.8;
 
@@ -481,7 +479,7 @@ std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vec
     if (step_check_front_ <= 0.0 && step_check_back_ <= 0.0) return {false, false};
     if (step_check_sample_step_ <= 1e-6) return {false, false};
 
-    const Eigen::Vector2d heading(std::cos(current_pose_map.z()), std::sin(current_pose_map.z()));
+    const Eigen::Vector2d heading(std::cos(chassis_pose_map.z()), std::sin(chassis_pose_map.z()));
     bool step_up = false;
     bool step_down = false;
 
@@ -539,9 +537,9 @@ void PathFollowerNode::publish_chassis_cmd(double velocity, double theta, double
     chassis_cmd_pub_->publish(msg);
 }
 
-std::optional<double> PathFollowerNode::get_current_theta_imu_world() const {
-    Eigen::Vector3d current_pose_map;
-    if (!get_current_pose(current_pose_map)) {
+std::optional<double> PathFollowerNode::get_chassis_theta_imu_world() const {
+    Eigen::Vector3d chassis_pose_map;
+    if (!get_chassis_pose(chassis_pose_map)) {
         return std::nullopt;
     }
 
@@ -550,12 +548,12 @@ std::optional<double> PathFollowerNode::get_current_theta_imu_world() const {
         return std::nullopt;
     }
 
-    double theta_imu_world = current_pose_map.z() - *map_to_imu_world_yaw;
+    double theta_imu_world = chassis_pose_map.z() - *map_to_imu_world_yaw;
     theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world));
     return theta_imu_world;
 }
 
-bool PathFollowerNode::get_current_pose(Eigen::Vector3d& current_pose) const {
+bool PathFollowerNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
     geometry_msgs::msg::TransformStamped tf;
     try {
         tf = tf_buffer_->lookupTransform("map", "chassis_link", tf2::TimePointZero);
@@ -564,14 +562,14 @@ bool PathFollowerNode::get_current_pose(Eigen::Vector3d& current_pose) const {
         return false;
     }
 
-    current_pose.head<2>() = utils::convert_to<Eigen::Vector3d>(tf.transform.translation).head<2>();
+    chassis_pose.head<2>() = utils::convert_to<Eigen::Vector3d>(tf.transform.translation).head<2>();
     const Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
     const Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
     if (x_axis.norm() < 1e-6) {
         RCLCPP_ERROR(get_logger(), "Invalid chassis_link orientation");
         return false;
     }
-    current_pose.z() = atan2(x_axis.y(), x_axis.x());
+    chassis_pose.z() = atan2(x_axis.y(), x_axis.x());
     return true;
 }
 
@@ -589,6 +587,9 @@ std::optional<double> PathFollowerNode::get_map_to_imu_world_yaw() const {
     if (x_axis.norm() < 1e-6) {
         RCLCPP_ERROR(get_logger(), "Invalid map to imu_world orientation");
         return std::nullopt;
+    }
+    if (x_axis.norm() < 0.8) {
+        RCLCPP_WARN(get_logger(), "map to imu_world x-axis norm too small: %.3f", x_axis.norm());
     }
     return std::atan2(x_axis.y(), x_axis.x());
 }

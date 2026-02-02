@@ -20,6 +20,126 @@ inline double scalar_value(const ceres::Jet<S, N>& v) {
     return static_cast<double>(v.a);
 }
 
+inline int clamp_int(const int v, const int lo, const int hi) {
+    return std::max(lo, std::min(v, hi));
+}
+
+template<typename T>
+inline T smoothstep01(const T& t_in) {
+    const T t = ceres::fmin(T(1.0), ceres::fmax(T(0.0), t_in));
+    return t * t * (T(3.0) - T(2.0) * t);
+}
+
+template<typename T>
+inline T smoothstep(const T& x, const T& edge0, const T& edge1) {
+    const T denom = ceres::fmax(T(1e-12), edge1 - edge0);
+    return smoothstep01((x - edge0) / denom);
+}
+
+template <typename T>
+inline void eval_quadratic_uniform_bspline_2d(
+    const std::vector<Eigen::Vector2d>& control_points,
+    const T& u_in,
+    Eigen::Matrix<T, 2, 1>* p,
+    Eigen::Matrix<T, 2, 1>* d1,
+    Eigen::Matrix<T, 2, 1>* d2
+) {
+    const int n = static_cast<int>(control_points.size());
+    if (n < 3) {
+        if (p) {
+            *p = Eigen::Matrix<T, 2, 1>(T(0.0), T(0.0));
+        }
+        if (d1) {
+            *d1 = Eigen::Matrix<T, 2, 1>(T(0.0), T(0.0));
+        }
+        if (d2) {
+            *d2 = Eigen::Matrix<T, 2, 1>(T(0.0), T(0.0));
+        }
+        return;
+    }
+
+    // 对应 ubs::ControlPointsContainer::updatedShape()：scale = (n - Degree) / (upper - lower)
+    // 这里 Degree=2, bounds=[0,1]，所以 scale = n - 2。
+    const double scale_d = static_cast<double>(n - 2);
+
+    const T u = ceres::fmin(ceres::fmax(u_in, T(0.0)), T(1.0));
+    const T base_x = u * T(scale_d);
+
+    const int xi_unclamped = static_cast<int>(std::floor(scalar_value(base_x)));
+    const int xi = clamp_int(xi_unclamped, 0, n - 3);
+    const T t = base_x - T(xi);
+
+    const T one_minus_t = T(1.0) - t;
+    const T b0 = T(0.5) * one_minus_t * one_minus_t;
+    const T b1 = T(0.5) * (T(-2.0) * t * t + T(2.0) * t + T(1.0));
+    const T b2 = T(0.5) * t * t;
+
+    const T db0_dt = -one_minus_t;
+    const T db1_dt = T(-2.0) * t + T(1.0);
+    const T db2_dt = t;
+
+    const Eigen::Vector2d& p0d = control_points[xi + 0];
+    const Eigen::Vector2d& p1d = control_points[xi + 1];
+    const Eigen::Vector2d& p2d = control_points[xi + 2];
+
+    const Eigen::Matrix<T, 2, 1> p0(T(p0d.x()), T(p0d.y()));
+    const Eigen::Matrix<T, 2, 1> p1(T(p1d.x()), T(p1d.y()));
+    const Eigen::Matrix<T, 2, 1> p2(T(p2d.x()), T(p2d.y()));
+
+    if (p) {
+        *p = b0 * p0 + b1 * p1 + b2 * p2;
+    }
+
+    // 一阶/二阶导数：先对局部参数 t 求导，再乘以 dt/du。
+    // base_x = u * scale, t = base_x - xi，所以 dt/du = scale（xi 对 u 的导数为 0）。
+    const T scale = T(scale_d);
+
+    if (d1) {
+        const Eigen::Matrix<T, 2, 1> dp_dt = db0_dt * p0 + db1_dt * p1 + db2_dt * p2;
+        *d1 = dp_dt * scale;
+    }
+
+    if (d2) {
+        // 二阶基函数对 t 的导数常数：b0''=1, b1''=-2, b2''=1
+        const Eigen::Matrix<T, 2, 1> d2p_dt2 = p0 - T(2.0) * p1 + p2;
+        *d2 = d2p_dt2 * (scale * scale);
+    }
+}
+
+inline double estimate_remaining_arclength(
+    const std::vector<Eigen::Vector2d>& control_points,
+    const double u_in,
+    const int num_samples
+) {
+    const double u = std::min(1.0, std::max(0.0, u_in));
+    const double one_minus_u = 1.0 - u;
+
+    auto dsdu_at = [&](double uu) {
+        Eigen::Matrix<double, 2, 1> d1;
+        eval_quadratic_uniform_bspline_2d<double>(control_points, uu, nullptr, &d1, nullptr);
+        return std::sqrt(d1.squaredNorm() + 1e-12);
+    };
+
+    if (num_samples <= 1) {
+        return one_minus_u * dsdu_at(u);
+    }
+
+    double length = 0.0;
+    double u_prev = u;
+    double dsdu_prev = dsdu_at(u_prev);
+
+    for (int i = 1; i <= num_samples; i++) {
+        const double ui = u + one_minus_u * (static_cast<double>(i) / static_cast<double>(num_samples));
+        const double dsdu = dsdu_at(ui);
+        const double du = ui - u_prev;
+        length += (dsdu_prev + dsdu) * 0.5 * du;
+        u_prev = ui;
+        dsdu_prev = dsdu;
+    }
+
+    return length;
+}
+
 // ============================================================================
 //                           LQR离散模型（10维状态）
 // ============================================================================
@@ -115,18 +235,6 @@ inline T interpolate_cost_map(const CostMap& cost_map, const T& x_map, const T& 
 }
 
 template<typename T>
-inline T smoothstep01(const T& t_in) {
-    const T t = ceres::fmin(T(1.0), ceres::fmax(T(0.0), t_in));
-    return t * t * (T(3.0) - T(2.0) * t);
-}
-
-template<typename T>
-inline T smoothstep(const T& x, const T& edge0, const T& edge1) {
-    const T denom = ceres::fmax(T(1e-12), edge1 - edge0);
-    return smoothstep01((x - edge0) / denom);
-}
-
-template<typename T>
 inline Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_map, const T& x_map, const T& y_map) {
     const T gx = (x_map - T(dir_map.origin_x)) / T(dir_map.resolution);
     const T gy = (y_map - T(dir_map.origin_y)) / T(dir_map.resolution);
@@ -159,43 +267,13 @@ inline Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_
     return (T(1.0) - dx) * (T(1.0) - dy) * v00 + dx * (T(1.0) - dy) * v10 + (T(1.0) - dx) * dy * v01 + dx * dy * v11;
 }
 
-template<typename T, typename Spline>
-inline T estimate_remaining_arclength(const Spline& spline, const T& u_in, int num_samples) {
-    const T u = ceres::fmin(ceres::fmax(u_in, T(0.0)), T(1.0));
-    const T one_minus_u = T(1.0) - u;
-
-    if (num_samples <= 1) {
-        const auto d1 = spline.derivative(u, 1);
-        const T dsdu = ceres::sqrt(d1.squaredNorm() + T(1e-12));
-        return one_minus_u * dsdu;
-    }
-
-    T length = T(0.0);
-    T u_prev = u;
-    const auto d1_prev = spline.derivative(u_prev, 1);
-    T dsdu_prev = ceres::sqrt(d1_prev.squaredNorm() + T(1e-12));
-
-    for (int i = 1; i <= num_samples; i++) {
-        const T ui = u + one_minus_u * (T(i) / T(num_samples));
-        const auto d1 = spline.derivative(ui, 1);
-        const T dsdu = ceres::sqrt(d1.squaredNorm() + T(1e-12));
-        const T du = ui - u_prev;
-        length += (dsdu_prev + dsdu) * T(0.5) * du;
-        u_prev = ui;
-        dsdu_prev = dsdu;
-    }
-
-    return length;
-}
-
 // ============================================================================
 //                         Follow模式 Cost Functor
 // ============================================================================
 
 struct FollowMPCCostFunctor {
     FollowMPCCostFunctor(
-        const ubs::UniformBSplineCeresGenerator<SplineT>& generator,
-        const int num_control_points,
+        const std::vector<Eigen::Vector2d>& ref_control_points,
         const Eigen::Vector3d& start_pose,
         const double u0,
         const Eigen::Vector2d& start_status,
@@ -204,8 +282,7 @@ struct FollowMPCCostFunctor {
         const CostMap& merged_cost_map,
         const DirectionMap& direction_map
     ):
-        generator_(generator),
-        num_control_points_(num_control_points),
+        ref_control_points_(ref_control_points),
         start_pose_(start_pose),
         u0_(u0),
         start_status_(start_status),
@@ -236,10 +313,6 @@ struct FollowMPCCostFunctor {
         T last_omega_cmd = T(start_cmd_.y());
 
         int res_idx = 0;
-
-        // 生成样条
-        const T* const* control_points_raw = parameters + params_.horizon;
-        auto spline = generator_.template generate<T>(control_points_raw, true);
 
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
@@ -273,9 +346,10 @@ struct FollowMPCCostFunctor {
 
             // 样条上的参考点
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
-            const Eigen::Matrix<T, 2, 1> pr = spline.evaluate(u);
-            const Eigen::Matrix<T, 2, 1> d1 = spline.derivative(u, 1);
-            const Eigen::Matrix<T, 2, 1> d2 = spline.derivative(u, 2);
+            Eigen::Matrix<T, 2, 1> pr;
+            Eigen::Matrix<T, 2, 1> d1;
+            Eigen::Matrix<T, 2, 1> d2;
+            eval_quadratic_uniform_bspline_2d<T>(ref_control_points_, u, &pr, &d1, &d2);
 
             const T dx = d1.x();
             const T dy = d1.y();
@@ -286,8 +360,13 @@ struct FollowMPCCostFunctor {
             const T dsdu = ceres::sqrt(dx * dx + dy * dy) + T(1e-6);
             const T kappa = (dx * ddy - dy * ddx) / (dsdu * dsdu * dsdu);
 
-            const T s_remain = estimate_remaining_arclength(spline, u, params_.follow_limits.slow_down_num_samples);
-            const T slow_dist = T(params_.follow_limits.slow_down_distance);
+            // 终点剩余里程：只需要数值用于限速，不需要其导数。用 double 做数值积分，并将结果提升为 T，显式阻断 AutoDiff 的巨大循环计算图。
+            const double s_remain_d = estimate_remaining_arclength(
+                ref_control_points_,
+                scalar_value(u),
+                params_.follow_limits.slow_down_num_samples
+            );
+            const T s_remain = T(s_remain_d);
 
             // Frenet误差
             const T ex = x - pr.x();
@@ -301,9 +380,7 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.q_theta) * etheta;
 
             // 2. 进度推进
-            // 使用剩余距离的平滑门控来调整进度权重，避免接近终点时过度推进
-            const T progress_scale = smoothstep(s_remain, T(0.0), slow_dist);
-            residuals[res_idx++] = T(params_.follow_weights.q_u) * progress_scale * (T(1.0) - u);
+            residuals[res_idx++] = T(params_.follow_weights.q_u) * (T(1.0) - u);
 
             // 3. 控制正则化
             residuals[res_idx++] = T(params_.follow_weights.r_v) * v_cmd;
@@ -346,8 +423,7 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(v_act - T(params_.follow_limits.vel_on_step));
 
             // 9. 终点减速
-            const T gate_goal = ceres::fmin(T(1.0), ceres::fmax(T(0.0), (slow_dist - s_remain) / (slow_dist + T(1e-6))));
-            const T deceleration = T(params_.follow_limits.acc_max * 0.9); // 期望的减速加速度
+            const T deceleration = T(params_.follow_limits.slow_down_deceleration); // 期望的减速加速度
             const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
             residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), v_act - v_dec_profile); // 惩罚超速
 
@@ -366,8 +442,7 @@ struct FollowMPCCostFunctor {
         return true;
     }
 
-    const ubs::UniformBSplineCeresGenerator<SplineT>& generator_;
-    const int num_control_points_;
+    const std::vector<Eigen::Vector2d>& ref_control_points_;
     const Eigen::Vector3d& start_pose_;
     const double u0_;
     const Eigen::Vector2d& start_status_;
@@ -510,31 +585,21 @@ MPCController::MPCController(const MPCParams& params): params_(params) {
 
 std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::follow_path(
     const SplineD& global_path,
-    const Eigen::Vector3d& current_pose_map,
-    const Eigen::Vector2d& current_status,
+    const Eigen::Vector3d& chassis_pose_map,
+    const Eigen::Vector2d& chassis_status,
     const CostMap& merged_cost_map,
     const DirectionMap& global_direction_map
 ) {
     // 投影到样条
     const double u0 = project_to_spline_u(
         global_path,
-        current_pose_map.head<2>(),
+        chassis_pose_map.head<2>(),
         last_u_,
         params_.follow_projection.proj_num_samples,
         params_.follow_projection.proj_search_window,
         params_.follow_projection.max_correspondence_distance
     );
     last_u_ = u0;
-
-    // 参考路径控制点
-    const int num_pts = static_cast<int>(global_path.getControlPoints().size());
-    std::vector<std::array<double, 2>> ref_point_blocks;
-    ref_point_blocks.reserve(num_pts);
-    for (const auto& p: global_path.getControlPoints()) {
-        ref_point_blocks.push_back({p.x(), p.y()});
-    }
-
-    ubs::UniformBSplineCeresGenerator<SplineT> generator(0.0, 1.0, {num_pts});
 
     // 决策变量
     std::vector<std::vector<double>> controls(params_.horizon, std::vector<double>(2, 0.0));
@@ -548,8 +613,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         }
     } else {
         for (int i = 0; i < params_.horizon; i++) {
-            controls[i][0] = current_status.x();
-            controls[i][1] = current_status.y();
+            controls[i][0] = chassis_status.x();
+            controls[i][1] = chassis_status.y();
         }
     }
 
@@ -557,11 +622,10 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     ceres::Problem problem;
 
     auto* cost_function = new ceres::DynamicAutoDiffCostFunction<FollowMPCCostFunctor>(new FollowMPCCostFunctor(
-        generator,
-        num_pts,
-        current_pose_map,
+        global_path.getControlPoints(),
+        chassis_pose_map,
         u0,
-        current_status,
+        chassis_status,
         last_cmd_,
         params_,
         merged_cost_map,
@@ -572,24 +636,14 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     for (int i = 0; i < params_.horizon; i++) {
         cost_function->AddParameterBlock(2);
     }
-    for (int i = 0; i < num_pts; i++) {
-        cost_function->AddParameterBlock(2);
-    }
-
     // 每步15个残差
     cost_function->SetNumResiduals(15 * params_.horizon);
 
     std::vector<double*> parameter_blocks;
-    parameter_blocks.reserve(params_.horizon + num_pts);
+    parameter_blocks.reserve(params_.horizon);
 
     for (auto& c: controls) {
         parameter_blocks.push_back(c.data());
-    }
-
-    for (auto& rp: ref_point_blocks) {
-        problem.AddParameterBlock(rp.data(), 2);
-        problem.SetParameterBlockConstant(rp.data());
-        parameter_blocks.push_back(rp.data());
     }
 
     problem.AddResidualBlock(cost_function, nullptr, parameter_blocks);
@@ -623,8 +677,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     last_cmd_ = cmd_v_omega;
 
     const double theta_cmd_map = std::atan2(
-        std::sin(current_pose_map.z() + controls[0][1] * params_.dt),
-        std::cos(current_pose_map.z() + controls[0][1] * params_.dt)
+        std::sin(chassis_pose_map.z() + controls[0][1] * params_.dt),
+        std::cos(chassis_pose_map.z() + controls[0][1] * params_.dt)
     );
 
     // 保存warm start
@@ -637,12 +691,12 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     std::vector<Eigen::Vector2d> predicted_path_map;
     predicted_path_map.reserve(params_.horizon + 1);
 
-    Eigen::Vector3d pose = current_pose_map;
+    Eigen::Vector3d pose = chassis_pose_map;
     predicted_path_map.push_back(pose.head<2>());
 
     Eigen::Matrix<double, LQR_STATE_SIZE, 1> x_state = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
-    x_state(IDX_DS) = current_status.x();
-    x_state(IDX_DPHI) = current_status.y();
+    x_state(IDX_DS) = chassis_status.x();
+    x_state(IDX_DPHI) = chassis_status.y();
     x_state(IDX_PHI) = pose.z();
 
     double theta_cmd = pose.z();
@@ -677,8 +731,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
 }
 
 std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::stop(
-    const Eigen::Vector3d& current_pose_map,
-    const Eigen::Vector2d& current_status,
+    const Eigen::Vector3d& chassis_pose_map,
+    const Eigen::Vector2d& chassis_status,
     const CostMap& merged_cost_map,
     const DirectionMap& global_direction_map
 ) {
@@ -694,16 +748,16 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         }
     } else {
         for (int i = 0; i < params_.horizon; i++) {
-            controls[i][0] = std::max(0.0, current_status.x());
-            controls[i][1] = current_status.y();
+            controls[i][0] = std::max(0.0, chassis_status.x());
+            controls[i][1] = chassis_status.y();
         }
     }
 
     ceres::Problem problem;
 
     auto* cost_function = new ceres::DynamicAutoDiffCostFunction<StopMPCCostFunctor>(new StopMPCCostFunctor(
-        current_pose_map,
-        current_status,
+        chassis_pose_map,
+        chassis_status,
         last_cmd_,
         params_,
         merged_cost_map,
@@ -751,8 +805,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     last_cmd_ = cmd_v_omega;
 
     const double theta_cmd_map = std::atan2(
-        std::sin(current_pose_map.z() + controls[0][1] * params_.dt),
-        std::cos(current_pose_map.z() + controls[0][1] * params_.dt)
+        std::sin(chassis_pose_map.z() + controls[0][1] * params_.dt),
+        std::cos(chassis_pose_map.z() + controls[0][1] * params_.dt)
     );
 
     // 保存warm start
@@ -765,12 +819,12 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     std::vector<Eigen::Vector2d> predicted_path_map;
     predicted_path_map.reserve(params_.horizon + 1);
 
-    Eigen::Vector3d pose = current_pose_map;
+    Eigen::Vector3d pose = chassis_pose_map;
     predicted_path_map.push_back(pose.head<2>());
 
     Eigen::Matrix<double, LQR_STATE_SIZE, 1> x_state = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
-    x_state(IDX_DS) = current_status.x();
-    x_state(IDX_DPHI) = current_status.y();
+    x_state(IDX_DS) = chassis_status.x();
+    x_state(IDX_DPHI) = chassis_status.y();
     x_state(IDX_PHI) = pose.z();
 
     double theta_cmd = pose.z();

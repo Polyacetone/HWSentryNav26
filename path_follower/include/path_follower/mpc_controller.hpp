@@ -28,7 +28,7 @@ struct MPCFollowLimits {
     double vel_on_step;
     double a_lat_max;
 
-    double slow_down_distance;
+    double slow_down_deceleration;
     int slow_down_num_samples;
 
     double step_norm_threshold;
@@ -109,15 +109,15 @@ public:
 
     std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
         const SplineD& global_path,
-        const Eigen::Vector3d& current_pose_map,
-        const Eigen::Vector2d& current_status,
+        const Eigen::Vector3d& chassis_pose_map,
+        const Eigen::Vector2d& chassis_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );
 
     std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> stop(
-        const Eigen::Vector3d& current_pose_map,
-        const Eigen::Vector2d& current_status,
+        const Eigen::Vector3d& chassis_pose_map,
+        const Eigen::Vector2d& chassis_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );

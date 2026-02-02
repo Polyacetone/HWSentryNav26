@@ -8,7 +8,7 @@
     spin_cmd_sub_topic: "/decision/spin_cmd"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
 
-    stop_threshold_dist: 1.0 # 停止距离 (m)
+    stop_threshold_dist: 0.3 # 停止距离 (m)
     stop_threshold_u: 0.99 # 停止样条参数u
 
     debug:
@@ -30,7 +30,7 @@
       general: # 通用参数
         horizon: 12 # 预测步数
         dt: 0.1 # 预测时间间隔
-        max_iterations: 30 # 最大迭代次数
+        max_iterations: 40 # 最大迭代次数
       lqr: # LQR预测相关参数，A/B/K矩阵见lqr_matrix.yaml
         dt: 0.001 # LQR小步时长(s)，用于计算每个子步包含多少个LQR小步
         substeps: 5 # 单步MPC内的LQR子步数
@@ -46,9 +46,9 @@
           omega_min: -6.0 # 最小角速度 (rad/s)
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_on_step: 1.0 # 台阶区域期望速度 (m/s)
+          vel_on_step: 0.5 # 台阶区域期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
-          slow_down_distance: 1.4 # 距离终点剩余弧长小于该值时开始减速 (m)
+          slow_down_deceleration: 1.2 # 终点减速期望加速度 (m/s²)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
           step_norm_transition: 0.05 # smoothstep过渡宽度
@@ -64,7 +64,7 @@
           acc_limit: 10.0 # 指令变化率超限惩罚（dv_cmd）
           alpha_limit: 10.0 # 指令变化率超限惩罚（domega_cmd）
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 3.0 # 台阶区域速度保持权重
+          vel_on_step: 4.5 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障权重（全局+局部）
           direction: 3.0 # 台阶方向对齐权重
           step: 0.01 # 经过台阶惩罚
@@ -75,7 +75,7 @@
           omega_min: -12.5 # 最小角速度硬约束 (rad/s)
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_on_step: 1.0 # 台阶区域期望速度 (m/s)
+          vel_on_step: 0.5 # 台阶区域期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights: # 权重
           q_v: 0.6 # 线速度正则
