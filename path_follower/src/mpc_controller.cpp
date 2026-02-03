@@ -141,7 +141,7 @@ inline double estimate_remaining_arclength(
 }
 
 // ============================================================================
-//                           LQR离散模型（10维状态）
+//                                 MPC预测模型
 // ============================================================================
 
 namespace {
@@ -163,6 +163,18 @@ template<typename T>
 inline T wrap_to_pi(const T& a) {
     return ceres::atan2(ceres::sin(a), ceres::cos(a));
 }
+
+template<typename T>
+struct PredictorState {
+    T x, y, theta;
+    T v_act, omega_act;
+
+    // LAG模式专用
+    T a_act;
+
+    // LQR模式专用
+    Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_lqr;
+};
 
 /**
  * @brief LQR闭环步进函数（使用预计算的离散闭环矩阵，带子步迭代）
@@ -198,6 +210,58 @@ inline void lqr_closed_loop_step(
 
         // 使用预计算的离散闭环矩阵进行状态更新
         x = model.A_cl.cast<T>() * x + model.B_ref.cast<T>() * x_ref;
+    }
+}
+
+template<typename T>
+inline void prediction_step(
+    const MPCParams& params,
+    PredictorState<T>& st,
+    const T& v_cmd,
+    const T& omega_cmd,
+    T& theta_cmd
+) {
+    const T dt = T(params.dt);
+    const T theta_cmd_next = wrap_to_pi(theta_cmd + omega_cmd * dt);
+    switch (params.prediction_model) {
+        case PredictionModel::NONE: {
+            st.v_act = v_cmd;
+            st.omega_act = omega_cmd;
+            st.theta = wrap_to_pi(st.theta + st.omega_act * dt);
+            st.x += st.v_act * ceres::cos(st.theta) * dt;
+            st.y += st.v_act * ceres::sin(st.theta) * dt;
+            theta_cmd = theta_cmd_next;
+            break;
+        }
+        case PredictionModel::LAG: {
+            const T tau_v = T(std::max(1e-6, params.lag.tau_v));
+            const T k_v = T(params.lag.k_v);
+            const T tau_omega = T(std::max(1e-6, params.lag.tau_omega));
+
+            const T a_dot = (k_v * (v_cmd - st.v_act) - st.a_act) / tau_v;
+            st.a_act = st.a_act + a_dot * dt;
+            st.v_act = st.v_act + st.a_act * dt;
+
+            const T omega_dot = (omega_cmd - st.omega_act) / tau_omega;
+            st.omega_act = st.omega_act + omega_dot * dt;
+
+            st.theta = wrap_to_pi(st.theta + st.omega_act * dt);
+            st.x += st.v_act * ceres::cos(st.theta) * dt;
+            st.y += st.v_act * ceres::sin(st.theta) * dt;
+            theta_cmd = theta_cmd_next;
+            break;
+        }
+        case PredictionModel::LQR: {
+            lqr_closed_loop_step(params.lqr, st.x_lqr, v_cmd, omega_cmd, theta_cmd_next);
+            st.v_act = st.x_lqr(IDX_DS);
+            st.omega_act = st.x_lqr(IDX_DPHI);
+            st.theta = st.x_lqr(IDX_PHI);
+
+            st.x += st.v_act * ceres::cos(st.theta) * dt;
+            st.y += st.v_act * ceres::sin(st.theta) * dt;
+            theta_cmd = theta_cmd_next;
+            break;
+        }
     }
 }
 }
@@ -289,24 +353,23 @@ struct FollowMPCCostFunctor {
         start_cmd_(start_cmd),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
-        lqr_(params.lqr) {}
+        direction_map_(direction_map) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
-        T x = T(start_pose_.x()); // 预测的x坐标
-        T y = T(start_pose_.y()); // 预测的y坐标
-        T theta = T(start_pose_.z()); // 预测的朝向
-        T u = T(u0_); // 参考进度变量
-        T theta_cmd = T(start_pose_.z()); // 基于理想指令外推的朝向，作为LQR参考输入
-        T v_act = T(start_status_.x()); // 预测的线速度
-        T omega_act = T(start_status_.y()); // 预测的角速度
-
-        Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_state;
-        x_state.setZero();
-        x_state(IDX_DS) = T(start_status_.x());
-        x_state(IDX_DPHI) = T(start_status_.y());
-        x_state(IDX_PHI) = T(start_pose_.z());
+        PredictorState<T> st;
+        st.x = T(start_pose_.x());
+        st.y = T(start_pose_.y());
+        st.theta = T(start_pose_.z());
+        T u = T(u0_);
+        T theta_cmd = T(start_pose_.z());
+        st.v_act = T(start_status_.x());
+        st.omega_act = T(start_status_.y());
+        st.a_act = T(0.0);
+        st.x_lqr.setZero();
+        st.x_lqr(IDX_DS) = T(start_status_.x());
+        st.x_lqr(IDX_DPHI) = T(start_status_.y());
+        st.x_lqr(IDX_PHI) = T(start_pose_.z());
 
         // 上一时刻指令（用于平滑约束）
         T last_v_cmd = T(start_cmd_.x());
@@ -319,30 +382,19 @@ struct FollowMPCCostFunctor {
             const T v_cmd = uk[0];
             const T omega_cmd = uk[1];
 
-            // 基于理想指令外推的下一时刻角度（用于下位机发送与LQR参考输入）
-            const T theta_cmd_next = wrap_to_pi(theta_cmd + omega_cmd * T(params_.dt));
-
             // 指令变化
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
             // 保存上一时刻状态用于计算变化率
-            const T v_act_prev = v_act;
-            const T omega_act_prev = omega_act;
+            const T v_act_prev = st.v_act;
+            const T omega_act_prev = st.omega_act;
 
-            lqr_closed_loop_step(lqr_, x_state, v_cmd, omega_cmd, theta_cmd_next);
-            const T v_now = x_state(IDX_DS);
-            const T theta_now = x_state(IDX_PHI);
-            x += v_now * ceres::cos(theta_now) * T(params_.dt);
-            y += v_now * ceres::sin(theta_now) * T(params_.dt);
-            theta = theta_now;
-            v_act = v_now;
-            omega_act = x_state(IDX_DPHI);
-            theta_cmd = theta_cmd_next;
+            prediction_step(params_, st, v_cmd, omega_cmd, theta_cmd);
 
             // 实际状态变化（用于物理约束）
-            const T dv_act = v_act - v_act_prev;
-            const T domega_act = omega_act - omega_act_prev;
+            const T dv_act = st.v_act - v_act_prev;
+            const T domega_act = st.omega_act - omega_act_prev;
 
             // 样条上的参考点
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -369,10 +421,10 @@ struct FollowMPCCostFunctor {
             const T s_remain = T(s_remain_d);
 
             // Frenet误差
-            const T ex = x - pr.x();
-            const T ey_world = y - pr.y();
+            const T ex = st.x - pr.x();
+            const T ey_world = st.y - pr.y();
             const T ey = -ex * ceres::sin(thetar) + ey_world * ceres::cos(thetar);
-            T etheta = theta - thetar;
+            T etheta = st.theta - thetar;
             etheta = ceres::atan2(ceres::sin(etheta), ceres::cos(etheta));
 
             // 1. 路径跟踪
@@ -397,15 +449,15 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
             // 6. 侧向加速度约束
-            const T a_lat = ceres::abs(v_act * omega_act);
+            const T a_lat = ceres::abs(st.v_act * st.omega_act);
             residuals[res_idx++] = T(params_.follow_weights.lat_acc_weight) * ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
 
             // 7. 避障
-            const T cost = interpolate_cost_map(merged_cost_map_, x, y);
+            const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
             residuals[res_idx++] = T(params_.follow_weights.obstacle_weight) * (cost / T(255.0));
 
             // 8. 台阶处理
-            const auto dir = interpolate_direction_map(direction_map_, x, y);
+            const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T step_gate = smoothstep(
                 dir_norm,
@@ -417,21 +469,21 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.step_weight) * step_gate;
 
             // 台阶方向对齐和台阶区域速度保持使用方向场模长门控
-            const Eigen::Matrix<T, 2, 1> heading(ceres::cos(theta), ceres::sin(theta));
+            const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
             residuals[res_idx++] = T(params_.follow_weights.direction_weight) * dir_norm * ceres::abs(heading_cross_dir);
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(v_act - T(params_.follow_limits.vel_on_step));
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(st.v_act - T(params_.follow_limits.vel_on_step));
 
             // 9. 终点减速
             const T deceleration = T(params_.follow_limits.slow_down_deceleration); // 期望的减速加速度
             const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
-            residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), v_act - v_dec_profile); // 惩罚超速
+            residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), st.v_act - v_dec_profile); // 惩罚超速
 
             // 进度动力学
             T denom = T(1.0) - kappa * ey;
             const T denom_abs = ceres::abs(denom);
             denom = denom / (denom_abs + T(1e-6)) * ceres::fmax(denom_abs, T(0.1));
-            const T dsdt = v_act * ceres::cos(etheta) / denom;
+            const T dsdt = st.v_act * ceres::cos(etheta) / denom;
             const T dudt = dsdt / dsdu;
             u += dudt * T(params_.dt);
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -450,8 +502,6 @@ struct FollowMPCCostFunctor {
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
-
-    const LQRModel& lqr_;
 };
 
 // ============================================================================
@@ -472,23 +522,22 @@ struct StopMPCCostFunctor {
         start_cmd_(start_cmd),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
-        lqr_(params.lqr) {}
+        direction_map_(direction_map) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
-        T x = T(start_pose_.x());
-        T y = T(start_pose_.y());
-        T theta = T(start_pose_.z());
+        PredictorState<T> st;
+        st.x = T(start_pose_.x());
+        st.y = T(start_pose_.y());
+        st.theta = T(start_pose_.z());
         T theta_cmd = T(start_pose_.z());
-        T v_act = T(start_status_.x());
-        T omega_act = T(start_status_.y());
-
-        Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_state;
-        x_state.setZero();
-        x_state(IDX_DS) = T(start_status_.x());
-        x_state(IDX_DPHI) = T(start_status_.y());
-        x_state(IDX_PHI) = T(start_pose_.z());
+        st.v_act = T(start_status_.x());
+        st.omega_act = T(start_status_.y());
+        st.a_act = T(0.0);
+        st.x_lqr.setZero();
+        st.x_lqr(IDX_DS) = T(start_status_.x());
+        st.x_lqr(IDX_DPHI) = T(start_status_.y());
+        st.x_lqr(IDX_PHI) = T(start_pose_.z());
 
         T last_v_cmd = T(start_cmd_.x());
         T last_omega_cmd = T(start_cmd_.y());
@@ -499,30 +548,20 @@ struct StopMPCCostFunctor {
             const T* uk = parameters[k];
             const T v_cmd = uk[0];
             const T omega_cmd = uk[1];
-
-            const T theta_ideal_next = wrap_to_pi(theta_cmd + omega_cmd * T(params_.dt));
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            const T v_act_prev = v_act;
-            const T omega_act_prev = omega_act;
+            const T v_act_prev = st.v_act;
+            const T omega_act_prev = st.omega_act;
 
-            lqr_closed_loop_step(lqr_, x_state, v_cmd, omega_cmd, theta_ideal_next);
-            const T v_now = x_state(IDX_DS);
-            const T theta_now = x_state(IDX_PHI);
-            x += v_now * ceres::cos(theta_now) * T(params_.dt);
-            y += v_now * ceres::sin(theta_now) * T(params_.dt);
-            theta = theta_now;
-            v_act = v_now;
-            omega_act = x_state(IDX_DPHI);
-            theta_cmd = theta_ideal_next;
+            prediction_step(params_, st, v_cmd, omega_cmd, theta_cmd);
 
-            const T dv_act = v_act - v_act_prev;
-            const T domega_act = omega_act - omega_act_prev;
+            const T dv_act = st.v_act - v_act_prev;
+            const T domega_act = st.omega_act - omega_act_prev;
 
             // 1. 速度正则化（希望停止）
-            residuals[res_idx++] = T(params_.stop_weights.q_v) * v_act;
-            residuals[res_idx++] = T(params_.stop_weights.q_omega) * omega_act;
+            residuals[res_idx++] = T(params_.stop_weights.q_v) * st.v_act;
+            residuals[res_idx++] = T(params_.stop_weights.q_omega) * st.omega_act;
 
             // 2. 指令变化率约束
             const T dv_cmd_limit = T(params_.stop_limits.acc_max * params_.dt);
@@ -531,22 +570,22 @@ struct StopMPCCostFunctor {
             residuals[res_idx++] = T(params_.stop_weights.alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
             // 3. 侧向加速度约束
-            const T a_lat = ceres::abs(v_act * omega_act);
+            const T a_lat = ceres::abs(st.v_act * st.omega_act);
             residuals[res_idx++] = T(params_.stop_weights.lat_acc_weight) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
 
             // 4. 避障
-            const T cost = interpolate_cost_map(merged_cost_map_, x, y);
+            const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
             residuals[res_idx++] = T(params_.stop_weights.obstacle_weight) * (cost / T(255.0));
 
             // 5. 台阶处理
-            const auto dir = interpolate_direction_map(direction_map_, x, y);
+            const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T gate_step = ceres::fmin(T(1.0), dir_norm * T(2.0));
             const auto dir_normalized = dir / dir_norm;
-            const Eigen::Matrix<T, 2, 1> heading(ceres::cos(theta), ceres::sin(theta));
+            const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_dot_dir = heading.dot(dir_normalized);
             // 这里统一使用接近门控，避免停止模式下不必要地接近台阶
-            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * ceres::abs(v_act - T(params_.stop_limits.vel_on_step));
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * ceres::abs(st.v_act - T(params_.stop_limits.vel_on_step));
             residuals[res_idx++] = T(params_.stop_weights.direction_weight) * gate_step * (T(1.0) - ceres::abs(heading_dot_dir));
             
             last_v_cmd = v_cmd;
@@ -554,10 +593,10 @@ struct StopMPCCostFunctor {
         }
 
         // 终端约束
-        const T cost_terminal = interpolate_cost_map(merged_cost_map_, x, y);
+        const T cost_terminal = interpolate_cost_map(merged_cost_map_, st.x, st.y);
         residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal_weight) * (cost_terminal / T(255.0));
 
-        const auto dir_t = interpolate_direction_map(direction_map_, x, y);
+        const auto dir_t = interpolate_direction_map(direction_map_, st.x, st.y);
         const T dir_t_norm = ceres::sqrt(dir_t.squaredNorm() + T(1e-10));
         const T gate_step_t = ceres::fmin(T(1.0), dir_t_norm * T(2.0));
         residuals[res_idx++] = T(params_.stop_weights.step_terminal_weight) * gate_step_t;
@@ -571,9 +610,41 @@ struct StopMPCCostFunctor {
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
-
-    const LQRModel& lqr_;
 };
+
+inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
+    const MPCParams& params,
+    const Eigen::Vector3d& chassis_pose_map,
+    const Eigen::Vector2d& chassis_status,
+    const std::vector<std::vector<double>>& controls
+) {
+    std::vector<Eigen::Vector2d> predicted_path_map;
+    predicted_path_map.reserve(params.horizon + 1);
+
+    PredictorState<double> st;
+    st.x = chassis_pose_map.x();
+    st.y = chassis_pose_map.y();
+    st.theta = chassis_pose_map.z();
+    st.v_act = chassis_status.x();
+    st.omega_act = chassis_status.y();
+    st.a_act = 0.0;
+    st.x_lqr = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
+    st.x_lqr(IDX_DS) = chassis_status.x();
+    st.x_lqr(IDX_DPHI) = chassis_status.y();
+    st.x_lqr(IDX_PHI) = chassis_pose_map.z();
+
+    predicted_path_map.emplace_back(st.x, st.y);
+
+    double theta_cmd = chassis_pose_map.z();
+    for (int i = 0; i < params.horizon; i++) {
+        const double v_cmd = controls[i][0];
+        const double w_cmd = controls[i][1];
+        prediction_step(params, st, v_cmd, w_cmd, theta_cmd);
+        predicted_path_map.emplace_back(st.x, st.y);
+    }
+
+    return predicted_path_map;
+}
 
 // ============================================================================
 //                            MPCController 实现
@@ -687,46 +758,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         last_controls_[i] = Eigen::Vector2d(controls[i][0], controls[i][1]);
     }
 
-    // 生成预测轨迹（使用固定LQR离散模型）
-    std::vector<Eigen::Vector2d> predicted_path_map;
-    predicted_path_map.reserve(params_.horizon + 1);
-
-    Eigen::Vector3d pose = chassis_pose_map;
-    predicted_path_map.push_back(pose.head<2>());
-
-    Eigen::Matrix<double, LQR_STATE_SIZE, 1> x_state = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
-    x_state(IDX_DS) = chassis_status.x();
-    x_state(IDX_DPHI) = chassis_status.y();
-    x_state(IDX_PHI) = pose.z();
-
-    double theta_cmd = pose.z();
-
-    // LQR以理想外推角作为参考输入，约束评估使用LQR实际响应状态
-    theta_cmd = std::atan2(std::sin(theta_cmd + controls[0][1] * params_.dt), std::cos(theta_cmd + controls[0][1] * params_.dt));
-    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1], theta_cmd);
-    const double theta_act_first = x_state(IDX_PHI);
-    const double v_first = x_state(IDX_DS);
-    pose.x() += v_first * std::cos(theta_act_first) * params_.dt;
-    pose.y() += v_first * std::sin(theta_act_first) * params_.dt;
-    pose.z() = theta_act_first;
-    predicted_path_map.push_back(pose.head<2>());
-
-    // 继续后续步骤的预测
-    for (int i = 1; i < params_.horizon; i++) {
-        const double v_cmd = controls[i][0];
-        const double w_cmd = controls[i][1];
-
-        theta_cmd = std::atan2(std::sin(theta_cmd + w_cmd * params_.dt), std::cos(theta_cmd + w_cmd * params_.dt));
-        lqr_closed_loop_step(params_.lqr, x_state, v_cmd, w_cmd, theta_cmd);
-        const double v_now = x_state(IDX_DS);
-        const double theta_now = x_state(IDX_PHI);
-        pose.x() += v_now * std::cos(theta_now) * params_.dt;
-        pose.y() += v_now * std::sin(theta_now) * params_.dt;
-        pose.z() = theta_now;
-
-        predicted_path_map.push_back(pose.head<2>());
-    }
-
+    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(params_, chassis_pose_map, chassis_status, controls);
     return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 
@@ -815,44 +847,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         last_controls_[i] = Eigen::Vector2d(controls[i][0], controls[i][1]);
     }
 
-    // 预测轨迹（使用固定LQR离散模型）
-    std::vector<Eigen::Vector2d> predicted_path_map;
-    predicted_path_map.reserve(params_.horizon + 1);
-
-    Eigen::Vector3d pose = chassis_pose_map;
-    predicted_path_map.push_back(pose.head<2>());
-
-    Eigen::Matrix<double, LQR_STATE_SIZE, 1> x_state = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
-    x_state(IDX_DS) = chassis_status.x();
-    x_state(IDX_DPHI) = chassis_status.y();
-    x_state(IDX_PHI) = pose.z();
-
-    double theta_cmd = pose.z();
-    theta_cmd = std::atan2(std::sin(theta_cmd + controls[0][1] * params_.dt), std::cos(theta_cmd + controls[0][1] * params_.dt));
-    lqr_closed_loop_step(params_.lqr, x_state, controls[0][0], controls[0][1], theta_cmd);
-    const double theta_act_first = x_state(IDX_PHI);
-    const double v_first = x_state(IDX_DS);
-    pose.x() += v_first * std::cos(theta_act_first) * params_.dt;
-    pose.y() += v_first * std::sin(theta_act_first) * params_.dt;
-    pose.z() = theta_act_first;
-    predicted_path_map.push_back(pose.head<2>());
-
-    // 继续后续步骤的预测
-    for (int i = 1; i < params_.horizon; i++) {
-        const double v_cmd = controls[i][0];
-        const double w_cmd = controls[i][1];
-
-        theta_cmd = std::atan2(std::sin(theta_cmd + w_cmd * params_.dt), std::cos(theta_cmd + w_cmd * params_.dt));
-        lqr_closed_loop_step(params_.lqr, x_state, v_cmd, w_cmd, theta_cmd);
-        const double v_now = x_state(IDX_DS);
-        const double theta_now = x_state(IDX_PHI);
-        pose.x() += v_now * std::cos(theta_now) * params_.dt;
-        pose.y() += v_now * std::sin(theta_now) * params_.dt;
-        pose.z() = theta_now;
-
-        predicted_path_map.push_back(pose.head<2>());
-    }
-
+    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(params_, chassis_pose_map, chassis_status, controls);
     return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 

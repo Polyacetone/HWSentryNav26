@@ -89,64 +89,97 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.predicted_path_pub_topic"), 1);
     }
 
-    const auto load_matrix = [this](const std::string& name, int rows, int cols) {
-        const auto data = declare_parameter<std::vector<double>>(name);
-        if (data.size() != rows * cols) {
-            RCLCPP_FATAL(get_logger(), "Parameter %s size %zu != %d", name.c_str(), data.size(), rows * cols);
-            throw std::runtime_error("Invalid matrix size");
-        }
-        Eigen::MatrixXd mat(rows, cols);
-        for (int r = 0; r < rows; r++) {
-            for (int c = 0; c < cols; c++) {
-                mat(r, c) = data[r * cols + c];
-            }
-        }
-        return mat;
-    };
-
-    const int horizon = (int)declare_parameter<int>("mpc.general.horizon");
+    const int horizon = declare_parameter<int>("mpc.general.horizon");
     const double mpc_dt = declare_parameter<double>("mpc.general.dt");
-    const int max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations");
+    const int max_iterations = declare_parameter<int>("mpc.general.max_iterations");
 
-    const double lqr_dt = declare_parameter<double>("mpc.lqr.dt");
-    const int substeps = (int)declare_parameter<int>("mpc.lqr.substeps");
-    if (substeps <= 0) {
-        RCLCPP_FATAL(get_logger(), "mpc.lqr.substeps must be > 0, got %d", substeps);
-        throw std::runtime_error("Invalid mpc.lqr.substeps");
+    const std::string prediction_model_str = declare_parameter<std::string>("mpc.general.model");
+    PredictionModel prediction_model;
+    if (prediction_model_str == "NONE") {
+        prediction_model = PredictionModel::NONE;
+    } else if (prediction_model_str == "LAG") {
+        prediction_model = PredictionModel::LAG;
+    } else if (prediction_model_str == "LQR") {
+        prediction_model = PredictionModel::LQR;
+    } else {
+        RCLCPP_FATAL(get_logger(), "Invalid mpc.general.model: %s", prediction_model_str.c_str());
+        throw std::runtime_error("Invalid mpc.general.model");
     }
-    const double dt_sub = mpc_dt / substeps;
 
-    const int lqr_steps_per_substep = (lqr_dt > 0.0) ? std::max(1, (int)std::llround(dt_sub / lqr_dt)) : 1;
-    const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
-    if (lqr_dt <= 0.0) {
-        RCLCPP_WARN(get_logger(), "mpc.lqr.dt <= 0, skip LQR-step bookkeeping");
-    } else if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
-        RCLCPP_WARN(
-            get_logger(),
-            "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f). ",
-            dt_sub, lqr_dt, lqr_steps_per_substep, dt_sub_from_lqr
-        );
+    LagModel lag_model;
+    // Always declare lag params so config files stay consistent.
+    lag_model.tau_v = declare_parameter<double>("mpc.general.lag.tau_v");
+    lag_model.k_v = declare_parameter<double>("mpc.general.lag.k_v");
+    lag_model.tau_omega = declare_parameter<double>("mpc.general.lag.tau_omega");
+    if (lag_model.tau_v <= 0.0) {
+        RCLCPP_FATAL(get_logger(), "mpc.general.lag.tau_v must be > 0, got %.6f", lag_model.tau_v);
+        throw std::runtime_error("Invalid mpc.general.lag.tau_v");
+    }
+    if (lag_model.tau_omega <= 0.0) {
+        RCLCPP_FATAL(get_logger(), "mpc.general.lag.tau_omega must be > 0, got %.6f", lag_model.tau_omega);
+        throw std::runtime_error("Invalid mpc.general.lag.tau_omega");
     }
 
     LQRModel lqr_model;
-    lqr_model.substeps = substeps;
-    lqr_model.dt_sub = dt_sub;
-    const Eigen::Matrix<double, 10, 10> A = load_matrix("mpc.lqr.A", 10, 10);
-    const Eigen::Matrix<double, 10, 4> B = load_matrix("mpc.lqr.B", 10, 4);
-    const Eigen::Matrix<double, 4, 10> K = load_matrix("mpc.lqr.K", 4, 10);
-    const Eigen::Matrix<double, 10, 10> Acl = A - B * K;
-    const Eigen::Matrix<double, 10, 10> BK = B * K;
-    Eigen::Matrix<double, 20, 20> M = Eigen::Matrix<double, 20, 20>::Zero();
-    M.block<10, 10>(0, 0) = Acl;
-    M.block<10, 10>(0, 10) = BK;
-    const Eigen::Matrix<double, 20, 20> Mexp = (M * dt_sub).exp();
-    lqr_model.A_cl = Mexp.block<10, 10>(0, 0);
-    lqr_model.B_ref = Mexp.block<10, 10>(0, 10);
+    // Safe defaults for non-LQR modes (avoid uninitialized matrices/fields).
+    lqr_model.substeps = 1;
+    lqr_model.dt_sub = mpc_dt;
+    lqr_model.A_cl.setIdentity();
+    lqr_model.B_ref.setZero();
+    if (prediction_model == PredictionModel::LQR) {
+        const double lqr_dt = declare_parameter<double>("mpc.general.lqr.dt");
+        const int substeps = declare_parameter<int>("mpc.general.lqr.substeps");
+        if (substeps <= 0) {
+            RCLCPP_FATAL(get_logger(), "mpc.general.lqr.substeps must be > 0, got %d", substeps);
+            throw std::runtime_error("Invalid mpc.general.lqr.substeps");
+        }
+        const double dt_sub = mpc_dt / substeps;
+        const int lqr_steps_per_substep = std::max<int>(1, std::llround(dt_sub / lqr_dt));
+        const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
+        if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
+            RCLCPP_WARN(
+                get_logger(),
+                "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f)",
+                dt_sub, lqr_dt, lqr_steps_per_substep, dt_sub_from_lqr
+            );
+        }
+
+        const auto load_matrix = [this](const std::string& name, int rows, int cols) {
+            const auto data = declare_parameter<std::vector<double>>(name);
+            if (data.size() != rows * cols) {
+                RCLCPP_FATAL(get_logger(), "Parameter %s size %zu != %d", name.c_str(), data.size(), rows * cols);
+                throw std::runtime_error("Invalid matrix size");
+            }
+            Eigen::MatrixXd mat(rows, cols);
+            for (int r = 0; r < rows; r++) {
+                for (int c = 0; c < cols; c++) {
+                    mat(r, c) = data[r * cols + c];
+                }
+            }
+            return mat;
+        };
+
+        lqr_model.substeps = substeps;
+        lqr_model.dt_sub = dt_sub;
+        const Eigen::Matrix<double, 10, 10> A = load_matrix("mpc.general.lqr.A", 10, 10);
+        const Eigen::Matrix<double, 10, 4> B = load_matrix("mpc.general.lqr.B", 10, 4);
+        const Eigen::Matrix<double, 4, 10> K = load_matrix("mpc.general.lqr.K", 4, 10);
+        const Eigen::Matrix<double, 10, 10> Acl = A - B * K;
+        const Eigen::Matrix<double, 10, 10> BK = B * K;
+        Eigen::Matrix<double, 20, 20> M = Eigen::Matrix<double, 20, 20>::Zero();
+        M.block<10, 10>(0, 0) = Acl;
+        M.block<10, 10>(0, 10) = BK;
+        const Eigen::Matrix<double, 20, 20> Mexp = (M * dt_sub).exp();
+        lqr_model.A_cl = Mexp.block<10, 10>(0, 0);
+        lqr_model.B_ref = Mexp.block<10, 10>(0, 10);
+    }
 
     params_ = {
         .horizon = horizon,
         .dt = mpc_dt,
         .max_iterations = max_iterations,
+        .prediction_model = prediction_model,
+        .lag = lag_model,
         .lqr = lqr_model,
         .follow_limits = {
             .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),

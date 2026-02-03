@@ -1,11 +1,27 @@
 #pragma once
 
 #include <expected>
+#include <string>
+#include <cctype>
 #include <Eigen/Dense>
 #include <path_follower/nav_map.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
+
+enum class PredictionModel { NONE, LAG, LQR };
+
+struct LagModel {
+    // 线速度延迟模型
+    // v_dot = a
+    // a_dot = (1/tau_v) * (k_v * (v_cmd - v) - a)
+    double tau_v;
+    double k_v;
+
+    // 角速度一阶惯性延迟模型
+    // omega_dot = (1/tau_omega) * (omega_cmd - omega)
+    double tau_omega;
+};
 
 struct LQRModel {
     // 离散化闭环矩阵（子步）: x_{k+1} = A_cl * x_k + B_ref * x_ref
@@ -93,6 +109,8 @@ struct MPCParams {
     double dt;
     int max_iterations;
 
+    PredictionModel prediction_model;
+    LagModel lag;
     LQRModel lqr;
 
     MPCFollowLimits follow_limits;
