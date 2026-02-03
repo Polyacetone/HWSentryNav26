@@ -8,8 +8,8 @@
     spin_cmd_sub_topic: "/decision/spin_cmd"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
 
-    stop_threshold_dist: 0.3 # 停止距离 (m)
-    stop_threshold_u: 0.99 # 停止样条参数u
+    stop_threshold_dist: 0.5 # 停止距离 (m)
+    stop_threshold_u: 0.99 # 停止样条参数u (0~1)
 
     debug:
       enable: true
@@ -30,11 +30,11 @@
       general: # 通用参数
         horizon: 12 # 预测步数
         dt: 0.1 # 预测时间间隔
-        max_iterations: 40 # 最大迭代次数
+        max_iterations: 60 # 最大迭代次数
       follow_path: # 路径跟随模式
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数
-          search_window: 0.1 # 局部搜索窗口大小（0~1）
+          search_window: 0.1 # 局部搜索窗口大小 (0~1)
           max_correspondence_distance: 1.0 # 最大对应点距离 (m)
         limits: # 运动限制
           vel_max: 2.0 # 最大速度 (m/s)
@@ -43,7 +43,8 @@
           omega_min: -6.0 # 最小角速度 (rad/s)
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_on_step: 0.5 # 台阶区域期望速度 (m/s)
+          vel_step_up: 0.8 # 上台阶期望速度 (m/s)
+          vel_step_down: 1.5 # 下台阶期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           slow_down_deceleration: 1.2 # 终点减速期望加速度 (m/s²)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
@@ -53,15 +54,15 @@
           q_y: 0.4 # 横向误差权重
           q_theta: 0.3 # 航向误差权重
           q_u: 2.0 # 进度项权重
-          q_v_final: 0.5 # 终点减速权重
+          q_v_final: 0.8 # 终点减速权重
           r_v: 0.02 # 线速度正则
           r_omega: 0.02 # 角速度正则
           r_dv: 0.04 # 线速度平滑
           r_domega: 0.04 # 角速度平滑
-          acc_limit: 10.0 # 指令变化率超限惩罚（dv_cmd）
-          alpha_limit: 10.0 # 指令变化率超限惩罚（domega_cmd）
+          acc_limit: 10.0 # 速度指令变化率超限惩罚
+          alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 4.5 # 台阶区域速度保持权重
+          vel_on_step: 3.0 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障权重（全局+局部）
           direction: 3.0 # 台阶方向对齐权重
           step: 0.01 # 经过台阶惩罚
@@ -72,13 +73,14 @@
           omega_min: -12.5 # 最小角速度硬约束 (rad/s)
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_on_step: 0.5 # 台阶区域期望速度 (m/s)
+          vel_step_up: 0.8 # 上台阶期望速度 (m/s)
+          vel_step_down: 1.5 # 下台阶期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights: # 权重
           q_v: 0.6 # 线速度正则
           q_omega: 0.6 # 角速度正则
-          acc_limit: 10.0 # 指令变化率超限惩罚（dv_cmd）
-          alpha_limit: 10.0 # 指令变化率超限惩罚（domega_cmd）
+          acc_limit: 10.0 # 速度指令变化率超限惩罚
+          alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
           vel_on_step: 3.0 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障惩罚

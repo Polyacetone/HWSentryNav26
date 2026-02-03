@@ -71,18 +71,18 @@ class SimConfig:
     ODOM_DELAY_SEC: float = 0.03
 
     # --- 传感器噪声（标准差）---
-    IMU_YAW_NOISE_STD_RAD: float = 0.0
+    IMU_YAW_NOISE_STD_RAD: float = 0.01
 
-    ODOM_X_NOISE_STD_M: float = 0.0
-    ODOM_Y_NOISE_STD_M: float = 0.0
-    ODOM_YAW_NOISE_STD_RAD: float = 0.0
-    ODOM_V_NOISE_STD_MPS: float = 0.0
-    ODOM_W_NOISE_STD_RADPS: float = 0.0
+    ODOM_X_NOISE_STD_M: float = 0.004
+    ODOM_Y_NOISE_STD_M: float = 0.004
+    ODOM_YAW_NOISE_STD_RAD: float = 0.01
+    ODOM_V_NOISE_STD_MPS: float = 0.01
+    ODOM_W_NOISE_STD_RADPS: float = 0.01
 
     # --- 力矩扰动（每个通道）---
     # u = [T_w_l, T_w_r, T_b_l, T_b_r]
     TORQUE_BIAS_NM: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
-    TORQUE_NOISE_STD_NM: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    TORQUE_NOISE_STD_NM: tuple[float, float, float, float] = (0.04, 0.04, 0.04, 0.04)
 
     # --- 话题名 ---
     TOPIC_CMD: str = "/path_follower/chassis_cmd"

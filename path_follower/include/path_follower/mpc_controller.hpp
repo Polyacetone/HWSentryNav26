@@ -41,7 +41,8 @@ struct MPCFollowLimits {
     double acc_max;
     double alpha_max;
 
-    double vel_on_step;
+    double vel_step_up;
+    double vel_step_down;
     double a_lat_max;
 
     double slow_down_deceleration;
@@ -85,7 +86,8 @@ struct MPCStopLimits {
     double acc_max;
     double alpha_max;
 
-    double vel_on_step;
+    double vel_step_up;
+    double vel_step_down;
     double a_lat_max;
 };
 

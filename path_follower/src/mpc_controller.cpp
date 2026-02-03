@@ -234,9 +234,9 @@ inline void prediction_step(
             break;
         }
         case PredictionModel::LAG: {
-            const T tau_v = T(std::max(1e-6, params.lag.tau_v));
+            const T tau_v = T(params.lag.tau_v);
             const T k_v = T(params.lag.k_v);
-            const T tau_omega = T(std::max(1e-6, params.lag.tau_omega));
+            const T tau_omega = T(params.lag.tau_omega);
 
             const T a_dot = (k_v * (v_cmd - st.v_act) - st.a_act) / tau_v;
             st.a_act = st.a_act + a_dot * dt;
@@ -386,15 +386,7 @@ struct FollowMPCCostFunctor {
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            // 保存上一时刻状态用于计算变化率
-            const T v_act_prev = st.v_act;
-            const T omega_act_prev = st.omega_act;
-
             prediction_step(params_, st, v_cmd, omega_cmd, theta_cmd);
-
-            // 实际状态变化（用于物理约束）
-            const T dv_act = st.v_act - v_act_prev;
-            const T domega_act = st.omega_act - omega_act_prev;
 
             // 样条上的参考点
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -459,20 +451,26 @@ struct FollowMPCCostFunctor {
             // 8. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
+            const auto dir_unit = dir / dir_norm;
+
+            // 台阶惩罚使用接近门控，避免不必要地接近台阶
             const T step_gate = smoothstep(
                 dir_norm,
                 T(params_.follow_limits.step_norm_threshold),
                 T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
             );
-
-            // 台阶惩罚使用接近门控，避免不必要地接近台阶
             residuals[res_idx++] = T(params_.follow_weights.step_weight) * step_gate;
 
-            // 台阶方向对齐和台阶区域速度保持使用方向场模长门控
+            // 台阶方向对齐
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * dir_norm * ceres::abs(heading_cross_dir);
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(st.v_act - T(params_.follow_limits.vel_on_step));
+            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * ceres::abs(heading_cross_dir);
+
+            // 台阶区域速度保持
+            const T cos_theta = heading.dot(dir_unit);
+            const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
+            const T target_vel_step = weight_up * T(params_.follow_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.follow_limits.vel_step_down);
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(st.v_act - target_vel_step);
 
             // 9. 终点减速
             const T deceleration = T(params_.follow_limits.slow_down_deceleration); // 期望的减速加速度
@@ -551,13 +549,7 @@ struct StopMPCCostFunctor {
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            const T v_act_prev = st.v_act;
-            const T omega_act_prev = st.omega_act;
-
             prediction_step(params_, st, v_cmd, omega_cmd, theta_cmd);
-
-            const T dv_act = st.v_act - v_act_prev;
-            const T domega_act = st.omega_act - omega_act_prev;
 
             // 1. 速度正则化（希望停止）
             residuals[res_idx++] = T(params_.stop_weights.q_v) * st.v_act;
@@ -580,26 +572,34 @@ struct StopMPCCostFunctor {
             // 5. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-            const T gate_step = ceres::fmin(T(1.0), dir_norm * T(2.0));
-            const auto dir_normalized = dir / dir_norm;
+            const auto dir_unit = dir / dir_norm;
+
+            // 台阶方向对齐
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
-            const T heading_dot_dir = heading.dot(dir_normalized);
-            // 这里统一使用接近门控，避免停止模式下不必要地接近台阶
-            residuals[res_idx++] = T(params_.stop_weights.vel_on_step_weight) * gate_step * ceres::abs(st.v_act - T(params_.stop_limits.vel_on_step));
-            residuals[res_idx++] = T(params_.stop_weights.direction_weight) * gate_step * (T(1.0) - ceres::abs(heading_dot_dir));
+            const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
+            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * ceres::abs(heading_cross_dir);
+
+            // 台阶区域速度保持
+            const T cos_theta = heading.dot(dir_unit);
+            const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
+            const T target_vel_step = weight_up * T(params_.follow_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.follow_limits.vel_step_down);
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(st.v_act - target_vel_step);
             
             last_v_cmd = v_cmd;
             last_omega_cmd = omega_cmd;
         }
 
-        // 终端约束
+        // 终端约束：不碰撞且不在台阶区域
         const T cost_terminal = interpolate_cost_map(merged_cost_map_, st.x, st.y);
         residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal_weight) * (cost_terminal / T(255.0));
-
-        const auto dir_t = interpolate_direction_map(direction_map_, st.x, st.y);
-        const T dir_t_norm = ceres::sqrt(dir_t.squaredNorm() + T(1e-10));
-        const T gate_step_t = ceres::fmin(T(1.0), dir_t_norm * T(2.0));
-        residuals[res_idx++] = T(params_.stop_weights.step_terminal_weight) * gate_step_t;
+        const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
+        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
+        const T step_gate = smoothstep(
+            dir_norm,
+            T(params_.follow_limits.step_norm_threshold),
+            T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
+        );
+        residuals[res_idx++] = T(params_.stop_weights.step_terminal_weight) * step_gate;
 
         return true;
     }
@@ -616,7 +616,7 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     const MPCParams& params,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
-    const std::vector<std::vector<double>>& controls
+    const std::vector<std::array<double, 2>>& controls
 ) {
     std::vector<Eigen::Vector2d> predicted_path_map;
     predicted_path_map.reserve(params.horizon + 1);
@@ -651,7 +651,7 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
 // ============================================================================
 
 MPCController::MPCController(const MPCParams& params): params_(params) {
-    last_controls_.assign(std::max(1, params_.horizon), Eigen::Vector2d::Zero());
+    last_controls_.assign(params_.horizon, Eigen::Vector2d::Zero());
 }
 
 std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::follow_path(
@@ -673,7 +673,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     last_u_ = u0;
 
     // 决策变量
-    std::vector<std::vector<double>> controls(params_.horizon, std::vector<double>(2, 0.0));
+    std::vector<std::array<double, 2>> controls(params_.horizon, {0.0, 0.0});
 
     // Warm start
     if (last_controls_.size() == params_.horizon) {
@@ -769,7 +769,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     const DirectionMap& global_direction_map
 ) {
     // 决策变量
-    std::vector<std::vector<double>> controls(params_.horizon, std::vector<double>(2, 0.0));
+    std::vector<std::array<double, 2>> controls(params_.horizon, {0.0, 0.0});
 
     // Warm start
     if (last_controls_.size() == params_.horizon) {
