@@ -3,18 +3,26 @@
     global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局方向地图订阅话题
     global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图订阅话题
     goal_sub_topic: "/decision/nav_goal" # 目标点订阅话题
+    odom_sub_topic: "/small_glim/odometry" # 里程计，用于获取当前速度
     control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
     lazy_distance: 1.0 # 如果目标点距离当前点小于该值，则不进行路径规划（单位：米）
-    goal_occupied_threshold: 50 # 如果目标点所在格子的代价值大于该阈值，则认为目标点不可达
-    goal_on_step_threshold: 0.1 # 如果目标点所在格子的方向场模长大于该阈值，则认为目标点在台阶上不可达
+    occupied_threshold: 50 # 如果起点/目标点所在格子的代价值大于该阈值，则认为起点/目标点不可达
+    on_step_threshold: 0.1 # 如果起点/目标点所在格子的方向场模长大于该阈值，则认为起点/目标点在台阶上不可达
 
     debug:
       enable: true # 是否启用调试模式
       rough_path_pub_topic: "/path_planner/debug/rough_path" # A*原始路径发布话题
       optimized_path_pub_topic: "/path_planner/debug/optimized_path" # 优化后路径的采样点发布话题
 
+    start_prediction:
+      enable: true # 是否启用起点预测（刹车距离 + 规划延迟）
+      max_accel: 2.0 # 最大减速度(>0)，用于估计刹车距离（单位：m/s^2）
+      planning_delay: 0.2 # A* + B样条期望耗时（单位：s）
+      min_speed: 0.3 # 低于该速度不进行起点前推（单位：m/s）
+      collision_check_step: 0.05 # 预测起点直线可达性采样间隔（单位：m）
+
     path_planner:
-      direction_weight: 2.0 # 方向代价权重
+      direction_weight: 1.0 # 方向代价权重
       obstacle_weight: 1.0 # 障碍物代价权重
       downsampled_waypoint_max_interval: 5 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
       feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
@@ -22,7 +30,7 @@
     path_optimizer:
       smoothness_weight: 0.3 # 平滑代价权重
       uniform_speed_weight: 0.2 # 速度均匀代价权重
-      obstacle_weight: 4.0 # 障碍物代价权重
+      obstacle_weight: 6.0 # 障碍物代价权重
       direction_weight: 4.0 # 方向代价权重
       step_weight: 0.3 # 经过台阶惩罚（基于方向场模长）
       step_norm_threshold: 0.01 # 台阶方向场模长阈值（>=该值视为台阶区域）

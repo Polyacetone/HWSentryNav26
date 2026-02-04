@@ -3,6 +3,8 @@
 #include <cv_bridge/cv_bridge.hpp>
 #include <tf2_ros/transform_listener.hpp>
 #include <tf2_ros/buffer.hpp>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <nav_msgs/msg/odometry.hpp>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
@@ -21,6 +23,7 @@ public:
     explicit PathPlannerNode(const rclcpp::NodeOptions& options);
 
 private:
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_sub_;
@@ -32,17 +35,26 @@ private:
 
     CostMap::ConstPtr global_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
+    nav_msgs::msg::Odometry::SharedPtr last_odom_msg_;
     AStarPlanner::ConstPtr path_planner_;
     BSplineOptimizer::ConstPtr path_optimizer_;
     double lazy_distance_;
     bool enable_debug_;
-    int goal_occupied_threshold_;
-    double goal_on_step_threshold_;
+    int occupied_threshold_;
+    double on_step_threshold_;
+    bool start_prediction_enable_;
+    double start_prediction_max_accel_;
+    double start_prediction_planning_delay_;
+    double start_prediction_min_speed_;
+    double start_prediction_collision_check_step_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     void goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
     void plan_new_path();
     void update_optimized_path();
+    bool is_map_point_feasible(const Eigen::Vector2d& map_pt) const;
+    Eigen::Vector2d adjust_reachable_start_on_segment(const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const;
+    Eigen::Vector2d predict_start_map(const Eigen::Vector2d& current_map) const;
     void publish_path(
         const std::vector<Eigen::Vector2d>& control_points,
         const std::vector<Eigen::Vector2d>& rough_path,
@@ -55,8 +67,14 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     lazy_distance_ = declare_parameter<double>("lazy_distance");
     enable_debug_ = declare_parameter<bool>("debug.enable");
-    goal_occupied_threshold_ = (int)declare_parameter<int>("goal_occupied_threshold");
-    goal_on_step_threshold_ = declare_parameter<double>("goal_on_step_threshold");
+    occupied_threshold_ = (int)declare_parameter<int>("occupied_threshold");
+    on_step_threshold_ = declare_parameter<double>("on_step_threshold");
+    start_prediction_enable_ = declare_parameter<bool>("start_prediction.enable");
+    start_prediction_max_accel_ = declare_parameter<double>("start_prediction.max_accel");
+    start_prediction_planning_delay_ = declare_parameter<double>("start_prediction.planning_delay");
+    start_prediction_min_speed_ = declare_parameter<double>("start_prediction.min_speed");
+    start_prediction_collision_check_step_ = declare_parameter<double>("start_prediction.collision_check_step");
+
     if (enable_debug_) {
         std::string rough_path_pub_topic = declare_parameter<std::string>("debug.rough_path_pub_topic");
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(rough_path_pub_topic, 1);
@@ -115,8 +133,71 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         goal_sub_topic, 1,
         [this](const geometry_msgs::msg::PointStamped::SharedPtr msg) { goal_callback(msg); }
     );
+    std::string odom_sub_topic = declare_parameter<std::string>("odom_sub_topic");
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        odom_sub_topic, 1,
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { last_odom_msg_ = msg; }
+    );
     std::string control_points_pub_topic = declare_parameter<std::string>("control_points_pub_topic");
     control_points_pub_ = create_publisher<nav_msgs::msg::Path>(control_points_pub_topic, 1);
+}
+
+bool PathPlannerNode::is_map_point_feasible(const Eigen::Vector2d& map_pt) const {
+    if (!global_cost_map_ || !global_direction_map_) return false;
+    const Eigen::Vector2d grid = global_cost_map_->map_coord_to_grid(map_pt);
+    if (!global_cost_map_->is_valid_coord(grid) || !global_direction_map_->is_valid_coord(grid)) return false;
+    if (global_cost_map_->interpolate(grid) > occupied_threshold_) return false;
+    if (global_direction_map_->interpolate(grid).norm() > on_step_threshold_) return false;
+    return true;
+}
+
+Eigen::Vector2d PathPlannerNode::adjust_reachable_start_on_segment(const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const {
+    const Eigen::Vector2d delta = to_map - from_map;
+    const double length = delta.norm();
+    if (length <= 1e-6) return from_map;
+    const double step = std::max(1e-3, start_prediction_collision_check_step_);
+    const int n = std::max(1, static_cast<int>(std::ceil(length / step)));
+    const Eigen::Vector2d dir = delta / length;
+
+    Eigen::Vector2d last_feasible = from_map;
+    for (int i = 0; i <= n; i++) {
+        const double d = length * (static_cast<double>(i) / static_cast<double>(n));
+        const Eigen::Vector2d pt = from_map + dir * d;
+        if (!is_map_point_feasible(pt)) {
+            break;
+        }
+        last_feasible = pt;
+    }
+    return last_feasible;
+}
+
+Eigen::Vector2d PathPlannerNode::predict_start_map(const Eigen::Vector2d& current_map) const {
+    if (!start_prediction_enable_) return current_map;
+    const auto odom = last_odom_msg_;
+    if (!odom) return current_map;
+
+    Eigen::Vector2d v_map(0.0, 0.0);
+    const Eigen::Vector2d v_raw(odom->twist.twist.linear.x, odom->twist.twist.linear.y);
+    try {
+        const auto imu_link_to_map = tf_buffer_->lookupTransform("map", "imu_link", tf2::TimePointZero);
+        const tf2::Matrix3x3 R(utils::convert_to<tf2::Transform>(imu_link_to_map.transform).getRotation());
+        const tf2::Vector3 v = R * tf2::Vector3(v_raw.x(), v_raw.y(), 0.0);
+        v_map = {v.x(), v.y()};
+    } catch (const std::exception& ex) {
+        RCLCPP_WARN(get_logger(), "Failed to transform velocity to map frame: %s", ex.what());
+        return current_map;
+    }
+
+    const double speed = v_map.norm();
+    if (speed < std::max(0.0, start_prediction_min_speed_)) return current_map;
+
+    const double brake_distance = speed * speed / (2.0 * start_prediction_max_accel_);
+    const double delay_distance = speed * std::max(0.0, start_prediction_planning_delay_);
+    const double total_distance = brake_distance + delay_distance;
+
+    const Eigen::Vector2d dir = v_map / speed;
+    const Eigen::Vector2d predicted = current_map + dir * total_distance;
+    return adjust_reachable_start_on_segment(current_map, predicted);
 }
 
 void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg) {
@@ -138,18 +219,26 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
     }
 
     const Eigen::Vector2d goal_map(msg->point.x, msg->point.y);
-    const Eigen::Vector2d start_map(chassis_to_map.getOrigin().x(), chassis_to_map.getOrigin().y());
-    if ((goal_map - start_map).norm() < lazy_distance_) {
+    const Eigen::Vector2d current_map(chassis_to_map.getOrigin().x(), chassis_to_map.getOrigin().y());
+
+    if ((goal_map - current_map).norm() < lazy_distance_) {
         RCLCPP_INFO(get_logger(), "New goal is within lazy distance (%.2f m)", lazy_distance_);
         publish_path({}, {}, {});
         return;
     }
 
+    const Eigen::Vector2d start_map = predict_start_map(current_map);
     const Eigen::Vector2d start_grid = global_cost_map_->map_coord_to_grid(start_map);
     const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_map);
 
     if (!global_cost_map_->is_valid_coord(start_grid)) {
         RCLCPP_WARN(get_logger(), "Start (%.2f, %.2f) is out of bound!", start_map.x(), start_map.y());
+        publish_path({}, {}, {});
+        return;
+    }
+
+    if (!is_map_point_feasible(start_map)) {
+        RCLCPP_ERROR(get_logger(), "Start (%.2f, %.2f) is not feasible!", start_map.x(), start_map.y());
         publish_path({}, {}, {});
         return;
     }
@@ -160,14 +249,8 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
         return;
     }
 
-    if (global_cost_map_->interpolate(goal_grid) > goal_occupied_threshold_) {
-        RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is occupied!", goal_map.x(), goal_map.y());
-        publish_path({}, {}, {});
-        return;
-    }
-
-    if (global_direction_map_->interpolate(goal_grid).norm() > goal_on_step_threshold_) {
-        RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is on step!", goal_map.x(), goal_map.y());
+    if (!is_map_point_feasible(goal_map)) {
+        RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is not feasible!", goal_map.x(), goal_map.y());
         publish_path({}, {}, {});
         return;
     }
