@@ -55,7 +55,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     lazy_distance_ = declare_parameter<double>("lazy_distance");
     enable_debug_ = declare_parameter<bool>("debug.enable");
-    goal_occupied_threshold_ = declare_parameter<int>("goal_occupied_threshold");
+    goal_occupied_threshold_ = (int)declare_parameter<int>("goal_occupied_threshold");
     goal_on_step_threshold_ = declare_parameter<double>("goal_on_step_threshold");
     if (enable_debug_) {
         std::string rough_path_pub_topic = declare_parameter<std::string>("debug.rough_path_pub_topic");

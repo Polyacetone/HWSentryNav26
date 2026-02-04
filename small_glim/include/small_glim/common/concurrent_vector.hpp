@@ -65,12 +65,12 @@ public:
         return values.empty();
     }
 
-    int size() const {
+    size_t size() const {
         std::lock_guard<std::mutex> lock(mutex);
         return values.size();
     }
 
-    void reserve(int n) {
+    void reserve(size_t n) {
         std::lock_guard<std::mutex> lock(mutex);
         values.reserve(n);
     }
@@ -190,7 +190,7 @@ public:
     * @param num_max   Maximum number of data
     * @return std::vector<T, Alloc>  Up to num_max data
     */
-    std::vector<T, Alloc> get_and_clear(int num_max) {
+    std::vector<T, Alloc> get_and_clear(size_t num_max) {
         std::vector<T, Alloc> buffer;
         std::lock_guard<std::mutex> lock(mutex);
         if (values.size() <= num_max) {

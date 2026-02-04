@@ -16,8 +16,8 @@ CostMap::CostMap(
     data(data) {}
 
 CostMap::CostMap(const nav_msgs::msg::OccupancyGrid& occupancy_grid):
-    width(occupancy_grid.info.width),
-    height(occupancy_grid.info.height),
+    width(static_cast<int>(occupancy_grid.info.width)),
+    height(static_cast<int>(occupancy_grid.info.height)),
     resolution(occupancy_grid.info.resolution),
     origin_x(occupancy_grid.info.origin.position.x),
     origin_y(occupancy_grid.info.origin.position.y),
@@ -53,13 +53,13 @@ bool CostMap::is_valid_coord(const Eigen::Vector2d& grid_coord) const {
 }
 
 uint8_t CostMap::at(const Eigen::Vector2i& grid_coord) const {
-    if (is_valid_coord(grid_coord)) return data[grid_coord.y() * width + grid_coord.x()];
+    if (is_valid_coord(grid_coord)) return data[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
     else return 255;
 }
 
 double CostMap::interpolate(const Eigen::Vector2d& grid_coord) const {
     if (!is_valid_coord(grid_coord)) return 255;
-    const int x0 = grid_coord.x(), y0 = grid_coord.y();
+    const int x0 = static_cast<int>(grid_coord.x()), y0 = static_cast<int>(grid_coord.y());
     const int x1 = x0 + 1, y1 = y0 + 1;
     const double dx = grid_coord.x() - x0, dy = grid_coord.y() - y0;
     return (1 - dx) * (1 - dy) * at({x0, y0}) + dx * (1 - dy) * at({x1, y0}) +
@@ -68,7 +68,7 @@ double CostMap::interpolate(const Eigen::Vector2d& grid_coord) const {
 
 Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
     constexpr int samples = 2;
-    const int x = grid_coord.x(), y = grid_coord.y();
+    const int x = static_cast<int>(grid_coord.x()), y = static_cast<int>(grid_coord.y());
     Eigen::Vector2d sum_grad(0, 0);
     for (int i = 1; i <= samples; i++) {
         sum_grad.x() += (at({x + i, y}) - at({x - i, y})) / (i * 2.0);
@@ -82,7 +82,7 @@ std::vector<Eigen::Vector2d> convert_direction_map(const cv::Mat& mat) {
         throw std::runtime_error("Direction map must be of type CV_8UC2");
     }
     std::vector<Eigen::Vector2d> vec;
-    vec.reserve(mat.cols * mat.rows);
+    vec.reserve(static_cast<size_t>(mat.cols) * static_cast<size_t>(mat.rows));
     for (int y = 0; y < mat.rows; y++) {
         for (int x = 0; x < mat.cols; x++) {
             cv::Vec2b val = mat.at<cv::Vec2b>(y, x);
@@ -122,13 +122,13 @@ bool DirectionMap::is_valid_coord(const Eigen::Vector2d& grid_coord) const {
 }
 
 Eigen::Vector2d DirectionMap::at(const Eigen::Vector2i& grid_coord) const {
-    if (is_valid_coord(grid_coord)) return data[grid_coord.y() * width + grid_coord.x()];
+    if (is_valid_coord(grid_coord)) return data[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
     else return {0, 0};
 }
 
 Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) const {
     if (!is_valid_coord(grid_coord)) return {0, 0};
-    const int x0 = grid_coord.x(), y0 = grid_coord.y();
+    const int x0 = static_cast<int>(grid_coord.x()), y0 = static_cast<int>(grid_coord.y());
     const int x1 = x0 + 1, y1 = y0 + 1;
     const double dx = grid_coord.x() - x0, dy = grid_coord.y() - y0;
     return (1 - dx) * (1 - dy) * at({x0, y0}) + dx * (1 - dy) * at({x1, y0}) +

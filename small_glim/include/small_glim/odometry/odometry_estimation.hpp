@@ -47,7 +47,7 @@ public:
     // Optimization params
     double smoother_lag;
     bool use_isam2_dogleg;
-    double isam2_relinearize_skip;
+    int isam2_relinearize_skip;
     double isam2_relinearize_thresh;
 
     // MISC
@@ -79,15 +79,11 @@ public:
     EstimationFrame::ConstPtr get_target_ivox_frame();
 
 private:
-    gtsam::NonlinearFactorGraph create_factors(
-        const int current,
-        const std::shared_ptr<gtsam::ImuFactor>& imu_factor,
-        gtsam::Values& new_values
-    );
-    void update_target(const int current, const Eigen::Isometry3d& T_target_imu);
-    int select_target_update_frame(const int preferred) const;
-    void update_frames(const int current, const gtsam::NonlinearFactorGraph& new_factors);
-    void update_smoother(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, const std::map<std::uint64_t, double>& new_stamp, int update_count = 0);
+    gtsam::NonlinearFactorGraph create_factors(const size_t current);
+    void update_target(const size_t current, const Eigen::Isometry3d& T_target_imu);
+    size_t select_target_update_frame(const size_t preferred) const;
+    void update_frames(const size_t current);
+    void update_smoother(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, const std::map<std::uint64_t, double>& new_stamp, size_t update_count = 0);
 
 private:
     std::unique_ptr<OdometryEstimationCPUParams> params;
@@ -97,7 +93,7 @@ private:
     Eigen::Isometry3d T_imu_lidar;
 
     // Frames & keyframes
-    int marginalized_cursor;
+    size_t marginalized_cursor;
     std::vector<EstimationFrame::Ptr> frames;
 
     // Utility classes
@@ -115,7 +111,7 @@ private:
     Eigen::Isometry3d last_T_target_imu; ///< Last IMU pose w.r.t. target model
     std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapCPU>> target_voxelmaps; ///< VGICP target voxelmap
     std::shared_ptr<gtsam_points::iVox> target_ivox; ///< GICP target iVox
-    std::deque<int> active_keyframes; ///< Active keyframes for pairwise registration
+    std::deque<size_t> active_keyframes; ///< Active keyframes for pairwise registration
 };
 
 }

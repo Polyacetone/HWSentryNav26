@@ -46,7 +46,7 @@ public:
     /**
     * @brief   Get the size of the input queue
     */
-    int workload() const;
+    size_t workload() const;
 
     /**
     * @brief Get the estimation results
@@ -76,7 +76,7 @@ private:
     ConcurrentVector<EstimationFrame::ConstPtr> output_target_ivox_frames {DataStorePolicy::UPTO(10)};
     ConcurrentVector<EstimationFrame::ConstPtr> output_marginalized_frames {DataStorePolicy::UPTO(10)};
 
-    std::atomic_int internal_frame_queue_size;
+    std::atomic_size_t internal_frame_queue_size;
     std::shared_ptr<OdometryEstimationCPU> odometry_estimation;
 };
 

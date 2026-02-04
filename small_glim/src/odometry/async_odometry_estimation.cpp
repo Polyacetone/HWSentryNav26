@@ -37,7 +37,7 @@ void AsyncOdometryEstimation::join() {
     }
 }
 
-int AsyncOdometryEstimation::workload() const {
+size_t AsyncOdometryEstimation::workload() const {
     return input_frame_queue.size() + internal_frame_queue_size;
 }
 

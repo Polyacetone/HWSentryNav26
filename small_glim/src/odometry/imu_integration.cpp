@@ -17,8 +17,8 @@ inline void update_saturation_axes(
     const Eigen::Array3d abs_w = w.cwiseAbs().array();
 
     for (int i = 0; i < 3; i++) {
-        status->acc_axes[i] = status->acc_axes[i] || (abs_a[i] > acc_thresh);
-        status->gyro_axes[i] = status->gyro_axes[i] || (abs_w[i] > gyro_thresh);
+        status->acc_axes[static_cast<size_t>(i)] = status->acc_axes[static_cast<size_t>(i)] || (abs_a[i] > acc_thresh);
+        status->gyro_axes[static_cast<size_t>(i)] = status->gyro_axes[static_cast<size_t>(i)] || (abs_w[i] > gyro_thresh);
     }
 }
 
@@ -114,11 +114,11 @@ void IMUIntegration::insert_imu(
     imu_queue.push_back(imu);
 }
 
-int IMUIntegration::integrate_imu(
+size_t IMUIntegration::integrate_imu(
     double start_time,
     double end_time,
     const gtsam::imuBias::ConstantBias& bias,
-    int* num_integrated,
+    size_t* num_integrated,
     IMUSaturationStatus* saturation_status
 ) {
     *num_integrated = 0;
@@ -128,7 +128,7 @@ int IMUIntegration::integrate_imu(
         *saturation_status = IMUSaturationStatus{};
     }
 
-    int cursor = 0;
+    size_t cursor = 0;
     auto imu_itr = imu_queue.begin();
     double last_stamp = start_time;
 
@@ -184,7 +184,7 @@ int IMUIntegration::integrate_imu(
     return cursor;
 }
 
-int IMUIntegration::integrate_imu(
+size_t IMUIntegration::integrate_imu(
     double start_time,
     double end_time,
     const gtsam::NavState& state,
@@ -202,7 +202,7 @@ int IMUIntegration::integrate_imu(
     pred_times.emplace_back(start_time);
     pred_poses.emplace_back(state.pose().matrix());
 
-    int cursor = 0;
+    size_t cursor = 0;
     auto imu_itr = imu_queue.begin();
     double last_stamp = start_time;
 
@@ -265,13 +265,13 @@ int IMUIntegration::integrate_imu(
     return cursor;
 }
 
-int IMUIntegration::find_imu_data(
+size_t IMUIntegration::find_imu_data(
     double start_time,
     double end_time,
     std::vector<double>& delta_times,
     std::vector<Eigen::Matrix<double, 7, 1>>& imu_data
 ) {
-    int cursor = 0;
+    size_t cursor = 0;
     auto imu_itr = imu_queue.begin();
     double last_stamp = start_time;
 
@@ -306,8 +306,8 @@ int IMUIntegration::find_imu_data(
     return cursor;
 }
 
-void IMUIntegration::erase_imu_data(int last) {
-    imu_queue.erase(imu_queue.begin(), imu_queue.begin() + last);
+void IMUIntegration::erase_imu_data(size_t last) {
+    imu_queue.erase(imu_queue.begin(), imu_queue.begin() + static_cast<int64_t>(last));
 }
 
 const gtsam::PreintegratedImuMeasurements& IMUIntegration::integrated_measurements() const {

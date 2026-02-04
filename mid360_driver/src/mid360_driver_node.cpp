@@ -71,10 +71,10 @@ namespace mid360_driver {
             }
         }
         sensor_msgs::msg::PointCloud2 msg;
-        msg.header.stamp.sec = std::floor(timestamp);
+        msg.header.stamp.sec = static_cast<int32_t>(std::floor(timestamp));
         msg.header.stamp.nanosec = static_cast<uint32_t>((timestamp - msg.header.stamp.sec) * 1e9);
         msg.header.frame_id = frame_id;
-        msg.width = points_to_publish.size();
+        msg.width = static_cast<uint32_t>(points_to_publish.size());
         msg.height = 1;
         msg.fields.reserve(4);
         sensor_msgs::msg::PointField field;
@@ -107,7 +107,7 @@ namespace mid360_driver {
         msg.point_step = 24;
         msg.row_step = msg.width * msg.point_step;
         msg.data.resize(msg.row_step * msg.height);
-        auto pointer = reinterpret_cast<float *>(msg.data.data());
+        auto* pointer = reinterpret_cast<float*>(msg.data.data());
         for (const auto &point: points_to_publish) {
             *pointer = point.x;
             ++pointer;
@@ -127,7 +127,7 @@ namespace mid360_driver {
     void LidarPublisher::publish_imu(const std::string &frame_id) const {
         for (const auto &imu: imu_to_publish) {
             sensor_msgs::msg::Imu msg;
-            msg.header.stamp.sec = std::floor(imu.timestamp);
+            msg.header.stamp.sec = static_cast<int32_t>(std::floor(imu.timestamp));
             msg.header.stamp.nanosec = static_cast<uint32_t>((imu.timestamp - msg.header.stamp.sec) * 1e9);
             msg.header.frame_id = frame_id;
             msg.angular_velocity.x = imu.angular_velocity_x;

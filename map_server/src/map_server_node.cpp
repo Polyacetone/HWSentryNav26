@@ -27,7 +27,7 @@ private:
     int map_size_x_, map_size_y_;
     bool enable_debug_;
     struct {
-        int cloud_accumulate_frames;
+        size_t cloud_accumulate_frames;
         double roi_xy_radius_min;
         double roi_xy_radius_max;
         double roi_z_max;
@@ -75,9 +75,9 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     map_resolution_ = declare_parameter<double>("map_resolution");
-    num_threads_ = declare_parameter<int>("num_threads");
+    num_threads_ = static_cast<int>(declare_parameter<int>("num_threads"));
     local_map_params_ = {
-        .cloud_accumulate_frames = (int)declare_parameter<int>("local_map.cloud_accumulate_frames"),
+        .cloud_accumulate_frames = (size_t)declare_parameter<int>("local_map.cloud_accumulate_frames"),
         .roi_xy_radius_min = declare_parameter<double>("local_map.roi_xy_radius_min"),
         .roi_xy_radius_max = declare_parameter<double>("local_map.roi_xy_radius_max"),
         .roi_z_max = declare_parameter<double>("local_map.roi_z_max"),
@@ -210,13 +210,13 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
     auto preprocessed = std::make_shared<small_gicp::PointCloud>();
 
     // 查找x, y, z字段的偏移量
-    int offset_x = -1, offset_y = -1, offset_z = -1;
+    size_t offset_x = static_cast<size_t>(-1), offset_y = static_cast<size_t>(-1), offset_z = static_cast<size_t>(-1);
     for (const auto& field : msg->fields) {
         if (field.name == "x") offset_x = field.offset;
         else if (field.name == "y") offset_y = field.offset;
         else if (field.name == "z") offset_z = field.offset;
     }
-    if (offset_x < 0 || offset_y < 0 || offset_z < 0) {
+    if (offset_x == static_cast<size_t>(-1) || offset_y == static_cast<size_t>(-1) || offset_z == static_cast<size_t>(-1)) {
         RCLCPP_WARN(get_logger(), "PointCloud2 missing x/y/z fields");
         return preprocessed;
     }
@@ -268,8 +268,8 @@ cv::Mat MapServerNode::dynamic_obstacle_analysis(const small_gicp::PointCloud& d
     cv::Mat dynamic_points_count = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
     cv::Mat local_cost_map = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
     for (const auto& pt : dynamic_points.points) {
-        const int map_x = pt.x() / map_resolution_;
-        const int map_y = pt.y() / map_resolution_;
+        const int map_x = static_cast<int>(pt.x() / map_resolution_);
+        const int map_y = static_cast<int>(pt.y() / map_resolution_);
         if (map_x < 0 || map_x >= map_size_x_ || map_y < 0 || map_y >= map_size_y_) continue;
         uint8_t& cell = dynamic_points_count.at<uint8_t>(map_y, map_x);
         cell = (cell < 255) ? (cell + 1) : 255;
@@ -333,7 +333,9 @@ cv::Mat MapServerNode::inflate_cost_map(const cv::Mat& cost_map) const {
                     // 机器人本体无法进入的区域 → 设为高代价
                     new_cost = 255;
                 } else {
-                    new_cost = 254 * std::exp(-cost_scaling_factor * (d - inscribed_radius));
+                    new_cost = static_cast<uint8_t>(
+                        255 * std::clamp(std::exp(-cost_scaling_factor * (d - inscribed_radius)), 0.0f, 1.0f)
+                    );
                 }
                 // 只在原代价较低时更新（保留更高优先级的代价）
                 if (new_cost > out_row[j]) {
@@ -367,10 +369,10 @@ void MapServerNode::pub_cost_map(
     nav_msgs::msg::OccupancyGrid occupancy_grid;
     occupancy_grid.header.frame_id = "map";
     occupancy_grid.header.stamp = stamp;
-    occupancy_grid.info.resolution = map_resolution_;
-    occupancy_grid.info.height = map_size_y_;
-    occupancy_grid.info.width = map_size_x_;
-    occupancy_grid.data.resize(map_size_x_ * map_size_y_);
+    occupancy_grid.info.resolution = static_cast<float>(map_resolution_);
+    occupancy_grid.info.height = static_cast<uint32_t>(map_size_y_);
+    occupancy_grid.info.width = static_cast<uint32_t>(map_size_x_);
+    occupancy_grid.data.resize(static_cast<size_t>(map_size_x_ * map_size_y_));
     std::copy(cost_map.data, cost_map.data + map_size_x_ * map_size_y_, occupancy_grid.data.data());
     publisher->publish(occupancy_grid);
 }
@@ -386,10 +388,10 @@ void MapServerNode::pub_cloud(
     msg.header.frame_id = "map";
     msg.header.stamp = stamp;
     msg.height = 1;
-    msg.width = num_points;
+    msg.width = static_cast<uint32_t>(num_points);
     msg.is_dense = true;
     msg.point_step = 12;
-    msg.row_step = 12 * num_points;
+    msg.row_step = static_cast<uint32_t>(12 * num_points);
     sensor_msgs::msg::PointField field_x;
     field_x.name = "x";
     field_x.offset = 0;
@@ -407,7 +409,7 @@ void MapServerNode::pub_cloud(
     field_z.count = 1;
     msg.fields = {field_x, field_y, field_z};
     msg.data.resize(msg.row_step * msg.height);
-    for (int i = 0; i < num_points; i++) {
+    for (size_t i = 0; i < num_points; i++) {
         Eigen::Vector3f pt = points[i](Eigen::seq(0, 2)).cast<float>();
         std::memcpy(msg.data.data() + i * 12, pt.data(), sizeof(pt));
     }

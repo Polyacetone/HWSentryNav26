@@ -22,7 +22,7 @@ public:
     );
 
     /// Number of points
-    int size() const {
+    size_t size() const {
         return points.size();
     }
 

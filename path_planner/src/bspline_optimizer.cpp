@@ -33,7 +33,7 @@ public:
     ): pos_evaluator_(pos_evaluator), cost_map_(cost_map), weight_(weight) {
         // 设置参数块，每个控制点是2维向量
         mutable_parameter_block_sizes()->clear();
-        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+        for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
             mutable_parameter_block_sizes()->push_back(2);
         }
         set_num_residuals(1);
@@ -46,7 +46,7 @@ public:
         residuals[0] = weight_ * cost;
         if (jacobians) {
             const Eigen::Vector2d cost_gradient = cost_map_.gradient(point);
-            for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+            for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
                 if (jacobians[i]) {
                     // ∂L/∂P_i = N_i,p(u) * ∂L/∂V
                     Eigen::Vector2d jac = weight_ * pos_evaluator_.basisVals_[i] * cost_gradient;
@@ -81,7 +81,7 @@ public:
         step_norm_threshold_(step_norm_threshold),
         step_norm_transition_(step_norm_transition) {
         mutable_parameter_block_sizes()->clear();
-        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+        for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
             mutable_parameter_block_sizes()->push_back(2);
         }
         set_num_residuals(1);
@@ -98,7 +98,7 @@ public:
         if (gate <= 1e-6) {
             residuals[0] = 0.0;
             if (jacobians) {
-                for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+                for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
                     if (jacobians[i]) {
                         jacobians[i][0] = 0.0;
                         jacobians[i][1] = 0.0;
@@ -129,7 +129,7 @@ public:
             const double gate_ym = gate_at(pos - Eigen::Vector2d(0.0, eps));
             const Eigen::Vector2d grad_gate((gate_xp - gate_xm) / (2.0 * eps), (gate_yp - gate_ym) / (2.0 * eps));
 
-            for (int i = 0; i < vel_evaluator_.ControlPointsSupport; i++) {
+            for (size_t i = 0; i < vel_evaluator_.ControlPointsSupport; i++) {
                 if (jacobians[i]) {
                     const double basis_pos = pos_evaluator_.basisVals_[i];
                     const double basis_vel = vel_evaluator_.basisVals_[i];
@@ -176,7 +176,7 @@ public:
        step_norm_threshold_(step_norm_threshold),
        step_norm_transition_(step_norm_transition) {
         mutable_parameter_block_sizes()->clear();
-        for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+        for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
             mutable_parameter_block_sizes()->push_back(2);
         }
         set_num_residuals(1);
@@ -203,7 +203,7 @@ public:
             const double gate_ym = gate_at(pos - Eigen::Vector2d(0.0, eps));
 
             const Eigen::Vector2d grad((gate_xp - gate_xm) / (2.0 * eps), (gate_yp - gate_ym) / (2.0 * eps));
-            for (int i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
+            for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; i++) {
                 if (jacobians[i]) {
                     Eigen::Vector2d jac = weight_ * pos_evaluator_.basisVals_[i] * grad;
                     jacobians[i][0] = jac.x();
@@ -308,17 +308,15 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
     }
     Spline spline(init_path);
     ubs::UniformBSplineCeres<Spline> spline_ceres(spline);
-    auto& control_points = spline.getControlPointsContainer();
-    using ContainerT = ubs::FixedSizeContainerTypeTrait<Eigen::Vector2d>;
     ceres::Problem problem;
 
     // 添加光滑度代价
     spline_ceres.addSmoothnessResiduals<2>(problem, smoothness_weight_);
 
     const double path_length = estimate_path_length(init_path);
-    const int num_samples = num_samples_per_length_ * path_length;
+    const size_t num_samples = static_cast<size_t>(std::ceil(path_length * num_samples_per_length_));
     std::vector<double*> parameter_pointers(spline_ceres.getNumPointParameterPointers());
-    for (int i = 0; i < num_samples; i++) {
+    for (size_t i = 0; i < num_samples; i++) {
         const double pos_u = double(i) / double(num_samples);
         const auto data = spline_ceres.getPointData(pos_u);
         spline_ceres.fillParameterPointers(data, parameter_pointers.begin(), parameter_pointers.end());
@@ -390,17 +388,17 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
     if (!summary.IsSolutionUsable()) return std::unexpected(summary.BriefReport());
 
     std::vector<Eigen::Vector2d> sample_points;
-    for (int i = 0; i < num_samples; i++) {
-        sample_points.push_back(spline.evaluate(double(i) / num_samples));
+    for (size_t i = 0; i < num_samples; i++) {
+        sample_points.push_back(spline.evaluate(double(i) / double(num_samples)));
     }
 
     return std::tuple{spline.getControlPoints(), sample_points};
 }
 
 double BSplineOptimizer::estimate_path_length(const std::vector<Eigen::Vector2d>& path) const {
-    const int len = path.size();
+    const size_t len = path.size();
     double length = 0;
-    for (int i = 1; i < len; i++) {
+    for (size_t i = 1; i < len; i++) {
         length += (path[i] - path[i - 1]).norm();
     }
     return length;

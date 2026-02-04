@@ -89,9 +89,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.predicted_path_pub_topic"), 1);
     }
 
-    const int horizon = declare_parameter<int>("mpc.general.horizon");
+    const int horizon = (int)declare_parameter<int>("mpc.general.horizon");
     const double mpc_dt = declare_parameter<double>("mpc.general.dt");
-    const int max_iterations = declare_parameter<int>("mpc.general.max_iterations");
+    const int max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations");
 
     const std::string prediction_model_str = declare_parameter<std::string>("mpc.general.model");
     PredictionModel prediction_model;
@@ -128,13 +128,13 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     lqr_model.B_ref.setZero();
     if (prediction_model == PredictionModel::LQR) {
         const double lqr_dt = declare_parameter<double>("mpc.general.lqr.dt");
-        const int substeps = declare_parameter<int>("mpc.general.lqr.substeps");
+        const int substeps = (int)declare_parameter<int>("mpc.general.lqr.substeps");
         if (substeps <= 0) {
             RCLCPP_FATAL(get_logger(), "mpc.general.lqr.substeps must be > 0, got %d", substeps);
             throw std::runtime_error("Invalid mpc.general.lqr.substeps");
         }
         const double dt_sub = mpc_dt / substeps;
-        const int lqr_steps_per_substep = std::max<int>(1, std::llround(dt_sub / lqr_dt));
+        const int lqr_steps_per_substep = std::max<int>(1, static_cast<int>(std::lround(dt_sub / lqr_dt)));
         const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
         if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
             RCLCPP_WARN(
@@ -146,14 +146,14 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
 
         const auto load_matrix = [this](const std::string& name, int rows, int cols) {
             const auto data = declare_parameter<std::vector<double>>(name);
-            if (data.size() != rows * cols) {
+            if (data.size() != static_cast<size_t>(rows) * static_cast<size_t>(cols)) {
                 RCLCPP_FATAL(get_logger(), "Parameter %s size %zu != %d", name.c_str(), data.size(), rows * cols);
                 throw std::runtime_error("Invalid matrix size");
             }
             Eigen::MatrixXd mat(rows, cols);
             for (int r = 0; r < rows; r++) {
                 for (int c = 0; c < cols; c++) {
-                    mat(r, c) = data[r * cols + c];
+                    mat(r, c) = data[static_cast<size_t>(r * cols + c)];
                 }
             }
             return mat;
@@ -419,7 +419,7 @@ void PathFollowerNode::handle_stop_state() {
         return;
     }
 
-    const double solve_ms = (std::chrono::high_resolution_clock::now() - start_time).count() / 1e6;
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
     if (solve_ms > params_.dt * 500.0) {
         RCLCPP_WARN(get_logger(), "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
     } else {
@@ -472,7 +472,7 @@ void PathFollowerNode::handle_follow_state() {
         return;
     }
 
-    const double solve_ms = (std::chrono::high_resolution_clock::now() - start_time).count() / 1e6;
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
     if (solve_ms > params_.dt * 500.0) {
         RCLCPP_WARN(get_logger(), "MPCController(Follow) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
     } else {
@@ -562,9 +562,9 @@ std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vec
 
 void PathFollowerNode::publish_chassis_cmd(double velocity, double theta, double omega, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const {
     interfaces::msg::ChassisCmd msg;
-    msg.velocity = velocity;
-    msg.theta = theta;
-    msg.omega = omega;
+    msg.velocity = static_cast<float>(velocity);
+    msg.theta = static_cast<float>(theta);
+    msg.omega = static_cast<float>(omega);
     msg.step_up_ahead = step_up_ahead;
     msg.step_down_ahead = step_down_ahead;
     msg.slow_spin = slow_spin;

@@ -19,7 +19,7 @@ template <typename T2>
 std::string convert_to_string(const std::vector<T2>& values) {
     std::stringstream sst;
     sst << "[";
-    for (int i = 0; i < values.size(); i++) {
+    for (size_t i = 0; i < values.size(); i++) {
         if (i) {
             sst << ",";
         }

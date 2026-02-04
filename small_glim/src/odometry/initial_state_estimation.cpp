@@ -16,7 +16,7 @@ InitialStateEstimation::InitialStateEstimation(
     const Config::Ptr config,
     const Eigen::Isometry3d& T_lidar_imu,
     const Eigen::Matrix<double, 6, 1>& imu_bias
-): T_lidar_imu(T_lidar_imu) {
+): imu_bias(imu_bias), T_lidar_imu(T_lidar_imu) {
     num_threads = config->param<int>("odometry_estimation.num_threads");
     window_size = config->param<double>("odometry_estimation.initialization_window_size");
 
@@ -93,7 +93,7 @@ EstimationFrame::ConstPtr InitialStateEstimation::initial_pose() {
     using gtsam::symbol_shorthand::X;
 
     gtsam::NonlinearFactorGraph graph;
-    for (int i = 1; i < T_odom_lidar.size(); i++) {
+    for (size_t i = 1; i < T_odom_lidar.size(); i++) {
         const auto& [t0, T_odom_lidar0] = T_odom_lidar[i - 1];
         const auto& [t1, T_odom_lidar1] = T_odom_lidar[i];
 
@@ -103,7 +103,7 @@ EstimationFrame::ConstPtr InitialStateEstimation::initial_pose() {
 
         graph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(i - 1), X(i), gtsam::Pose3(T_imu0_imu1.matrix()), gtsam::noiseModel::Isotropic::Precision(6, 1e3));
 
-        int num_integrated;
+        size_t num_integrated;
         gtsam::imuBias::ConstantBias imu_bias;
         imu_integration->integrate_imu(t0, t1, imu_bias, &num_integrated);
 
@@ -130,10 +130,10 @@ EstimationFrame::ConstPtr InitialStateEstimation::initial_pose() {
         return nullptr;
     }
 
-    int imu_cursor = 0;
+    size_t imu_cursor = 0;
     Eigen::Vector3d sum_acc_odom = Eigen::Vector3d::Zero();
     std::vector<Eigen::Vector3d> acc_odom(T_odom_lidar.size());
-    for (int i = 0; i < T_odom_lidar.size(); i++) {
+    for (size_t i = 0; i < T_odom_lidar.size(); i++) {
         while (imu_cursor < imu_data.size() - 1 && imu_data[imu_cursor][0] < T_odom_lidar[i].first) {
             imu_cursor++;
         }
@@ -156,7 +156,7 @@ EstimationFrame::ConstPtr InitialStateEstimation::initial_pose() {
     }
 
     gtsam::Values values;
-    for (int i = 0; i < T_odom_lidar.size(); i++) {
+    for (size_t i = 0; i < T_odom_lidar.size(); i++) {
         const Eigen::Isometry3d T_world_imu = init_T_world_odom * T_odom_lidar[i].second * T_lidar_imu;
         values.insert(X(i), gtsam::Pose3(T_world_imu.matrix()));
         values.insert(V(i), gtsam::Vector3(0.0, 0.0, 0.0));
@@ -173,7 +173,7 @@ EstimationFrame::ConstPtr InitialStateEstimation::initial_pose() {
     gtsam::Pose3 T_odom_lidar0 = T_odom_imu0 * gtsam::Pose3(T_lidar_imu.inverse().matrix());
 
     EstimationFrame::Ptr estimated = std::make_shared<EstimationFrame>();
-    estimated->id = -1;
+    estimated->id = static_cast<size_t>(-1);
     estimated->stamp = T_odom_lidar.back().first;
     estimated->T_lidar_imu = T_lidar_imu;
     estimated->v_world_imu = values.at<gtsam::Vector3>(V(T_odom_lidar.size() - 1));

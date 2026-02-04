@@ -45,7 +45,7 @@ struct EstimationFrame {
     void set_T_world_frame(FrameType frame_type, const Eigen::Isometry3d& T);
 
 public:
-    long id; ///< Frame ID
+    size_t id; ///< Frame ID
     double stamp; ///< Timestamp
 
     Eigen::Isometry3d T_lidar_imu; ///< LiDAR-IMU transformation

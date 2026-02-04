@@ -6,8 +6,6 @@ set(CMAKE_CXX_COMPILER "g++-13")
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_BUILD_TYPE Release)
-add_compile_options(-O3)
 
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
@@ -36,6 +34,21 @@ rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN small_glim::SmallGlimNode
   EXECUTABLE ${PROJECT_NAME}_node
 )
+
+# 如果gtsam_points或GTSAM构建时没有使用-march=native，则这里不要使用-march=native
+# 同理如果gtsam_points或GTSAM构建时没有开启ASAN，则这里也不要使用-fsanitize=address
+target_compile_options(${PROJECT_NAME} PRIVATE
+  $<$<CONFIG:Debug>:-O0 -g -Wall -Wextra -Wpedantic -Wconversion -fsanitize=undefined -fstack-protector-strong -fcf-protection=full>
+  $<$<CONFIG:Release>:-O3 -DNDEBUG -Wall -Wextra -Wpedantic -Wconversion -flto=auto>
+)
+
+target_link_options(${PROJECT_NAME} PRIVATE
+  $<$<CONFIG:Debug>:-fsanitize=undefined>
+  $<$<CONFIG:Release>:-flto=auto>
+)
+
+target_compile_options(${PROJECT_NAME}_node PRIVATE $<$<CONFIG:Debug>:-fsanitize=undefined>)
+target_link_options(${PROJECT_NAME}_node PRIVATE $<$<CONFIG:Debug>:-fsanitize=undefined>)
 
 ament_auto_package(
   USE_SCOPED_HEADER_INSTALL_DIR

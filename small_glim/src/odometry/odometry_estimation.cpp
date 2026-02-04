@@ -106,8 +106,8 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
             break;
         }
         case OdometryEstimationCPUParams::RegistrationType::VGICP: {
-            target_voxelmaps.resize(params->vgicp_voxelmap_levels);
-            for (int i = 0; i < params->vgicp_voxelmap_levels; i++) {
+            target_voxelmaps.resize(static_cast<size_t>(params->vgicp_voxelmap_levels));
+            for (size_t i = 0; i < static_cast<size_t>(params->vgicp_voxelmap_levels); i++) {
                 const double resolution = params->vgicp_resolution * std::pow(params->vgicp_voxelmap_scaling_factor, i);
                 target_voxelmaps[i] = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
                 target_voxelmaps[i]->set_lru_horizon(params->lru_thresh);
@@ -117,13 +117,7 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
     }
 }
 
-gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
-    const int current,
-    const std::shared_ptr<gtsam::ImuFactor>& imu_factor,
-    gtsam::Values& new_values
-) {
-    const int last = current - 1;
-
+gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(const size_t current) {
     if (current == 0) {
         last_T_target_imu = frames[current]->T_world_imu;
         // update_target(current, frames[current]->T_world_imu);
@@ -171,8 +165,8 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
     }
 
     // Create pairwise matching factors
-    for (const int target : active_keyframes) {
-        if (target < 0 || target < marginalized_cursor) continue;
+    for (const size_t target : active_keyframes) {
+        if (target < marginalized_cursor) continue;
         if (frames[target]->frame->size() < 20) continue;
         switch (params->registration_type) {
             case OdometryEstimationCPUParams::RegistrationType::GICP: {
@@ -207,11 +201,11 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(
     return factors;
 }
 
-int OdometryEstimationCPU::select_target_update_frame(const int preferred) const {
-    if (preferred < 0 || preferred >= static_cast<int>(frames.size())) return -1;
+size_t OdometryEstimationCPU::select_target_update_frame(const size_t preferred) const {
+    if (preferred >= frames.size()) return static_cast<size_t>(-1);
 
-    auto is_valid = [&](int idx) -> bool {
-        if (idx < 0 || idx >= static_cast<int>(frames.size())) return false;
+    auto is_valid = [&](size_t idx) -> bool {
+        if (idx >= frames.size()) return false;
         if (!frames[idx]) return false;
         if (!frames[idx]->frame) return false;
         return !frames[idx]->deskew_imu_saturated;
@@ -220,19 +214,19 @@ int OdometryEstimationCPU::select_target_update_frame(const int preferred) const
     if (is_valid(preferred)) return preferred;
 
     // Search nearby frames (prefer closest in time/index).
-    constexpr int search_radius = 5;
-    for (int d = 1; d <= search_radius; d++) {
-        const int left = preferred - d;
-        const int right = preferred + d;
+    constexpr size_t search_radius = 5;
+    for (size_t d = 1; d <= search_radius; d++) {
+        const size_t left = preferred - d;
+        const size_t right = preferred + d;
         if (is_valid(left)) return left;
         if (is_valid(right)) return right;
     }
 
-    return -1;
+    return static_cast<size_t>(-1);
 }
 
 void OdometryEstimationCPU::update_target(
-    const int current,
+    const size_t current,
     const Eigen::Isometry3d& T_target_imu
 ) {
     auto frame = frames[current]->frame;
@@ -286,8 +280,8 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         logger::warn("odom_estimation", "insert_frame points={}", raw_frame->size());
     }
 
-    const int current = frames.size();
-    const int last = current - 1;
+    const size_t current = frames.size();
+    const size_t last = current - 1;
 
     // The very first frame
     if (frames.empty()) {
@@ -324,7 +318,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
         // Transform points into IMU frame
         std::vector<Eigen::Vector4d> points_imu(raw_frame->size());
-        for (int i = 0; i < raw_frame->size(); i++) {
+        for (size_t i = 0; i < raw_frame->size(); i++) {
             points_imu[i] = T_imu_lidar * raw_frame->points[i];
         }
 
@@ -367,12 +361,12 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
             gtsam::noiseModel::Isotropic::Precision(3, 1.0)
         );
         new_factors.emplace_shared<gtsam_points::LinearDampingFactor>(B(0), 6, 1e6);
-        new_factors.add(create_factors(current, nullptr, new_values));
+        new_factors.add(create_factors(current));
 
         update_smoother(new_factors, new_values, new_stamps);
-        update_frames(current, new_factors);
+        update_frames(current);
 
-        if (current % params->keyframe_delta == 0) {
+        if (current % static_cast<size_t>(params->keyframe_delta) == 0) {
             active_keyframes.push_back(current);
         }
 
@@ -391,8 +385,8 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     const gtsam::NavState last_nav_world_imu(last_T_world_imu, last_v_world_imu);
 
     // IMU integration between LiDAR scans (inter-scan)
-    int num_imu_integrated = 0;
-    const int imu_read_cursor = imu_integration->integrate_imu(last_stamp, raw_frame->stamp, last_imu_bias, &num_imu_integrated);
+    size_t num_imu_integrated = 0;
+    const size_t imu_read_cursor = imu_integration->integrate_imu(last_stamp, raw_frame->stamp, last_imu_bias, &num_imu_integrated);
     imu_integration->erase_imu_data(imu_read_cursor);
     logger::debug("odom_estimation", "num_imu_integrated={}", num_imu_integrated);
 
@@ -497,11 +491,11 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     new_frame->deskew_gyro_saturated_axes = deskew_sat.gyro_axes;
 
     // Store IMU-rate trajectory used for deskewing
-    new_frame->imu_rate_trajectory.resize(8, pred_imu_times.size());
-    for (int i = 0; i < pred_imu_times.size(); i++) {
+    new_frame->imu_rate_trajectory.resize(8, static_cast<int64_t>(pred_imu_times.size()));
+    for (size_t i = 0; i < pred_imu_times.size(); i++) {
         const Eigen::Vector3d trans = pred_imu_poses[i].translation();
         const Eigen::Quaterniond quat(pred_imu_poses[i].linear());
-        new_frame->imu_rate_trajectory.col(i) << pred_imu_times[i], trans, quat.x(), quat.y(), quat.z(), quat.w();
+        new_frame->imu_rate_trajectory.col(static_cast<int64_t>(i)) << pred_imu_times[i], trans, quat.x(), quat.y(), quat.z(), quat.w();
     }
 
     // Deskew and tranform points into IMU frame
@@ -531,8 +525,8 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     new_frame->frame_type = FrameType::IMU;
 
     if (params->registration_type == OdometryEstimationCPUParams::RegistrationType::VGICP) {
-        new_frame->voxelmaps.resize(params->vgicp_voxelmap_levels);
-        for (int i = 0; i < params->vgicp_voxelmap_levels; i++) {
+        new_frame->voxelmaps.resize(static_cast<size_t>(params->vgicp_voxelmap_levels));
+        for (size_t i = 0; i < static_cast<size_t>(params->vgicp_voxelmap_levels); i++) {
             double resolution = params->vgicp_resolution * std::pow(params->vgicp_voxelmap_scaling_factor, i);
             new_frame->voxelmaps[i] = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
             new_frame->voxelmaps[i]->insert(*frame);
@@ -541,7 +535,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
     frames.push_back(new_frame);
 
-    new_factors.add(create_factors(current, imu_factor, new_values));
+    new_factors.add(create_factors(current));
 
     // Update smoother
     update_smoother(new_factors, new_values, new_stamps);
@@ -549,7 +543,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     // Find out marginalized frames
     while (marginalized_cursor < current) {
         bool is_active_keyframe = false;
-        for (int k : active_keyframes) {
+        for (size_t k : active_keyframes) {
             if (k == marginalized_cursor) {
                 is_active_keyframe = true;
                 break;
@@ -570,17 +564,17 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     }
 
     // Update frames
-    update_frames(current, new_factors);
+    update_frames(current);
 
-    if (current % params->keyframe_delta == 0) {
+    if (current % static_cast<size_t>(params->keyframe_delta) == 0) {
         active_keyframes.push_back(current);
-        while (active_keyframes.size() > params->keyframe_window_size) {
-            int old_keyframe = active_keyframes.front();
+        while (active_keyframes.size() > static_cast<size_t>(params->keyframe_window_size)) {
+            size_t old_keyframe = active_keyframes.front();
             active_keyframes.pop_front();
 
             if (frames[old_keyframe]) {
-                const int chosen = select_target_update_frame(old_keyframe);
-                if (chosen < 0) {
+                const size_t chosen = select_target_update_frame(old_keyframe);
+                if (chosen == static_cast<size_t>(-1)) {
                     logger::warn(
                         "odom_estimation",
                         "skip iVox target update: no valid neighbor found (preferred={}, time={})",
@@ -613,14 +607,8 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 }
 
 std::vector<EstimationFrame::ConstPtr> OdometryEstimationCPU::get_remaining_frames() {
-    // Perform a few optimization iterations at the end
-    // for(int i=0; i<5; i++) {
-    //   smoother->update();
-    // }
-    // OdometryEstimationCPU::update_frames(frames.size() - 1, gtsam::NonlinearFactorGraph());
-
     std::vector<EstimationFrame::ConstPtr> marginalized_frames;
-    for (int i = marginalized_cursor; i < frames.size(); i++) {
+    for (size_t i = marginalized_cursor; i < frames.size(); i++) {
         marginalized_frames.push_back(frames[i]);
     }
 
@@ -651,14 +639,11 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::get_target_ivox_frame() {
     return target_frame;
 }
 
-void OdometryEstimationCPU::update_frames(
-    int current,
-    const gtsam::NonlinearFactorGraph& new_factors
-) {
+void OdometryEstimationCPU::update_frames(size_t current) {
     logger::debug("odom_estimation", "update frames current={} marginalized_cursor={}", current, marginalized_cursor);
 
     gtsam::Values values = smoother->calculateEstimate();
-    for (int i = marginalized_cursor; i < frames.size(); i++) {
+    for (size_t i = marginalized_cursor; i < frames.size(); i++) {
         if (!values.exists(X(i))) continue;
         try {
             Eigen::Isometry3d T_world_imu = Eigen::Isometry3d(values.at<gtsam::Pose3>(X(i)).matrix());
@@ -681,10 +666,10 @@ void OdometryEstimationCPU::update_smoother(
     const gtsam::NonlinearFactorGraph& new_factors,
     const gtsam::Values& new_values,
     const std::map<std::uint64_t, double>& new_stamp,
-    int update_count
+    size_t update_count
 ) {
     smoother->update(new_factors, new_values, new_stamp);
-    for (int i = 0; i < update_count; i++) {
+    for (size_t i = 0; i < update_count; i++) {
         smoother->update();
     }
 }

@@ -54,12 +54,14 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
     }
     const auto cmp = [](const Node::Ptr& n1, const Node::Ptr& n2) { return n1->f() > n2->f(); };
     std::priority_queue<Node::Ptr, std::vector<Node::Ptr>, decltype(cmp)> open_fwd(cmp), open_bwd(cmp);
-    const int map_size = costmap.data.size();
+    const size_t map_size = costmap.data.size();
     std::vector<Node::Ptr> all_fwd(map_size, nullptr), all_bwd(map_size, nullptr);
     std::vector<double> closed_fwd(map_size, 0.0), closed_bwd(map_size, 0.0);
 
-    const auto get_key = [&](const Eigen::Vector2i& pt) { return pt.y() * costmap.width + pt.x(); };
-    const int s_key = get_key(start_grid), g_key = get_key(goal_grid);
+    const auto get_key = [&](const Eigen::Vector2i& pt) {
+        return static_cast<size_t>(pt.y()) * static_cast<size_t>(costmap.width) + static_cast<size_t>(pt.x());
+    };
+    const size_t s_key = get_key(start_grid), g_key = get_key(goal_grid);
     const Node::Ptr start_node = std::make_shared<Node>(start_grid, 0, heuristic(start_grid, goal_grid), nullptr);
     const Node::Ptr goal_node  = std::make_shared<Node>(goal_grid, 0, heuristic(goal_grid, start_grid), nullptr);
     open_fwd.push(start_node);
@@ -74,8 +76,8 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
         // 前向搜索
         if (!open_fwd.empty()) {
             const auto current = open_fwd.top(); open_fwd.pop();
-            const int c_key = get_key(current->coord);
-            if (closed_fwd[c_key]) continue;
+            const size_t c_key = get_key(current->coord);
+            if (closed_fwd[c_key] != 0) continue;
             closed_fwd[c_key] = current->g;
             if (closed_bwd[c_key] > 0) {
                 const double total_cost = current->g + closed_bwd[c_key];
@@ -87,8 +89,8 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
             }
             for (const auto& dir : directions_) {
                 const Eigen::Vector2i next = current->coord + dir;
-                const int n_key = get_key(next);
-                if (!is_valid(costmap, next) || closed_fwd[n_key]) continue;
+                const size_t n_key = get_key(next);
+                if (!is_valid(costmap, next) || closed_fwd[n_key] != 0) continue;
 
                 double obstacle_cost = costmap.at(next) * obstacle_weight_;
                 double step_cost = 0;
@@ -109,8 +111,8 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
         // 反向搜索
         if (!open_bwd.empty()) {
             const auto current = open_bwd.top(); open_bwd.pop();
-            const int c_key = get_key(current->coord);
-            if (closed_bwd[c_key]) continue;
+            const size_t c_key = get_key(current->coord);
+            if (closed_bwd[c_key] != 0) continue;
             closed_bwd[c_key] = current->g;
             if (closed_fwd[c_key] > 0) {
                 double total_cost = current->g + closed_fwd[c_key];
@@ -122,8 +124,8 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
             }
             for (const auto& dir : directions_) {
                 const Eigen::Vector2i next = current->coord + dir;
-                const int n_key = get_key(next);
-                if (!is_valid(costmap, next) || closed_bwd[n_key]) continue;
+                const size_t n_key = get_key(next);
+                if (!is_valid(costmap, next) || closed_bwd[n_key] != 0) continue;
                 
                 double obstacle_cost = costmap.at(next) * obstacle_weight_;
                 double step_cost = 0;
@@ -165,10 +167,10 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
     // 路径降采样
     const int resolution = std::min<int>(
         downsampled_waypoint_max_interval_,
-        std::max<int>((raw_path.size() - 1) / (MIN_PATH_SIZE - 1), 1) // 使路径点不少于MIN_PATH_SIZE个
+        std::max<int>(static_cast<int>((raw_path.size() - 1) / (MIN_PATH_SIZE - 1)), 1) // 使路径点不少于MIN_PATH_SIZE个
     );
     std::vector<Eigen::Vector2i> downsampled_path;
-    for (int i = 0; i < raw_path.size() - resolution; i += resolution) {
+    for (size_t i = 0; i < raw_path.size() - static_cast<size_t>(resolution); i += static_cast<size_t>(resolution)) {
         downsampled_path.emplace_back(raw_path[i]);
     }
     downsampled_path.emplace_back(raw_path[raw_path.size() - 1]);

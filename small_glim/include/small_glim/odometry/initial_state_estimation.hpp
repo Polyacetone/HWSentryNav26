@@ -42,7 +42,7 @@ private:
     double init_stamp;
     double stamp;
     Eigen::Vector3d sum_acc;
-    Eigen::Matrix<double, 6, 1> imu_bias;
+    const Eigen::Matrix<double, 6, 1> imu_bias;
     const Eigen::Isometry3d T_lidar_imu;
     bool force_init;
     Eigen::Vector3d init_v_world_imu;

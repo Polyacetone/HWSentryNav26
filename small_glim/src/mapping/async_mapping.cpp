@@ -50,19 +50,19 @@ std::optional<ImuTrajectory> parse_imu_rate_trajectory(const Eigen::Matrix<doubl
     }
 
     ImuTrajectory out;
-    out.times.resize(traj.cols());
-    out.poses.resize(traj.cols());
-    for (int i = 0; i < traj.cols(); i++) {
+    out.times.resize(static_cast<size_t>(traj.cols()));
+    out.poses.resize(static_cast<size_t>(traj.cols()));
+    for (int64_t i = 0; i < traj.cols(); i++) {
         const Eigen::Matrix<double, 8, 1> imu = traj.col(i);
-        out.times[i] = imu[0];
+        out.times[static_cast<size_t>(i)] = imu[0];
         Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
         T.translation() << imu[1], imu[2], imu[3];
         T.linear() = Eigen::Quaterniond(imu[7], imu[4], imu[5], imu[6]).toRotationMatrix();
-        out.poses[i] = T;
+        out.poses[static_cast<size_t>(i)] = T;
     }
 
     // Basic monotonicity check
-    for (std::size_t i = 1; i < out.times.size(); i++) {
+    for (size_t i = 1; i < out.times.size(); i++) {
         if (!(out.times[i] > out.times[i - 1])) {
             return std::nullopt;
         }
@@ -82,7 +82,7 @@ std::optional<ImuTrajectory> optimize_imu_trajectory_with_end_priors(
     }
 
     gtsam::Values values;
-    for (int i = 0; i < static_cast<int>(initial.times.size()); i++) {
+    for (size_t i = 0; i < initial.times.size(); i++) {
         values.insert(X(i), gtsam::Pose3(initial.poses[i].matrix()));
     }
 
@@ -93,13 +93,13 @@ std::optional<ImuTrajectory> optimize_imu_trajectory_with_end_priors(
         gtsam::noiseModel::Isotropic::Sigma(6, 1e-5)
     );
     graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
-        X(static_cast<int>(initial.times.size() - 1)),
+        X(initial.times.size() - 1),
         gtsam::Pose3(T_world_imu_end.matrix()),
         gtsam::noiseModel::Isotropic::Sigma(6, 1e-5)
     );
 
     const double total_dt = std::max(1e-6, initial.times.back() - initial.times.front());
-    for (int i = 1; i < static_cast<int>(initial.times.size()); i++) {
+    for (size_t i = 1; i < initial.times.size(); i++) {
         const double dt_norm = (initial.times[i] - initial.times[i - 1]) / total_dt;
         const Eigen::Isometry3d T_last_curr = initial.poses[i - 1].inverse() * initial.poses[i];
         graph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
@@ -120,7 +120,7 @@ std::optional<ImuTrajectory> optimize_imu_trajectory_with_end_priors(
     ImuTrajectory out;
     out.times = initial.times;
     out.poses.resize(initial.poses.size());
-    for (int i = 0; i < static_cast<int>(out.poses.size()); i++) {
+    for (size_t i = 0; i < out.poses.size(); i++) {
         out.poses[i] = Eigen::Isometry3d(optimized.at<gtsam::Pose3>(X(i)).matrix());
     }
 
@@ -160,9 +160,9 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
         }
 
         // Pack x, y, z into uint64_t: [unused(1b)][z(21b)][y(21b)][x(21b)]
-        std::uint64_t bits = (static_cast<std::uint64_t>(coord[0] & coord_bit_mask) << (0 * coord_bit_size))
-            | (static_cast<std::uint64_t>(coord[1] & coord_bit_mask) << (1 * coord_bit_size))
-            | (static_cast<std::uint64_t>(coord[2] & coord_bit_mask) << (2 * coord_bit_size));
+        std::uint64_t bits = (static_cast<std::uint64_t>(static_cast<uint64_t>(coord[0]) & coord_bit_mask) << (0 * coord_bit_size))
+            | (static_cast<std::uint64_t>(static_cast<uint64_t>(coord[1]) & coord_bit_mask) << (1 * coord_bit_size))
+            | (static_cast<std::uint64_t>(static_cast<uint64_t>(coord[2]) & coord_bit_mask) << (2 * coord_bit_size));
 
         coord_pt.emplace_back(bits, i);
     }
@@ -182,7 +182,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr voxelgrid_sampling(const pcl::PointCloud<pcl
 
         std::uint64_t current_voxel = coord_pt[i].first;
         Eigen::Vector3d sum(0, 0, 0);
-        int count = 0;
+        size_t count = 0;
 
         // Accumulate all points in the same voxel
         while (i < coord_pt.size() && coord_pt[i].first == current_voxel) {
@@ -476,7 +476,7 @@ std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> AsyncMapping::build_keyframe_clo
     auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     cloud->reserve(frame.frame->size());
     const auto& points = frame.frame->points;
-    for (int i = 0; i < frame.frame->size(); i++) {
+    for (size_t i = 0; i < frame.frame->size(); i++) {
         const Eigen::Vector4d p = points[i];
         cloud->emplace_back(static_cast<float>(p.x()), static_cast<float>(p.y()), static_cast<float>(p.z()));
     }
@@ -486,7 +486,7 @@ std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> AsyncMapping::build_keyframe_clo
 void AsyncMapping::downsample_map_if_needed() {
     if (map_cloud_->empty()) return;
     if (params_.downsample_every_n_keyframes <= 0) return;
-    if (keyframes_since_downsample_ < params_.downsample_every_n_keyframes) return;
+    if (keyframes_since_downsample_ < static_cast<size_t>(params_.downsample_every_n_keyframes)) return;
     if (params_.map_voxel_leaf_size <= 0.0) return;
 
     const std::size_t before = map_cloud_->size();

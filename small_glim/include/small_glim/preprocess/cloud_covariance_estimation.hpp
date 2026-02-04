@@ -24,7 +24,7 @@ public:
     * @param normals   [output] Estimated normals
     * @param covs      [output] Estimated covariances
     */
-    void estimate(const std::vector<Eigen::Vector4d>& points, const std::vector<int>& neighbors, std::vector<Eigen::Vector4d>& normals, std::vector<Eigen::Matrix4d>& covs) const;
+    void estimate(const std::vector<Eigen::Vector4d>& points, const std::vector<size_t>& neighbors, std::vector<Eigen::Vector4d>& normals, std::vector<Eigen::Matrix4d>& covs) const;
 
     /**
     * @brief Estimate point normals and covariances
@@ -36,8 +36,8 @@ public:
     */
     void estimate(
         const std::vector<Eigen::Vector4d>& points,
-        const std::vector<int>& neighbors,
-        const int k_neighbors,
+        const std::vector<size_t>& neighbors,
+        const size_t k_neighbors,
         std::vector<Eigen::Vector4d>& normals,
         std::vector<Eigen::Matrix4d>& covs
     ) const;
@@ -45,14 +45,14 @@ public:
     /// Estimate point covariances
     std::vector<Eigen::Matrix4d> estimate(
         const std::vector<Eigen::Vector4d>& points,
-        const std::vector<int>& neighbors,
-        const int k_neighbors
+        const std::vector<size_t>& neighbors,
+        const size_t k_neighbors
     ) const;
 
     /// Estimate point covariances
     std::vector<Eigen::Matrix4d> estimate(
         const std::vector<Eigen::Vector4d>& points,
-        const std::vector<int>& neighbors
+        const std::vector<size_t>& neighbors
     ) const;
 
     /**

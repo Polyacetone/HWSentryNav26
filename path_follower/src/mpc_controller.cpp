@@ -78,9 +78,9 @@ inline void eval_quadratic_uniform_bspline_2d(
     const T db1_dt = T(-2.0) * t + T(1.0);
     const T db2_dt = t;
 
-    const Eigen::Vector2d& p0d = control_points[xi + 0];
-    const Eigen::Vector2d& p1d = control_points[xi + 1];
-    const Eigen::Vector2d& p2d = control_points[xi + 2];
+    const Eigen::Vector2d& p0d = control_points[static_cast<size_t>(xi + 0)];
+    const Eigen::Vector2d& p1d = control_points[static_cast<size_t>(xi + 1)];
+    const Eigen::Vector2d& p2d = control_points[static_cast<size_t>(xi + 2)];
 
     const Eigen::Matrix<T, 2, 1> p0(T(p0d.x()), T(p0d.y()));
     const Eigen::Matrix<T, 2, 1> p1(T(p1d.x()), T(p1d.y()));
@@ -146,18 +146,10 @@ inline double estimate_remaining_arclength(
 
 namespace {
 constexpr int LQR_STATE_SIZE = 10;
-constexpr int LQR_INPUT_SIZE = 4;
-
 constexpr int IDX_S = 0;
 constexpr int IDX_DS = 1;
 constexpr int IDX_PHI = 2;
 constexpr int IDX_DPHI = 3;
-constexpr int IDX_THETA_L_L = 4;
-constexpr int IDX_DTHETA_L_L = 5;
-constexpr int IDX_THETA_L_R = 6;
-constexpr int IDX_DTHETA_L_R = 7;
-constexpr int IDX_THETA_B = 8;
-constexpr int IDX_DTHETA_B = 9;
 
 template<typename T>
 inline T wrap_to_pi(const T& a) {
@@ -319,7 +311,7 @@ inline Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_
     const T dy = gy - T(y0);
 
     const auto at = [&](int x, int y) {
-        const Eigen::Vector2d v = dir_map.data[y * dir_map.width + x];
+        const Eigen::Vector2d v = dir_map.data[static_cast<size_t>(y * dir_map.width + x)];
         return Eigen::Matrix<T, 2, 1>(T(v.x()), T(v.y()));
     };
 
@@ -619,7 +611,7 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     const std::vector<std::array<double, 2>>& controls
 ) {
     std::vector<Eigen::Vector2d> predicted_path_map;
-    predicted_path_map.reserve(params.horizon + 1);
+    predicted_path_map.reserve(static_cast<size_t>(params.horizon) + 1);
 
     PredictorState<double> st;
     st.x = chassis_pose_map.x();
@@ -637,8 +629,8 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
 
     double theta_cmd = chassis_pose_map.z();
     for (int i = 0; i < params.horizon; i++) {
-        const double v_cmd = controls[i][0];
-        const double w_cmd = controls[i][1];
+        const double v_cmd = controls[static_cast<size_t>(i)][0];
+        const double w_cmd = controls[static_cast<size_t>(i)][1];
         prediction_step(params, st, v_cmd, w_cmd, theta_cmd);
         predicted_path_map.emplace_back(st.x, st.y);
     }
@@ -651,7 +643,7 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
 // ============================================================================
 
 MPCController::MPCController(const MPCParams& params): params_(params) {
-    last_controls_.assign(params_.horizon, Eigen::Vector2d::Zero());
+    last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
 }
 
 std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::follow_path(
@@ -673,19 +665,19 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     last_u_ = u0;
 
     // 决策变量
-    std::vector<std::array<double, 2>> controls(params_.horizon, {0.0, 0.0});
+    std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
 
     // Warm start
-    if (last_controls_.size() == params_.horizon) {
+    if (last_controls_.size() == static_cast<size_t>(params_.horizon)) {
         for (int i = 0; i < params_.horizon; i++) {
-            const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[i + 1] : last_controls_.back();
-            controls[i][0] = init.x();
-            controls[i][1] = init.y();
+            const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[static_cast<size_t>(i + 1)] : last_controls_.back();
+            controls[static_cast<size_t>(i)][0] = init.x();
+            controls[static_cast<size_t>(i)][1] = init.y();
         }
     } else {
         for (int i = 0; i < params_.horizon; i++) {
-            controls[i][0] = chassis_status.x();
-            controls[i][1] = chassis_status.y();
+            controls[static_cast<size_t>(i)][0] = chassis_status.x();
+            controls[static_cast<size_t>(i)][1] = chassis_status.y();
         }
     }
 
@@ -711,7 +703,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     cost_function->SetNumResiduals(15 * params_.horizon);
 
     std::vector<double*> parameter_blocks;
-    parameter_blocks.reserve(params_.horizon);
+    parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
 
     for (auto& c: controls) {
         parameter_blocks.push_back(c.data());
@@ -721,10 +713,10 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
 
     // 设置边界
     for (int i = 0; i < params_.horizon; i++) {
-        problem.SetParameterLowerBound(controls[i].data(), 0, params_.follow_limits.vel_min);
-        problem.SetParameterUpperBound(controls[i].data(), 0, params_.follow_limits.vel_max);
-        problem.SetParameterLowerBound(controls[i].data(), 1, params_.follow_limits.omega_min);
-        problem.SetParameterUpperBound(controls[i].data(), 1, params_.follow_limits.omega_max);
+        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, params_.follow_limits.vel_min);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.follow_limits.vel_max);
+        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.follow_limits.omega_min);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.follow_limits.omega_max);
     }
 
     // 求解
@@ -753,9 +745,9 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     );
 
     // 保存warm start
-    last_controls_.resize(params_.horizon);
+    last_controls_.resize(static_cast<size_t>(params_.horizon));
     for (int i = 0; i < params_.horizon; i++) {
-        last_controls_[i] = Eigen::Vector2d(controls[i][0], controls[i][1]);
+        last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
     }
 
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(params_, chassis_pose_map, chassis_status, controls);
@@ -769,19 +761,19 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     const DirectionMap& global_direction_map
 ) {
     // 决策变量
-    std::vector<std::array<double, 2>> controls(params_.horizon, {0.0, 0.0});
+    std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
 
     // Warm start
-    if (last_controls_.size() == params_.horizon) {
+    if (last_controls_.size() == static_cast<size_t>(params_.horizon)) {
         for (int i = 0; i < params_.horizon; i++) {
-            const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[i + 1] : last_controls_.back();
-            controls[i][0] = std::max(0.0, init.x());
-            controls[i][1] = init.y();
+            const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[static_cast<size_t>(i + 1)] : last_controls_.back();
+            controls[static_cast<size_t>(i)][0] = std::max(0.0, init.x());
+            controls[static_cast<size_t>(i)][1] = init.y();
         }
     } else {
         for (int i = 0; i < params_.horizon; i++) {
-            controls[i][0] = std::max(0.0, chassis_status.x());
-            controls[i][1] = chassis_status.y();
+            controls[static_cast<size_t>(i)][0] = std::max(0.0, chassis_status.x());
+            controls[static_cast<size_t>(i)][1] = chassis_status.y();
         }
     }
 
@@ -804,7 +796,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     cost_function->SetNumResiduals(8 * params_.horizon + 2);
 
     std::vector<double*> parameter_blocks;
-    parameter_blocks.reserve(params_.horizon);
+    parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
     for (auto& c: controls) {
         parameter_blocks.push_back(c.data());
     }
@@ -812,10 +804,10 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
 
     // 边界
     for (int i = 0; i < params_.horizon; i++) {
-        problem.SetParameterLowerBound(controls[i].data(), 0, 0.0);
-        problem.SetParameterUpperBound(controls[i].data(), 0, params_.stop_limits.vel_max);
-        problem.SetParameterLowerBound(controls[i].data(), 1, params_.stop_limits.omega_min);
-        problem.SetParameterUpperBound(controls[i].data(), 1, params_.stop_limits.omega_max);
+        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, 0.0);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.stop_limits.vel_max);
+        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.stop_limits.omega_min);
+        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.stop_limits.omega_max);
     }
 
     ceres::Solver::Options options;
@@ -842,9 +834,9 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     );
 
     // 保存warm start
-    last_controls_.resize(params_.horizon);
+    last_controls_.resize(static_cast<size_t>(params_.horizon));
     for (int i = 0; i < params_.horizon; i++) {
-        last_controls_[i] = Eigen::Vector2d(controls[i][0], controls[i][1]);
+        last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
     }
 
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(params_, chassis_pose_map, chassis_status, controls);

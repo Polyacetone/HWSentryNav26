@@ -59,11 +59,11 @@ public:
     * @param num_integrated Number of integrated IMU measurements
     * @return Index of the last integrated IMU frame
     */
-    int integrate_imu(
+    size_t integrate_imu(
         double start_time,
         double end_time,
         const gtsam::imuBias::ConstantBias& bias,
-        int* num_integrated,
+        size_t* num_integrated,
         IMUSaturationStatus* saturation_status = nullptr
     );
 
@@ -77,7 +77,7 @@ public:
     * @param pred_poses     Predicted IMU poses
     * @return Index of the last integrated IMU frame
     */
-    int integrate_imu(
+    size_t integrate_imu(
         double start_time,
         double end_time,
         const gtsam::NavState& state,
@@ -95,7 +95,7 @@ public:
     * @param imu_data    IMU data
     * @return Index of the last integrated IMU frame
     */
-    int find_imu_data(
+    size_t find_imu_data(
         double start_time,
         double end_time,
         std::vector<double>& delta_times,
@@ -106,7 +106,7 @@ public:
     * @brief Erase IMU data before the given index
     * @param last Last integrated IMU measurement index
     */
-    void erase_imu_data(int last);
+    void erase_imu_data(size_t last);
 
     /**
     * @brief Preintegrated measurements

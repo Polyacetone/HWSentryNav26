@@ -16,7 +16,7 @@ public:
     * @brief Number of points
     * @return Number of points
     */
-    int size() const {
+    size_t size() const {
         return points.size();
     }
 
@@ -28,8 +28,8 @@ public:
     std::vector<double> intensities; // Point intensities
     std::vector<Eigen::Vector4d> points; // Points (homogeneous coordinates)
 
-    int k_neighbors; // Number of neighbors of each point
-    std::vector<int> neighbors; // k-nearest neighbors of each point
+    size_t k_neighbors; // Number of neighbors of each point
+    std::vector<size_t> neighbors; // k-nearest neighbors of each point
 };
 
 }

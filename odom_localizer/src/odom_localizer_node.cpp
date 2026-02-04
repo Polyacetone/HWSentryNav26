@@ -30,7 +30,8 @@ public:
     explicit OdomLocalizerNode(const rclcpp::NodeOptions& options);
 
 private:
-    int num_threads_, cov_num_neighbors_map_, cov_num_neighbors_lidar_, gicp_max_iterations_, min_points_lidar_;
+    size_t min_points_lidar_;
+    int num_threads_, cov_num_neighbors_map_, cov_num_neighbors_lidar_, gicp_max_iterations_;
     double downsample_resolution_map_, downsample_resolution_lidar_, gicp_max_correspondence_distance_;
     double odom_to_map_no_filter_distance_, odom_to_map_no_filter_angle_;
     double normalized_error_threshold_, overlap_threshold_;
@@ -70,15 +71,15 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
     static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
-    num_threads_ = declare_parameter<int>("num_threads");
+    num_threads_ = (int)declare_parameter<int>("num_threads");
     enable_debug_ = declare_parameter<bool>("enable_debug");
     robot_color_wait_timeout_ = declare_parameter<double>("robot_color_wait_timeout");
     enable_gicp_registration_ = declare_parameter<bool>("enable_gicp_registration");
     perform_gicp_only_once_ = declare_parameter<bool>("perform_gicp_only_once");
-    cov_num_neighbors_map_ = declare_parameter<int>("cov_num_neighbors_map");
-    cov_num_neighbors_lidar_ = declare_parameter<int>("cov_num_neighbors_lidar");
-    min_points_lidar_ = declare_parameter<int>("min_points_lidar");
-    gicp_max_iterations_ = declare_parameter<int>("gicp_max_iterations");
+    cov_num_neighbors_map_ = (int)declare_parameter<int>("cov_num_neighbors_map");
+    cov_num_neighbors_lidar_ = (int)declare_parameter<int>("cov_num_neighbors_lidar");
+    min_points_lidar_ = (size_t)declare_parameter<int>("min_points_lidar");
+    gicp_max_iterations_ = (int)declare_parameter<int>("gicp_max_iterations");
     gicp_max_correspondence_distance_ = declare_parameter<double>("gicp_max_correspondence_distance");
     downsample_resolution_map_ = declare_parameter<double>("downsample_resolution_map");
     downsample_resolution_lidar_ = declare_parameter<double>("downsample_resolution_lidar");
@@ -199,8 +200,8 @@ bool OdomLocalizerNode::perform_gicp_registration() {
     double max_overlap = 0.0;
     const auto align = [&](const Eigen::Isometry3d& init) {
         const auto result = reg.align(*map_cloud_, *source_cloud_, *map_kd_tree_, init);
-        const double normalized_error = result.error / result.num_inliers;
-        const double overlap = static_cast<double>(result.num_inliers) / source_cloud_->size();
+        const double normalized_error = result.error / static_cast<double>(result.num_inliers);
+        const double overlap = static_cast<double>(result.num_inliers) / static_cast<double>(source_cloud_->size());
         min_normalized_error = std::min(min_normalized_error, normalized_error);
         max_overlap = std::max(max_overlap, overlap);
         RCLCPP_DEBUG(get_logger(), "Normalized error: %.4f, Overlap: %.4f", normalized_error, overlap);
@@ -286,13 +287,13 @@ std::optional<Eigen::Isometry3d> OdomLocalizerNode::lookup_tf(const std::string&
 small_gicp::PointCloud::Ptr OdomLocalizerNode::convert_pointcloud2_to_small_gicp(sensor_msgs::msg::PointCloud2::SharedPtr msg) const {
     auto cloud = std::make_shared<small_gicp::PointCloud>();
 
-    int offset_x = -1, offset_y = -1, offset_z = -1;
+    size_t offset_x = static_cast<size_t>(-1), offset_y = static_cast<size_t>(-1), offset_z = static_cast<size_t>(-1);
     for (const auto& field : msg->fields) {
         if (field.name == "x") offset_x = field.offset;
         else if (field.name == "y") offset_y = field.offset;
         else if (field.name == "z") offset_z = field.offset;
     }
-    if (offset_x < 0 || offset_y < 0 || offset_z < 0) {
+    if (offset_x == static_cast<size_t>(-1) || offset_y == static_cast<size_t>(-1) || offset_z == static_cast<size_t>(-1)) {
         RCLCPP_WARN(get_logger(), "PointCloud2 missing x/y/z fields");
         return cloud;
     }

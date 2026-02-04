@@ -12,11 +12,18 @@ template<> bool Config::param<bool>(const std::string& name) {
     return std::any_cast<bool>(config_map_[name]);
 }
 
-template<> int Config::param<int>(const std::string& name) {
+template<> int32_t Config::param<int32_t>(const std::string& name) {
     if (!config_map_.contains(name)) {
-        config_map_[name] = std::make_any<int>(node_->declare_parameter<int>(name));
+        config_map_[name] = std::make_any<int32_t>(node_->declare_parameter<int32_t>(name));
     }
-    return std::any_cast<int>(config_map_[name]);
+    return std::any_cast<int32_t>(config_map_[name]);
+}
+
+template<> int64_t Config::param<int64_t>(const std::string& name) {
+    if (!config_map_.contains(name)) {
+        config_map_[name] = std::make_any<int64_t>(node_->declare_parameter<int64_t>(name));
+    }
+    return std::any_cast<int64_t>(config_map_[name]);
 }
 
 template<> float Config::param<float>(const std::string& name) {
@@ -47,14 +54,22 @@ template<> std::vector<bool> Config::param<std::vector<bool>>(const std::string&
     return std::any_cast<std::vector<bool>>(config_map_[name]);
 }
 
-template<> std::vector<int> Config::param<std::vector<int>>(const std::string& name) {
+template<> std::vector<int32_t> Config::param<std::vector<int32_t>>(const std::string& name) {
     if (!config_map_.contains(name)) {
         const std::vector<int64_t> i64vec = node_->declare_parameter<std::vector<int64_t>>(name);
-        std::vector<int> i32vec(i64vec.size());
-        std::for_each(i64vec.begin(), i64vec.end(), [&](const int64_t x) { i32vec.push_back(static_cast<int>(x)); });
-        config_map_[name] = std::make_any<std::vector<int>>(i32vec);
+        std::vector<int32_t> i32vec(i64vec.size());
+        std::for_each(i64vec.begin(), i64vec.end(), [&](const int64_t x) { i32vec.push_back(static_cast<int32_t>(x)); });
+        config_map_[name] = std::make_any<std::vector<int32_t>>(i32vec);
     }
-    return std::any_cast<std::vector<int>>(config_map_[name]);
+    return std::any_cast<std::vector<int32_t>>(config_map_[name]);
+}
+
+template<> std::vector<int64_t> Config::param<std::vector<int64_t>>(const std::string& name) {
+    if (!config_map_.contains(name)) {
+        const std::vector<int64_t> i64vec = node_->declare_parameter<std::vector<int64_t>>(name);
+        config_map_[name] = std::make_any<std::vector<int64_t>>(i64vec);
+    }
+    return std::any_cast<std::vector<int64_t>>(config_map_[name]);
 }
 
 template<> std::vector<double> Config::param<std::vector<double>>(const std::string& name) {

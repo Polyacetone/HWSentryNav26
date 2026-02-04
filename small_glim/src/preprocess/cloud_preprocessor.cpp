@@ -66,7 +66,7 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
     // Downsampling
     if (params->use_random_grid_downsampling) {
         const double rate = params->downsample_target > 0
-            ? static_cast<double>(params->downsample_target) / frame->size()
+            ? static_cast<double>(params->downsample_target) / static_cast<double>(frame->size())
             : params->downsample_rate;
         frame = gtsam_points::randomgrid_sampling(
             frame,
@@ -93,11 +93,11 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
     double squared_distance_near_thresh = params->distance_near_thresh * params->distance_near_thresh;
     double squared_distance_far_thresh = params->distance_far_thresh * params->distance_far_thresh;
 
-    for (int i = 0; i < frame->size(); i++) {
+    for (size_t i = 0; i < frame->size(); i++) {
         const bool is_finite = frame->points[i].allFinite();
         const double squared_dist = (Eigen::Vector4d() << frame->points[i].head<3>(), 0.0).finished().squaredNorm();
         if (squared_dist > squared_distance_near_thresh && squared_dist < squared_distance_far_thresh && is_finite) {
-            indices.push_back(i);
+            indices.push_back(static_cast<int>(i));
         }
     }
 
@@ -160,30 +160,30 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
         preprocessed->intensities.assign(frame->intensities, frame->intensities + frame->size());
     }
 
-    preprocessed->k_neighbors = params->k_correspondences;
-    preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params->k_correspondences);
+    preprocessed->k_neighbors = static_cast<size_t>(params->k_correspondences);
+    preprocessed->neighbors = find_neighbors(frame->points, frame->size(), static_cast<size_t>(params->k_correspondences));
 
     logger::debug("cloud_preprocess", "Preprocessed: {} -> {} points", raw_points->size(), preprocessed->size());
     return preprocessed;
 }
 
-std::vector<int> CloudPreprocessor::find_neighbors(
+std::vector<size_t> CloudPreprocessor::find_neighbors(
     const Eigen::Vector4d* points,
-    const int num_points,
-    const int k
+    const size_t num_points,
+    const size_t k
 ) const {
-    gtsam_points::KdTree tree(points, num_points);
-    std::vector<int> neighbors(num_points * k);
+    gtsam_points::KdTree tree(points, static_cast<int>(num_points));
+    std::vector<size_t> neighbors(num_points * k);
 
-    const auto perpoint_task = [&](int i) {
+    const auto perpoint_task = [&](size_t i) {
         std::vector<size_t> k_indices(k);
         std::vector<double> k_sq_dists(k);
         tree.knn_search(points[i].data(), k, k_indices.data(), k_sq_dists.data());
-        std::copy(k_indices.begin(), k_indices.end(), neighbors.begin() + i * k);
+        std::copy(k_indices.begin(), k_indices.end(), neighbors.begin() + static_cast<int64_t>(i) * static_cast<int64_t>(k));
     };
 
     #pragma omp parallel for num_threads(params->num_threads) schedule(guided, 8)
-    for (int i = 0; i < num_points; i++) {
+    for (size_t i = 0; i < num_points; i++) {
         perpoint_task(i);
     }
 

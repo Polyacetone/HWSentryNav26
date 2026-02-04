@@ -25,7 +25,7 @@ public:
 
     void timer_callback();
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
-    int points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
+    size_t points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
 
     void pub_odometry(const EstimationFrame::ConstPtr frame);
     void pub_cloud(const EstimationFrame::ConstPtr frame, const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher);
@@ -151,7 +151,7 @@ void SmallGlimNode::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
     odometry_estimation->insert_imu(imu_stamp, linear_acc, angular_vel);
 }
 
-int SmallGlimNode::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+size_t SmallGlimNode::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
     const auto raw_points = std::make_shared<RawPoints>(*msg, intensity_field, ring_field);
     if (raw_points == nullptr) {
         logger::warn("node", "failed to extract points from message");
@@ -161,7 +161,7 @@ int SmallGlimNode::points_callback(const sensor_msgs::msg::PointCloud2::ConstSha
     time_keeper->process(raw_points);
     auto preprocessed = preprocessor->preprocess(raw_points);
     odometry_estimation->insert_frame(preprocessed);
-    const int workload = odometry_estimation->workload();
+    const size_t workload = odometry_estimation->workload();
     logger::debug("node", "workload={}", workload);
     return workload;
 }
@@ -186,7 +186,7 @@ void SmallGlimNode::timer_callback() {
 }
 
 void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
-    const rclcpp::Time stamp(frame->stamp * 1e9);
+    const rclcpp::Time stamp(static_cast<int64_t>(frame->stamp * 1e9));
     const Eigen::Isometry3d T_odom_imu = frame->T_world_imu;
     const Eigen::Vector3d v_odom_imu = frame->v_world_imu;
     const Eigen::Isometry3d T_lidar_imu = frame->T_lidar_imu;
@@ -223,12 +223,12 @@ void SmallGlimNode::pub_cloud(
     const auto& points = frame->frame->points;
     sensor_msgs::msg::PointCloud2 msg;
     msg.header.frame_id = "odom";
-    msg.header.stamp = rclcpp::Time(frame->stamp * 1e9);
+    msg.header.stamp = rclcpp::Time(static_cast<int64_t>(frame->stamp * 1e9));
     msg.height = 1;
-    msg.width = num_points;
+    msg.width = static_cast<uint32_t>(num_points);
     msg.is_dense = true;
     msg.point_step = 12;
-    msg.row_step = 12 * num_points;
+    msg.row_step = static_cast<uint32_t>(12 * num_points);
     sensor_msgs::msg::PointField field_x;
     field_x.name = "x";
     field_x.offset = 0;
@@ -246,7 +246,7 @@ void SmallGlimNode::pub_cloud(
     field_z.count = 1;
     msg.fields = {field_x, field_y, field_z};
     msg.data.resize(msg.row_step * msg.height);
-    for (int i = 0; i < num_points; i++) {
+    for (size_t i = 0; i < num_points; i++) {
         Eigen::Vector3f pt = points[i](Eigen::seq(0, 2)).cast<float>();
         if (frame->frame_type != FrameType::WORLD) pt = frame->T_world_frame().cast<float>() * pt;
         std::memcpy(msg.data.data() + i * 12, pt.data(), sizeof(pt));

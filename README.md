@@ -27,7 +27,7 @@
 推荐使用apt安装：`sudo apt install libboost-all-dev`。
 
 ### GTSAM
-可能需要按照以下步骤自行构建。
+推荐按照以下步骤自行构建。
 ```bash
 sudo apt install libomp-dev libboost-all-dev libmetis-dev \
                  libfmt-dev libspdlog-dev \
@@ -46,11 +46,11 @@ sudo make install
 ```
 
 ### gtsam_points
-可能需要按照以下步骤自行构建。
+推荐按照以下步骤自行构建。
 ```bash
 git clone https://github.com/koide3/gtsam_points
 mkdir gtsam_points/build && cd gtsam_points/build
-cmake .. -DBUILD_WITH_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
+cmake .. -DBUILD_WITH_CUDA=OFF -DCMAKE_BUILD_TYPE=Release -DBUILD_WITH_MARCH_NATIVE=OFF
 make -j$(nproc)
 sudo make install
 ```
@@ -70,3 +70,9 @@ utils/cpp/offline_mapping_optimizer使用了absl库。如果不想安装absl也�
 ### CUDA（可选）
 utils/cpp/offline_mapping_optimizer可以使用CUDA加速光束法去除动态障碍物。如果没有CUDA环境，可以禁用该功能，会回落到CPU实现。
 CUDA可以使用apt安装：`sudo apt install nvidia-cuda-toolkit`。若需要更高版本的CUDA，可以参考NVIDIA官网的[安装指南](https://developer.nvidia.com/cuda-downloads)。
+
+## 开发提示
+
+项目在Debug和Release模式下使用不同的编译选项。Debug模式下启用了`-fsanitize=address,undefined`以帮助检测内存错误和未定义行为，但是非常影响性能。正常开发和测试时建议使用Release模式，遇到问题时再切换到Debug模式进行排查。构建模式可以在`compile.sh`中修改。
+
+在Debug模式下使用LSAN时，可能会误报`rcl_node_init`函数的内存泄漏。这是由于ROS2的节点初始化过程中分配了一些全局资源，LSAN无法正确识别这些资源的生命周期。建议将`leak:rcl_node_init`加入LSAN的忽略文件（默认存放在工作空间下的`lsan.supp`），以避免误报。

@@ -14,26 +14,25 @@ RawPoints::RawPoints(
     const std::string& ring_channel
 ) {
     using sensor_msgs::msg::PointField;
+    size_t num_points = points_msg.width * points_msg.height;
 
-    int num_points = points_msg.width * points_msg.height;
+    uint8_t x_type = 0;
+    uint8_t y_type = 0;
+    uint8_t z_type = 0;
+    uint8_t time_type = 0; // ouster and livox
+    uint8_t intensity_type = 0;
+    uint8_t color_type = 0;
+    uint8_t ring_type = 0;
 
-    int x_type = 0;
-    int y_type = 0;
-    int z_type = 0;
-    int time_type = 0; // ouster and livox
-    int intensity_type = 0;
-    int color_type = 0;
-    int ring_type = 0;
+    size_t x_offset = static_cast<size_t>(-1);
+    size_t y_offset = static_cast<size_t>(-1);
+    size_t z_offset = static_cast<size_t>(-1);
+    size_t time_offset = static_cast<size_t>(-1);
+    size_t intensity_offset = static_cast<size_t>(-1);
+    size_t color_offset = static_cast<size_t>(-1);
+    size_t ring_offset = static_cast<size_t>(-1);
 
-    int x_offset = -1;
-    int y_offset = -1;
-    int z_offset = -1;
-    int time_offset = -1;
-    int intensity_offset = -1;
-    int color_offset = -1;
-    int ring_offset = -1;
-
-    std::unordered_map<std::string, std::pair<int*, int*>> fields;
+    std::unordered_map<std::string, std::pair<uint8_t*, size_t*>> fields;
     fields["x"] = std::make_pair(&x_type, &x_offset);
     fields["y"] = std::make_pair(&y_type, &y_offset);
     fields["z"] = std::make_pair(&z_type, &z_offset);
@@ -54,7 +53,7 @@ RawPoints::RawPoints(
         *found->second.second = field.offset;
     }
 
-    if (x_offset < 0 || y_offset < 0 || z_offset < 0) {
+    if (x_offset == static_cast<size_t>(-1) || y_offset == static_cast<size_t>(-1) || z_offset == static_cast<size_t>(-1)) {
         throw std::runtime_error("missing point coordinate fields");
     }
 
@@ -66,18 +65,18 @@ RawPoints::RawPoints(
 
     if (x_type == PointField::FLOAT32 && y_offset == x_offset + sizeof(float) && z_offset == y_offset + sizeof(float)) {
         // Special case: contiguous 3 floats
-        for (int i = 0; i < num_points; i++) {
+        for (size_t i = 0; i < num_points; i++) {
             const auto* x_ptr = &points_msg.data[points_msg.point_step * i + x_offset];
             points[i] << Eigen::Map<const Eigen::Vector3f>(reinterpret_cast<const float*>(x_ptr)).cast<double>(), 1.0;
         }
     } else if (x_type == PointField::FLOAT64 && y_offset == x_offset + sizeof(double) && z_offset == y_offset + sizeof(double)) {
         // Special case: contiguous 3 doubles
-        for (int i = 0; i < num_points; i++) {
+        for (size_t i = 0; i < num_points; i++) {
             const auto* x_ptr = &points_msg.data[points_msg.point_step * i + x_offset];
             points[i] << Eigen::Map<const Eigen::Vector3d>(reinterpret_cast<const double*>(x_ptr)), 1.0;
         }
     } else {
-        for (int i = 0; i < num_points; i++) {
+        for (size_t i = 0; i < num_points; i++) {
             const auto* x_ptr = &points_msg.data[points_msg.point_step * i + x_offset];
             const auto* y_ptr = &points_msg.data[points_msg.point_step * i + y_offset];
             const auto* z_ptr = &points_msg.data[points_msg.point_step * i + z_offset];
@@ -90,9 +89,9 @@ RawPoints::RawPoints(
         }
     }
 
-    if (time_offset >= 0) {
+    if (time_offset != static_cast<size_t>(-1)) {
         times.resize(num_points);
-        for (int i = 0; i < num_points; i++) {
+        for (size_t i = 0; i < num_points; i++) {
             const auto* time_ptr = &points_msg.data[points_msg.point_step * i + time_offset];
             switch (time_type) {
                 case PointField::UINT32: {
@@ -114,9 +113,9 @@ RawPoints::RawPoints(
         }
     }
 
-    if (intensity_offset >= 0) {
+    if (intensity_offset != static_cast<size_t>(-1)) {
         intensities.resize(num_points);
-        for (int i = 0; i < num_points; i++) {
+        for (size_t i = 0; i < num_points; i++) {
             const auto* intensity_ptr = &points_msg.data[points_msg.point_step * i + intensity_offset];
             switch (intensity_type) {
                 case PointField::UINT8: {
@@ -146,21 +145,21 @@ RawPoints::RawPoints(
         }
     }
 
-    if (color_offset >= 0) {
+    if (color_offset != static_cast<size_t>(-1)) {
         if (color_type != PointField::UINT32) {
             throw std::runtime_error(std::format("unsupported color type {}", color_type));
         } else {
             colors.resize(num_points);
-            for (int i = 0; i < num_points; i++) {
+            for (size_t i = 0; i < num_points; i++) {
                 const auto* color_ptr = &points_msg.data[points_msg.point_step * i + color_offset];
                 colors[i] = Eigen::Matrix<unsigned char, 4, 1>(reinterpret_cast<const std::uint8_t*>(color_ptr)).cast<double>() / 255.0;
             }
         }
     }
 
-    if (ring_offset >= 0) {
+    if (ring_offset != static_cast<size_t>(-1)) {
         rings.resize(num_points);
-        for (int i = 0; i < num_points; i++) {
+        for (size_t i = 0; i < num_points; i++) {
             const auto* ring_ptr = &points_msg.data[points_msg.point_step * i + ring_offset];
             switch (ring_type) {
                 case PointField::UINT8: {

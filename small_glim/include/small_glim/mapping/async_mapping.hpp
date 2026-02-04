@@ -94,7 +94,7 @@ private:
 	std::ofstream poses_ofs_;
 
 	std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> map_cloud_;
-	int keyframes_since_downsample_{0};
+	size_t keyframes_since_downsample_{0};
 };
 
 }

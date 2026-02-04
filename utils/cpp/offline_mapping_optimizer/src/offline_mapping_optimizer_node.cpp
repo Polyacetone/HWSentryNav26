@@ -229,7 +229,7 @@ void estimate_cov(
     // Precompute pt * pt.transpose()
     std::vector<Eigen::Matrix4d> pt_cross(points.size());
 #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 64)
-    for (int i = 0; i < points.size(); i++) {
+    for (size_t i = 0; i < points.size(); i++) {
         pt_cross[i] = points[i] * points[i].transpose();
     }
 
@@ -262,7 +262,7 @@ void estimate_cov(
 
 // Calculate covariances
 #pragma omp parallel for num_threads(node_params.num_threads) schedule(guided, 8)
-    for (int i = 0; i < points.size(); i++) {
+    for (size_t i = 0; i < points.size(); i++) {
         calc_cov(i);
     }
 }
