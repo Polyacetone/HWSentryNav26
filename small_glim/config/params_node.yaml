@@ -3,11 +3,11 @@
     node:
       debug: false
       enable_mapping: false
-      enable_tf_publish: true
+      enable_tf_publish: false
       imu_time_offset: 0.0
       points_time_offset: 0.0
-      acc_scale: 9.8
-      imu_sub_topic: "/mid360_driver/imu"
+      acc_scale: 1.0
+      imu_sub_topic: "/serial_bridge/imu"
       points_sub_topic: "/mid360_driver/lidar"
       odometry_pub_topic: "/small_glim/odometry"
       registered_cloud_pub_topic: "/small_glim/registered_cloud"

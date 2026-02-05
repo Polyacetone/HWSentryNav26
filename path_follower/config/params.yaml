@@ -30,19 +30,21 @@
       general: # 通用参数
         horizon: 12 # 预测步数
         dt: 0.1 # 预测时间间隔
-        max_iterations: 60 # 最大迭代次数
+        max_iterations: 100 # 最大迭代次数
       follow_path: # 路径跟随模式
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
           max_correspondence_distance: 1.0 # 最大对应点距离 (m)
         limits: # 运动限制
-          vel_max: 2.0 # 最大速度 (m/s)
+          vel_max: 1.5 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
-          omega_max: 6.0 # 最大角速度 (rad/s)
-          omega_min: -6.0 # 最小角速度 (rad/s)
+          omega_max: 3.0 # 最大角速度 (rad/s)
+          omega_min: -3.0 # 最小角速度 (rad/s)
+          start_vel_cmd_act_diff_max: 0.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
+          start_omega_cmd_act_diff_max: 1.8 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
-          alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
+          alpha_max: 6.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           vel_step_up: 0.8 # 上台阶期望速度 (m/s)
           vel_step_down: 1.5 # 下台阶期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
@@ -56,9 +58,9 @@
           q_u: 2.0 # 进度项权重
           q_v_final: 0.8 # 终点减速权重
           r_v: 0.02 # 线速度正则
-          r_omega: 0.02 # 角速度正则
+          r_omega: 0.04 # 角速度正则
           r_dv: 0.04 # 线速度平滑
-          r_domega: 0.04 # 角速度平滑
+          r_domega: 0.06 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
@@ -71,6 +73,8 @@
           vel_max: 2.8 # 最大线速度硬约束 (m/s)
           omega_max: 12.5 # 最大角速度硬约束 (rad/s)
           omega_min: -12.5 # 最小角速度硬约束 (rad/s)
+          start_vel_cmd_act_diff_max: 0.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
+          start_omega_cmd_act_diff_max: 1.8 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           vel_step_up: 0.8 # 上台阶期望速度 (m/s)

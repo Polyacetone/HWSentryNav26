@@ -107,72 +107,56 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     }
 
     LagModel lag_model;
-    // Always declare lag params so config files stay consistent.
     lag_model.tau_v = declare_parameter<double>("mpc.general.lag.tau_v");
     lag_model.k_v = declare_parameter<double>("mpc.general.lag.k_v");
     lag_model.tau_omega = declare_parameter<double>("mpc.general.lag.tau_omega");
-    if (lag_model.tau_v <= 0.0) {
-        RCLCPP_FATAL(get_logger(), "mpc.general.lag.tau_v must be > 0, got %.6f", lag_model.tau_v);
-        throw std::runtime_error("Invalid mpc.general.lag.tau_v");
-    }
-    if (lag_model.tau_omega <= 0.0) {
-        RCLCPP_FATAL(get_logger(), "mpc.general.lag.tau_omega must be > 0, got %.6f", lag_model.tau_omega);
-        throw std::runtime_error("Invalid mpc.general.lag.tau_omega");
-    }
 
     LQRModel lqr_model;
-    // Safe defaults for non-LQR modes (avoid uninitialized matrices/fields).
-    lqr_model.substeps = 1;
-    lqr_model.dt_sub = mpc_dt;
-    lqr_model.A_cl.setIdentity();
-    lqr_model.B_ref.setZero();
-    if (prediction_model == PredictionModel::LQR) {
-        const double lqr_dt = declare_parameter<double>("mpc.general.lqr.dt");
-        const int substeps = (int)declare_parameter<int>("mpc.general.lqr.substeps");
-        if (substeps <= 0) {
-            RCLCPP_FATAL(get_logger(), "mpc.general.lqr.substeps must be > 0, got %d", substeps);
-            throw std::runtime_error("Invalid mpc.general.lqr.substeps");
-        }
-        const double dt_sub = mpc_dt / substeps;
-        const int lqr_steps_per_substep = std::max<int>(1, static_cast<int>(std::lround(dt_sub / lqr_dt)));
-        const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
-        if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
-            RCLCPP_WARN(
-                get_logger(),
-                "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f)",
-                dt_sub, lqr_dt, lqr_steps_per_substep, dt_sub_from_lqr
-            );
-        }
-
-        const auto load_matrix = [this](const std::string& name, int rows, int cols) {
-            const auto data = declare_parameter<std::vector<double>>(name);
-            if (data.size() != static_cast<size_t>(rows) * static_cast<size_t>(cols)) {
-                RCLCPP_FATAL(get_logger(), "Parameter %s size %zu != %d", name.c_str(), data.size(), rows * cols);
-                throw std::runtime_error("Invalid matrix size");
-            }
-            Eigen::MatrixXd mat(rows, cols);
-            for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < cols; c++) {
-                    mat(r, c) = data[static_cast<size_t>(r * cols + c)];
-                }
-            }
-            return mat;
-        };
-
-        lqr_model.substeps = substeps;
-        lqr_model.dt_sub = dt_sub;
-        const Eigen::Matrix<double, 10, 10> A = load_matrix("mpc.general.lqr.A", 10, 10);
-        const Eigen::Matrix<double, 10, 4> B = load_matrix("mpc.general.lqr.B", 10, 4);
-        const Eigen::Matrix<double, 4, 10> K = load_matrix("mpc.general.lqr.K", 4, 10);
-        const Eigen::Matrix<double, 10, 10> Acl = A - B * K;
-        const Eigen::Matrix<double, 10, 10> BK = B * K;
-        Eigen::Matrix<double, 20, 20> M = Eigen::Matrix<double, 20, 20>::Zero();
-        M.block<10, 10>(0, 0) = Acl;
-        M.block<10, 10>(0, 10) = BK;
-        const Eigen::Matrix<double, 20, 20> Mexp = (M * dt_sub).exp();
-        lqr_model.A_cl = Mexp.block<10, 10>(0, 0);
-        lqr_model.B_ref = Mexp.block<10, 10>(0, 10);
+    const double lqr_dt = declare_parameter<double>("mpc.general.lqr.dt");
+    const int substeps = (int)declare_parameter<int>("mpc.general.lqr.substeps");
+    if (substeps <= 0) {
+        RCLCPP_FATAL(get_logger(), "mpc.general.lqr.substeps must be > 0, got %d", substeps);
+        throw std::runtime_error("Invalid mpc.general.lqr.substeps");
     }
+    const double dt_sub = mpc_dt / substeps;
+    const int lqr_steps_per_substep = std::max<int>(1, static_cast<int>(std::lround(dt_sub / lqr_dt)));
+    const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
+    if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
+        RCLCPP_WARN(
+            get_logger(),
+            "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f)",
+            dt_sub, lqr_dt, lqr_steps_per_substep, dt_sub_from_lqr
+        );
+    }
+
+    const auto load_matrix = [this](const std::string& name, int rows, int cols) {
+        const auto data = declare_parameter<std::vector<double>>(name);
+        if (data.size() != static_cast<size_t>(rows) * static_cast<size_t>(cols)) {
+            RCLCPP_FATAL(get_logger(), "Parameter %s size %zu != %d", name.c_str(), data.size(), rows * cols);
+            throw std::runtime_error("Invalid matrix size");
+        }
+        Eigen::MatrixXd mat(rows, cols);
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                mat(r, c) = data[static_cast<size_t>(r * cols + c)];
+            }
+        }
+        return mat;
+    };
+
+    lqr_model.substeps = substeps;
+    lqr_model.dt_sub = dt_sub;
+    const Eigen::Matrix<double, 10, 10> A = load_matrix("mpc.general.lqr.A", 10, 10);
+    const Eigen::Matrix<double, 10, 4> B = load_matrix("mpc.general.lqr.B", 10, 4);
+    const Eigen::Matrix<double, 4, 10> K = load_matrix("mpc.general.lqr.K", 4, 10);
+    const Eigen::Matrix<double, 10, 10> Acl = A - B * K;
+    const Eigen::Matrix<double, 10, 10> BK = B * K;
+    Eigen::Matrix<double, 20, 20> M = Eigen::Matrix<double, 20, 20>::Zero();
+    M.block<10, 10>(0, 0) = Acl;
+    M.block<10, 10>(0, 10) = BK;
+    const Eigen::Matrix<double, 20, 20> Mexp = (M * dt_sub).exp();
+    lqr_model.A_cl = Mexp.block<10, 10>(0, 0);
+    lqr_model.B_ref = Mexp.block<10, 10>(0, 10);
 
     params_ = {
         .horizon = horizon,
@@ -186,6 +170,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
             .omega_max = declare_parameter<double>("mpc.follow_path.limits.omega_max"),
             .omega_min = declare_parameter<double>("mpc.follow_path.limits.omega_min"),
+            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.follow_path.limits.start_vel_cmd_act_diff_max"),
+            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.follow_path.limits.start_omega_cmd_act_diff_max"),
             .acc_max = declare_parameter<double>("mpc.follow_path.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.follow_path.limits.alpha_max"),
             .vel_step_up = declare_parameter<double>("mpc.follow_path.limits.vel_step_up"),
@@ -205,13 +191,13 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .r_omega = declare_parameter<double>("mpc.follow_path.weights.r_omega"),
             .r_dv = declare_parameter<double>("mpc.follow_path.weights.r_dv"),
             .r_domega = declare_parameter<double>("mpc.follow_path.weights.r_domega"),
-            .acc_limit_weight = declare_parameter<double>("mpc.follow_path.weights.acc_limit"),
-            .alpha_limit_weight = declare_parameter<double>("mpc.follow_path.weights.alpha_limit"),
-            .lat_acc_weight = declare_parameter<double>("mpc.follow_path.weights.lat_acc"),
-            .vel_on_step_weight = declare_parameter<double>("mpc.follow_path.weights.vel_on_step"),
-            .obstacle_weight = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
-            .direction_weight = declare_parameter<double>("mpc.follow_path.weights.direction"),
-            .step_weight = declare_parameter<double>("mpc.follow_path.weights.step")
+            .acc_limit = declare_parameter<double>("mpc.follow_path.weights.acc_limit"),
+            .alpha_limit = declare_parameter<double>("mpc.follow_path.weights.alpha_limit"),
+            .lat_acc = declare_parameter<double>("mpc.follow_path.weights.lat_acc"),
+            .vel_on_step = declare_parameter<double>("mpc.follow_path.weights.vel_on_step"),
+            .obstacle = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
+            .direction = declare_parameter<double>("mpc.follow_path.weights.direction"),
+            .step = declare_parameter<double>("mpc.follow_path.weights.step")
         },
         .follow_projection = {
             .proj_num_samples = (int)declare_parameter<int>("mpc.follow_path.projection.num_samples"),
@@ -222,6 +208,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .vel_max = declare_parameter<double>("mpc.stop.limits.vel_max"),
             .omega_max = declare_parameter<double>("mpc.stop.limits.omega_max"),
             .omega_min = declare_parameter<double>("mpc.stop.limits.omega_min"),
+            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.stop.limits.start_vel_cmd_act_diff_max"),
+            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.stop.limits.start_omega_cmd_act_diff_max"),
             .acc_max = declare_parameter<double>("mpc.stop.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.stop.limits.alpha_max"),
             .vel_step_up = declare_parameter<double>("mpc.stop.limits.vel_step_up"),
@@ -231,14 +219,14 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         .stop_weights = {
             .q_v = declare_parameter<double>("mpc.stop.weights.q_v"),
             .q_omega = declare_parameter<double>("mpc.stop.weights.q_omega"),
-            .acc_limit_weight = declare_parameter<double>("mpc.stop.weights.acc_limit"),
-            .alpha_limit_weight = declare_parameter<double>("mpc.stop.weights.alpha_limit"),
-            .lat_acc_weight = declare_parameter<double>("mpc.stop.weights.lat_acc"),
-            .vel_on_step_weight = declare_parameter<double>("mpc.stop.weights.vel_on_step"),
-            .obstacle_weight = declare_parameter<double>("mpc.stop.weights.obstacle"),
-            .obstacle_terminal_weight = declare_parameter<double>("mpc.stop.weights.obstacle_terminal"),
-            .direction_weight = declare_parameter<double>("mpc.stop.weights.direction"),
-            .step_terminal_weight = declare_parameter<double>("mpc.stop.weights.step_terminal")
+            .acc_limit = declare_parameter<double>("mpc.stop.weights.acc_limit"),
+            .alpha_limit = declare_parameter<double>("mpc.stop.weights.alpha_limit"),
+            .lat_acc = declare_parameter<double>("mpc.stop.weights.lat_acc"),
+            .vel_on_step = declare_parameter<double>("mpc.stop.weights.vel_on_step"),
+            .obstacle = declare_parameter<double>("mpc.stop.weights.obstacle"),
+            .obstacle_terminal = declare_parameter<double>("mpc.stop.weights.obstacle_terminal"),
+            .direction = declare_parameter<double>("mpc.stop.weights.direction"),
+            .step_terminal = declare_parameter<double>("mpc.stop.weights.step_terminal")
         }
     };
 

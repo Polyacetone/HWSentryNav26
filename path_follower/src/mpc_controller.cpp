@@ -363,12 +363,17 @@ struct FollowMPCCostFunctor {
         st.x_lqr(IDX_DPHI) = T(start_status_.y());
         st.x_lqr(IDX_PHI) = T(start_pose_.z());
 
-        // 上一时刻指令（用于平滑约束）
-        T last_v_cmd = T(start_cmd_.x());
-        T last_omega_cmd = T(start_cmd_.y());
+        // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束
+        T last_v_cmd = ceres::fmax(
+            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.follow_limits.start_vel_cmd_act_diff_max - params_.follow_limits.acc_max * params_.dt)),
+            T(start_status_.x() - params_.follow_limits.start_vel_cmd_act_diff_max + params_.follow_limits.acc_max * params_.dt)
+        );
+        T last_omega_cmd = ceres::fmax(
+            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.follow_limits.start_omega_cmd_act_diff_max - params_.follow_limits.alpha_max * params_.dt)),
+            T(start_status_.y() - params_.follow_limits.start_omega_cmd_act_diff_max + params_.follow_limits.alpha_max * params_.dt)
+        );
 
-        int res_idx = 0;
-
+        size_t res_idx = 0;
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
             const T v_cmd = uk[0];
@@ -429,16 +434,16 @@ struct FollowMPCCostFunctor {
             // 5. 指令变化率软约束
             const T dv_cmd_limit = T(params_.follow_limits.acc_max * params_.dt);
             const T domega_cmd_limit = T(params_.follow_limits.alpha_max * params_.dt);
-            residuals[res_idx++] = T(params_.follow_weights.acc_limit_weight) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
-            residuals[res_idx++] = T(params_.follow_weights.alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
+            residuals[res_idx++] = T(params_.follow_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
+            residuals[res_idx++] = T(params_.follow_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
             // 6. 侧向加速度约束
             const T a_lat = ceres::abs(st.v_act * st.omega_act);
-            residuals[res_idx++] = T(params_.follow_weights.lat_acc_weight) * ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
+            residuals[res_idx++] = T(params_.follow_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
 
             // 7. 避障
             const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
-            residuals[res_idx++] = T(params_.follow_weights.obstacle_weight) * (cost / T(255.0));
+            residuals[res_idx++] = T(params_.follow_weights.obstacle) * (cost / T(255.0));
 
             // 8. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
@@ -451,18 +456,18 @@ struct FollowMPCCostFunctor {
                 T(params_.follow_limits.step_norm_threshold),
                 T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
             );
-            residuals[res_idx++] = T(params_.follow_weights.step_weight) * step_gate;
+            residuals[res_idx++] = T(params_.follow_weights.step) * step_gate;
 
             // 台阶方向对齐
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * ceres::abs(heading_cross_dir);
+            residuals[res_idx++] = T(params_.follow_weights.direction) * ceres::abs(heading_cross_dir);
 
             // 台阶区域速度保持
             const T cos_theta = heading.dot(dir_unit);
             const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
             const T target_vel_step = weight_up * T(params_.follow_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.follow_limits.vel_step_down);
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(st.v_act - target_vel_step);
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step) * dir_norm * ceres::abs(st.v_act - target_vel_step);
 
             // 9. 终点减速
             const T deceleration = T(params_.follow_limits.slow_down_deceleration); // 期望的减速加速度
@@ -529,11 +534,16 @@ struct StopMPCCostFunctor {
         st.x_lqr(IDX_DPHI) = T(start_status_.y());
         st.x_lqr(IDX_PHI) = T(start_pose_.z());
 
-        T last_v_cmd = T(start_cmd_.x());
-        T last_omega_cmd = T(start_cmd_.y());
+        T last_v_cmd = ceres::fmax(
+            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.stop_limits.start_vel_cmd_act_diff_max - params_.stop_limits.acc_max * params_.dt)),
+            T(start_status_.x() - params_.stop_limits.start_vel_cmd_act_diff_max + params_.stop_limits.acc_max * params_.dt)
+        );
+        T last_omega_cmd = ceres::fmax(
+            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.stop_limits.start_omega_cmd_act_diff_max - params_.stop_limits.alpha_max * params_.dt)),
+            T(start_status_.y() - params_.stop_limits.start_omega_cmd_act_diff_max + params_.stop_limits.alpha_max * params_.dt)
+        );
 
-        int res_idx = 0;
-
+        size_t res_idx = 0;
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
             const T v_cmd = uk[0];
@@ -550,16 +560,16 @@ struct StopMPCCostFunctor {
             // 2. 指令变化率约束
             const T dv_cmd_limit = T(params_.stop_limits.acc_max * params_.dt);
             const T domega_cmd_limit = T(params_.stop_limits.alpha_max * params_.dt);
-            residuals[res_idx++] = T(params_.stop_weights.acc_limit_weight) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
-            residuals[res_idx++] = T(params_.stop_weights.alpha_limit_weight) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
+            residuals[res_idx++] = T(params_.stop_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
+            residuals[res_idx++] = T(params_.stop_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
             // 3. 侧向加速度约束
             const T a_lat = ceres::abs(st.v_act * st.omega_act);
-            residuals[res_idx++] = T(params_.stop_weights.lat_acc_weight) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
+            residuals[res_idx++] = T(params_.stop_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
 
             // 4. 避障
             const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
-            residuals[res_idx++] = T(params_.stop_weights.obstacle_weight) * (cost / T(255.0));
+            residuals[res_idx++] = T(params_.stop_weights.obstacle) * (cost / T(255.0));
 
             // 5. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
@@ -569,13 +579,13 @@ struct StopMPCCostFunctor {
             // 台阶方向对齐
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-            residuals[res_idx++] = T(params_.follow_weights.direction_weight) * ceres::abs(heading_cross_dir);
+            residuals[res_idx++] = T(params_.follow_weights.direction) * ceres::abs(heading_cross_dir);
 
             // 台阶区域速度保持
             const T cos_theta = heading.dot(dir_unit);
             const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
             const T target_vel_step = weight_up * T(params_.follow_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.follow_limits.vel_step_down);
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step_weight) * dir_norm * ceres::abs(st.v_act - target_vel_step);
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step) * dir_norm * ceres::abs(st.v_act - target_vel_step);
             
             last_v_cmd = v_cmd;
             last_omega_cmd = omega_cmd;
@@ -583,7 +593,7 @@ struct StopMPCCostFunctor {
 
         // 终端约束：不碰撞且不在台阶区域
         const T cost_terminal = interpolate_cost_map(merged_cost_map_, st.x, st.y);
-        residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal_weight) * (cost_terminal / T(255.0));
+        residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal) * (cost_terminal / T(255.0));
         const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
         const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
         const T step_gate = smoothstep(
@@ -591,7 +601,7 @@ struct StopMPCCostFunctor {
             T(params_.follow_limits.step_norm_threshold),
             T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
         );
-        residuals[res_idx++] = T(params_.stop_weights.step_terminal_weight) * step_gate;
+        residuals[res_idx++] = T(params_.stop_weights.step_terminal) * step_gate;
 
         return true;
     }

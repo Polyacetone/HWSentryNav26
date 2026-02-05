@@ -48,11 +48,11 @@ def wrap_to_pi(angle: float) -> float:
 @dataclass
 class Limits:
     # 必须与 wheel_leg_lqr_follow_sim.py 中 SimConfig 保持一致（或更保守）
-    max_v: float = 2.8
-    max_w: float = 7.2
-    max_acc: float = 2.5
-    max_ang_acc: float = 12.0
-    max_v_w_product: float = 3.5
+    max_v: float = 1.5
+    max_w: float = 6.0
+    max_acc: float = 2.0
+    max_ang_acc: float = 10.0
+    max_v_w_product: float = 3.0
 
 
 @dataclass
@@ -106,6 +106,15 @@ def build_scenarios(limits: Limits, margin: float) -> List[ScenarioConfig]:
 
     scenarios: List[ScenarioConfig] = []
 
+    # 0) 静止保持
+    scenarios.append(
+        ScenarioConfig(
+            name="idle",
+            duration=5.0,
+            generator=lambda t: (0.0, 0.0),
+        )
+    )
+
     # 1) 纯平动：多次梯形加减速
     scenarios.append(
         ScenarioConfig(
@@ -137,19 +146,18 @@ def build_scenarios(limits: Limits, margin: float) -> List[ScenarioConfig]:
     )
 
     # 4) 交替耦合：先加速再转向，再同时变化
-    def coupled_script(t: float) -> Tuple[float, float]:
-        if t < 4.0:
-            return (0.8 * v_peak * (t / 4.0), 0.0)
-        if t < 7.0:
-            tt = t - 4.0
-            return (0.8 * v_peak, 0.7 * w_peak * (tt / 3.0))
-        if t < 11.0:
-            tt = t - 7.0
-            return (0.8 * v_peak * (1.0 - tt / 4.0), 0.7 * w_peak * (1.0 - 2.0 * tt / 4.0))
-        tt = t - 11.0
-        return (0.35 * v_peak * math.sin(2 * math.pi * 0.4 * tt), 0.55 * w_peak * math.sin(2 * math.pi * 0.25 * tt + 0.3))
-
-    scenarios.append(ScenarioConfig(name="coupled_script", duration=16.0, generator=coupled_script))
+    # def coupled_script(t: float) -> Tuple[float, float]:
+    #     if t < 4.0:
+    #         return (0.8 * v_peak * (t / 4.0), 0.0)
+    #     if t < 7.0:
+    #         tt = t - 4.0
+    #         return (0.8 * v_peak, 0.7 * w_peak * (tt / 3.0))
+    #     if t < 11.0:
+    #         tt = t - 7.0
+    #         return (0.8 * v_peak * (1.0 - tt / 4.0), 0.7 * w_peak * (1.0 - 2.0 * tt / 4.0))
+    #     tt = t - 11.0
+    #     return (0.35 * v_peak * math.sin(2 * math.pi * 0.4 * tt), 0.55 * w_peak * math.sin(2 * math.pi * 0.25 * tt + 0.3))
+    # scenarios.append(ScenarioConfig(name="coupled_script", duration=16.0, generator=coupled_script))
 
     return scenarios
 
@@ -295,7 +303,7 @@ def main() -> int:
     # 同时发布侧还会做 rate-limit，确保 dv/dt、dw/dt 满足加速度约束
     margin = 0.75
 
-    cmd_hz = 100.0  # 发布指令频率；越高越容易让内部 rate-limit 不生效
+    cmd_hz = 10.0  # 发布指令频率；越高越容易让内部 rate-limit 不生效
     cmd_dt = 1.0 / cmd_hz
 
     scenarios = build_scenarios(limits, margin)
@@ -316,8 +324,8 @@ def main() -> int:
     class IdentNode(Node):
         def __init__(self):
             super().__init__("wheel_leg_lqr_ident")
-            self.pub = self.create_publisher(ChassisCmd, "/path_follower/chassis_cmd", 2)
-            self.sub = self.create_subscription(ChassisStatus, "/serial_bridge/chassis_status", self._status_cb, 10)
+            self.pub = self.create_publisher(ChassisCmd, "/path_follower/chassis_cmd", 1)
+            self.sub = self.create_subscription(ChassisStatus, "/serial_bridge/chassis_status", self._status_cb, 1)
 
             self._t0_wall = time.time()
             self._t_prev_cmd = self._t0_wall
