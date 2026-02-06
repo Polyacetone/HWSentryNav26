@@ -110,6 +110,41 @@ struct MPCStopWeights {
     double step_terminal;
 };
 
+struct MPCRecoveryLimits {
+    double vel_max;
+    double vel_min;
+    double omega_max;
+    double omega_min;
+
+    double start_vel_cmd_act_diff_max;
+    double start_omega_cmd_act_diff_max;
+    double acc_max;
+    double alpha_max;
+
+    double a_lat_max;
+};
+
+struct MPCRecoveryWeights {
+    double q_goal_xy;
+    double q_goal_theta;
+
+    double r_v;
+    double r_omega;
+    double r_dv;
+    double r_domega;
+
+    double acc_limit;
+    double alpha_limit;
+    double lat_acc;
+
+    double obstacle;
+    double step;
+
+    double q_goal_xy_terminal;
+    double obstacle_terminal;
+    double step_terminal;
+};
+
 struct MPCParams {
     int horizon;
     double dt;
@@ -125,6 +160,9 @@ struct MPCParams {
 
     MPCStopLimits stop_limits;
     MPCStopWeights stop_weights;
+
+    MPCRecoveryLimits recovery_limits;
+    MPCRecoveryWeights recovery_weights;
 };
 
 class MPCController {
@@ -145,6 +183,16 @@ public:
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );
+
+    std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> recover_to_point(
+        const Eigen::Vector2d& goal_map,
+        const Eigen::Vector3d& chassis_pose_map,
+        const Eigen::Vector2d& chassis_status,
+        const CostMap& merged_cost_map,
+        const DirectionMap& global_direction_map
+    );
+
+    [[nodiscard]] const MPCParams& params() const { return params_; }
 
 private:
     MPCParams params_;

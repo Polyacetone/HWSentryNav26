@@ -17,71 +17,65 @@
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
 #include <path_follower/nav_map.hpp>
-#include <path_follower/control_fsm.hpp>
+#include <path_follower/navigation_controller.hpp>
 #include <path_follower/mpc_controller.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
-class PathFollowerNode: public rclcpp::Node {
+
+class PathFollowerNode : public rclcpp::Node {
 public:
     explicit PathFollowerNode(const rclcpp::NodeOptions& options);
 
 private:
+    // ─── ROS 回调 ───
     void control_points_callback(const nav_msgs::msg::Path::SharedPtr msg);
     void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
     void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
     void control_timer_callback();
-    void handle_stop_state();
-    void handle_follow_state();
+
+    // ─── 工具函数 ───
     bool get_chassis_pose(Eigen::Vector3d& chassis_pose) const;
     std::optional<double> get_map_to_imu_world_yaw() const;
     std::optional<double> get_chassis_theta_imu_world() const;
-    void publish_chassis_cmd(double velocity, double theta, double omega, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const;
+    void publish_chassis_cmd(const ControlOutput& output);
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
-    std::tuple<bool, bool> detect_steps_on_spline(const Eigen::Vector3d& chassis_pose_map, const double u0);
 
+    // ─── ROS 通信 ───
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr control_points_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<interfaces::msg::SpinCmd>::SharedPtr spin_cmd_sub_;
-
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_predicted_path_pub_;
-
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 
-    double stop_threshold_dist_, stop_threshold_u_;
+    // ─── 参数 ───
     bool enable_debug_;
-    double step_check_back_;
-    double step_check_front_;
-    double step_check_sample_step_;
-    MPCParams params_;
-    std::unique_ptr<MPCController> mpc_controller_;
 
+    // ─── 核心组件 ───
+    std::unique_ptr<NavigationController> nav_controller_;
+
+    // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
-    Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero(); // (v, omega)
+    Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
-
-    std::unique_ptr<ControlFsm> control_fsm_;
-    ControlFsm::State last_fsm_state_ = ControlFsm::State::IDLE; // 用于打印日志
-    double last_reference_u_ = 0.0; // 上一次投影到样条曲线的参数u
-    std::optional<double> theta_keep_imu_world_; // 用于Idle状态保持当前角度
 };
 
-PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("path_follower", options) {
+// ═══════════════════════ 构造函数 ════════════════════════════
+
+PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("path_follower", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
 
-    stop_threshold_dist_ = declare_parameter<double>("stop_threshold_dist");
-    stop_threshold_u_ = declare_parameter<double>("stop_threshold_u");
     enable_debug_ = declare_parameter<bool>("debug.enable");
     if (enable_debug_) {
         get_logger().set_level(rclcpp::Logger::Level::Debug);
@@ -89,9 +83,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
         debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.predicted_path_pub_topic"), 1);
     }
 
-    const int horizon = (int)declare_parameter<int>("mpc.general.horizon");
+    // ─── MPC 参数加载 ───
+    const int horizon = static_cast<int>(declare_parameter<int>("mpc.general.horizon"));
     const double mpc_dt = declare_parameter<double>("mpc.general.dt");
-    const int max_iterations = (int)declare_parameter<int>("mpc.general.max_iterations");
+    const int max_iterations = static_cast<int>(declare_parameter<int>("mpc.general.max_iterations"));
 
     const std::string prediction_model_str = declare_parameter<std::string>("mpc.general.model");
     PredictionModel prediction_model;
@@ -113,7 +108,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
 
     LQRModel lqr_model;
     const double lqr_dt = declare_parameter<double>("mpc.general.lqr.dt");
-    const int substeps = (int)declare_parameter<int>("mpc.general.lqr.substeps");
+    const int substeps = static_cast<int>(declare_parameter<int>("mpc.general.lqr.substeps"));
     if (substeps <= 0) {
         RCLCPP_FATAL(get_logger(), "mpc.general.lqr.substeps must be > 0, got %d", substeps);
         throw std::runtime_error("Invalid mpc.general.lqr.substeps");
@@ -123,8 +118,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
     if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
         RCLCPP_WARN(
-            get_logger(),
-            "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f)",
+            get_logger(), "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f)",
             dt_sub, lqr_dt, lqr_steps_per_substep, dt_sub_from_lqr
         );
     }
@@ -158,7 +152,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
     lqr_model.A_cl = Mexp.block<10, 10>(0, 0);
     lqr_model.B_ref = Mexp.block<10, 10>(0, 10);
 
-    params_ = {
+    MPCParams mpc_params = {
         .horizon = horizon,
         .dt = mpc_dt,
         .max_iterations = max_iterations,
@@ -178,7 +172,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .vel_step_down = declare_parameter<double>("mpc.follow_path.limits.vel_step_down"),
             .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
             .slow_down_deceleration = declare_parameter<double>("mpc.follow_path.limits.slow_down_deceleration"),
-            .slow_down_num_samples = (int)declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples"),
+            .slow_down_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples")),
             .step_norm_threshold = declare_parameter<double>("mpc.follow_path.limits.step_norm_threshold"),
             .step_norm_transition = declare_parameter<double>("mpc.follow_path.limits.step_norm_transition")
         },
@@ -200,7 +194,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .step = declare_parameter<double>("mpc.follow_path.weights.step")
         },
         .follow_projection = {
-            .proj_num_samples = (int)declare_parameter<int>("mpc.follow_path.projection.num_samples"),
+            .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.projection.num_samples")),
             .proj_search_window = declare_parameter<double>("mpc.follow_path.projection.search_window"),
             .max_correspondence_distance = declare_parameter<double>("mpc.follow_path.projection.max_correspondence_distance")
         },
@@ -227,31 +221,92 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             .obstacle_terminal = declare_parameter<double>("mpc.stop.weights.obstacle_terminal"),
             .direction = declare_parameter<double>("mpc.stop.weights.direction"),
             .step_terminal = declare_parameter<double>("mpc.stop.weights.step_terminal")
+        },
+        .recovery_limits = {
+            .vel_max = declare_parameter<double>("mpc.recovery.limits.vel_max"),
+            .vel_min = declare_parameter<double>("mpc.recovery.limits.vel_min"),
+            .omega_max = declare_parameter<double>("mpc.recovery.limits.omega_max"),
+            .omega_min = declare_parameter<double>("mpc.recovery.limits.omega_min"),
+            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.recovery.limits.start_vel_cmd_act_diff_max"),
+            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.recovery.limits.start_omega_cmd_act_diff_max"),
+            .acc_max = declare_parameter<double>("mpc.recovery.limits.acc_max"),
+            .alpha_max = declare_parameter<double>("mpc.recovery.limits.alpha_max"),
+            .a_lat_max = declare_parameter<double>("mpc.recovery.limits.a_lat_max")
+        },
+        .recovery_weights = {
+            .q_goal_xy = declare_parameter<double>("mpc.recovery.weights.q_goal_xy"),
+            .q_goal_theta = declare_parameter<double>("mpc.recovery.weights.q_goal_theta"),
+            .r_v = declare_parameter<double>("mpc.recovery.weights.r_v"),
+            .r_omega = declare_parameter<double>("mpc.recovery.weights.r_omega"),
+            .r_dv = declare_parameter<double>("mpc.recovery.weights.r_dv"),
+            .r_domega = declare_parameter<double>("mpc.recovery.weights.r_domega"),
+            .acc_limit = declare_parameter<double>("mpc.recovery.weights.acc_limit"),
+            .alpha_limit = declare_parameter<double>("mpc.recovery.weights.alpha_limit"),
+            .lat_acc = declare_parameter<double>("mpc.recovery.weights.lat_acc"),
+            .obstacle = declare_parameter<double>("mpc.recovery.weights.obstacle"),
+            .step = declare_parameter<double>("mpc.recovery.weights.step"),
+            .q_goal_xy_terminal = declare_parameter<double>("mpc.recovery.weights.q_goal_xy_terminal"),
+            .obstacle_terminal = declare_parameter<double>("mpc.recovery.weights.obstacle_terminal"),
+            .step_terminal = declare_parameter<double>("mpc.recovery.weights.step_terminal")
         }
     };
 
-    mpc_controller_ = std::make_unique<MPCController>(params_);
+    auto mpc_controller = std::make_shared<MPCController>(mpc_params);
 
-    control_fsm_ = std::make_unique<ControlFsm>(ControlFsm::Params{
+    // ─── FSM 参数 ───
+    FsmParams fsm_params;
+    fsm_params.transition = {
         .follow_to_spin_vel_max = declare_parameter<double>("control_fsm.follow_to_spin_vel_max"),
         .spin_to_follow_omega_max = declare_parameter<double>("control_fsm.spin_to_follow_omega_max"),
         .to_idle_vel_max = declare_parameter<double>("control_fsm.to_idle_vel_max"),
-        .to_idle_omega_max = declare_parameter<double>("control_fsm.to_idle_omega_max")
-    });
-    last_fsm_state_ = control_fsm_->state();
+        .to_idle_omega_max = declare_parameter<double>("control_fsm.to_idle_omega_max"),
+    };
+    fsm_params.recovery = {
+        .enable = declare_parameter<bool>("recovery.enable"),
+        .hazard_cost_threshold = declare_parameter<double>("recovery.hazard.cost_threshold"),
+        .hazard_step_norm_threshold = declare_parameter<double>("recovery.hazard.step_norm_threshold"),
+        .safe_cost_threshold = declare_parameter<double>("recovery.safe.cost_threshold"),
+        .safe_step_norm_threshold = declare_parameter<double>("recovery.safe.step_norm_threshold"),
+        .circ_radius = declare_parameter<double>("recovery.search.circ_radius"),
+        .circ_angle_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_angle_samples")),
+        .circ_radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_radius_samples")),
+        .goal_reached_dist = declare_parameter<double>("recovery.exit.goal_reached_dist"),
+        .safe_hold_time = declare_parameter<double>("recovery.exit.safe_hold_time"),
+        .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout"),
+    };
+    fsm_params.stuck = {
+        .enable = declare_parameter<bool>("recovery.stuck.enable"),
+        .cmd_vel_threshold = declare_parameter<double>("recovery.stuck.cmd_vel_threshold"),
+        .timeout = declare_parameter<double>("recovery.stuck.timeout"),
+        .max_displacement = declare_parameter<double>("recovery.stuck.max_displacement"),
+        .reverse_speed = declare_parameter<double>("recovery.stuck.reverse_speed"),
+        .reverse_duration = declare_parameter<double>("recovery.stuck.reverse_duration"),
+    };
 
-    step_check_back_ = declare_parameter<double>("step_ahead_flag.window_back");
-    step_check_front_ = declare_parameter<double>("step_ahead_flag.window_front");
-    step_check_sample_step_ = declare_parameter<double>("step_ahead_flag.sample_step");
+    // ─── NavigationController 参数 ───
+    NavigationParams nav_params;
+    nav_params.stop_threshold_dist = declare_parameter<double>("stop_threshold_dist");
+    nav_params.stop_threshold_u = declare_parameter<double>("stop_threshold_u");
+    nav_params.step_check_back = declare_parameter<double>("step_ahead_flag.window_back");
+    nav_params.step_check_front = declare_parameter<double>("step_ahead_flag.window_front");
+    nav_params.step_check_sample_step = declare_parameter<double>("step_ahead_flag.sample_step");
 
+    // ─── 创建 NavigationController ───
+    nav_controller_ = std::make_unique<NavigationController>(nav_params, fsm_params, mpc_controller, get_logger());
+
+    // ─── 订阅 / 发布 ───
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("global_cost_map_sub_topic"), 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
             global_cost_map_ = std::make_shared<CostMap>(*msg);
-            RCLCPP_INFO(get_logger(), "Received global cost map: size=(%d,%d), resolution=%.2f", global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution);
+            RCLCPP_INFO(
+                get_logger(), "Received global cost map: size=(%d,%d), resolution=%.2f",
+                global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution
+            );
             global_cost_map_sub_.reset();
         }
     );
+
     global_direction_map_sub_ = create_subscription<sensor_msgs::msg::Image>(
         declare_parameter<std::string>("global_direction_map_sub_topic"), 1,
         [this](const sensor_msgs::msg::Image::SharedPtr msg) {
@@ -262,32 +317,43 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options): Node("pa
             cv::Mat img = cv_bridge::toCvShare(msg, "8UC2")->image;
             global_direction_map_ = std::make_shared<DirectionMap>(img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y);
             if (global_direction_map_->width != global_cost_map_->width || global_direction_map_->height != global_cost_map_->height) {
-                RCLCPP_FATAL(get_logger(), "Direction map size (%d,%d) does not match cost map (%d,%d)!", global_direction_map_->width, global_direction_map_->height, global_cost_map_->width, global_cost_map_->height);
+                RCLCPP_FATAL(
+                    get_logger(), "Direction map size (%d,%d) does not match cost map (%d,%d)!",
+                    global_direction_map_->width, global_direction_map_->height,
+                    global_cost_map_->width, global_cost_map_->height
+                );
                 throw std::runtime_error("Direction map size does not match cost map size");
             }
             RCLCPP_INFO(get_logger(), "Received global direction map");
             global_direction_map_sub_.reset();
         }
     );
+
     local_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("local_cost_map_sub_topic"), 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { local_cost_map_callback(msg); }
     );
+
     control_points_sub_ = create_subscription<nav_msgs::msg::Path>(
         declare_parameter<std::string>("control_points_sub_topic"), 1,
         [this](const nav_msgs::msg::Path::SharedPtr msg) { control_points_callback(msg); }
     );
+
     chassis_status_sub_ = create_subscription<interfaces::msg::ChassisStatus>(
         declare_parameter<std::string>("chassis_status_sub_topic"), 1,
         [this](const interfaces::msg::ChassisStatus::SharedPtr msg) { chassis_status_callback(msg); }
     );
+
     spin_cmd_sub_ = create_subscription<interfaces::msg::SpinCmd>(
         declare_parameter<std::string>("spin_cmd_sub_topic"), 1,
         [this](const interfaces::msg::SpinCmd::SharedPtr msg) { spin_cmd_callback(msg); }
     );
+
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("chassis_cmd_pub_topic"), 1);
-    control_timer_ = create_wall_timer(std::chrono::duration<double>(params_.dt), [this]() { control_timer_callback(); });
+    control_timer_ = create_wall_timer(std::chrono::duration<double>(mpc_params.dt), [this]() { control_timer_callback(); });
 }
+
+// ═══════════════════════ ROS 回调 ════════════════════════════
 
 void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::SharedPtr msg) {
     if (msg->poses.size() < 3) {
@@ -295,17 +361,15 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
             RCLCPP_WARN(get_logger(), "Received insufficient control points (%zu), need at least 3!", msg->poses.size());
         }
         global_path_ = std::nullopt;
-        last_reference_u_ = 0.0;
         return;
     }
     std::vector<Eigen::Vector2d> cpts;
     cpts.reserve(msg->poses.size());
-    for (const auto& ps: msg->poses) {
+    for (const auto& ps : msg->poses) {
         cpts.emplace_back(ps.pose.position.x, ps.pose.position.y);
     }
     global_path_ = SplineD(cpts);
     global_path_->setExtrapolate(true);
-    last_reference_u_ = 0.0;
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
@@ -333,247 +397,67 @@ void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGri
     }
 }
 
+// ═══════════════════ 控制主循环 ══════════════════════════════
+
 void PathFollowerNode::control_timer_callback() {
     if (!merged_cost_map_ || !global_direction_map_) return;
 
-    ControlFsm::Inputs fsm_inputs;
-    fsm_inputs.has_path = global_path_.has_value();
-    fsm_inputs.spin_requested = (spin_state_ != SpinState::STOP);
-    fsm_inputs.spin_high_priority = spin_high_priority_;
-    fsm_inputs.velocity = chassis_status_.x();
-    fsm_inputs.omega = chassis_status_.y();
-    control_fsm_->update(fsm_inputs);
+    Eigen::Vector3d chassis_pose_map;
+    if (!get_chassis_pose(chassis_pose_map)) return;
 
-    const auto fsm_state = control_fsm_->state();
-    if (fsm_state != last_fsm_state_) {
-        const auto dest = control_fsm_->destination();
-        const char* state_str = (fsm_state == ControlFsm::State::IDLE) ? "IDLE" :
-            (fsm_state == ControlFsm::State::FOLLOW) ? "FOLLOW" :
-            (fsm_state == ControlFsm::State::SPIN) ? "SPIN" : "STOPPING";
-        const char* dest_str = (dest == ControlFsm::Destination::IDLE) ? "IDLE" :
-            (dest == ControlFsm::Destination::FOLLOW) ? "FOLLOW" : "SPIN";
-        if (fsm_state == ControlFsm::State::STOPPING) {
-            RCLCPP_INFO(get_logger(), "Control FSM -> %s (dest=%s)", state_str, dest_str);
-        } else {
-            RCLCPP_INFO(get_logger(), "Control FSM -> %s", state_str);
-        }
-        last_fsm_state_ = fsm_state;
-    }
+    // 组装控制输入
+    ControlInput input;
+    input.global_path = global_path_;
+    input.chassis_pose_map = chassis_pose_map;
+    input.chassis_status = chassis_status_;
+    input.spin_requested = (spin_state_ != SpinState::STOP);
+    input.spin_high_priority = spin_high_priority_;
+    input.spin_slow = (spin_state_ == SpinState::SPIN_SLOW);
+    input.spin_fast = (spin_state_ == SpinState::SPIN_FAST);
+    input.merged_cost_map = merged_cost_map_.get();
+    input.global_direction_map = global_direction_map_.get();
+    input.map_to_imu_world_yaw = get_map_to_imu_world_yaw();
+    input.chassis_theta_imu_world = get_chassis_theta_imu_world();
+    input.stamp = now();
 
-    switch (fsm_state) {
-        case ControlFsm::State::IDLE: { // 闲置模式：无路径且无需小陀螺
-            // Idle也持续发送固定角度（imu_world系），避免电控误以为目标角度为0
-            if (!theta_keep_imu_world_) theta_keep_imu_world_ = get_chassis_theta_imu_world();
-            if (!theta_keep_imu_world_) break;
-            publish_chassis_cmd(0.0, *theta_keep_imu_world_, 0.0, false, false, false, false);
-            break;
-        }
-        case ControlFsm::State::FOLLOW: { // 路径跟随模式
-            handle_follow_state();
-            break;
-        }
-        case ControlFsm::State::SPIN: { // 小陀螺模式：速度/角速度由电控负责（通过slow_spin/fast_spin标志）
-            const bool slow_spin = (spin_state_ == SpinState::SPIN_SLOW);
-            const bool fast_spin = (spin_state_ == SpinState::SPIN_FAST);
-            publish_chassis_cmd(0.0, 0.0, 0.0, false, false, slow_spin, fast_spin);
-            break;
-        }
-        case ControlFsm::State::STOPPING: { // 过渡停止模式：用于Follow<->Spin以及路径丢失等场景，保证指令平滑
-            handle_stop_state();
-            break;
-        }
-    }
+    // 调用控制逻辑层
+    const ControlOutput output = nav_controller_->update(input);
 
-    if (fsm_state != ControlFsm::State::IDLE) {
-        // 离开Idle状态后，清除保持角度
-        theta_keep_imu_world_ = std::nullopt;
-    }
-}
-
-void PathFollowerNode::handle_stop_state() {
-    Eigen::Vector3d chassis_pose;
-    if (!get_chassis_pose(chassis_pose)) return;
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    const auto result = mpc_controller_->stop(
-        chassis_pose,
-        chassis_status_,
-        *merged_cost_map_,
-        *global_direction_map_
-    );
-    if (!result) {
-        RCLCPP_ERROR(get_logger(), "MPCController(Stop) solve failed: %s", result.error().c_str());
-        return;
-    }
-
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
-    if (solve_ms > params_.dt * 500.0) {
-        RCLCPP_WARN(get_logger(), "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
-    } else {
-        RCLCPP_DEBUG(get_logger(), "MPCController(Stop) solve time: %.2f ms", solve_ms);
-    }
-
-    // 将 map 系下的期望角度转换到 imu_world 系
-    double theta_imu_world = 0.0;
-    const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
-    if (!map_to_imu_world_yaw) return;
-    theta_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
-    theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world)); // 角度归一化到 [-pi, pi]
-
-    publish_chassis_cmd(
-        std::get<0>(*result).x(),
-        theta_imu_world,
-        std::get<0>(*result).z(),
-        false, false, false, false
-    );
-    if (enable_debug_) {
-        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
-    }
-}
-
-void PathFollowerNode::handle_follow_state() {
-    Eigen::Vector3d chassis_pose;
-    if (!get_chassis_pose(chassis_pose)) return;
-
-    const double u0 = project_to_spline_u(
-        *global_path_,
-        chassis_pose.head<2>(),
-        last_reference_u_,
-        params_.follow_projection.proj_num_samples,
-        params_.follow_projection.proj_search_window,
-        params_.follow_projection.max_correspondence_distance
-    );
-    last_reference_u_ = u0;
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    const auto result = mpc_controller_->follow_path(
-        *global_path_,
-        chassis_pose,
-        chassis_status_,
-        *merged_cost_map_,
-        *global_direction_map_
-    );
-    if (!result) {
-        RCLCPP_ERROR(get_logger(), "MPCController(Follow) solve failed: %s", result.error().c_str());
-        return;
-    }
-
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
-    if (solve_ms > params_.dt * 500.0) {
-        RCLCPP_WARN(get_logger(), "MPCController(Follow) solve time %.2f ms > %.2f ms", solve_ms, params_.dt * 500.0);
-    } else {
-        RCLCPP_DEBUG(get_logger(), "MPCController(Follow) solve time: %.2f ms", solve_ms);
-    }
-
-    // 如果已经到达目标点，则清除路径，准备进入闲置状态
-    if ((chassis_pose.head<2>() - global_path_->evaluate(1.0)).norm() < stop_threshold_dist_ || u0 > stop_threshold_u_) {
-        RCLCPP_INFO(get_logger(), "Reached goal, currently at (%.2f, %.2f)", chassis_pose.x(), chassis_pose.y());
+    // 处理路径清除请求
+    if (output.path_cleared) {
+        RCLCPP_INFO(get_logger(), "Path cleared by controller");
         global_path_ = std::nullopt;
-        last_reference_u_ = 0.0;
     }
 
-    // 将 map 系下的期望角度转换到 imu_world 系
-    double theta_imu_world = 0.0;
-    const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
-    if (!map_to_imu_world_yaw) return;
-    theta_imu_world = std::get<0>(*result).y() - *map_to_imu_world_yaw;
-    theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world)); // 角度归一化到 [-pi, pi]
-
-    const auto [step_up_ahead, step_down_ahead] = detect_steps_on_spline(chassis_pose, u0);
-    publish_chassis_cmd(
-        std::get<0>(*result).x(),
-        theta_imu_world,
-        std::get<0>(*result).z(),
-        step_up_ahead, step_down_ahead, false, false
-    );
-    if (enable_debug_) {
-        debug_predicted_path_pub_->publish(path_to_nav_msg(std::get<1>(*result)));
+    // 发布指令
+    if (output.valid) {
+        publish_chassis_cmd(output);
+        if (enable_debug_ && output.predicted_path_map) {
+            debug_predicted_path_pub_->publish(path_to_nav_msg(*output.predicted_path_map));
+        }
     }
 }
 
-std::tuple<bool, bool> PathFollowerNode::detect_steps_on_spline(const Eigen::Vector3d& chassis_pose_map, const double u0) {
-    constexpr double dir_norm_threshold = 0.8;
-    constexpr double dot_threshold = 0.8;
+// ═══════════════════ 工具函数 ════════════════════════════════
 
-    if (!global_direction_map_) return {false, false};
-    if (!global_path_) return {false, false};
-    if (step_check_front_ <= 0.0 && step_check_back_ <= 0.0) return {false, false};
-    if (step_check_sample_step_ <= 1e-6) return {false, false};
-
-    const Eigen::Vector2d heading(std::cos(chassis_pose_map.z()), std::sin(chassis_pose_map.z()));
-    bool step_up = false;
-    bool step_down = false;
-
-    const auto sample_at_u = [&](double u) {
-        const Eigen::Vector2d p_map = global_path_->evaluate(u);
-        const Eigen::Vector2d g = global_direction_map_->map_coord_to_grid(p_map);
-        const Eigen::Vector2d dir = global_direction_map_->interpolate(g);
-        const double n = dir.norm();
-        if (n < dir_norm_threshold) return;
-        const double dot = dir.normalized().dot(heading);
-        if (dot > dot_threshold) step_up = true;
-        if (dot < -dot_threshold) step_down = true;
-    };
-
-    sample_at_u(u0);
-
-    // 向前：按弧长近似等间距采样
-    double u_fwd = u0;
-    double dist_fwd = 0.0;
-    const double target_fwd = std::max(0.0, step_check_front_);
-    while (dist_fwd + 1e-9 < target_fwd && u_fwd < 1.0 - 1e-9 && !(step_up && step_down)) {
-        const Eigen::Vector2d d1 = global_path_->derivative(u_fwd, 1);
-        const double dsdu = std::max(1e-6, d1.norm());
-        const double du = step_check_sample_step_ / dsdu;
-        u_fwd = std::min(1.0, u_fwd + du);
-        dist_fwd += step_check_sample_step_;
-        sample_at_u(u_fwd);
-    }
-
-    // 向后：按弧长近似等间距采样
-    double u_bwd = u0;
-    double dist_bwd = 0.0;
-    const double target_bwd = std::max(0.0, step_check_back_);
-    while (dist_bwd + 1e-9 < target_bwd && u_bwd > 1e-9 && !(step_up && step_down)) {
-        const Eigen::Vector2d d1 = global_path_->derivative(u_bwd, 1);
-        const double dsdu = std::max(1e-6, d1.norm());
-        const double du = step_check_sample_step_ / dsdu;
-        u_bwd = std::max(0.0, u_bwd - du);
-        dist_bwd += step_check_sample_step_;
-        sample_at_u(u_bwd);
-    }
-
-    return {step_up, step_down};
-}
-
-void PathFollowerNode::publish_chassis_cmd(double velocity, double theta, double omega, bool step_up_ahead, bool step_down_ahead, bool slow_spin, bool fast_spin) const {
+void PathFollowerNode::publish_chassis_cmd(const ControlOutput& output) {
     interfaces::msg::ChassisCmd msg;
-    msg.velocity = static_cast<float>(velocity);
-    msg.theta = static_cast<float>(theta);
-    msg.omega = static_cast<float>(omega);
-    msg.step_up_ahead = step_up_ahead;
-    msg.step_down_ahead = step_down_ahead;
-    msg.slow_spin = slow_spin;
-    msg.fast_spin = fast_spin;
+    msg.velocity = static_cast<float>(output.velocity);
+    msg.theta = static_cast<float>(output.theta_imu_world);
+    msg.omega = static_cast<float>(output.omega);
+    msg.step_up_ahead = output.step_up_ahead;
+    msg.step_down_ahead = output.step_down_ahead;
+    msg.slow_spin = output.slow_spin;
+    msg.fast_spin = output.fast_spin;
     chassis_cmd_pub_->publish(msg);
 }
 
 std::optional<double> PathFollowerNode::get_chassis_theta_imu_world() const {
     Eigen::Vector3d chassis_pose_map;
-    if (!get_chassis_pose(chassis_pose_map)) {
-        return std::nullopt;
-    }
-
-    const auto map_to_imu_world_yaw = get_map_to_imu_world_yaw();
-    if (!map_to_imu_world_yaw) {
-        return std::nullopt;
-    }
-
-    double theta_imu_world = chassis_pose_map.z() - *map_to_imu_world_yaw;
-    theta_imu_world = std::atan2(std::sin(theta_imu_world), std::cos(theta_imu_world));
-    return theta_imu_world;
+    if (!get_chassis_pose(chassis_pose_map)) return std::nullopt;
+    const auto yaw = get_map_to_imu_world_yaw();
+    if (!yaw) return std::nullopt;
+    return std::atan2(std::sin(chassis_pose_map.z() - *yaw), std::cos(chassis_pose_map.z() - *yaw));
 }
 
 bool PathFollowerNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
@@ -584,7 +468,6 @@ bool PathFollowerNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
         RCLCPP_ERROR(get_logger(), "Could not transform chassis_link to map: %s", ex.what());
         return false;
     }
-
     chassis_pose.head<2>() = utils::convert_to<Eigen::Vector3d>(tf.transform.translation).head<2>();
     const Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
     const Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
@@ -604,7 +487,6 @@ std::optional<double> PathFollowerNode::get_map_to_imu_world_yaw() const {
         RCLCPP_ERROR(get_logger(), "Could not transform map to imu_world: %s", ex.what());
         return std::nullopt;
     }
-
     const Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
     const Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
     if (x_axis.norm() < 1e-6) {
@@ -621,7 +503,7 @@ nav_msgs::msg::Path PathFollowerNode::path_to_nav_msg(const std::vector<Eigen::V
     nav_msgs::msg::Path msg;
     msg.header.stamp = now();
     msg.header.frame_id = "map";
-    for (const auto& p: path) {
+    for (const auto& p : path) {
         geometry_msgs::msg::PoseStamped ps;
         ps.header = msg.header;
         ps.pose.position.x = p.x();
@@ -631,6 +513,7 @@ nav_msgs::msg::Path PathFollowerNode::path_to_nav_msg(const std::vector<Eigen::V
     }
     return msg;
 }
+
 }
 
 #include "rclcpp_components/register_node_macro.hpp"
