@@ -17,8 +17,8 @@
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
 #include <path_follower/nav_map.hpp>
-#include <path_follower/navigation_controller.hpp>
-#include <path_follower/mpc_controller.hpp>
+#include <path_follower/main_controller.hpp>
+#include <path_follower/mpc_solver.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
@@ -59,7 +59,7 @@ private:
     bool enable_debug_;
 
     // ─── 核心组件 ───
-    std::unique_ptr<NavigationController> nav_controller_;
+    std::unique_ptr<MainController> nav_controller_;
 
     // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
@@ -251,15 +251,15 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         }
     };
 
-    auto mpc_controller = std::make_shared<MPCController>(mpc_params);
+    auto mpc_controller = std::make_shared<MPCSolver>(mpc_params);
 
     // ─── FSM 参数 ───
     FsmParams fsm_params;
     fsm_params.transition = {
-        .follow_to_spin_vel_max = declare_parameter<double>("control_fsm.follow_to_spin_vel_max"),
-        .spin_to_follow_omega_max = declare_parameter<double>("control_fsm.spin_to_follow_omega_max"),
-        .to_idle_vel_max = declare_parameter<double>("control_fsm.to_idle_vel_max"),
-        .to_idle_omega_max = declare_parameter<double>("control_fsm.to_idle_omega_max"),
+        .follow_to_spin_vel_max = declare_parameter<double>("state_machine.follow_to_spin_vel_max"),
+        .spin_to_follow_omega_max = declare_parameter<double>("state_machine.spin_to_follow_omega_max"),
+        .to_idle_vel_max = declare_parameter<double>("state_machine.to_idle_vel_max"),
+        .to_idle_omega_max = declare_parameter<double>("state_machine.to_idle_omega_max"),
     };
     fsm_params.recovery = {
         .enable = declare_parameter<bool>("recovery.enable"),
@@ -283,7 +283,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .reverse_duration = declare_parameter<double>("recovery.stuck.reverse_duration"),
     };
 
-    // ─── NavigationController 参数 ───
+    // ─── MainController 参数 ───
     NavigationParams nav_params;
     nav_params.stop_threshold_dist = declare_parameter<double>("stop_threshold_dist");
     nav_params.stop_threshold_u = declare_parameter<double>("stop_threshold_u");
@@ -291,8 +291,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     nav_params.step_check_front = declare_parameter<double>("step_ahead_flag.window_front");
     nav_params.step_check_sample_step = declare_parameter<double>("step_ahead_flag.sample_step");
 
-    // ─── 创建 NavigationController ───
-    nav_controller_ = std::make_unique<NavigationController>(nav_params, fsm_params, mpc_controller, get_logger());
+    // ─── 创建 MainController ───
+    nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
 
     // ─── 订阅 / 发布 ───
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(

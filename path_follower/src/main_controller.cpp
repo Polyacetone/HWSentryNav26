@@ -1,27 +1,125 @@
-#include <path_follower/navigation_controller.hpp>
+#include <path_follower/main_controller.hpp>
 
 #include <chrono>
+#include <algorithm>
+#include <limits>
+#include <numbers>
 #include <rclcpp/logging.hpp>
 
 namespace path_follower {
 
+namespace {
+
+struct RecoveryGoalPlanner {
+    struct FieldSample {
+        double cost = 0.0;
+        double step_norm = 0.0;
+    };
+
+    static std::optional<FieldSample> sample_fields(
+        const CostMap& cost_map,
+        const DirectionMap& dir_map,
+        const Eigen::Vector2d& pos
+    ) {
+        const Eigen::Vector2d gc = cost_map.map_coord_to_grid(pos);
+        if (!cost_map.is_valid_coord(gc)) return std::nullopt;
+        const Eigen::Vector2d gd = dir_map.map_coord_to_grid(pos);
+        if (!dir_map.is_valid_coord(gd)) return std::nullopt;
+
+        FieldSample s;
+        s.cost = cost_map.interpolate(gc);
+        s.step_norm = dir_map.interpolate(gd).norm();
+        return s;
+    }
+
+    static bool is_safe_goal(const RecoveryParams& p, const FieldSample& s) {
+        return (s.cost < p.safe_cost_threshold) && (s.step_norm < p.safe_step_norm_threshold);
+    }
+
+    static double potential_cost(const FieldSample& s) {
+        const double cost01 = std::clamp(s.cost / 255.0, 0.0, 1.0);
+        return cost01 + s.step_norm;
+    }
+
+    struct PathScore {
+        double score = std::numeric_limits<double>::infinity();
+        bool end_safe = false;
+        FieldSample end_sample;
+    };
+
+    static std::optional<PathScore> score_candidate_by_path_integral(
+        const RecoveryParams& p,
+        const CostMap& cost_map,
+        const DirectionMap& dir_map,
+        const Eigen::Vector2d& origin,
+        const Eigen::Vector2d& goal
+    ) {
+        double acc = 0.0;
+        std::optional<FieldSample> end_s;
+        for (int i = 0; i <= p.circ_radius_samples; i++) {
+            const double t = static_cast<double>(i) / static_cast<double>(p.circ_radius_samples);
+            const Eigen::Vector2d pos = origin + (goal - origin) * t;
+            const auto s = sample_fields(cost_map, dir_map, pos);
+            if (!s) return std::nullopt;
+            acc += potential_cost(*s);
+            if (i == p.circ_radius_samples) end_s = s;
+        }
+
+        PathScore out;
+        out.score = acc;
+        out.end_sample = *end_s;
+        out.end_safe = is_safe_goal(p, *end_s);
+        return out;
+    }
+
+    static std::optional<Eigen::Vector2d> find_goal(
+        const RecoveryParams& p,
+        const CostMap& cost_map,
+        const DirectionMap& dir_map,
+        const Eigen::Vector3d& chassis_pose
+    ) {
+        const Eigen::Vector2d origin = chassis_pose.head<2>();
+
+        std::optional<Eigen::Vector2d> best_pt;
+        std::optional<PathScore> best_sc;
+
+        for (int i = 0; i < p.circ_angle_samples; i++) {
+            const double a = 2.0 * std::numbers::pi * static_cast<double>(i) / static_cast<double>(p.circ_angle_samples);
+            const Eigen::Vector2d pt = origin + Eigen::Vector2d(std::cos(a), std::sin(a)) * p.circ_radius;
+            const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt);
+            if (!sc) continue;
+            if (!best_sc || sc->score < best_sc->score) {
+                best_sc = *sc;
+                best_pt = pt;
+            }
+        }
+
+        return best_pt;
+    }
+};
+
+}  // namespace
+
 // ═══════════════════════ 构造函数 ════════════════════════════
 
-NavigationController::NavigationController(
+MainController::MainController(
     const NavigationParams& nav_params,
     const FsmParams& fsm_params,
-    std::shared_ptr<MPCController> mpc_controller,
+    std::shared_ptr<MPCSolver> mpc_controller,
     rclcpp::Logger logger
-) : control_fsm_(std::make_unique<ControlFsm>(fsm_params, logger)),
+) : control_fsm_(std::make_unique<StateMachine>(fsm_params, logger)),
     mpc_controller_(std::move(mpc_controller)),
     logger_(logger),
-    nav_params_(nav_params) {
+    nav_params_(nav_params),
+    fsm_params_(fsm_params) {
     last_fsm_state_ = control_fsm_->state();
 }
 
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
-ControlOutput NavigationController::update(const ControlInput& input) {
+ControlOutput MainController::update(const ControlInput& input) {
+    const FsmState prev_state = last_fsm_state_;
+
     // 1. 组装 FSM 输入
     FsmInput fsm_input;
     fsm_input.has_path = input.global_path.has_value();
@@ -33,18 +131,14 @@ ControlOutput NavigationController::update(const ControlInput& input) {
     fsm_input.merged_cost_map = input.merged_cost_map;
     fsm_input.global_direction_map = input.global_direction_map;
     fsm_input.chassis_theta_imu_world = input.chassis_theta_imu_world;
+    fsm_input.recovery_goal_map = recovery_goal_map_;
     fsm_input.stamp = input.stamp;
 
     // 2. FSM 状态决策
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
     const FsmState state = fsm_output.state;
-
-    // 3. 日志：状态变化
-    if (state != last_fsm_state_) {
-        static constexpr const char* names[] = {"IDLE", "FOLLOW", "SPIN", "STOPPING", "HAZARD_RECOVERY", "STUCK_REVERSE"};
-        RCLCPP_INFO(logger_, "Control FSM -> %s", names[static_cast<int>(state)]);
-        last_fsm_state_ = state;
-    }
+    on_state_transition(input, prev_state, state);
+    last_fsm_state_ = state;
 
     // 4. 根据 FSM 状态，执行对应的控制逻辑
     ControlOutput output;
@@ -53,8 +147,8 @@ ControlOutput NavigationController::update(const ControlInput& input) {
         case FsmState::FOLLOW: output = execute_follow(input); break;
         case FsmState::SPIN: output = execute_spin(input); break;
         case FsmState::STOPPING: output = execute_stop(input); break;
-        case FsmState::HAZARD_RECOVERY: output = execute_recovery(input, fsm_output); break;
-        case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(input, fsm_output); break;
+        case FsmState::HAZARD_RECOVERY: output = execute_recovery(input); break;
+        case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(input); break;
     }
 
     output.fsm_state = state;
@@ -73,13 +167,13 @@ ControlOutput NavigationController::update(const ControlInput& input) {
     return output;
 }
 
-FsmState NavigationController::fsm_state() const {
+FsmState MainController::fsm_state() const {
     return control_fsm_->state();
 }
 
 // ═══════════════════ IDLE: 保持静止 ══════════════════════════
 
-ControlOutput NavigationController::execute_idle(const ControlInput& input) {
+ControlOutput MainController::execute_idle(const ControlInput& input) {
     ControlOutput out;
 
     if (!theta_keep_imu_world_) theta_keep_imu_world_ = input.chassis_theta_imu_world;
@@ -94,7 +188,7 @@ ControlOutput NavigationController::execute_idle(const ControlInput& input) {
 
 // ═══════════════════ FOLLOW: 跟随路径 ════════════════════════
 
-ControlOutput NavigationController::execute_follow(const ControlInput& input) {
+ControlOutput MainController::execute_follow(const ControlInput& input) {
     ControlOutput out;
 
     if (!input.global_path || !input.merged_cost_map || !input.global_direction_map) return out;
@@ -116,16 +210,16 @@ ControlOutput NavigationController::execute_follow(const ControlInput& input) {
         *input.merged_cost_map, *input.global_direction_map
     );
     if (!result) {
-        RCLCPP_ERROR(logger_, "MPCController(Follow) solve failed: %s", result.error().c_str());
+        RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
         return out;
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
     const double dt = mpc_controller_->params().dt;
     if (solve_ms > dt * 500.0) {
-        RCLCPP_WARN(logger_, "MPCController(Follow) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
+        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
     } else {
-        RCLCPP_DEBUG(logger_, "MPCController(Follow) solve time: %.2f ms", solve_ms);
+        RCLCPP_DEBUG(logger_, "MPCSolver(Follow) solve time: %.2f ms", solve_ms);
     }
 
     // 到达目标点 → 标记清除路径
@@ -153,7 +247,7 @@ ControlOutput NavigationController::execute_follow(const ControlInput& input) {
 
 // ═══════════════════ SPIN: 小陀螺 ════════════════════════════
 
-ControlOutput NavigationController::execute_spin(const ControlInput& input) {
+ControlOutput MainController::execute_spin(const ControlInput& input) {
     ControlOutput out;
     out.slow_spin = input.spin_slow;
     out.fast_spin = input.spin_fast;
@@ -163,7 +257,7 @@ ControlOutput NavigationController::execute_spin(const ControlInput& input) {
 
 // ═══════════════════ STOPPING: 平滑减速 ══════════════════════
 
-ControlOutput NavigationController::execute_stop(const ControlInput& input) {
+ControlOutput MainController::execute_stop(const ControlInput& input) {
     ControlOutput out;
 
     if (!input.merged_cost_map || !input.global_direction_map) return out;
@@ -175,16 +269,16 @@ ControlOutput NavigationController::execute_stop(const ControlInput& input) {
         *input.merged_cost_map, *input.global_direction_map
     );
     if (!result) {
-        RCLCPP_ERROR(logger_, "MPCController(Stop) solve failed: %s", result.error().c_str());
+        RCLCPP_ERROR(logger_, "MPCSolver(Stop) solve failed: %s", result.error().c_str());
         return out;
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
     const double dt = mpc_controller_->params().dt;
     if (solve_ms > dt * 500.0) {
-        RCLCPP_WARN(logger_, "MPCController(Stop) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
+        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
     } else {
-        RCLCPP_DEBUG(logger_, "MPCController(Stop) solve time: %.2f ms", solve_ms);
+        RCLCPP_DEBUG(logger_, "MPCSolver(Stop) solve time: %.2f ms", solve_ms);
     }
 
     const double theta_imu_world = wrap_pi(std::get<0>(*result).y() - *input.map_to_imu_world_yaw);
@@ -197,32 +291,90 @@ ControlOutput NavigationController::execute_stop(const ControlInput& input) {
     return out;
 }
 
+void MainController::on_state_transition(const ControlInput& input, const FsmState prev, const FsmState next) {
+    if (prev == next) return;
+
+    if (next == FsmState::HAZARD_RECOVERY) {
+        recovery_goal_map_ = std::nullopt;
+        recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
+    }
+    if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY) {
+        recovery_goal_map_ = std::nullopt;
+        recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
+    }
+
+    if (next == FsmState::STUCK_REVERSE) {
+        reverse_theta_keep_imu_world_ = input.chassis_theta_imu_world;
+    }
+    if (prev == FsmState::STUCK_REVERSE && next != FsmState::STUCK_REVERSE) {
+        reverse_theta_keep_imu_world_ = std::nullopt;
+    }
+}
+
+void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
+    const auto& p = fsm_params_.recovery;
+    if (!p.enable) {
+        recovery_goal_map_ = std::nullopt;
+        return;
+    }
+
+    if (!input.merged_cost_map || !input.global_direction_map) return;
+
+    const bool need_new = (!recovery_goal_map_) || (recovery_goal_set_time_.nanoseconds() == 0) || ((input.stamp - recovery_goal_set_time_).seconds() >= p.goal_timeout);
+
+    if (!need_new) return;
+
+    recovery_goal_map_ = RecoveryGoalPlanner::find_goal(
+        p, *input.merged_cost_map, *input.global_direction_map, input.chassis_pose_map
+    );
+    recovery_goal_set_time_ = input.stamp;
+
+    if (!recovery_goal_map_) {
+        RCLCPP_ERROR(logger_, "HAZARD_RECOVERY failed to find a recovery goal");
+        return;
+    }
+
+    const auto s = RecoveryGoalPlanner::sample_fields(*input.merged_cost_map, *input.global_direction_map, *recovery_goal_map_);
+    if (!s) {
+        RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (field sample invalid)", recovery_goal_map_->x(), recovery_goal_map_->y());
+        return;
+    }
+
+    if (RecoveryGoalPlanner::is_safe_goal(p, *s)) {
+        RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (SAFE cost=%.1f step=%.3f)", recovery_goal_map_->x(), recovery_goal_map_->y(), s->cost, s->step_norm);
+    } else {
+        RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (UNSAFE cost=%.1f step=%.3f)", recovery_goal_map_->x(), recovery_goal_map_->y(), s->cost, s->step_norm);
+    }
+}
+
 // ═══════════════════ HAZARD_RECOVERY: MPC 驱动恢复 ═══════════
 
-ControlOutput NavigationController::execute_recovery(const ControlInput& input, const FsmOutput& fsm_output) {
+ControlOutput MainController::execute_recovery(const ControlInput& input) {
     ControlOutput out;
 
-    if (!fsm_output.recovery_goal_map) return out;
     if (!input.merged_cost_map || !input.global_direction_map) return out;
     if (!input.map_to_imu_world_yaw) return out;
 
+    update_recovery_goal_if_needed(input);
+    if (!recovery_goal_map_) return out;
+
     auto start_time = std::chrono::high_resolution_clock::now();
     const auto result = mpc_controller_->recover_to_point(
-        *fsm_output.recovery_goal_map,
+        *recovery_goal_map_,
         input.chassis_pose_map, input.chassis_status,
         *input.merged_cost_map, *input.global_direction_map
     );
     if (!result) {
-        RCLCPP_ERROR(logger_, "MPCController(Recovery) solve failed: %s", result.error().c_str());
+        RCLCPP_ERROR(logger_, "MPCSolver(Recovery) solve failed: %s", result.error().c_str());
         return out;
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
     const double dt = mpc_controller_->params().dt;
     if (solve_ms > dt * 500.0) {
-        RCLCPP_WARN(logger_, "MPCController(Recovery) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
+        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
     } else {
-        RCLCPP_DEBUG(logger_, "MPCController(Recovery) solve time: %.2f ms", solve_ms);
+        RCLCPP_DEBUG(logger_, "MPCSolver(Recovery) solve time: %.2f ms", solve_ms);
     }
 
     const double theta_imu_world = wrap_pi(std::get<0>(*result).y() - *input.map_to_imu_world_yaw);
@@ -237,14 +389,14 @@ ControlOutput NavigationController::execute_recovery(const ControlInput& input, 
 
 // ═══════════════════ STUCK_REVERSE: 倒车脱困 ═════════════════
 
-ControlOutput NavigationController::execute_stuck_reverse(const ControlInput& input, const FsmOutput& fsm_output) {
-    (void)input;
+ControlOutput MainController::execute_stuck_reverse(const ControlInput& input) {
     ControlOutput out;
 
-    if (!fsm_output.reverse_cmd) return out;
+    if (!reverse_theta_keep_imu_world_) reverse_theta_keep_imu_world_ = input.chassis_theta_imu_world;
+    if (!reverse_theta_keep_imu_world_) return out;
 
-    out.velocity = fsm_output.reverse_cmd->velocity;
-    out.theta_imu_world = fsm_output.reverse_cmd->theta_imu_world;
+    out.velocity = -fsm_params_.stuck.reverse_speed;
+    out.theta_imu_world = *reverse_theta_keep_imu_world_;
     out.omega = 0.0;
     out.valid = true;
     return out;
@@ -252,7 +404,7 @@ ControlOutput NavigationController::execute_stuck_reverse(const ControlInput& in
 
 // ═══════════════════ 台阶检测 ════════════════════════════════
 
-std::tuple<bool, bool> NavigationController::detect_steps_on_spline(const ControlInput& input, const double u0) const {
+std::tuple<bool, bool> MainController::detect_steps_on_spline(const ControlInput& input, const double u0) const {
     constexpr double dir_norm_threshold = 0.5;
     constexpr double dot_threshold = 0.5;
 

@@ -165,9 +165,9 @@ struct MPCParams {
     MPCRecoveryWeights recovery_weights;
 };
 
-class MPCController {
+class MPCSolver {
 public:
-    explicit MPCController(const MPCParams& params);
+    explicit MPCSolver(const MPCParams& params);
 
     std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
         const SplineD& global_path,

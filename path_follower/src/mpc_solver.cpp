@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <uniform_bspline_ceres/uniform_bspline_ceres_generator.hpp>
-#include <path_follower/mpc_controller.hpp>
+#include <path_follower/mpc_solver.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
@@ -785,14 +785,14 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
 }
 
 // ============================================================================
-//                            MPCController 实现
+//                            MPCSolver 实现
 // ============================================================================
 
-MPCController::MPCController(const MPCParams& params): params_(params) {
+MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
     last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
 }
 
-std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::follow_path(
+std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::follow_path(
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
@@ -900,7 +900,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 
-std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::stop(
+std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::stop(
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
     const CostMap& merged_cost_map,
@@ -989,7 +989,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 
-std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCController::recover_to_point(
+std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::recover_to_point(
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,

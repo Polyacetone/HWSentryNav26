@@ -1,4 +1,4 @@
-#include <path_follower/control_fsm.hpp>
+#include <path_follower/state_machine.hpp>
 #include <rclcpp/logging.hpp>
 
 #include <boost/statechart/custom_reaction.hpp>
@@ -59,17 +59,12 @@ struct StuckMonitor {
     }
 };
 
-// ═════════════════════ 危险恢复目标搜索逻辑 ═════════════════════
+// ═════════════════════ 危险恢复逻辑（FSM 仅负责进入/退出） ═════════════════════
 
 struct HazardLogic {
-    std::optional<Eigen::Vector2d> goal_map;
-    rclcpp::Time goal_set_time{0, 0, RCL_ROS_TIME};
     std::optional<rclcpp::Time> safe_since;
 
-    void reset() {
-        goal_map = std::nullopt;
-        safe_since = std::nullopt;
-    }
+    void reset() { safe_since = std::nullopt; }
 
     static bool is_pose_hazard(
         const RecoveryParams& p,
@@ -84,159 +79,27 @@ struct HazardLogic {
         return (cost >= p.hazard_cost_threshold) || (step_norm >= p.hazard_step_norm_threshold);
     }
 
-    struct FieldSample {
-        double cost = 0.0;
-        double step_norm = 0.0;
-    };
-
-    static std::optional<FieldSample> sample_fields(
-        const CostMap& cost_map, const DirectionMap& dir_map, const Eigen::Vector2d& pos
-    ) {
-        const Eigen::Vector2d gc = cost_map.map_coord_to_grid(pos);
-        if (!cost_map.is_valid_coord(gc)) return std::nullopt;
-        const Eigen::Vector2d gd = dir_map.map_coord_to_grid(pos);
-        if (!dir_map.is_valid_coord(gd)) return std::nullopt;
-
-        FieldSample s;
-        s.cost = cost_map.interpolate(gc);
-        s.step_norm = dir_map.interpolate(gd).norm();
-        return s;
-    }
-
-    static bool is_safe_goal(const RecoveryParams& p, const FieldSample& s) {
-        return (s.cost < p.safe_cost_threshold) && (s.step_norm < p.safe_step_norm_threshold);
-    }
-
-    static double potential_cost(const FieldSample& s) {
-        const double cost01 = std::clamp(s.cost / 255.0, 0.0, 1.0);
-        return cost01 + s.step_norm;
-    }
-
-    static std::optional<Eigen::Vector2d> potential_gradient(
-        const CostMap& cost_map,
-        const DirectionMap& dir_map,
-        const Eigen::Vector2d& pos,
-        double eps
-    ) {
-        if (!(eps > 1e-6)) return std::nullopt;
-
-        const Eigen::Vector2d dx(eps, 0.0);
-        const Eigen::Vector2d dy(0.0, eps);
-
-        const auto fx1 = sample_fields(cost_map, dir_map, pos + dx);
-        const auto fx0 = sample_fields(cost_map, dir_map, pos - dx);
-        const auto fy1 = sample_fields(cost_map, dir_map, pos + dy);
-        const auto fy0 = sample_fields(cost_map, dir_map, pos - dy);
-        if (!fx1 || !fx0 || !fy1 || !fy0) return std::nullopt;
-
-        const double dfdx = (potential_cost(*fx1) - potential_cost(*fx0)) / (2.0 * eps);
-        const double dfdy = (potential_cost(*fy1) - potential_cost(*fy0)) / (2.0 * eps);
-        return Eigen::Vector2d(dfdx, dfdy);
-    }
-
-    struct PathScore {
-        double score = std::numeric_limits<double>::infinity();
-        bool end_safe = false;
-        FieldSample end_sample;
-    };
-
-    static std::optional<PathScore> score_candidate_by_path_integral(
-        const RecoveryParams& p,
-        const CostMap& cost_map,
-        const DirectionMap& dir_map,
-        const Eigen::Vector2d& origin,
-        const Eigen::Vector2d& goal
-    ) {
-        double acc = 0.0;
-        std::optional<FieldSample> end_s;
-        for (int i = 0; i <= p.circ_radius_samples; i++) {
-            const double t = static_cast<double>(i) / static_cast<double>(p.circ_radius_samples);
-            const Eigen::Vector2d pos = origin + (goal - origin) * t;
-            const auto s = sample_fields(cost_map, dir_map, pos);
-            if (!s) return std::nullopt;
-            acc += potential_cost(*s);
-            if (i == p.circ_radius_samples) end_s = s;
-        }
-
-        PathScore out;
-        out.score = acc;
-        out.end_sample = *end_s;
-        out.end_safe = is_safe_goal(p, *end_s);
-        return out;
-    }
-
-    std::optional<Eigen::Vector2d> find_goal(
-        const RecoveryParams& p,
-        const CostMap& cost_map,
-        const DirectionMap& dir_map,
-        const Eigen::Vector3d& chassis_pose
-    ) const {
-        const Eigen::Vector2d origin = chassis_pose.head<2>();
-
-        // 固定半径环上取点，路径积分评分
-        std::optional<Eigen::Vector2d> best_pt;
-        std::optional<PathScore> best_sc;
-
-        for (int i = 0; i < p.circ_angle_samples; i++) {
-            const double a = 2.0 * std::numbers::pi * static_cast<double>(i) / static_cast<double>(p.circ_angle_samples);
-            const Eigen::Vector2d pt = origin + Eigen::Vector2d(std::cos(a), std::sin(a)) * p.circ_radius;
-            const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt);
-            if (!sc) continue;
-            if (!best_sc || sc->score < best_sc->score) {
-                best_sc = *sc;
-                best_pt = pt;
-            }
-        }
-
-        return best_pt;
-    }
-
-    /// 更新恢复目标 + 退出判定（不调用 MPC）
-    struct StepResult {
-        std::optional<Eigen::Vector2d> goal;
-        bool finished = false;
-    };
-
-    StepResult step(
+    bool should_exit(
         const RecoveryParams& p,
         const rclcpp::Time& now,
         const Eigen::Vector3d& chassis_pose_map,
         const CostMap& cost_map,
         const DirectionMap& dir_map,
+        const std::optional<Eigen::Vector2d>& recovery_goal_map,
         rclcpp::Logger& logger
     ) {
-        if (!p.enable) return {std::nullopt, true};
-
-        // 需要新目标？
-        const bool need_new = (!goal_map) || ((now - goal_set_time).seconds() >= p.goal_timeout);
-        if (need_new) {
-            goal_map = find_goal(p, cost_map, dir_map, chassis_pose_map);
-            goal_set_time = now;
-            if (goal_map) {
-                const auto s = sample_fields(cost_map, dir_map, *goal_map);
-                if (s) {
-                    if (is_safe_goal(p, *s)) {
-                        RCLCPP_WARN(logger, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (SAFE cost=%.1f step=%.3f)", goal_map->x(), goal_map->y(), s->cost, s->step_norm);
-                    } else {
-                        RCLCPP_WARN(logger, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (UNSAFE cost=%.1f step=%.3f)", goal_map->x(), goal_map->y(), s->cost, s->step_norm);
-                    }
-                } else {
-                    RCLCPP_WARN(logger, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (field sample invalid)", goal_map->x(), goal_map->y());
-                }
-            } else {
-                RCLCPP_ERROR(logger, "HAZARD_RECOVERY failed to find a safe goal");
-            }
+        if (!p.enable) return true;
+        if (!recovery_goal_map) {
+            safe_since = std::nullopt;
+            return false;
         }
 
-        if (!goal_map) {
-            return {std::nullopt, false};
-        }
+        const Eigen::Vector2d pos = chassis_pose_map.head<2>();
+        const double dist = (pos - *recovery_goal_map).norm();
 
-        // 退出判定：到达目标且位于安全区一段时间
-        const double dist = (chassis_pose_map.head<2>() - *goal_map).norm();
-        const Eigen::Vector2d gc = cost_map.map_coord_to_grid(chassis_pose_map.head<2>());
+        const Eigen::Vector2d gc = cost_map.map_coord_to_grid(pos);
         const double cost_now = cost_map.interpolate(gc);
-        const Eigen::Vector2d gd = dir_map.map_coord_to_grid(chassis_pose_map.head<2>());
+        const Eigen::Vector2d gd = dir_map.map_coord_to_grid(pos);
         const double step_now = dir_map.interpolate(gd).norm();
         const bool safe = (cost_now < p.safe_cost_threshold) && (step_now < p.safe_step_norm_threshold);
 
@@ -244,13 +107,13 @@ struct HazardLogic {
             if (!safe_since) safe_since = now;
             if ((now - *safe_since).seconds() >= p.safe_hold_time) {
                 RCLCPP_INFO(logger, "Exit HAZARD_RECOVERY (safe for %.2f s)", (now - *safe_since).seconds());
-                return {goal_map, true};
+                return true;
             }
         } else {
             safe_since = std::nullopt;
         }
 
-        return {goal_map, false};
+        return false;
     }
 };
 
@@ -468,20 +331,18 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
             return discard_event();
         }
 
-        // 只做目标搜索和退出判定，不调用 MPC
-        auto result = m.hazard_logic.step(
+        // FSM 只负责退出判定；恢复目标点由 MainController 维护
+        const bool finished = m.hazard_logic.should_exit(
             m.params.recovery,
             in.stamp,
             in.chassis_pose_map,
             *in.merged_cost_map,
             *in.global_direction_map,
+            in.recovery_goal_map,
             m.logger
         );
 
-        // 输出恢复目标点，供 NavigationController 调用 MPC
-        m.output.recovery_goal_map = result.goal;
-
-        if (result.finished) {
+        if (finished) {
             m.output.recovery_finished = true;
             if (m.hazard_resume_state == FsmState::SPIN) {
                 return transit<StSpin>();
@@ -521,21 +382,15 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
             return transit<StIdle>();
         }
 
-        // 输出倒车指令（简单运动学，不需要 MPC）
-        FsmOutput::ReverseCmd cmd;
-        cmd.velocity = -m.params.stuck.reverse_speed;
-        cmd.theta_imu_world = *in.chassis_theta_imu_world;
-        m.output.reverse_cmd = cmd;
-
         return discard_event();
     }
 };
 
-}  // anonymous namespace
+} // anonymous namespace
 
 // ═══════════════════════ Impl 桥接 ═══════════════════════════
 
-struct ControlFsm::Impl {
+struct StateMachine::Impl {
     Impl(const FsmParams& params, rclcpp::Logger logger) : machine(params, logger) {
         machine.initiate();
     }
@@ -545,24 +400,24 @@ struct ControlFsm::Impl {
 
 // ═══════════════════════ 公开接口 ════════════════════════════
 
-ControlFsm::ControlFsm(const FsmParams& params, rclcpp::Logger logger) : impl_(std::make_unique<Impl>(params, logger)) {}
+StateMachine::StateMachine(const FsmParams& params, rclcpp::Logger logger) : impl_(std::make_unique<Impl>(params, logger)) {}
 
-ControlFsm::~ControlFsm() = default;
-ControlFsm::ControlFsm(ControlFsm&&) noexcept = default;
-ControlFsm& ControlFsm::operator=(ControlFsm&&) noexcept = default;
+StateMachine::~StateMachine() = default;
+StateMachine::StateMachine(StateMachine&&) noexcept = default;
+StateMachine& StateMachine::operator=(StateMachine&&) noexcept = default;
 
-FsmOutput ControlFsm::update(const FsmInput& input) {
+FsmOutput StateMachine::update(const FsmInput& input) {
     impl_->machine.clear_output();
     impl_->machine.process_event(EvUpdate(input));
     impl_->machine.output.state = impl_->machine.active_state;
     return impl_->machine.output;
 }
 
-FsmState ControlFsm::state() const {
+FsmState StateMachine::state() const {
     return impl_->machine.active_state;
 }
 
-void ControlFsm::on_chassis_cmd_published(double velocity, double omega, const rclcpp::Time& stamp) {
+void StateMachine::on_chassis_cmd_published(double velocity, double omega, const rclcpp::Time& stamp) {
     impl_->machine.last_cmd_velocity = velocity;
     impl_->machine.last_cmd_omega = omega;
     impl_->machine.last_cmd_time = stamp;

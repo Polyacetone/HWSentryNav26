@@ -8,8 +8,8 @@
 #include <rclcpp/logger.hpp>
 #include <rclcpp/time.hpp>
 
-#include <path_follower/control_fsm.hpp>
-#include <path_follower/mpc_controller.hpp>
+#include <path_follower/state_machine.hpp>
+#include <path_follower/mpc_solver.hpp>
 #include <path_follower/nav_map.hpp>
 #include <path_follower/utils.hpp>
 
@@ -17,7 +17,7 @@ namespace path_follower {
 
 // ═══════════════════════ 控制器输入 ═══════════════════════════
 
-/// 每个控制周期由 Node 填写、传入 NavigationController
+/// 每个控制周期由 Node 填写、传入 MainController
 struct ControlInput {
     // ─── 路径 ───
     std::optional<SplineD> global_path;
@@ -46,7 +46,7 @@ struct ControlInput {
 
 // ═══════════════════════ 控制器输出 ═══════════════════════════
 
-/// NavigationController 每个周期的输出
+/// MainController 每个周期的输出
 struct ControlOutput {
     // ─── 底盘指令 ───
     double velocity = 0.0;
@@ -80,16 +80,16 @@ struct NavigationParams {
     double step_check_sample_step;
 };
 
-// ═══════════════════ NavigationController ═════════════════════
+// ═══════════════════ MainController ═════════════════════
 
 /// 控制逻辑层：接收传感器/状态数据，调用 FSM 决策 + MPC 计算，输出底盘指令。
 /// 不依赖 ROS 通信，便于测试和维护。
-class NavigationController {
+class MainController {
 public:
-    NavigationController(
+    MainController(
         const NavigationParams& nav_params,
         const FsmParams& fsm_params,
-        std::shared_ptr<MPCController> mpc_controller,
+        std::shared_ptr<MPCSolver> mpc_controller,
         rclcpp::Logger logger
     );
 
@@ -108,8 +108,11 @@ private:
     ControlOutput execute_follow(const ControlInput& input);
     ControlOutput execute_spin(const ControlInput& input);
     ControlOutput execute_stop(const ControlInput& input);
-    ControlOutput execute_recovery(const ControlInput& input, const FsmOutput& fsm_output);
-    ControlOutput execute_stuck_reverse(const ControlInput& input, const FsmOutput& fsm_output);
+    ControlOutput execute_recovery(const ControlInput& input);
+    ControlOutput execute_stuck_reverse(const ControlInput& input);
+
+    void on_state_transition(const ControlInput& input, FsmState prev, FsmState next);
+    void update_recovery_goal_if_needed(const ControlInput& input);
 
     // ─── 工具函数 ───
     std::tuple<bool, bool> detect_steps_on_spline(
@@ -120,17 +123,21 @@ private:
     }
 
     // ─── 核心组件 ───
-    std::unique_ptr<ControlFsm> control_fsm_;
-    std::shared_ptr<MPCController> mpc_controller_;
+    std::unique_ptr<StateMachine> control_fsm_;
+    std::shared_ptr<MPCSolver> mpc_controller_;
     rclcpp::Logger logger_;
 
     // ─── 参数 ───
     NavigationParams nav_params_;
+    FsmParams fsm_params_;
 
     // ─── 内部状态 ───
     double last_reference_u_ = 0.0;
     std::optional<double> theta_keep_imu_world_;
+    std::optional<double> reverse_theta_keep_imu_world_;
+    std::optional<Eigen::Vector2d> recovery_goal_map_;
+    rclcpp::Time recovery_goal_set_time_{0, 0, RCL_ROS_TIME};
     FsmState last_fsm_state_ = FsmState::IDLE;
 };
 
-}  // namespace path_follower
+}

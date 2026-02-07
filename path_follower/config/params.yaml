@@ -20,7 +20,7 @@
       window_front: 1.0 # 当前在全局路径上的前方窗口 (m)
       sample_step: 0.05 # 沿样条弧长采样间隔 (m)
 
-    control_fsm: # 控制状态机参数
+    state_machine: # 控制状态机参数
       follow_to_spin_vel_max: 0.2 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
       spin_to_follow_omega_max: 1.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
       to_idle_vel_max: 0.2 # 切到空闲前，线速度需小于该阈值 (m/s)

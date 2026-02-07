@@ -74,7 +74,7 @@ enum class FsmState {
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
 
-// 每个控制周期由 NavigationController 填写、传入 FSM
+// 每个控制周期由 MainController 填写、传入 FSM
 struct FsmInput {
     // 外部请求
     bool has_path = false;
@@ -90,6 +90,9 @@ struct FsmInput {
     const CostMap* merged_cost_map = nullptr;
     const DirectionMap* global_direction_map = nullptr;
 
+    // 恢复目标点（由 MainController 维护/选择，FSM 仅用于退出判定）
+    std::optional<Eigen::Vector2d> recovery_goal_map;
+
     // 坐标变换（STUCK_REVERSE 需要）
     std::optional<double> chassis_theta_imu_world;
 
@@ -101,16 +104,6 @@ struct FsmInput {
 struct FsmOutput {
     FsmState state = FsmState::IDLE;
 
-    // ─── HAZARD_RECOVERY: 恢复目标点（由 NavigationController 执行 MPC）───
-    std::optional<Eigen::Vector2d> recovery_goal_map;
-
-    // ─── STUCK_REVERSE: 倒车指令（简单运动学，直接输出）───
-    struct ReverseCmd {
-        double velocity = 0.0;
-        double theta_imu_world = 0.0;
-    };
-    std::optional<ReverseCmd> reverse_cmd;
-
     // STUCK_REVERSE 完成后要求清除全局路径
     bool clear_global_path = false;
 
@@ -120,18 +113,16 @@ struct FsmOutput {
 
 // ═══════════════════════ 统一控制状态机 ═════════════════════
 
-// 纯状态决策层：根据输入判断状态转换，输出状态和恢复目标。
-// 不执行任何 MPC 计算。
-class ControlFsm {
+class StateMachine {
 public:
-    explicit ControlFsm(const FsmParams& params, rclcpp::Logger logger);
-    ~ControlFsm();
+    explicit StateMachine(const FsmParams& params, rclcpp::Logger logger);
+    ~StateMachine();
 
-    ControlFsm(ControlFsm&&) noexcept;
-    ControlFsm& operator=(ControlFsm&&) noexcept;
+    StateMachine(StateMachine&&) noexcept;
+    StateMachine& operator=(StateMachine&&) noexcept;
 
-    ControlFsm(const ControlFsm&) = delete;
-    ControlFsm& operator=(const ControlFsm&) = delete;
+    StateMachine(const StateMachine&) = delete;
+    StateMachine& operator=(const StateMachine&) = delete;
 
     // 每个控制周期调用一次，返回状态决策结果
     FsmOutput update(const FsmInput& input);
