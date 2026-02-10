@@ -130,14 +130,13 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.chassis_pose_map = input.chassis_pose_map;
     fsm_input.merged_cost_map = input.merged_cost_map;
     fsm_input.global_direction_map = input.global_direction_map;
-    fsm_input.chassis_theta_imu_world = input.chassis_theta_imu_world;
     fsm_input.recovery_goal_map = recovery_goal_map_;
     fsm_input.stamp = input.stamp;
 
     // 2. FSM 状态决策
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
     const FsmState state = fsm_output.state;
-    on_state_transition(input, prev_state, state);
+    on_state_transition(prev_state, state);
     last_fsm_state_ = state;
 
     // 4. 根据 FSM 状态，执行对应的控制逻辑
@@ -154,12 +153,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     output.fsm_state = state;
     output.path_cleared |= fsm_output.clear_global_path;
 
-    // 5. 非 IDLE 状态清除保持角度
-    if (state != FsmState::IDLE) {
-        theta_keep_imu_world_ = std::nullopt;
-    }
-
-    // 6. 回调卡住检测
+    // 5. 回调卡住检测
     if (output.valid) {
         control_fsm_->on_chassis_cmd_published(output.velocity, output.omega, input.stamp);
     }
@@ -174,13 +168,9 @@ FsmState MainController::fsm_state() const {
 // ═══════════════════ IDLE: 保持静止 ══════════════════════════
 
 ControlOutput MainController::execute_idle(const ControlInput& input) {
+    (void)input;
     ControlOutput out;
-
-    if (!theta_keep_imu_world_) theta_keep_imu_world_ = input.chassis_theta_imu_world;
-    if (!theta_keep_imu_world_) return out;
-
     out.velocity = 0.0;
-    out.theta_imu_world = *theta_keep_imu_world_;
     out.omega = 0.0;
     out.valid = true;
     return out;
@@ -190,9 +180,7 @@ ControlOutput MainController::execute_idle(const ControlInput& input) {
 
 ControlOutput MainController::execute_follow(const ControlInput& input) {
     ControlOutput out;
-
     if (!input.global_path || !input.merged_cost_map || !input.global_direction_map) return out;
-    if (!input.map_to_imu_world_yaw) return out;
 
     // 投影当前位置到样条
     const double u0 = project_to_spline_u(
@@ -229,15 +217,11 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         last_reference_u_ = 0.0;
     }
 
-    // 坐标变换: map theta → imu_world theta
-    const double theta_imu_world = wrap_pi(std::get<0>(*result).y() - *input.map_to_imu_world_yaw);
-
     // 台阶检测
     const auto [step_up, step_down] = detect_steps_on_spline(input, u0);
 
     out.velocity = std::get<0>(*result).x();
-    out.theta_imu_world = theta_imu_world;
-    out.omega = std::get<0>(*result).z();
+    out.omega = std::get<0>(*result).y();
     out.step_up_ahead = step_up;
     out.step_down_ahead = step_down;
     out.predicted_path_map = std::get<1>(*result);
@@ -259,9 +243,7 @@ ControlOutput MainController::execute_spin(const ControlInput& input) {
 
 ControlOutput MainController::execute_stop(const ControlInput& input) {
     ControlOutput out;
-
     if (!input.merged_cost_map || !input.global_direction_map) return out;
-    if (!input.map_to_imu_world_yaw) return out;
 
     auto start_time = std::chrono::high_resolution_clock::now();
     const auto result = mpc_controller_->stop(
@@ -281,17 +263,14 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
         RCLCPP_DEBUG(logger_, "MPCSolver(Stop) solve time: %.2f ms", solve_ms);
     }
 
-    const double theta_imu_world = wrap_pi(std::get<0>(*result).y() - *input.map_to_imu_world_yaw);
-
     out.velocity = std::get<0>(*result).x();
-    out.theta_imu_world = theta_imu_world;
-    out.omega = std::get<0>(*result).z();
+    out.omega = std::get<0>(*result).y();
     out.predicted_path_map = std::get<1>(*result);
     out.valid = true;
     return out;
 }
 
-void MainController::on_state_transition(const ControlInput& input, const FsmState prev, const FsmState next) {
+void MainController::on_state_transition(const FsmState prev, const FsmState next) {
     if (prev == next) return;
 
     if (next == FsmState::HAZARD_RECOVERY) {
@@ -301,13 +280,6 @@ void MainController::on_state_transition(const ControlInput& input, const FsmSta
     if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY) {
         recovery_goal_map_ = std::nullopt;
         recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
-    }
-
-    if (next == FsmState::STUCK_REVERSE) {
-        reverse_theta_keep_imu_world_ = input.chassis_theta_imu_world;
-    }
-    if (prev == FsmState::STUCK_REVERSE && next != FsmState::STUCK_REVERSE) {
-        reverse_theta_keep_imu_world_ = std::nullopt;
     }
 }
 
@@ -351,9 +323,7 @@ void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
 
 ControlOutput MainController::execute_recovery(const ControlInput& input) {
     ControlOutput out;
-
     if (!input.merged_cost_map || !input.global_direction_map) return out;
-    if (!input.map_to_imu_world_yaw) return out;
 
     update_recovery_goal_if_needed(input);
     if (!recovery_goal_map_) return out;
@@ -377,11 +347,8 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
         RCLCPP_DEBUG(logger_, "MPCSolver(Recovery) solve time: %.2f ms", solve_ms);
     }
 
-    const double theta_imu_world = wrap_pi(std::get<0>(*result).y() - *input.map_to_imu_world_yaw);
-
     out.velocity = std::get<0>(*result).x();
-    out.theta_imu_world = theta_imu_world;
-    out.omega = std::get<0>(*result).z();
+    out.omega = std::get<0>(*result).y();
     out.predicted_path_map = std::get<1>(*result);
     out.valid = true;
     return out;
@@ -390,13 +357,9 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
 // ═══════════════════ STUCK_REVERSE: 倒车脱困 ═════════════════
 
 ControlOutput MainController::execute_stuck_reverse(const ControlInput& input) {
+    (void)input;
     ControlOutput out;
-
-    if (!reverse_theta_keep_imu_world_) reverse_theta_keep_imu_world_ = input.chassis_theta_imu_world;
-    if (!reverse_theta_keep_imu_world_) return out;
-
     out.velocity = -fsm_params_.stuck.reverse_speed;
-    out.theta_imu_world = *reverse_theta_keep_imu_world_;
     out.omega = 0.0;
     out.valid = true;
     return out;

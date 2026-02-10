@@ -36,10 +36,6 @@ struct ControlInput {
     const CostMap* merged_cost_map = nullptr;
     const DirectionMap* global_direction_map = nullptr;
 
-    // ─── 坐标变换 ───
-    std::optional<double> map_to_imu_world_yaw;
-    std::optional<double> chassis_theta_imu_world;
-
     // ─── 时间 ───
     rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
 };
@@ -50,7 +46,6 @@ struct ControlInput {
 struct ControlOutput {
     // ─── 底盘指令 ───
     double velocity = 0.0;
-    double theta_imu_world = 0.0;
     double omega = 0.0;
     bool step_up_ahead = false;
     bool step_down_ahead = false;
@@ -111,12 +106,11 @@ private:
     ControlOutput execute_recovery(const ControlInput& input);
     ControlOutput execute_stuck_reverse(const ControlInput& input);
 
-    void on_state_transition(const ControlInput& input, FsmState prev, FsmState next);
+    void on_state_transition(FsmState prev, FsmState next);
     void update_recovery_goal_if_needed(const ControlInput& input);
 
     // ─── 工具函数 ───
-    std::tuple<bool, bool> detect_steps_on_spline(
-        const ControlInput& input, double u0) const;
+    std::tuple<bool, bool> detect_steps_on_spline(const ControlInput& input, double u0) const;
 
     static double wrap_pi(double a) {
         return std::atan2(std::sin(a), std::cos(a));
@@ -133,8 +127,6 @@ private:
 
     // ─── 内部状态 ───
     double last_reference_u_ = 0.0;
-    std::optional<double> theta_keep_imu_world_;
-    std::optional<double> reverse_theta_keep_imu_world_;
     std::optional<Eigen::Vector2d> recovery_goal_map_;
     rclcpp::Time recovery_goal_set_time_{0, 0, RCL_ROS_TIME};
     FsmState last_fsm_state_ = FsmState::IDLE;

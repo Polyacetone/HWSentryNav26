@@ -808,7 +808,7 @@ MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
     last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
 }
 
-std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::follow_path(
+std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::follow_path(
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
@@ -903,11 +903,6 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
     last_cmd_ = cmd_v_omega;
 
-    const double theta_cmd_map = std::atan2(
-        std::sin(chassis_pose_map.z() + controls[0][1] * params_.dt),
-        std::cos(chassis_pose_map.z() + controls[0][1] * params_.dt)
-    );
-
     // 保存warm start
     last_controls_.resize(static_cast<size_t>(params_.horizon));
     for (int i = 0; i < params_.horizon; i++) {
@@ -921,10 +916,10 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
         params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls
     );
-    return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
+    return std::tuple{cmd_v_omega, predicted_path_map};
 }
 
-std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::stop(
+std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::stop(
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
     const CostMap& merged_cost_map,
@@ -1000,11 +995,6 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
     last_cmd_ = cmd_v_omega;
 
-    const double theta_cmd_map = std::atan2(
-        std::sin(chassis_pose_map.z() + controls[0][1] * params_.dt),
-        std::cos(chassis_pose_map.z() + controls[0][1] * params_.dt)
-    );
-
     // 保存warm start
     last_controls_.resize(static_cast<size_t>(params_.horizon));
     for (int i = 0; i < params_.horizon; i++) {
@@ -1018,10 +1008,10 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
         params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls
     );
-    return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
+    return std::tuple{cmd_v_omega, predicted_path_map};
 }
 
-std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::recover_to_point(
+std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::recover_to_point(
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
@@ -1099,11 +1089,6 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
     last_cmd_ = cmd_v_omega;
 
-    const double theta_cmd_map = std::atan2(
-        std::sin(chassis_pose_map.z() + controls[0][1] * params_.dt),
-        std::cos(chassis_pose_map.z() + controls[0][1] * params_.dt)
-    );
-
     // 保存warm start
     last_controls_.resize(static_cast<size_t>(params_.horizon));
     for (int i = 0; i < params_.horizon; i++) {
@@ -1117,7 +1102,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
         params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls
     );
-    return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
+    return std::tuple{cmd_v_omega, predicted_path_map};
 }
 
 }

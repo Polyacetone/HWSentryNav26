@@ -160,7 +160,7 @@ class MPCSolver {
 public:
     explicit MPCSolver(const MPCParams& params);
 
-    std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
+    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
@@ -168,14 +168,14 @@ public:
         const DirectionMap& global_direction_map
     );
 
-    std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> stop(
+    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> stop(
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );
 
-    std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::string> recover_to_point(
+    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> recover_to_point(
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,

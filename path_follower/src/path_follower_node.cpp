@@ -372,8 +372,6 @@ void PathFollowerNode::control_timer_callback() {
     input.spin_fast = (spin_state_ == SpinState::SPIN_FAST);
     input.merged_cost_map = merged_cost_map_.get();
     input.global_direction_map = global_direction_map_.get();
-    input.map_to_imu_world_yaw = get_map_to_imu_world_yaw();
-    input.chassis_theta_imu_world = get_chassis_theta_imu_world();
     input.stamp = now();
 
     // 调用控制逻辑层
@@ -399,21 +397,12 @@ void PathFollowerNode::control_timer_callback() {
 void PathFollowerNode::publish_chassis_cmd(const ControlOutput& output) {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = static_cast<float>(output.velocity);
-    msg.theta = static_cast<float>(output.theta_imu_world);
     msg.omega = static_cast<float>(output.omega);
     msg.step_up_ahead = output.step_up_ahead;
     msg.step_down_ahead = output.step_down_ahead;
     msg.slow_spin = output.slow_spin;
     msg.fast_spin = output.fast_spin;
     chassis_cmd_pub_->publish(msg);
-}
-
-std::optional<double> PathFollowerNode::get_chassis_theta_imu_world() const {
-    Eigen::Vector3d chassis_pose_map;
-    if (!get_chassis_pose(chassis_pose_map)) return std::nullopt;
-    const auto yaw = get_map_to_imu_world_yaw();
-    if (!yaw) return std::nullopt;
-    return std::atan2(std::sin(chassis_pose_map.z() - *yaw), std::cos(chassis_pose_map.z() - *yaw));
 }
 
 bool PathFollowerNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
@@ -433,26 +422,6 @@ bool PathFollowerNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
     }
     chassis_pose.z() = atan2(x_axis.y(), x_axis.x());
     return true;
-}
-
-std::optional<double> PathFollowerNode::get_map_to_imu_world_yaw() const {
-    geometry_msgs::msg::TransformStamped tf;
-    try {
-        tf = tf_buffer_->lookupTransform("imu_world", "map", tf2::TimePointZero);
-    } catch (const tf2::TransformException& ex) {
-        RCLCPP_ERROR(get_logger(), "Could not transform map to imu_world: %s", ex.what());
-        return std::nullopt;
-    }
-    const Eigen::Quaterniond q = utils::convert_to<Eigen::Quaterniond>(tf.transform.rotation);
-    const Eigen::Vector2d x_axis = (q * Eigen::Vector3d::UnitX()).head<2>();
-    if (x_axis.norm() < 1e-6) {
-        RCLCPP_ERROR(get_logger(), "Invalid map to imu_world orientation");
-        return std::nullopt;
-    }
-    if (x_axis.norm() < 0.8) {
-        RCLCPP_WARN(get_logger(), "map to imu_world x-axis norm too small: %.3f", x_axis.norm());
-    }
-    return std::atan2(x_axis.y(), x_axis.x());
 }
 
 nav_msgs::msg::Path PathFollowerNode::path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const {

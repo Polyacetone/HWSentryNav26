@@ -6,7 +6,6 @@
 - 场景由可独立组合的 v/w profiles 构成（支持 v 匀加速 + w 正弦等组合）
 - 支持预置 scenario（兼容之前一键跑常用组合）
 - 发布侧做 rate-limit + 速度/角速度/|v*w| 钳制（带 margin），尽量避免触发仿真内部限幅
-- 启动时查询 TF，使用 imu_world<-chassis_link 的姿态计算 theta0（查不到直接报错退出）
 - 输出文件不覆盖：统一保存到 identify_data/ 下，按时间戳+场景名命名
 
 运行示例：
@@ -425,48 +424,6 @@ def quat_xy_xaxis_yaw(x: float, y: float, z: float, w: float) -> float:
     return wrap_to_pi(math.atan2(r10, r00))
 
 
-def lookup_initial_theta_from_tf(node, world_frame: str, chassis_frame: str, timeout_sec: float) -> float:
-    """Query TF and compute initial theta0.
-
-    theta0 is chassis_link x-axis projection angle on imu_world xy plane.
-    Must succeed; otherwise raises RuntimeError.
-    """
-
-    try:
-        import tf2_ros
-    except Exception as e:
-        raise RuntimeError("无法导入 tf2_ros；请确认已安装并 source ROS2 环境") from e
-
-    buffer = tf2_ros.Buffer()
-    _listener = tf2_ros.TransformListener(buffer, node)
-
-    t_start = time.time()
-    last_err: Optional[BaseException] = None
-    while True:
-        try:
-            trans = buffer.lookup_transform(world_frame, chassis_frame, rclpy.time.Time())
-            q = trans.transform.rotation
-            theta0 = quat_xy_xaxis_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
-            node.get_logger().info(
-                f"tf theta0: {world_frame}<-{chassis_frame}: yaw={theta0:.6f} rad ({theta0 * 180.0 / math.pi:.2f} deg)"
-            )
-            return float(theta0)
-        except Exception as e:
-            last_err = e
-            if time.time() - t_start >= float(timeout_sec):
-                break
-            try:
-                import rclpy
-
-                rclpy.spin_once(node, timeout_sec=0.05)
-            except Exception:
-                time.sleep(0.05)
-
-    raise RuntimeError(
-        f"TF 查询失败（{timeout_sec:.2f}s 内未获得 {world_frame} <- {chassis_frame}）: {last_err}"
-    )
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record identification data for wheel_leg_lqr_follow_sim")
     parser.add_argument("--scenario", type=str, default="", help="预置场景名称；与 v/w profile 互斥（优先使用 scenario）")
@@ -569,7 +526,6 @@ def main() -> int:
     cmd_t: List[float] = []
     cmd_v: List[float] = []
     cmd_w: List[float] = []
-    cmd_theta: List[float] = []
 
     st_t: List[float] = []
     st_v: List[float] = []
@@ -584,21 +540,13 @@ def main() -> int:
             self._t0_wall = time.time()
             self._t_prev_cmd = self._t0_wall
 
-            self._theta0 = lookup_initial_theta_from_tf(
-                self,
-                world_frame=str(args.tf_world),
-                chassis_frame=str(args.tf_chassis),
-                timeout_sec=float(args.tf_timeout),
-            )
-            self._theta = float(self._theta0)
-
             self._v_cur = 0.0
             self._w_cur = 0.0
 
             self._recording_started = False
             self._timer = self.create_timer(cmd_dt, self._on_timer)
             self.get_logger().info(
-                f"record start: cmd_hz={cmd_hz:g}, warmup={warmup_sec:g}s, scenario={scenario.name}, total~{total_sec:.1f}s, theta0={self._theta0:.6f}"
+                f"record start: cmd_hz={cmd_hz:g}, warmup={warmup_sec:g}s, scenario={scenario.name}, total~{total_sec:.1f}s"
             )
 
         def _status_cb(self, msg: ChassisStatus) -> None:
@@ -609,11 +557,10 @@ def main() -> int:
             st_v.append(float(msg.velocity))
             st_w.append(float(msg.omega))
 
-        def _publish_cmd(self, v: float, w: float, theta: float) -> None:
+        def _publish_cmd(self, v: float, w: float) -> None:
             msg = ChassisCmd()
             msg.velocity = float(v)
             msg.omega = float(w)
-            msg.theta = float(theta)
             msg.slow_spin = False
             msg.fast_spin = False
             self.pub.publish(msg)
@@ -645,8 +592,6 @@ def main() -> int:
                 ),
             )
 
-            # trapezoidal integration for theta: use average of previous and current angular rates
-            self._theta = wrap_to_pi(self._theta + 0.5 * (float(self._w_cur) + float(w_tgt)) * dt)
             self._v_cur = float(v_tgt)
             self._w_cur = float(w_tgt)
 
@@ -658,12 +603,11 @@ def main() -> int:
                 cmd_t.append(float(t_rel))
                 cmd_v.append(float(self._v_cur))
                 cmd_w.append(float(self._w_cur))
-                cmd_theta.append(float(self._theta))
 
-            self._publish_cmd(self._v_cur, self._w_cur, self._theta)
+            self._publish_cmd(self._v_cur, self._w_cur)
 
             if elapsed >= total_sec:
-                self._publish_cmd(0.0, 0.0, self._theta)
+                self._publish_cmd(0.0, 0.0)
                 self.get_logger().info("record done: stop publishing")
                 raise SystemExit
 
@@ -718,7 +662,6 @@ def main() -> int:
         "tf_world": str(args.tf_world),
         "tf_chassis": str(args.tf_chassis),
         "tf_timeout": float(args.tf_timeout),
-        "theta0": float(getattr(node, "_theta0", 0.0)),
         "record_wall_time": time.time(),
     }
 
@@ -736,7 +679,6 @@ def main() -> int:
         cmd_t=np.asarray(cmd_t, dtype=float),
         cmd_v=np.asarray(cmd_v, dtype=float),
         cmd_w=np.asarray(cmd_w, dtype=float),
-        cmd_theta=np.asarray(cmd_theta, dtype=float),
     )
 
     plt = try_setup_matplotlib()

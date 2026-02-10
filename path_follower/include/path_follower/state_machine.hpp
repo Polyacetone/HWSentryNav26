@@ -93,9 +93,6 @@ struct FsmInput {
     // 恢复目标点（由 MainController 维护/选择，FSM 仅用于退出判定）
     std::optional<Eigen::Vector2d> recovery_goal_map;
 
-    // 坐标变换（STUCK_REVERSE 需要）
-    std::optional<double> chassis_theta_imu_world;
-
     // 时间戳
     rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
 };

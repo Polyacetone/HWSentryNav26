@@ -370,7 +370,7 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (!m.params.stuck.enable || !in.chassis_theta_imu_world) {
+        if (!m.params.stuck.enable) {
             m.output.clear_global_path = true;
             return transit<StIdle>();
         }

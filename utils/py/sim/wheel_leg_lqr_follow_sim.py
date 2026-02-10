@@ -510,6 +510,7 @@ class WheelLegLqrFollowSimNode(Node):
 
         self._v_applied = 0.0
         self._w_applied = 0.0
+        self._w_prev = 0.0
 
         # s reference
         self._s_ref = float(self.dyn.s)
@@ -565,26 +566,22 @@ class WheelLegLqrFollowSimNode(Node):
         self._spin_fast = fast_spin
 
         if slow_spin or fast_spin:
-            # ignore v/theta/omega; spin handled in _on_lqr
+            # ignore v/omega; spin handled in _on_lqr
             return
 
         v = float(msg.velocity)
-        theta = float(msg.theta)
         w = float(msg.omega)
 
         if not is_finite(v):
             v = 0.0
         if not is_finite(w):
             w = 0.0
-        if not is_finite(theta):
-            theta = self._theta_target
 
         # 目标限幅（速度/角速度 + 乘积）；加速度在 1000Hz 中做 rate-limit
         v, w = self._clamp_v_w_product(v, w)
 
         self._v_target = v
         self._w_target = w
-        self._theta_target = wrap_to_pi(theta)
 
     def _clamp_v_w_product(self, v: float, w: float) -> tuple[float, float]:
         v = float(np.clip(v, -self.cfg.MAX_VELOCITY, self.cfg.MAX_VELOCITY))
@@ -632,6 +629,9 @@ class WheelLegLqrFollowSimNode(Node):
             self._v_target = 0.0
             self._w_target = float(spin_w * last_sign)
 
+        # capture previous applied omega for trapezoidal integration
+        w_prev = float(self._w_applied)
+
         # apply 1000Hz accel limits
         self._v_applied = self._rate_limit(self._v_applied, self._v_target, self.cfg.MAX_ACCEL, self._dt_lqr)
         self._w_applied = self._rate_limit(self._w_applied, self._w_target, self.cfg.MAX_ANG_ACCEL, self._dt_lqr)
@@ -639,9 +639,11 @@ class WheelLegLqrFollowSimNode(Node):
         # enforce max speed / max omega / product after rate-limit
         self._v_applied, self._w_applied = self._clamp_v_w_product(self._v_applied, self._w_applied)
 
-        # update theta reference
-        if spin_mode:
-            self._theta_target = wrap_to_pi(self._theta_target + self._w_applied * self._dt_lqr)
+        # update theta reference by trapezoidal integration of applied omega
+        self._theta_target = wrap_to_pi(self._theta_target + 0.5 * (w_prev + self._w_applied) * self._dt_lqr)
+
+        # remember previous omega
+        self._w_prev = float(self._w_applied)
 
         # update s reference
         # Use current LQR response state s as the baseline to avoid s_ref runaway
