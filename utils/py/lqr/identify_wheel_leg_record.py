@@ -53,8 +53,8 @@ class Limits:
     max_v: float = 1.5
     max_w: float = 6.0
     max_acc: float = 2.5
-    max_ang_acc: float = 12.0
-    max_v_w_product: float = 3.2
+    max_ang_acc: float = 6.0
+    max_v_w_product: float = 3.0
 
 
 def clamp_v_w_product(v: float, w: float, limits: Limits) -> Tuple[float, float]:
@@ -230,7 +230,7 @@ def build_v_profiles(limits: Limits, margin: float) -> Dict[str, Profile1D]:
         name="v_stairs",
         segments=(
             seg_hold(duration=2.0, value=0.0),
-            seg_stairs(duration=6.0, steps=[v_peak*0.2, v_peak*0.4, v_peak*0.6, v_peak*0.8, v_peak]),
+            seg_stairs(duration=6.0, steps=[v_peak*0.25, v_peak*0.5, v_peak*0.75, v_peak]),
             seg_hold(duration=2.0, value=0.0),
         )
     )
@@ -321,11 +321,13 @@ def build_preset_scenarios(v_profiles: Dict[str, Profile1D], w_profiles: Dict[st
 
     scenarios["v_const"] = _mk("v_const", "v_const", "idle")
     scenarios["v_ramp"] = _mk("v_ramp", "v_ramp", "idle")
+    scenarios["v_sine"] = _mk("v_sine", "v_sine", "idle")
     scenarios["v_stairs"] = _mk("v_stairs", "v_stairs", "idle")
     scenarios["v_chirp"] = _mk("v_chirp", "v_chirp", "idle")
 
     scenarios["w_const"] = _mk("w_const", "idle", "w_const")
     scenarios["w_ramp"] = _mk("w_ramp", "idle", "w_ramp")
+    scenarios["w_sine"] = _mk("w_sine", "idle", "w_sine")
     scenarios["w_switch"] = _mk("w_switch", "idle", "w_switch")
     scenarios["w_chirp"] = _mk("w_chirp", "idle", "w_chirp")
 
@@ -643,7 +645,8 @@ def main() -> int:
                 ),
             )
 
-            self._theta = wrap_to_pi(self._theta + float(w_tgt) * dt)
+            # trapezoidal integration for theta: use average of previous and current angular rates
+            self._theta = wrap_to_pi(self._theta + 0.5 * (float(self._w_cur) + float(w_tgt)) * dt)
             self._v_cur = float(v_tgt)
             self._w_cur = float(w_tgt)
 

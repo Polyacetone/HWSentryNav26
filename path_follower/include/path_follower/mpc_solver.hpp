@@ -1,6 +1,7 @@
 #pragma once
 
 #include <expected>
+#include <array>
 #include <string>
 #include <cctype>
 #include <Eigen/Dense>
@@ -9,27 +10,19 @@
 
 namespace path_follower {
 
-enum class PredictionModel { NONE, LAG, LQR };
+struct MPCModel {
+    // 离散 MIMO 状态空间模型（用于 MPC 内部预测 v_act/omega_act）
+    // 状态：[ v(k), v(k-1), ..., v(k-n+1),  w(k),  v_cmd_z1=v_cmd(k-1),  w_cmd_z1=w_cmd(k-1) ]
+    // 输入： [ v_cmd(k), w_cmd(k) ]
+    // 输出： [ v_act=v(k), w_act=w(k) ]
+    static constexpr int MAX_V_ORDER = 8;
 
-struct LagModel {
-    // 线速度延迟模型
-    // v_dot = a
-    // a_dot = (1/tau_v) * (k_v * (v_cmd - v) - a)
-    double tau_v;
-    double k_v;
-
-    // 角速度一阶惯性延迟模型
-    // omega_dot = (1/tau_omega) * (omega_cmd - omega)
-    double tau_omega;
-};
-
-struct LQRModel {
-    // 离散化闭环矩阵（子步）: x_{k+1} = A_cl * x_k + B_ref * x_ref
-    // 其中 A_cl = exp((A - B*K) * dt_sub), B_ref = \int_0^{dt_sub} exp((A - B*K)\tau) d\tau * (B*K)
-    Eigen::Matrix<double, 10, 10> A_cl;   // 离散闭环状态矩阵（子步）
-    Eigen::Matrix<double, 10, 10> B_ref;  // 离散参考输入矩阵（子步）
-    int substeps;                         // 每个 MPC 步内的子步数
-    double dt_sub;                        // LQR 子步时长 (s)
+    int v_order;
+    std::array<double, MAX_V_ORDER> v_ar = {};  // a1..an, 仅使用 [0..v_order)
+    double v_w_coeff;       // v(k+1) 中 w(k) 的系数
+    double v_vcmd_z1_coeff; // v(k+1) 中 v_cmd(k-1) 的系数
+    double w_alpha;         // w(k+1) = alpha*w(k) + beta*w_cmd(k-1)
+    double w_beta;          // w(k+1) = alpha*w(k) + beta*w_cmd(k-1)
 };
 
 struct MPCFollowLimits {
@@ -150,9 +143,7 @@ struct MPCParams {
     double dt;
     int max_iterations;
 
-    PredictionModel prediction_model;
-    LagModel lag;
-    LQRModel lqr;
+    MPCModel model;
 
     MPCFollowLimits follow_limits;
     MPCFollowWeights follow_weights;

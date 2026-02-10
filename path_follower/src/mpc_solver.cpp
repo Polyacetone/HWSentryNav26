@@ -145,12 +145,6 @@ inline double estimate_remaining_arclength(
 // ============================================================================
 
 namespace {
-constexpr int LQR_STATE_SIZE = 10;
-constexpr int IDX_S = 0;
-constexpr int IDX_DS = 1;
-constexpr int IDX_PHI = 2;
-constexpr int IDX_DPHI = 3;
-
 template<typename T>
 inline T wrap_to_pi(const T& a) {
     return ceres::atan2(ceres::sin(a), ceres::cos(a));
@@ -161,48 +155,65 @@ struct PredictorState {
     T x, y, theta;
     T v_act, omega_act;
 
-    // LAG模式专用
-    T a_act;
-
-    // LQR模式专用
-    Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_lqr;
+    // 模型内部状态
+    std::array<T, MPCModel::MAX_V_ORDER> v_hist; // v(k), v(k-1), ...
+    T w_state;  // w(k)
+    T v_cmd_z1; // v_cmd(k-1)
+    T w_cmd_z1; // w_cmd(k-1)
 };
 
-/**
- * @brief LQR闭环步进函数（使用预计算的离散闭环矩阵，带子步迭代）
- * 
- * 离散闭环动力学（子步）：
- *   x_{k+1} = A_cl * x_k + B_ref * x_ref
- * 
- * 其中：
- *   - A_cl = exp((A - B*K) * dt_sub) 是离散闭环状态矩阵
- *   - B_ref 是离散参考输入矩阵
- *   - x_ref 是参考状态，其中 s, phi 跟踪当前值，ds, dphi 是指令速度
- *   - dt_sub = dt_mpc / substeps
- * 
- * 通过子步迭代，可以正确处理 s_ref, phi_ref 跟踪当前状态的效果
- */
 template<typename T>
-inline void lqr_closed_loop_step(
-    const LQRModel& model,
-    Eigen::Matrix<T, LQR_STATE_SIZE, 1>& x,
-    const T& v_ref,
-    const T& w_ref,
-    const T& theta_ref
+inline void model_init(
+    const MPCModel& model,
+    PredictorState<T>& st,
+    const T& v_meas,
+    const T& w_meas,
+    const T& v_cmd_prev,
+    const T& w_cmd_prev
 ) {
-    // 子步迭代
-    for (int i = 0; i < model.substeps; i++) {
-        // 构建参考状态（每个子步都更新 s_ref 和 phi_ref）
-        Eigen::Matrix<T, LQR_STATE_SIZE, 1> x_ref = Eigen::Matrix<T, LQR_STATE_SIZE, 1>::Zero();
-        x_ref(IDX_S) = x(IDX_S);       // s_ref 跟踪当前位置
-        x_ref(IDX_DS) = v_ref;         // ds_ref 是指令速度
-        // phi_ref：使用理想指令外推得到的下一时刻角度作为参考，并做最短角差处理避免跨 ±pi 跳变
-        x_ref(IDX_PHI) = x(IDX_PHI) + wrap_to_pi(theta_ref - x(IDX_PHI));
-        x_ref(IDX_DPHI) = w_ref;       // dphi_ref 是指令角速度
-
-        // 使用预计算的离散闭环矩阵进行状态更新
-        x = model.A_cl.cast<T>() * x + model.B_ref.cast<T>() * x_ref;
+    for (int i = 0; i < MPCModel::MAX_V_ORDER; i++) {
+        st.v_hist[static_cast<size_t>(i)] = v_meas;
     }
+    st.w_state = w_meas;
+    st.v_cmd_z1 = v_cmd_prev;
+    st.w_cmd_z1 = w_cmd_prev;
+    st.v_act = v_meas;
+    st.omega_act = w_meas;
+    (void)model; // 当前模型参数不影响初始状态
+}
+
+template<typename T>
+inline void model_step(
+    const MPCModel& model,
+    PredictorState<T>& st,
+    const T& v_cmd,
+    const T& w_cmd
+) {
+    // v(k+1) = sum_i a_i * v(k-i) + b_w*w(k) + b_u*v_cmd(k-1)
+    T v_next = T(0.0);
+    const int n = std::max(1, std::min(model.v_order, MPCModel::MAX_V_ORDER));
+    for (int i = 0; i < n; i++) {
+        v_next += T(model.v_ar[static_cast<size_t>(i)]) * st.v_hist[static_cast<size_t>(i)];
+    }
+    v_next += T(model.v_w_coeff) * st.w_state;
+    v_next += T(model.v_vcmd_z1_coeff) * st.v_cmd_z1;
+
+    // w(k+1) = alpha*w(k) + beta*w_cmd(k-1)
+    const T w_next = T(model.w_alpha) * st.w_state + T(model.w_beta) * st.w_cmd_z1;
+
+    // v_hist[1] <- v_hist[0] ...
+    for (int i = n - 1; i >= 1; i--) {
+        st.v_hist[static_cast<size_t>(i)] = st.v_hist[static_cast<size_t>(i - 1)];
+    }
+    st.v_hist[0] = v_next;
+    st.w_state = w_next;
+
+    // 输入延迟
+    st.v_cmd_z1 = v_cmd;
+    st.w_cmd_z1 = w_cmd;
+
+    st.v_act = st.v_hist[0];
+    st.omega_act = st.w_state;
 }
 
 template<typename T>
@@ -211,50 +222,31 @@ inline void prediction_step(
     PredictorState<T>& st,
     const T& v_cmd,
     const T& omega_cmd,
+    const T& omega_cmd_prev,
     T& theta_cmd
 ) {
     const T dt = T(params.dt);
-    const T theta_cmd_next = wrap_to_pi(theta_cmd + omega_cmd * dt);
-    switch (params.prediction_model) {
-        case PredictionModel::NONE: {
-            st.v_act = v_cmd;
-            st.omega_act = omega_cmd;
-            st.theta = wrap_to_pi(st.theta + st.omega_act * dt);
-            st.x += st.v_act * ceres::cos(st.theta) * dt;
-            st.y += st.v_act * ceres::sin(st.theta) * dt;
-            theta_cmd = theta_cmd_next;
-            break;
-        }
-        case PredictionModel::LAG: {
-            const T tau_v = T(params.lag.tau_v);
-            const T k_v = T(params.lag.k_v);
-            const T tau_omega = T(params.lag.tau_omega);
 
-            const T a_dot = (k_v * (v_cmd - st.v_act) - st.a_act) / tau_v;
-            st.a_act = st.a_act + a_dot * dt;
-            st.v_act = st.v_act + st.a_act * dt;
+    // 梯形积分（Heun/Trapezoidal）：
+    // - theta_cmd 用 (omega_cmd_prev, omega_cmd) 的均值积分
+    // - 位姿用 (v_act, omega_act) 在步前/步后取均值积分
+    const T theta_cmd_next = wrap_to_pi(theta_cmd + (omega_cmd_prev + omega_cmd) * (dt * T(0.5)));
 
-            const T omega_dot = (omega_cmd - st.omega_act) / tau_omega;
-            st.omega_act = st.omega_act + omega_dot * dt;
+    const T theta0 = st.theta;
+    const T v0 = st.v_act;
+    const T w0 = st.omega_act;
 
-            st.theta = wrap_to_pi(st.theta + st.omega_act * dt);
-            st.x += st.v_act * ceres::cos(st.theta) * dt;
-            st.y += st.v_act * ceres::sin(st.theta) * dt;
-            theta_cmd = theta_cmd_next;
-            break;
-        }
-        case PredictionModel::LQR: {
-            lqr_closed_loop_step(params.lqr, st.x_lqr, v_cmd, omega_cmd, theta_cmd_next);
-            st.v_act = st.x_lqr(IDX_DS);
-            st.omega_act = st.x_lqr(IDX_DPHI);
-            st.theta = st.x_lqr(IDX_PHI);
+    // 先更新执行器动态，再用 v_act/omega_act 推进位姿
+    model_step(params.model, st, v_cmd, omega_cmd);
 
-            st.x += st.v_act * ceres::cos(st.theta) * dt;
-            st.y += st.v_act * ceres::sin(st.theta) * dt;
-            theta_cmd = theta_cmd_next;
-            break;
-        }
-    }
+    const T v1 = st.v_act;
+    const T w1 = st.omega_act;
+    const T theta1 = wrap_to_pi(theta0 + (w0 + w1) * (dt * T(0.5)));
+
+    st.x += (v0 * ceres::cos(theta0) + v1 * ceres::cos(theta1)) * (dt * T(0.5));
+    st.y += (v0 * ceres::sin(theta0) + v1 * ceres::sin(theta1)) * (dt * T(0.5));
+    st.theta = theta1;
+    theta_cmd = theta_cmd_next;
 }
 }
 
@@ -355,15 +347,7 @@ struct FollowMPCCostFunctor {
         st.theta = T(start_pose_.z());
         T u = T(u0_);
         T theta_cmd = T(start_pose_.z());
-        st.v_act = T(start_status_.x());
-        st.omega_act = T(start_status_.y());
-        st.a_act = T(0.0);
-        st.x_lqr.setZero();
-        st.x_lqr(IDX_DS) = T(start_status_.x());
-        st.x_lqr(IDX_DPHI) = T(start_status_.y());
-        st.x_lqr(IDX_PHI) = T(start_pose_.z());
-
-        // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束
+        // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束 & 作为辨识模型的 z^-1 输入状态
         T last_v_cmd = ceres::fmax(
             ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.follow_limits.start_vel_cmd_act_diff_max - params_.follow_limits.acc_max * params_.dt)),
             T(start_status_.x() - params_.follow_limits.start_vel_cmd_act_diff_max + params_.follow_limits.acc_max * params_.dt)
@@ -371,6 +355,15 @@ struct FollowMPCCostFunctor {
         T last_omega_cmd = ceres::fmax(
             ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.follow_limits.start_omega_cmd_act_diff_max - params_.follow_limits.alpha_max * params_.dt)),
             T(start_status_.y() - params_.follow_limits.start_omega_cmd_act_diff_max + params_.follow_limits.alpha_max * params_.dt)
+        );
+
+        model_init(
+            params_.model,
+            st,
+            T(start_status_.x()),
+            T(start_status_.y()),
+            last_v_cmd,
+            last_omega_cmd
         );
 
         size_t res_idx = 0;
@@ -383,7 +376,7 @@ struct FollowMPCCostFunctor {
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            prediction_step(params_, st, v_cmd, omega_cmd, theta_cmd);
+            prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
 
             // 样条上的参考点
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -526,14 +519,8 @@ struct StopMPCCostFunctor {
         st.y = T(start_pose_.y());
         st.theta = T(start_pose_.z());
         T theta_cmd = T(start_pose_.z());
-        st.v_act = T(start_status_.x());
-        st.omega_act = T(start_status_.y());
-        st.a_act = T(0.0);
-        st.x_lqr.setZero();
-        st.x_lqr(IDX_DS) = T(start_status_.x());
-        st.x_lqr(IDX_DPHI) = T(start_status_.y());
-        st.x_lqr(IDX_PHI) = T(start_pose_.z());
 
+        // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束 & 作为辨识模型的 z^-1 输入状态
         T last_v_cmd = ceres::fmax(
             ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.stop_limits.start_vel_cmd_act_diff_max - params_.stop_limits.acc_max * params_.dt)),
             T(start_status_.x() - params_.stop_limits.start_vel_cmd_act_diff_max + params_.stop_limits.acc_max * params_.dt)
@@ -541,6 +528,15 @@ struct StopMPCCostFunctor {
         T last_omega_cmd = ceres::fmax(
             ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.stop_limits.start_omega_cmd_act_diff_max - params_.stop_limits.alpha_max * params_.dt)),
             T(start_status_.y() - params_.stop_limits.start_omega_cmd_act_diff_max + params_.stop_limits.alpha_max * params_.dt)
+        );
+
+        model_init(
+            params_.model,
+            st,
+            T(start_status_.x()),
+            T(start_status_.y()),
+            last_v_cmd,
+            last_omega_cmd
         );
 
         size_t res_idx = 0;
@@ -551,7 +547,7 @@ struct StopMPCCostFunctor {
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            prediction_step(params_, st, v_cmd, omega_cmd, theta_cmd);
+            prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
 
             // 1. 速度正则化（希望停止）
             residuals[res_idx++] = T(params_.stop_weights.q_v) * st.v_act;
@@ -643,14 +639,8 @@ struct RecoveryMPCCostFunctor {
         st.y = T(start_pose_.y());
         st.theta = T(start_pose_.z());
         T theta_cmd = T(start_pose_.z());
-        st.v_act = T(start_status_.x());
-        st.omega_act = T(start_status_.y());
-        st.a_act = T(0.0);
-        st.x_lqr.setZero();
-        st.x_lqr(IDX_DS) = T(start_status_.x());
-        st.x_lqr(IDX_DPHI) = T(start_status_.y());
-        st.x_lqr(IDX_PHI) = T(start_pose_.z());
 
+        // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束 & 作为辨识模型的 z^-1 输入状态
         T last_v_cmd = ceres::fmax(
             ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.recovery_limits.start_vel_cmd_act_diff_max - params_.recovery_limits.acc_max * params_.dt)),
             T(start_status_.x() - params_.recovery_limits.start_vel_cmd_act_diff_max + params_.recovery_limits.acc_max * params_.dt)
@@ -658,6 +648,15 @@ struct RecoveryMPCCostFunctor {
         T last_omega_cmd = ceres::fmax(
             ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.recovery_limits.start_omega_cmd_act_diff_max - params_.recovery_limits.alpha_max * params_.dt)),
             T(start_status_.y() - params_.recovery_limits.start_omega_cmd_act_diff_max + params_.recovery_limits.alpha_max * params_.dt)
+        );
+
+        model_init(
+            params_.model,
+            st,
+            T(start_status_.x()),
+            T(start_status_.y()),
+            last_v_cmd,
+            last_omega_cmd
         );
 
         const T gx = T(goal_map_.x());
@@ -671,7 +670,7 @@ struct RecoveryMPCCostFunctor {
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            prediction_step(params_, st, v_cmd, omega_cmd, theta_cmd);
+            prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
 
             // 1. 目标点吸引
             const T dx = st.x - gx;
@@ -754,6 +753,7 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     const MPCParams& params,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
+    const Eigen::Vector2d& cmd_prev,
     const std::vector<std::array<double, 2>>& controls
 ) {
     std::vector<Eigen::Vector2d> predicted_path_map;
@@ -763,13 +763,15 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     st.x = chassis_pose_map.x();
     st.y = chassis_pose_map.y();
     st.theta = chassis_pose_map.z();
-    st.v_act = chassis_status.x();
-    st.omega_act = chassis_status.y();
-    st.a_act = 0.0;
-    st.x_lqr = Eigen::Matrix<double, LQR_STATE_SIZE, 1>::Zero();
-    st.x_lqr(IDX_DS) = chassis_status.x();
-    st.x_lqr(IDX_DPHI) = chassis_status.y();
-    st.x_lqr(IDX_PHI) = chassis_pose_map.z();
+
+    model_init(
+        params.model,
+        st,
+        chassis_status.x(),
+        chassis_status.y(),
+        cmd_prev.x(),
+        cmd_prev.y()
+    );
 
     predicted_path_map.emplace_back(st.x, st.y);
 
@@ -777,11 +779,25 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     for (int i = 0; i < params.horizon; i++) {
         const double v_cmd = controls[static_cast<size_t>(i)][0];
         const double w_cmd = controls[static_cast<size_t>(i)][1];
-        prediction_step(params, st, v_cmd, w_cmd, theta_cmd);
+        const double w_cmd_prev = (i == 0) ? cmd_prev.y() : controls[static_cast<size_t>(i - 1)][1];
+        prediction_step(params, st, v_cmd, w_cmd, w_cmd_prev, theta_cmd);
         predicted_path_map.emplace_back(st.x, st.y);
     }
 
     return predicted_path_map;
+}
+
+inline double clamp_prev_cmd(
+    const double cmd_prev,
+    const double status,
+    const double cmd_act_diff_max,
+    const double rate_max,
+    const double dt
+) {
+    return std::max(
+        std::min(cmd_prev, status + cmd_act_diff_max - rate_max * dt),
+        status - cmd_act_diff_max + rate_max * dt
+    );
 }
 
 // ============================================================================
@@ -810,6 +826,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     );
     last_u_ = u0;
 
+    const Eigen::Vector2d start_cmd = last_cmd_;
+
     // 决策变量
     std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
 
@@ -835,7 +853,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         chassis_pose_map,
         u0,
         chassis_status,
-        last_cmd_,
+        start_cmd,
         params_,
         merged_cost_map,
         global_direction_map
@@ -896,7 +914,13 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
     }
 
-    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(params_, chassis_pose_map, chassis_status, controls);
+    const Eigen::Vector2d cmd_prev_clamped(
+        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.follow_limits.start_vel_cmd_act_diff_max, params_.follow_limits.acc_max, params_.dt),
+        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.follow_limits.start_omega_cmd_act_diff_max, params_.follow_limits.alpha_max, params_.dt)
+    );
+    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
+        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls
+    );
     return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 
@@ -906,6 +930,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     const CostMap& merged_cost_map,
     const DirectionMap& global_direction_map
 ) {
+    const Eigen::Vector2d start_cmd = last_cmd_;
+
     // 决策变量
     std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
 
@@ -928,7 +954,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     auto* cost_function = new ceres::DynamicAutoDiffCostFunction<StopMPCCostFunctor>(new StopMPCCostFunctor(
         chassis_pose_map,
         chassis_status,
-        last_cmd_,
+        start_cmd,
         params_,
         merged_cost_map,
         global_direction_map
@@ -985,7 +1011,13 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
     }
 
-    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(params_, chassis_pose_map, chassis_status, controls);
+    const Eigen::Vector2d cmd_prev_clamped(
+        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.stop_limits.start_vel_cmd_act_diff_max, params_.stop_limits.acc_max, params_.dt),
+        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.stop_limits.start_omega_cmd_act_diff_max, params_.stop_limits.alpha_max, params_.dt)
+    );
+    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
+        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls
+    );
     return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 
@@ -996,6 +1028,8 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
     const CostMap& merged_cost_map,
     const DirectionMap& global_direction_map
 ) {
+    const Eigen::Vector2d start_cmd = last_cmd_;
+
     // 决策变量
     std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
 
@@ -1019,7 +1053,7 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         goal_map,
         chassis_pose_map,
         chassis_status,
-        last_cmd_,
+        start_cmd,
         params_,
         merged_cost_map,
         global_direction_map
@@ -1076,7 +1110,13 @@ std::expected<std::tuple<Eigen::Vector3d, std::vector<Eigen::Vector2d>>, std::st
         last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
     }
 
-    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(params_, chassis_pose_map, chassis_status, controls);
+    const Eigen::Vector2d cmd_prev_clamped(
+        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.recovery_limits.start_vel_cmd_act_diff_max, params_.recovery_limits.acc_max, params_.dt),
+        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.recovery_limits.start_omega_cmd_act_diff_max, params_.recovery_limits.alpha_max, params_.dt)
+    );
+    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
+        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls
+    );
     return std::make_tuple(Eigen::Vector3d(cmd_v_omega.x(), theta_cmd_map, cmd_v_omega.y()), predicted_path_map);
 }
 

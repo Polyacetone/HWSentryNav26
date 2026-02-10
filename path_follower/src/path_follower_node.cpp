@@ -1,5 +1,4 @@
 #include <Eigen/Dense>
-#include <unsupported/Eigen/MatrixFunctions>
 #include <rclcpp/rclcpp.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/core.hpp>
@@ -88,77 +87,34 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     const double mpc_dt = declare_parameter<double>("mpc.general.dt");
     const int max_iterations = static_cast<int>(declare_parameter<int>("mpc.general.max_iterations"));
 
-    const std::string prediction_model_str = declare_parameter<std::string>("mpc.general.model");
-    PredictionModel prediction_model;
-    if (prediction_model_str == "NONE") {
-        prediction_model = PredictionModel::NONE;
-    } else if (prediction_model_str == "LAG") {
-        prediction_model = PredictionModel::LAG;
-    } else if (prediction_model_str == "LQR") {
-        prediction_model = PredictionModel::LQR;
-    } else {
-        RCLCPP_FATAL(get_logger(), "Invalid mpc.general.model: %s", prediction_model_str.c_str());
-        throw std::runtime_error("Invalid mpc.general.model");
+    // ─── 系统辨识执行器模型（离散） ───
+    MPCModel model;
+    model.v_order = static_cast<int>(declare_parameter<int>("mpc.model.v_order"));
+    const auto v_ar = declare_parameter<std::vector<double>>("mpc.model.v_ar");
+    model.v_w_coeff = declare_parameter<double>("mpc.model.v_w_coeff");
+    model.v_vcmd_z1_coeff = declare_parameter<double>("mpc.model.v_vcmd_z1_coeff");
+    model.w_alpha = declare_parameter<double>("mpc.model.w_alpha");
+    model.w_beta = declare_parameter<double>("mpc.model.w_beta");
+    if (model.v_order <= 0 || model.v_order > MPCModel::MAX_V_ORDER) {
+        RCLCPP_FATAL(get_logger(), "mpc.model.v_order must be in [1,%d], got %d", MPCModel::MAX_V_ORDER, model.v_order);
+        throw std::runtime_error("Invalid mpc.model.v_order");
     }
-
-    LagModel lag_model;
-    lag_model.tau_v = declare_parameter<double>("mpc.general.lag.tau_v");
-    lag_model.k_v = declare_parameter<double>("mpc.general.lag.k_v");
-    lag_model.tau_omega = declare_parameter<double>("mpc.general.lag.tau_omega");
-
-    LQRModel lqr_model;
-    const double lqr_dt = declare_parameter<double>("mpc.general.lqr.dt");
-    const int substeps = static_cast<int>(declare_parameter<int>("mpc.general.lqr.substeps"));
-    if (substeps <= 0) {
-        RCLCPP_FATAL(get_logger(), "mpc.general.lqr.substeps must be > 0, got %d", substeps);
-        throw std::runtime_error("Invalid mpc.general.lqr.substeps");
+    if (v_ar.size() != static_cast<size_t>(model.v_order)) {
+        RCLCPP_FATAL(get_logger(), "mpc.model.v_ar size %zu != v_order %d", v_ar.size(), model.v_order);
+        throw std::runtime_error("Invalid mpc.model.v_ar");
     }
-    const double dt_sub = mpc_dt / substeps;
-    const int lqr_steps_per_substep = std::max<int>(1, static_cast<int>(std::lround(dt_sub / lqr_dt)));
-    const double dt_sub_from_lqr = lqr_steps_per_substep * lqr_dt;
-    if (std::abs(dt_sub_from_lqr - dt_sub) > 1e-6) {
-        RCLCPP_WARN(
-            get_logger(), "MPC dt/substeps=%.6f is not an integer multiple of lqr dt=%.6f (nearest %d steps => %.6f)",
-            dt_sub, lqr_dt, lqr_steps_per_substep, dt_sub_from_lqr
-        );
+    for (int i = 0; i < MPCModel::MAX_V_ORDER; i++) {
+        model.v_ar[static_cast<size_t>(i)] = 0.0;
     }
-
-    const auto load_matrix = [this](const std::string& name, int rows, int cols) {
-        const auto data = declare_parameter<std::vector<double>>(name);
-        if (data.size() != static_cast<size_t>(rows) * static_cast<size_t>(cols)) {
-            RCLCPP_FATAL(get_logger(), "Parameter %s size %zu != %d", name.c_str(), data.size(), rows * cols);
-            throw std::runtime_error("Invalid matrix size");
-        }
-        Eigen::MatrixXd mat(rows, cols);
-        for (int r = 0; r < rows; r++) {
-            for (int c = 0; c < cols; c++) {
-                mat(r, c) = data[static_cast<size_t>(r * cols + c)];
-            }
-        }
-        return mat;
-    };
-
-    lqr_model.substeps = substeps;
-    lqr_model.dt_sub = dt_sub;
-    const Eigen::Matrix<double, 10, 10> A = load_matrix("mpc.general.lqr.A", 10, 10);
-    const Eigen::Matrix<double, 10, 4> B = load_matrix("mpc.general.lqr.B", 10, 4);
-    const Eigen::Matrix<double, 4, 10> K = load_matrix("mpc.general.lqr.K", 4, 10);
-    const Eigen::Matrix<double, 10, 10> Acl = A - B * K;
-    const Eigen::Matrix<double, 10, 10> BK = B * K;
-    Eigen::Matrix<double, 20, 20> M = Eigen::Matrix<double, 20, 20>::Zero();
-    M.block<10, 10>(0, 0) = Acl;
-    M.block<10, 10>(0, 10) = BK;
-    const Eigen::Matrix<double, 20, 20> Mexp = (M * dt_sub).exp();
-    lqr_model.A_cl = Mexp.block<10, 10>(0, 0);
-    lqr_model.B_ref = Mexp.block<10, 10>(0, 10);
+    for (int i = 0; i < model.v_order; i++) {
+        model.v_ar[static_cast<size_t>(i)] = v_ar[static_cast<size_t>(i)];
+    }
 
     MPCParams mpc_params = {
         .horizon = horizon,
         .dt = mpc_dt,
         .max_iterations = max_iterations,
-        .prediction_model = prediction_model,
-        .lag = lag_model,
-        .lqr = lqr_model,
+        .model = model,
         .follow_limits = {
             .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
             .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
