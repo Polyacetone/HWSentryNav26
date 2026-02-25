@@ -12,8 +12,8 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Quaternion, TransformStamped
 from interfaces.msg import ChassisCmd, ChassisStatus, JointState
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Imu, PointCloud2, PointField
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import Image, Imu, PointCloud2, PointField
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 
 def wrap_to_pi(angle: float) -> float:
@@ -91,6 +91,30 @@ class SimConfig:
     TOPIC_IMU: str = "/serial_bridge/imu"
     TOPIC_STATUS: str = "/serial_bridge/chassis_status"
     TOPIC_CLOUD: str = "/small_glim/registered_cloud"
+
+    # --- 地图话题（参考 path_follower/path_planner/map_server）---
+    TOPIC_GLOBAL_COST_MAP: str = "/map_server/global_cost_map"
+    TOPIC_LOCAL_COST_MAP: str = "/map_server/local_cost_map"
+    TOPIC_GLOBAL_DIRECTION_MAP: str = "/map_server/global_direction_map"
+
+    # --- 障碍物判定（cost map）---
+    # cost map 值域按工程惯例认为是 0~255（OccupancyGrid 的 int8 通过 uint8 解释）
+    OBSTACLE_COST_THRESHOLD: int = 200  # >= 该值认为是障碍物/发生接触
+    OBSTACLE_PUSH_COST_THRESHOLD: int = 250  # 当前位置 cost >= 该值则被“挤开”
+    OBSTACLE_PUSH_SPEED_MPS: float = 0.6  # 被推开速度（m/s）
+    ROBOT_INSCRIBED_RADIUS_M: float = 0.30  # 机器人内切圆半径（用于碰撞点采样）
+    COLLISION_LOOKAHEAD_M: float = 0.05  # 前/后碰撞点额外外扩（m）
+
+    # --- 台阶判定（direction map）---
+    STEP_NORM_THRESHOLD: float = 0.9  # direction 向量模长 >= 该值认为在台阶区域
+    STEP_STUCK_HEADING_ERR_RAD: float = math.radians(30.0)  # 与台阶方向场夹角过大则卡住
+    STEP_STUCK_MIN_SPEED_MPS: float = 0.4  # 速度过小则卡住（仅在尝试前进时）
+    STEP_RELEASE_NORM_THRESHOLD: float = 0.6  # 离开台阶区域的判定阈值（建议略小于进入阈值）
+
+    # --- 小陀螺漂移 ---
+    SPIN_DRIFT_SPEED_MPS: float = 0.02  # 小陀螺位置漂移速度（m/s）
+    SPIN_DRIFT_DIR_X: float = 1.0
+    SPIN_DRIFT_DIR_Y: float = 0.0
 
     # --- Frame 约定 ---
     FRAME_IMU_WORLD: str = "imu_world"
@@ -468,6 +492,149 @@ class WheelLegDynamics:
 
 
 # =============================================================================
+# nav map helpers (参考 path_follower/path_planner/nav_map.cpp)
+# =============================================================================
+
+
+class CostMap2D:
+    def __init__(self, msg: OccupancyGrid):
+        self.width = int(msg.info.width)
+        self.height = int(msg.info.height)
+        self.resolution = float(msg.info.resolution)
+        self.origin_x = float(msg.info.origin.position.x)
+        self.origin_y = float(msg.info.origin.position.y)
+
+        # OccupancyGrid.data 是 int8；工程里实际把它当作 uint8 cost(0~255) 来用
+        raw = np.asarray(msg.data, dtype=np.int8)
+        self.data = raw.astype(np.uint8, copy=False)
+        if self.data.size != self.width * self.height:
+            raise ValueError(f"CostMap data size mismatch: got {self.data.size}, expected {self.width*self.height}")
+
+    def map_coord_to_grid(self, x: float, y: float) -> tuple[float, float]:
+        return ((x - self.origin_x) / self.resolution, (y - self.origin_y) / self.resolution)
+
+    def is_valid_grid_coord_i(self, xi: int, yi: int) -> bool:
+        return 0 <= xi < self.width and 0 <= yi < self.height
+
+    def is_valid_grid_coord_d(self, gx: float, gy: float) -> bool:
+        return 0.0 <= gx and gx + 1.0 <= float(self.width) and 0.0 <= gy and gy + 1.0 <= float(self.height)
+
+    def at(self, xi: int, yi: int) -> int:
+        if self.is_valid_grid_coord_i(xi, yi):
+            return int(self.data[yi * self.width + xi])
+        return 255
+
+    def interpolate_grid(self, gx: float, gy: float) -> float:
+        if not self.is_valid_grid_coord_d(gx, gy):
+            return 255.0
+
+        x0 = int(gx)
+        y0 = int(gy)
+        x1 = x0 + 1
+        y1 = y0 + 1
+        dx = float(gx - x0)
+        dy = float(gy - y0)
+
+        c00 = self.at(x0, y0)
+        c10 = self.at(x1, y0)
+        c01 = self.at(x0, y1)
+        c11 = self.at(x1, y1)
+
+        return (1 - dx) * (1 - dy) * c00 + dx * (1 - dy) * c10 + (1 - dx) * dy * c01 + dx * dy * c11
+
+    def cost_at_map(self, x: float, y: float) -> Optional[float]:
+        gx, gy = self.map_coord_to_grid(x, y)
+        if not self.is_valid_grid_coord_d(gx, gy):
+            return None
+        return float(self.interpolate_grid(gx, gy))
+
+    def gradient_grid(self, gx: float, gy: float) -> np.ndarray:
+        samples = 2
+        x = int(gx)
+        y = int(gy)
+
+        sum_gx = 0.0
+        sum_gy = 0.0
+        for i in range(1, samples + 1):
+            sum_gx += (self.at(x + i, y) - self.at(x - i, y)) / (i * 2.0)
+            sum_gy += (self.at(x, y + i) - self.at(x, y - i)) / (i * 2.0)
+        return np.array([sum_gx / samples, sum_gy / samples], dtype=float)
+
+    def gradient_at_map(self, x: float, y: float) -> Optional[np.ndarray]:
+        gx, gy = self.map_coord_to_grid(x, y)
+        if not self.is_valid_grid_coord_d(gx, gy):
+            return None
+        return self.gradient_grid(gx, gy)
+
+
+class DirectionMap2D:
+    def __init__(self, msg: Image, resolution: float, origin_x: float, origin_y: float):
+        if msg.encoding not in ("8UC2", "8UC2; compressed"):
+            # map_server/path_planner 期望 8UC2；这里不强制卡死，尽量运行
+            pass
+
+        self.width = int(msg.width)
+        self.height = int(msg.height)
+        self.resolution = float(resolution)
+        self.origin_x = float(origin_x)
+        self.origin_y = float(origin_y)
+
+        raw = np.frombuffer(msg.data, dtype=np.uint8)
+        if msg.step <= 0:
+            raise ValueError("DirectionMap image step is invalid")
+        if raw.size < int(msg.step) * int(msg.height):
+            raise ValueError("DirectionMap image data too short")
+
+        row_bytes = int(msg.step)
+        pixels_per_row = int(msg.width) * 2
+        mat = raw.reshape((int(msg.height), row_bytes))[:, :pixels_per_row]
+        pix = mat.reshape((int(msg.height), int(msg.width), 2))
+
+        p0 = pix[:, :, 0]
+        p1 = pix[:, :, 1]
+        mask_zero = ((p0 == 0) & (p1 == 0)) | ((p0 == 128) & (p1 == 128))
+
+        vec = (pix.astype(np.float32) - 128.0) / 128.0
+        vec[mask_zero, :] = 0.0
+        self.data = vec  # (H,W,2)
+
+    def map_coord_to_grid(self, x: float, y: float) -> tuple[float, float]:
+        return ((x - self.origin_x) / self.resolution, (y - self.origin_y) / self.resolution)
+
+    def is_valid_grid_coord_d(self, gx: float, gy: float) -> bool:
+        return 0.0 <= gx and gx + 1.0 <= float(self.width) and 0.0 <= gy and gy + 1.0 <= float(self.height)
+
+    def at(self, xi: int, yi: int) -> np.ndarray:
+        if 0 <= xi < self.width and 0 <= yi < self.height:
+            return self.data[yi, xi, :].astype(float, copy=False)
+        return np.array([0.0, 0.0], dtype=float)
+
+    def interpolate_grid(self, gx: float, gy: float) -> np.ndarray:
+        if not self.is_valid_grid_coord_d(gx, gy):
+            return np.array([0.0, 0.0], dtype=float)
+
+        x0 = int(gx)
+        y0 = int(gy)
+        x1 = x0 + 1
+        y1 = y0 + 1
+        dx = float(gx - x0)
+        dy = float(gy - y0)
+
+        v00 = self.at(x0, y0)
+        v10 = self.at(x1, y0)
+        v01 = self.at(x0, y1)
+        v11 = self.at(x1, y1)
+
+        return (1 - dx) * (1 - dy) * v00 + dx * (1 - dy) * v10 + (1 - dx) * dy * v01 + dx * dy * v11
+
+    def direction_at_map(self, x: float, y: float) -> Optional[np.ndarray]:
+        gx, gy = self.map_coord_to_grid(x, y)
+        if not self.is_valid_grid_coord_d(gx, gy):
+            return None
+        return self.interpolate_grid(gx, gy)
+
+
+# =============================================================================
 # ROS2 Node
 # =============================================================================
 
@@ -512,6 +679,13 @@ class WheelLegLqrFollowSimNode(Node):
         self._w_applied = 0.0
         self._w_prev = 0.0
 
+        # environment interaction state
+        self._step_stuck = False
+
+        self._global_cost_map: Optional[CostMap2D] = None
+        self._local_cost_map: Optional[CostMap2D] = None
+        self._direction_map: Optional[DirectionMap2D] = None
+
         # s reference
         self._s_ref = float(self.dyn.s)
         self._was_spin_mode = False
@@ -532,6 +706,11 @@ class WheelLegLqrFollowSimNode(Node):
         # sub
         self.create_subscription(ChassisCmd, self.cfg.TOPIC_CMD, self._cmd_cb, 2)
 
+        # map subs
+        self.create_subscription(OccupancyGrid, self.cfg.TOPIC_GLOBAL_COST_MAP, self._on_global_cost_map, 1)
+        self.create_subscription(OccupancyGrid, self.cfg.TOPIC_LOCAL_COST_MAP, self._on_local_cost_map, 1)
+        self.create_subscription(Image, self.cfg.TOPIC_GLOBAL_DIRECTION_MAP, self._on_global_direction_map, 1)
+
         # timers
         self._lqr_timer = self.create_timer(self._dt_lqr, self._on_lqr)
         self._imu_timer = self.create_timer(1.0 / self.cfg.IMU_PUB_HZ, self._pub_imu)
@@ -551,6 +730,141 @@ class WheelLegLqrFollowSimNode(Node):
             f"  Cloud: {self.cfg.CLOUD_PUB_HZ} Hz\n"
             f"  TF(odom->map): {self.cfg.TF_PUB_HZ} Hz"
         )
+
+    # ------------------------
+    # map callbacks
+    # ------------------------
+
+    def _on_global_cost_map(self, msg: OccupancyGrid) -> None:
+        try:
+            self._global_cost_map = CostMap2D(msg)
+        except Exception as ex:
+            self.get_logger().error(f"Failed to parse global cost map: {ex}")
+            self._global_cost_map = None
+
+    def _on_local_cost_map(self, msg: OccupancyGrid) -> None:
+        try:
+            self._local_cost_map = CostMap2D(msg)
+        except Exception as ex:
+            self.get_logger().error(f"Failed to parse local cost map: {ex}")
+            self._local_cost_map = None
+
+    def _on_global_direction_map(self, msg: Image) -> None:
+        if self._global_cost_map is None:
+            self.get_logger().warn("Received direction map but global cost map is not ready yet")
+            return
+        try:
+            dm = DirectionMap2D(
+                msg,
+                resolution=self._global_cost_map.resolution,
+                origin_x=self._global_cost_map.origin_x,
+                origin_y=self._global_cost_map.origin_y,
+            )
+            if dm.width != self._global_cost_map.width or dm.height != self._global_cost_map.height:
+                raise ValueError(
+                    f"Direction map size ({dm.width},{dm.height}) does not match cost map ({self._global_cost_map.width},{self._global_cost_map.height})"
+                )
+            self._direction_map = dm
+        except Exception as ex:
+            self.get_logger().error(f"Failed to parse direction map: {ex}")
+            self._direction_map = None
+
+    # ------------------------
+    # environment helpers
+    # ------------------------
+
+    def _cost_at(self, x: float, y: float) -> Optional[float]:
+        costs: list[float] = []
+        if self._global_cost_map is not None:
+            c = self._global_cost_map.cost_at_map(x, y)
+            if c is not None:
+                costs.append(float(c))
+        if self._local_cost_map is not None:
+            c = self._local_cost_map.cost_at_map(x, y)
+            if c is not None:
+                costs.append(float(c))
+        if not costs:
+            return None
+        return float(max(costs))
+
+    def _gradient_at(self, x: float, y: float) -> Optional[np.ndarray]:
+        # 取当前位置 cost 更大的那张图的梯度，避免局部/全局不一致时方向跳变
+        candidates: list[tuple[float, np.ndarray]] = []
+        if self._global_cost_map is not None:
+            c = self._global_cost_map.cost_at_map(x, y)
+            g = self._global_cost_map.gradient_at_map(x, y)
+            if c is not None and g is not None:
+                candidates.append((float(c), g))
+        if self._local_cost_map is not None:
+            c = self._local_cost_map.cost_at_map(x, y)
+            g = self._local_cost_map.gradient_at_map(x, y)
+            if c is not None and g is not None:
+                candidates.append((float(c), g))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda t: t[0], reverse=True)
+        return candidates[0][1]
+
+    def _find_escape_dir(self, x: float, y: float, step: float) -> Optional[np.ndarray]:
+        base_cost = self._cost_at(x, y)
+        if base_cost is None:
+            return None
+        best_cost = float(base_cost)
+        best_dir: Optional[np.ndarray] = None
+        for k in range(16):
+            ang = 2.0 * math.pi * (k / 16.0)
+            dx = math.cos(ang) * step
+            dy = math.sin(ang) * step
+            c = self._cost_at(x + dx, y + dy)
+            if c is None:
+                continue
+            if float(c) < best_cost:
+                best_cost = float(c)
+                best_dir = np.array([dx, dy], dtype=float)
+        if best_dir is None:
+            return None
+        n = float(np.linalg.norm(best_dir))
+        if n <= 1e-9:
+            return None
+        return best_dir / n
+
+    def _collision_flags(self, x: float, y: float, yaw: float) -> tuple[bool, bool, Optional[float]]:
+        r = float(self.cfg.ROBOT_INSCRIBED_RADIUS_M + self.cfg.COLLISION_LOOKAHEAD_M)
+        fx = x + r * math.cos(yaw)
+        fy = y + r * math.sin(yaw)
+        rx = x - r * math.cos(yaw)
+        ry = y - r * math.sin(yaw)
+
+        c_front = self._cost_at(fx, fy)
+        c_rear = self._cost_at(rx, ry)
+        c_center = self._cost_at(x, y)
+
+        thr = float(self.cfg.OBSTACLE_COST_THRESHOLD)
+        front_hit = (c_front is not None) and (float(c_front) >= thr)
+        rear_hit = (c_rear is not None) and (float(c_rear) >= thr)
+        return front_hit, rear_hit, c_center
+
+    def _step_info(self, x: float, y: float) -> tuple[float, float]:
+        # returns: (step_norm, heading_err)
+        # - step_norm: 台阶方向场模长
+        # - heading_err: 与台阶方向夹角（前后等价，取更小者）
+        if self._direction_map is None:
+            return 0.0, 0.0
+        vec = self._direction_map.direction_at_map(x, y)
+        if vec is None:
+            return 0.0, 0.0
+
+        vx = float(vec[0])
+        vy = float(vec[1])
+        n = float(math.hypot(vx, vy))
+        if n <= 1e-9:
+            return n, 0.0
+
+        step_yaw = math.atan2(vy, vx)
+        yaw = wrap_to_pi(self.dyn.theta)
+        e1 = abs(angle_diff(yaw, step_yaw))
+        e2 = abs(angle_diff(yaw, wrap_to_pi(step_yaw + math.pi)))
+        return n, float(min(e1, e2))
 
     # ------------------------
     # cmd processing
@@ -629,15 +943,74 @@ class WheelLegLqrFollowSimNode(Node):
             self._v_target = 0.0
             self._w_target = float(spin_w * last_sign)
 
+        # ----- environment constraints (台阶/障碍物) -----
+        v_des = float(self._v_target)
+        w_des = float(self._w_target)
+
+        x0 = float(self.dyn.x)
+        y0 = float(self.dyn.y)
+        yaw0 = wrap_to_pi(float(self.dyn.theta))
+
+        step_norm, step_heading_err = self._step_info(x0, y0)
+        on_step = step_norm >= float(self.cfg.STEP_NORM_THRESHOLD)
+
+        # step stuck state machine
+        if self._step_stuck:
+            if step_norm < float(self.cfg.STEP_RELEASE_NORM_THRESHOLD):
+                self._step_stuck = False
+
+        entered_stuck = False
+        if (not self._step_stuck) and on_step and (v_des > 0.0):
+            if (step_heading_err > float(self.cfg.STEP_STUCK_HEADING_ERR_RAD)) or (abs(float(self.dyn.v)) < float(self.cfg.STEP_STUCK_MIN_SPEED_MPS)):
+                self._step_stuck = True
+                entered_stuck = True
+
+        if self._step_stuck:
+            # 卡台阶：立即停住，之后只允许倒车，且不响应角速度
+            spin_mode = False
+            v_des = float(min(v_des, 0.0))
+            w_des = 0.0
+            if entered_stuck:
+                self._v_applied = 0.0
+                self._w_applied = 0.0
+                self.dyn.state[self.dyn.IDX_DS] = 0.0
+                self.dyn.state[self.dyn.IDX_DPHI] = 0.0
+
+        front_hit, rear_hit, center_cost = self._collision_flags(x0, y0, yaw0)
+        if front_hit and v_des > 0.0:
+            v_des = 0.0
+        if rear_hit and v_des < 0.0:
+            v_des = 0.0
+
         # capture previous applied omega for trapezoidal integration
         w_prev = float(self._w_applied)
 
         # apply 1000Hz accel limits
-        self._v_applied = self._rate_limit(self._v_applied, self._v_target, self.cfg.MAX_ACCEL, self._dt_lqr)
-        self._w_applied = self._rate_limit(self._w_applied, self._w_target, self.cfg.MAX_ANG_ACCEL, self._dt_lqr)
+        self._v_applied = self._rate_limit(self._v_applied, v_des, self.cfg.MAX_ACCEL, self._dt_lqr)
+        self._w_applied = self._rate_limit(self._w_applied, w_des, self.cfg.MAX_ANG_ACCEL, self._dt_lqr)
 
         # enforce max speed / max omega / product after rate-limit
         self._v_applied, self._w_applied = self._clamp_v_w_product(self._v_applied, self._w_applied)
+
+        # collision hard clamp after rate-limit (避免 1ms 内继续向障碍物“渗透”)
+        if front_hit and self._v_applied > 0.0:
+            self._v_applied = 0.0
+        if rear_hit and self._v_applied < 0.0:
+            self._v_applied = 0.0
+        if self._step_stuck:
+            self._w_applied = 0.0
+
+        # dt 级预测：防止单步穿透障碍物（尤其是薄障碍/高速度时）
+        if self._v_applied != 0.0:
+            pred_x = x0 + float(self._v_applied) * math.cos(yaw0) * float(self._dt_lqr)
+            pred_y = y0 + float(self._v_applied) * math.sin(yaw0) * float(self._dt_lqr)
+            next_front, next_rear, next_center_cost = self._collision_flags(pred_x, pred_y, yaw0)
+            thr = float(self.cfg.OBSTACLE_COST_THRESHOLD)
+            center_block = (next_center_cost is not None) and (float(next_center_cost) >= thr)
+            if self._v_applied > 0.0 and (next_front or center_block):
+                self._v_applied = 0.0
+            if self._v_applied < 0.0 and (next_rear or center_block):
+                self._v_applied = 0.0
 
         # update theta reference by trapezoidal integration of applied omega
         self._theta_target = wrap_to_pi(self._theta_target + 0.5 * (w_prev + self._w_applied) * self._dt_lqr)
@@ -670,6 +1043,43 @@ class WheelLegLqrFollowSimNode(Node):
             dt=self._dt_lqr,
             u_disturb=u_disturb,
         )
+
+        # obstacle push-out (若当前位置代价过高，则沿“下降梯度”方向挤开)
+        cost_now = self._cost_at(self.dyn.x, self.dyn.y)
+        if cost_now is not None and float(cost_now) >= float(self.cfg.OBSTACLE_PUSH_COST_THRESHOLD):
+            grad = self._gradient_at(self.dyn.x, self.dyn.y)
+            push_dir: Optional[np.ndarray] = None
+            if grad is not None:
+                away = -grad
+                n = float(np.linalg.norm(away))
+                if n > 1e-6:
+                    push_dir = away / n
+            if push_dir is None:
+                # 梯度过小/平台区域：尝试找一个更低 cost 的方向
+                step = 0.0
+                if self._global_cost_map is not None:
+                    step = float(self._global_cost_map.resolution)
+                elif self._local_cost_map is not None:
+                    step = float(self._local_cost_map.resolution)
+                step = max(0.05, step)
+                push_dir = self._find_escape_dir(self.dyn.x, self.dyn.y, step)
+
+            if push_dir is not None:
+                disp = float(self.cfg.OBSTACLE_PUSH_SPEED_MPS) * float(self._dt_lqr)
+                self.dyn.world_pose[0] += float(push_dir[0]) * disp
+                self.dyn.world_pose[1] += float(push_dir[1]) * disp
+
+        # spin drift (小陀螺模式位置缓慢漂移)
+        if spin_mode and float(self.cfg.SPIN_DRIFT_SPEED_MPS) > 0.0:
+            dx = float(self.cfg.SPIN_DRIFT_DIR_X)
+            dy = float(self.cfg.SPIN_DRIFT_DIR_Y)
+            n = math.hypot(dx, dy)
+            if n > 1e-9:
+                ux = dx / n
+                uy = dy / n
+                disp = float(self.cfg.SPIN_DRIFT_SPEED_MPS) * float(self._dt_lqr)
+                self.dyn.world_pose[0] += ux * disp
+                self.dyn.world_pose[1] += uy * disp
 
         # push odom sample for delay
         self._odom_buf.append(

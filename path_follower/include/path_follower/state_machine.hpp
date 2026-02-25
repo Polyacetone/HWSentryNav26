@@ -64,6 +64,7 @@ struct FsmParams {
 // ═══════════════════════════ 状态枚举 ═══════════════════════
 
 enum class FsmState {
+    DEAD,             // 底盘失效（Dead/Recovery/Abnormal）：保持 v=w=0，等待恢复
     IDLE,             // 无路径且不旋转
     FOLLOW,           // 跟随全局路径
     SPIN,             // 小陀螺模式
@@ -80,6 +81,9 @@ struct FsmInput {
     bool has_path = false;
     bool spin_requested = false;
     bool spin_high_priority = false;
+
+    // 底盘是否处于失效模式（Dead/Recovery/Abnormal）
+    bool chassis_dead = false;
 
     // 底盘实际状态
     double velocity = 0.0;   // 线速度

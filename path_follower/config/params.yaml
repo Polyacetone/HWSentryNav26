@@ -37,34 +37,34 @@
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
           max_correspondence_distance: 1.0 # 最大对应点距离 (m)
         limits: # 运动限制
-          vel_max: 1.0 # 最大速度 (m/s)
+          vel_max: 1.5 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
-          omega_max: 3.0 # 最大角速度 (rad/s)
-          omega_min: -3.0 # 最小角速度 (rad/s)
-          start_vel_cmd_act_diff_max: 0.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
-          start_omega_cmd_act_diff_max: 1.8 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
+          omega_max: 7.2 # 最大角速度 (rad/s)
+          omega_min: -7.2 # 最小角速度 (rad/s)
+          start_vel_cmd_act_diff_max: 1.2 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
+          start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
-          alpha_max: 6.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
+          alpha_max: 7.2 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           vel_step_up: 0.8 # 上台阶期望速度 (m/s)
-          vel_step_down: 1.5 # 下台阶期望速度 (m/s)
+          vel_step_down: 1.2 # 下台阶期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           slow_down_deceleration: 1.2 # 终点减速期望加速度 (m/s²)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
           step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
-          q_y: 0.4 # 横向误差权重
+          q_y: 0.5 # 横向误差权重
           q_theta: 0.3 # 航向误差权重
           q_u: 2.0 # 进度项权重
           q_v_final: 0.8 # 终点减速权重
-          r_v: 0.02 # 线速度正则
-          r_omega: 0.04 # 角速度正则
+          r_v: 0.01 # 线速度正则
+          r_omega: 0.06 # 角速度正则
           r_dv: 0.04 # 线速度平滑
-          r_domega: 0.06 # 角速度平滑
+          r_domega: 0.10 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 3.0 # 台阶区域速度保持权重
+          vel_on_step: 1.0 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障权重（全局+局部）
           direction: 3.0 # 台阶方向对齐权重
           step: 0.01 # 经过台阶惩罚
@@ -73,12 +73,12 @@
           vel_max: 2.8 # 最大线速度硬约束 (m/s)
           omega_max: 12.5 # 最大角速度硬约束 (rad/s)
           omega_min: -12.5 # 最小角速度硬约束 (rad/s)
-          start_vel_cmd_act_diff_max: 0.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
-          start_omega_cmd_act_diff_max: 1.8 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
+          start_vel_cmd_act_diff_max: 1.2 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
+          start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.5 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
-          alpha_max: 12.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
+          alpha_max: 7.2 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           vel_step_up: 0.8 # 上台阶期望速度 (m/s)
-          vel_step_down: 1.5 # 下台阶期望速度 (m/s)
+          vel_step_down: 1.2 # 下台阶期望速度 (m/s)
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights: # 权重
           q_v: 0.6 # 线速度正则
@@ -138,6 +138,6 @@
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.09 # 指令速度超过该值才开始检测 (m/s)
         timeout: 5.0 # 持续时间阈值 (s)
-        max_displacement: 0.05 # 位移小于该值则判定卡住 (m)
+        max_displacement: 0.1 # 位移小于该值则判定卡住 (m)
         reverse_speed: 0.6 # 倒车速度 (m/s)
-        reverse_duration: 0.5 # 倒车时间 (s)
+        reverse_duration: 1.0 # 倒车时间 (s)

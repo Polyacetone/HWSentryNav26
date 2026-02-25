@@ -10,6 +10,16 @@ namespace path_follower {
 
 namespace {
 
+inline bool is_chassis_dead_leg_mode(const uint8_t leg_mode) {
+    // 见 common_sentry_2026/interfaces/msg/serial_bridge/ChassisStatus.msg
+    // 0:Dead, 1:Recovery, 6:Abnormal
+    return leg_mode == 0u || leg_mode == 1u || leg_mode == 6u;
+}
+
+}
+
+namespace {
+
 struct RecoveryGoalPlanner {
     struct FieldSample {
         double cost = 0.0;
@@ -125,6 +135,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.has_path = input.global_path.has_value();
     fsm_input.spin_requested = input.spin_requested;
     fsm_input.spin_high_priority = input.spin_high_priority;
+    fsm_input.chassis_dead = is_chassis_dead_leg_mode(input.chassis_leg_mode);
     fsm_input.velocity = input.chassis_status.x();
     fsm_input.omega = input.chassis_status.y();
     fsm_input.chassis_pose_map = input.chassis_pose_map;
@@ -142,6 +153,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     // 4. 根据 FSM 状态，执行对应的控制逻辑
     ControlOutput output;
     switch (state) {
+        case FsmState::DEAD: output = execute_dead(input); break;
         case FsmState::IDLE: output = execute_idle(input); break;
         case FsmState::FOLLOW: output = execute_follow(input); break;
         case FsmState::SPIN: output = execute_spin(input); break;
@@ -159,6 +171,17 @@ ControlOutput MainController::update(const ControlInput& input) {
     }
 
     return output;
+}
+
+// ═══════════════════ DEAD: 失效保持静止 ═════════════════════
+
+ControlOutput MainController::execute_dead(const ControlInput& input) {
+    (void)input;
+    ControlOutput out;
+    out.velocity = 0.0;
+    out.omega = 0.0;
+    out.valid = true;
+    return out;
 }
 
 FsmState MainController::fsm_state() const {
@@ -273,11 +296,12 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
 void MainController::on_state_transition(const FsmState prev, const FsmState next) {
     if (prev == next) return;
 
-    if (next == FsmState::HAZARD_RECOVERY) {
+    // DEAD 只是临时冻结；不要让它打断 HAZARD_RECOVERY 的恢复目标/计时
+    if (next == FsmState::HAZARD_RECOVERY && prev != FsmState::DEAD) {
         recovery_goal_map_ = std::nullopt;
         recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
     }
-    if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY) {
+    if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY && next != FsmState::DEAD) {
         recovery_goal_map_ = std::nullopt;
         recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
     }

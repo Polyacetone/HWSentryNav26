@@ -65,6 +65,7 @@ private:
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
     Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
+    uint8_t chassis_leg_mode_ = 4;
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 };
@@ -331,6 +332,7 @@ void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::Shared
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
     chassis_status_.x() = msg->velocity;
     chassis_status_.y() = msg->omega;
+    chassis_leg_mode_ = msg->leg_mode;
 }
 
 void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -366,6 +368,7 @@ void PathFollowerNode::control_timer_callback() {
     input.global_path = global_path_;
     input.chassis_pose_map = chassis_pose_map;
     input.chassis_status = chassis_status_;
+    input.chassis_leg_mode = chassis_leg_mode_;
     input.spin_requested = (spin_state_ != SpinState::STOP);
     input.spin_high_priority = spin_high_priority_;
     input.spin_slow = (spin_state_ == SpinState::SPIN_SLOW);

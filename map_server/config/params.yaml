@@ -20,9 +20,9 @@
     local_map:
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       cost_map_pub_topic: "/map_server/local_cost_map" # 局部代价地图发布话题名称
-      cloud_accumulate_frames: 3 # 局部点云累积帧数
+      cloud_accumulate_frames: 6 # 局部点云累积帧数
       roi_xy_radius_min: 0.3 # 局部点云感兴趣区域xy平面半径最小值（以lidar为中心），单位m
-      roi_xy_radius_max: 3.0 # 局部点云感兴趣区域xy平面半径最大值（以lidar为中心），单位m
+      roi_xy_radius_max: 4.0 # 局部点云感兴趣区域xy平面半径最大值（以lidar为中心），单位m
       roi_z_max: 1.0 # 局部点云感兴趣区域z轴最大值（以lidar为中心），单位m
       roi_z_min: -1.0 # 局部点云感兴趣区域z轴最小值（以lidar为中心），单位m
       downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m

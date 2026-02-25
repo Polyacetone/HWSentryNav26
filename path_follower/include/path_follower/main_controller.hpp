@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -25,6 +26,9 @@ struct ControlInput {
     // ─── 底盘状态 ───
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();  // (x, y, theta) in map
     Eigen::Vector2d chassis_status = Eigen::Vector2d::Zero();    // (v_act, ω_act)
+
+    // ─── 底盘模式 ───
+    uint8_t chassis_leg_mode = 4;                                // 参考 interfaces/msg/ChassisStatus.msg
 
     // ─── 小陀螺请求 ───
     bool spin_requested = false;
@@ -99,6 +103,7 @@ public:
 
 private:
     // ─── 各状态的执行函数 ───
+    ControlOutput execute_dead(const ControlInput& input);
     ControlOutput execute_idle(const ControlInput& input);
     ControlOutput execute_follow(const ControlInput& input);
     ControlOutput execute_spin(const ControlInput& input);

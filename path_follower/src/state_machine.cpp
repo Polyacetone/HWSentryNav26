@@ -25,6 +25,15 @@ inline NormalDest compute_desired(const FsmInput& in) {
     return NormalDest::IDLE;
 }
 
+inline FsmState desired_to_state(const NormalDest d) {
+    switch (d) {
+        case NormalDest::IDLE: return FsmState::IDLE;
+        case NormalDest::FOLLOW: return FsmState::FOLLOW;
+        case NormalDest::SPIN: return FsmState::SPIN;
+    }
+    return FsmState::IDLE;
+}
+
 // ═════════════════════ 卡住检测器 ═════════════════════
 
 struct StuckMonitor {
@@ -128,6 +137,7 @@ struct StIdle;
 struct StFollow;
 struct StSpin;
 struct StStopping;
+struct StDead;
 struct StHazardRecovery;
 struct StStuckReverse;
 
@@ -148,6 +158,9 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
 
     // ──── Stopping 目的态 ────
     NormalDest stop_dest = NormalDest::IDLE;
+
+    // ──── DEAD 恢复后目标态（尽量恢复到进入前的状态） ────
+    FsmState dead_resume_state = FsmState::IDLE;
 
     // ──── Hazard Recovery 恢复后目标态 ────
     FsmState hazard_resume_state = FsmState::IDLE;
@@ -192,6 +205,12 @@ struct StIdle final : sc::state<StIdle, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
+        if (in.chassis_dead) {
+            m.dead_resume_state = FsmState::IDLE;
+            m.stuck_monitor.reset();
+            return transit<StDead>();
+        }
+
         if (m.params.recovery.enable && in.merged_cost_map && in.global_direction_map) {
             if (HazardLogic::is_pose_hazard(m.params.recovery, *in.merged_cost_map, *in.global_direction_map, in.chassis_pose_map.head<2>())) {
                 m.hazard_resume_state = FsmState::IDLE;
@@ -220,6 +239,12 @@ struct StFollow final : sc::state<StFollow, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
+        if (in.chassis_dead) {
+            m.dead_resume_state = FsmState::FOLLOW;
+            m.stuck_monitor.reset();
+            return transit<StDead>();
+        }
+
         if (m.check_stuck(in)) {
             return transit<StStuckReverse>();
         }
@@ -245,6 +270,12 @@ struct StSpin final : sc::state<StSpin, Machine> {
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
+
+        if (in.chassis_dead) {
+            m.dead_resume_state = FsmState::SPIN;
+            m.stuck_monitor.reset();
+            return transit<StDead>();
+        }
 
         if (m.params.recovery.enable && in.merged_cost_map && in.global_direction_map) {
             if (HazardLogic::is_pose_hazard(m.params.recovery, *in.merged_cost_map, *in.global_direction_map, in.chassis_pose_map.head<2>())) {
@@ -278,6 +309,13 @@ struct StStopping final : sc::state<StStopping, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
+        if (in.chassis_dead) {
+            // STOPPING 属于过渡态：失效恢复后直接回到当下 desired 的正常态即可
+            m.dead_resume_state = desired_to_state(compute_desired(in));
+            m.stuck_monitor.reset();
+            return transit<StDead>();
+        }
+
         if (m.check_stuck(in)) {
             return transit<StStuckReverse>();
         }
@@ -307,6 +345,60 @@ struct StStopping final : sc::state<StStopping, Machine> {
     }
 };
 
+// ─────────────── DEAD ───────────────
+struct StDead final : sc::state<StDead, Machine> {
+    using reactions = sc::custom_reaction<EvUpdate>;
+
+    explicit StDead(my_context ctx) : sc::state<StDead, Machine>(ctx) {
+        auto& m = context<Machine>();
+        m.active_state = FsmState::DEAD;
+        m.stuck_monitor.reset();
+        RCLCPP_WARN(m.logger, "FSM -> DEAD");
+    }
+
+    sc::result react(const EvUpdate& ev) {
+        auto& m = context<Machine>();
+        const auto& in = ev.input;
+
+        if (in.chassis_dead) {
+            // 底盘仍处于失效模式：保持 DEAD
+            return discard_event();
+        }
+
+        // 底盘恢复：优先恢复到进入 DEAD 前的可恢复态；否则回到当下 desired 正常态
+        const auto desired = compute_desired(in);
+        const FsmState desired_state = desired_to_state(desired);
+
+        auto resume = m.dead_resume_state;
+
+        // 不恢复这些“动作型/过渡型”状态，避免恢复瞬间发生倒车/过渡指令
+        if (resume == FsmState::STOPPING || resume == FsmState::STUCK_REVERSE || resume == FsmState::DEAD) {
+            resume = desired_state;
+        }
+
+        // 若恢复态与当前输入不兼容，则退化为 desired
+        if (resume == FsmState::FOLLOW && !in.has_path) {
+            resume = desired_state;
+        }
+        if (resume == FsmState::SPIN) {
+            const bool can_spin = in.spin_high_priority || (!in.has_path);
+            const bool should_spin = in.spin_requested && can_spin;
+            if (!should_spin) resume = desired_state;
+        }
+        if (resume == FsmState::HAZARD_RECOVERY && !m.params.recovery.enable) {
+            resume = desired_state;
+        }
+
+        switch (resume) {
+            case FsmState::HAZARD_RECOVERY: return transit<StHazardRecovery>();
+            case FsmState::FOLLOW: return transit<StFollow>();
+            case FsmState::SPIN: return transit<StSpin>();
+            case FsmState::IDLE: return transit<StIdle>();
+            default: return transit<StIdle>();
+        }
+    }
+};
+
 // ─────────────── HAZARD_RECOVERY ───────────────
 struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
     using reactions = sc::custom_reaction<EvUpdate>;
@@ -322,6 +414,12 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
+
+        if (in.chassis_dead) {
+            m.dead_resume_state = FsmState::HAZARD_RECOVERY;
+            m.stuck_monitor.reset();
+            return transit<StDead>();
+        }
 
         if (m.check_stuck(in)) {
             return transit<StStuckReverse>();
@@ -369,6 +467,13 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
+
+        if (in.chassis_dead) {
+            // 避免恢复瞬间继续倒车：恢复后回到当下 desired 正常态
+            m.dead_resume_state = desired_to_state(compute_desired(in));
+            m.stuck_monitor.reset();
+            return transit<StDead>();
+        }
 
         if (!m.params.stuck.enable) {
             m.output.clear_global_path = true;
