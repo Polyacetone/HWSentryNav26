@@ -27,8 +27,9 @@ struct ControlInput {
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();  // (x, y, theta) in map
     Eigen::Vector2d chassis_status = Eigen::Vector2d::Zero();    // (v_act, ω_act)
 
-    // ─── 底盘模式 ───
-    uint8_t chassis_leg_mode = 4;                                // 参考 interfaces/msg/ChassisStatus.msg
+    // ─── 底盘模式/比赛状态 ───
+    uint8_t chassis_leg_mode = 0;                                // 参考 interfaces/msg/ChassisStatus.msg
+    uint8_t comp_stage = 0;                                      // 参考 interfaces/msg/CompStage.msg
 
     // ─── 小陀螺请求 ───
     bool spin_requested = false;
@@ -135,6 +136,7 @@ private:
     std::optional<Eigen::Vector2d> recovery_goal_map_;
     rclcpp::Time recovery_goal_set_time_{0, 0, RCL_ROS_TIME};
     FsmState last_fsm_state_ = FsmState::IDLE;
+    Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
 };
 
 }

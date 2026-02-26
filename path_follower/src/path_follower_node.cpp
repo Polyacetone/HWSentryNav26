@@ -12,6 +12,7 @@
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
 #include <interfaces/msg/chassis_cmd.hpp>
+#include <interfaces/msg/comp_stage.hpp>
 
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
@@ -48,6 +49,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<interfaces::msg::SpinCmd>::SharedPtr spin_cmd_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
+    rclcpp::Subscription<interfaces::msg::CompStage>::SharedPtr comp_stage_sub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_predicted_path_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
@@ -66,6 +68,7 @@ private:
     std::optional<SplineD> global_path_;
     Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
     uint8_t chassis_leg_mode_ = 4;
+    uint8_t comp_stage_ = 4;
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 };
@@ -300,6 +303,11 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         declare_parameter<std::string>("chassis_status_sub_topic"), 1,
         [this](const interfaces::msg::ChassisStatus::SharedPtr msg) { chassis_status_callback(msg); }
     );
+    
+    comp_stage_sub_ = create_subscription<interfaces::msg::CompStage>(
+        declare_parameter<std::string>("comp_stage_sub_topic"), 1,
+        [this](const interfaces::msg::CompStage::SharedPtr msg) { comp_stage_ = msg->game_progress; }
+    );
 
     spin_cmd_sub_ = create_subscription<interfaces::msg::SpinCmd>(
         declare_parameter<std::string>("spin_cmd_sub_topic"), 1,
@@ -369,6 +377,7 @@ void PathFollowerNode::control_timer_callback() {
     input.chassis_pose_map = chassis_pose_map;
     input.chassis_status = chassis_status_;
     input.chassis_leg_mode = chassis_leg_mode_;
+    input.comp_stage = comp_stage_;
     input.spin_requested = (spin_state_ != SpinState::STOP);
     input.spin_high_priority = spin_high_priority_;
     input.spin_slow = (spin_state_ == SpinState::SPIN_SLOW);

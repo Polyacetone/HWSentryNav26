@@ -29,7 +29,7 @@
       distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
       cost_map_inflation: # 局部代价地图膨胀参数
-        inflation_radius: 1.0 # 代价地图膨胀半径，单位m
+        inflation_radius: 0.8 # 代价地图膨胀半径，单位m
         inscribed_radius: 0.3 # 机器人内切圆半径，单位m
-        cost_scaling_factor: 20.0 # 代价缩放因子
+        cost_scaling_factor: 8.0 # 代价缩放因子
         obstacle_threshold: 100 # 超过该值的格子被视为障碍物

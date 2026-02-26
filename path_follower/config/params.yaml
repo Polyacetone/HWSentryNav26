@@ -4,6 +4,7 @@
     global_direction_map_sub_topic: "/map_server/global_direction_map"
     global_cost_map_sub_topic: "/map_server/global_cost_map"
     local_cost_map_sub_topic: "/map_server/local_cost_map"
+    comp_stage_sub_topic: "/serial_bridge/comp_stage"
     chassis_status_sub_topic: "/serial_bridge/chassis_status"
     spin_cmd_sub_topic: "/decision/spin_cmd"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
@@ -104,7 +105,7 @@
           a_lat_max: 3.5 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights:
           q_goal_xy: 0.2 # 每步目标点吸引（x/y误差）
-          q_goal_theta: 0.0 # 朝向目标点
+          q_goal_theta: 0.1 # 朝向目标点
           r_v: 0.02 # 线速度正则
           r_omega: 0.02 # 角速度正则
           r_dv: 0.04 # 线速度平滑

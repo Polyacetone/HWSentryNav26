@@ -160,6 +160,9 @@ class MPCSolver {
 public:
     explicit MPCSolver(const MPCParams& params);
 
+    void set_last_cmd(const Eigen::Vector2d& cmd);
+    void reset_warm_start();
+
     std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,

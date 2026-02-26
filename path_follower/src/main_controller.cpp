@@ -10,10 +10,10 @@ namespace path_follower {
 
 namespace {
 
-inline bool is_chassis_dead_leg_mode(const uint8_t leg_mode) {
-    // 见 common_sentry_2026/interfaces/msg/serial_bridge/ChassisStatus.msg
-    // 0:Dead, 1:Recovery, 6:Abnormal
-    return leg_mode == 0u || leg_mode == 1u || leg_mode == 6u;
+inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_status) {
+    // leg_mode: 0:死亡, 1:恢复, 6:异常
+    // comp_status: 4:比赛中
+    return leg_mode == 0u || leg_mode == 1u || leg_mode == 6u || comp_status != 4u;
 }
 
 }
@@ -129,13 +129,14 @@ MainController::MainController(
 
 ControlOutput MainController::update(const ControlInput& input) {
     const FsmState prev_state = last_fsm_state_;
+    mpc_controller_->set_last_cmd(last_cmd_);
 
     // 1. 组装 FSM 输入
     FsmInput fsm_input;
     fsm_input.has_path = input.global_path.has_value();
     fsm_input.spin_requested = input.spin_requested;
     fsm_input.spin_high_priority = input.spin_high_priority;
-    fsm_input.chassis_dead = is_chassis_dead_leg_mode(input.chassis_leg_mode);
+    fsm_input.chassis_dead = is_chassis_dead(input.chassis_leg_mode, input.comp_stage);
     fsm_input.velocity = input.chassis_status.x();
     fsm_input.omega = input.chassis_status.y();
     fsm_input.chassis_pose_map = input.chassis_pose_map;
@@ -150,7 +151,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     on_state_transition(prev_state, state);
     last_fsm_state_ = state;
 
-    // 4. 根据 FSM 状态，执行对应的控制逻辑
+    // 3. 根据 FSM 状态，执行对应的控制逻辑
     ControlOutput output;
     switch (state) {
         case FsmState::DEAD: output = execute_dead(input); break;
@@ -165,9 +166,15 @@ ControlOutput MainController::update(const ControlInput& input) {
     output.fsm_state = state;
     output.path_cleared |= fsm_output.clear_global_path;
 
-    // 5. 回调卡住检测
+    // 4. 同步已发布指令到 FSM / MPC，并在非 MPC 状态时重置 MPC 的 warm start
     if (output.valid) {
-        control_fsm_->on_chassis_cmd_published(output.velocity, output.omega, input.stamp);
+        last_cmd_ = Eigen::Vector2d(output.velocity, output.omega);
+        control_fsm_->on_chassis_cmd_published(last_cmd_.x(), last_cmd_.y(), input.stamp);
+        mpc_controller_->set_last_cmd(last_cmd_);
+        const bool non_mpc_state = (state == FsmState::DEAD) || (state == FsmState::IDLE) || (state == FsmState::SPIN) || (state == FsmState::STUCK_REVERSE);
+        if (non_mpc_state) {
+            mpc_controller_->reset_warm_start();
+        }
     }
 
     return output;

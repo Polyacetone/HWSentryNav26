@@ -678,10 +678,10 @@ struct RecoveryMPCCostFunctor {
             residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * dx;
             residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * dy;
 
-            // 2. 朝向目标（不要求台阶对齐）
-            const T theta_goal = ceres::atan2(gy - st.y, gx - st.x);
-            T etheta = wrap_to_pi(st.theta - theta_goal);
-            residuals[res_idx++] = T(params_.recovery_weights.q_goal_theta) * etheta;
+            // 2. 朝向目标（前后朝向均可，使用sin）
+            const T desired_theta = ceres::atan2(gy - st.y, gx - st.x);
+            const T heading_cross_desired = ceres::sin(st.theta - desired_theta);
+            residuals[res_idx++] = T(params_.recovery_weights.q_goal_theta) * ceres::abs(heading_cross_desired);
 
             // 3. 指令正则
             residuals[res_idx++] = T(params_.recovery_weights.r_v) * v_cmd;
@@ -805,6 +805,14 @@ inline double clamp_prev_cmd(
 // ============================================================================
 
 MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
+    last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
+}
+
+void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
+    last_cmd_ = cmd;
+}
+
+void MPCSolver::reset_warm_start() {
     last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
 }
 
