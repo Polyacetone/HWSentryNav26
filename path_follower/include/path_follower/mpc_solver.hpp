@@ -1,29 +1,12 @@
 #pragma once
 
 #include <expected>
-#include <array>
 #include <string>
-#include <cctype>
 #include <Eigen/Dense>
 #include <path_follower/nav_map.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
-
-struct MPCModel {
-    // 离散 MIMO 状态空间模型（用于 MPC 内部预测 v_act/omega_act）
-    // 状态：[ v(k), v(k-1), ..., v(k-n+1),  w(k),  v_cmd_z1=v_cmd(k-1),  w_cmd_z1=w_cmd(k-1) ]
-    // 输入： [ v_cmd(k), w_cmd(k) ]
-    // 输出： [ v_act=v(k), w_act=w(k) ]
-    static constexpr int MAX_V_ORDER = 8;
-
-    int v_order;
-    std::array<double, MAX_V_ORDER> v_ar = {};  // a1..an, 仅使用 [0..v_order)
-    double v_w_coeff;       // v(k+1) 中 w(k) 的系数
-    double v_vcmd_z1_coeff; // v(k+1) 中 v_cmd(k-1) 的系数
-    double w_alpha;         // w(k+1) = alpha*w(k) + beta*w_cmd(k-1)
-    double w_beta;          // w(k+1) = alpha*w(k) + beta*w_cmd(k-1)
-};
 
 struct MPCFollowLimits {
     double vel_max;
@@ -86,6 +69,9 @@ struct MPCStopLimits {
     double vel_step_up;
     double vel_step_down;
     double a_lat_max;
+
+    double step_norm_threshold;
+    double step_norm_transition;
 };
 
 struct MPCStopWeights {
@@ -113,8 +99,10 @@ struct MPCRecoveryLimits {
     double start_omega_cmd_act_diff_max;
     double acc_max;
     double alpha_max;
-
     double a_lat_max;
+
+    double step_norm_threshold;
+    double step_norm_transition;
 };
 
 struct MPCRecoveryWeights {
@@ -142,8 +130,6 @@ struct MPCParams {
     int horizon;
     double dt;
     int max_iterations;
-
-    MPCModel model;
 
     MPCFollowLimits follow_limits;
     MPCFollowWeights follow_weights;

@@ -22,8 +22,9 @@
       collision_check_step: 0.05 # 预测起点直线可达性采样间隔（单位：m）
 
     path_planner:
-      direction_weight: 1.0 # 方向代价权重
-      obstacle_weight: 1.0 # 障碍物代价权重
+      direction_weight: 6.0 # 方向代价权重
+      obstacle_weight: 4.0 # 障碍物代价权重
+      step_weight: 0.6 # 经过台阶惩罚（基于方向场模长），A*专用
       downsampled_waypoint_max_interval: 5 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
       feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
 
@@ -32,7 +33,7 @@
       uniform_speed_weight: 0.2 # 速度均匀代价权重
       obstacle_weight: 6.0 # 障碍物代价权重
       direction_weight: 4.0 # 方向代价权重
-      step_weight: 0.3 # 经过台阶惩罚（基于方向场模长）
+      step_weight: 0.6 # 经过台阶惩罚（基于方向场模长）
       step_norm_threshold: 0.01 # 台阶方向场模长阈值（>=该值视为台阶区域）
       step_norm_transition: 0.05 # smoothstep 过渡宽度（避免硬阈值带来的不稳定）
       start_end_weight: 1000.0 # 起终点保持代价权重

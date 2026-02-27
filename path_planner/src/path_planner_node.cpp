@@ -86,6 +86,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     path_planner_ = std::make_shared<AStarPlanner>(
         declare_parameter<double>("path_planner.direction_weight"),
         declare_parameter<double>("path_planner.obstacle_weight"),
+        declare_parameter<double>("path_planner.step_weight"),
         declare_parameter<int>("path_planner.downsampled_waypoint_max_interval"),
         declare_parameter<int>("path_planner.feasible_threshold")
     );

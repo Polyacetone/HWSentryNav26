@@ -14,6 +14,7 @@ public:
     explicit AStarPlanner(
         const double direction_weight,
         const double obstacle_weight,
+        const double step_weight,                         // penalty for stepping (based on direction field magnitude)
         const int downsampled_waypoint_max_interval,
         const int feasible_threshold
     );
@@ -38,7 +39,7 @@ private:
     const std::vector<Eigen::Vector2i> directions_ = {
         {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
     };
-    const double direction_weight_, obstacle_weight_;
+    const double direction_weight_, obstacle_weight_, step_weight_;
     const int downsampled_waypoint_max_interval_, feasible_threshold_;
 };
 } // namespace path_planner

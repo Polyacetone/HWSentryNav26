@@ -20,11 +20,13 @@ namespace path_planner {
 AStarPlanner::AStarPlanner(
     const double direction_weight,
     const double obstacle_weight,
+    const double step_weight,
     const int downsampled_waypoint_max_interval,
     const int feasible_threshold
 ):
     direction_weight_(direction_weight),
     obstacle_weight_(obstacle_weight),
+    step_weight_(step_weight),
     downsampled_waypoint_max_interval_(downsampled_waypoint_max_interval),
     feasible_threshold_(feasible_threshold) {}
 
@@ -99,8 +101,9 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                     Eigen::Vector2d move_dir = dir.cast<double>().normalized();
                     step_cost = (1 - std::abs(move_dir.dot(step_dir))) * direction_weight_;
                 }
+                double step_penalty = step_dir.norm() * step_weight_;
 
-                const double cost = current->g + dir.norm() + obstacle_cost + step_cost;
+                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty;
                 if (all_fwd[n_key] && all_fwd[n_key]->g <= cost) continue;
                 const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, goal_grid), current);
                 open_fwd.push(neighbor);
@@ -134,8 +137,9 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                     Eigen::Vector2d move_dir = dir.cast<double>().normalized();
                     step_cost = (1 - std::abs(move_dir.dot(step_dir))) * direction_weight_;
                 }
+                double step_penalty = step_dir.norm() * step_weight_;
 
-                const double cost = current->g + dir.norm() + obstacle_cost + step_cost;
+                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty;
                 if (all_bwd[n_key] && all_bwd[n_key]->g <= cost) continue;
                 const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, start_grid), current);
                 open_bwd.push(neighbor);

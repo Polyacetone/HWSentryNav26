@@ -145,6 +145,21 @@ inline double estimate_remaining_arclength(
 // ============================================================================
 
 namespace {
+constexpr int MODEL_NX = 5;
+constexpr double SGN_EPS = 0.05;
+constexpr double CF1 = 0.0458085153424462;
+constexpr double CF2 = -0.12171850144629534;
+constexpr double CF3 = -0.018544239394365794;
+constexpr double XH0 = 0.07563204163396076;
+constexpr double A00 = 0.829168;
+constexpr double A01 = -0.044388;
+constexpr double A03 = 0.050302;
+constexpr double A10 = 1.095902;
+constexpr double A11 = 0.943339;
+constexpr double A13 = 0.008339;
+constexpr double A22 = -0.110976;
+constexpr double A24 = 1.110976;
+
 template<typename T>
 inline T wrap_to_pi(const T& a) {
     return ceres::atan2(ceres::sin(a), ceres::cos(a));
@@ -155,65 +170,70 @@ struct PredictorState {
     T x, y, theta;
     T v_act, omega_act;
 
-    // 模型内部状态
-    std::array<T, MPCModel::MAX_V_ORDER> v_hist; // v(k), v(k-1), ...
-    T w_state;  // w(k)
-    T v_cmd_z1; // v_cmd(k-1)
-    T w_cmd_z1; // w_cmd(k-1)
+    // greybox 模型内部状态 x = [x_h, v_act, w_act, dv, dw]
+    Eigen::Matrix<T, MODEL_NX, 1> x_model;
 };
 
 template<typename T>
 inline void model_init(
-    const MPCModel& model,
     PredictorState<T>& st,
     const T& v_meas,
     const T& w_meas,
     const T& v_cmd_prev,
     const T& w_cmd_prev
 ) {
-    for (int i = 0; i < MPCModel::MAX_V_ORDER; i++) {
-        st.v_hist[static_cast<size_t>(i)] = v_meas;
-    }
-    st.w_state = w_meas;
-    st.v_cmd_z1 = v_cmd_prev;
-    st.w_cmd_z1 = w_cmd_prev;
+    st.x_model.setZero();
+    st.x_model(0) = T(XH0);
+    st.x_model(1) = v_meas;
+    st.x_model(2) = w_meas;
+    st.x_model(3) = v_cmd_prev; // dv = v_cmd[k-1]
+    st.x_model(4) = w_cmd_prev; // dw = w_cmd[k-1]
+
     st.v_act = v_meas;
     st.omega_act = w_meas;
-    (void)model; // 当前模型参数不影响初始状态
+}
+
+template<typename T>
+inline T smooth_sgn(const T& x, const double eps) {
+    const T e = ceres::fmax(T(1e-6), T(eps));
+    return ceres::tanh(x / e);
 }
 
 template<typename T>
 inline void model_step(
-    const MPCModel& model,
     PredictorState<T>& st,
+    const double dt,
     const T& v_cmd,
     const T& w_cmd
 ) {
-    // v(k+1) = sum_i a_i * v(k-i) + b_w*w(k) + b_u*v_cmd(k-1)
-    T v_next = T(0.0);
-    const int n = std::max(1, std::min(model.v_order, MPCModel::MAX_V_ORDER));
-    for (int i = 0; i < n; i++) {
-        v_next += T(model.v_ar[static_cast<size_t>(i)]) * st.v_hist[static_cast<size_t>(i)];
-    }
-    v_next += T(model.v_w_coeff) * st.w_state;
-    v_next += T(model.v_vcmd_z1_coeff) * st.v_cmd_z1;
+    const T xh = st.x_model(0);
+    const T v = st.x_model(1);
+    const T w = st.x_model(2);
+    const T dv = st.x_model(3);
+    const T dw = st.x_model(4);
 
-    // w(k+1) = alpha*w(k) + beta*w_cmd(k-1)
-    const T w_next = T(model.w_alpha) * st.w_state + T(model.w_beta) * st.w_cmd_z1;
+    T xh_next = T(A00) * xh + T(A01) * v + T(A03) * dv;
+    T v_next = T(A10) * xh + T(A11) * v + T(A13) * dv;
+    T w_next = T(A22) * w + T(A24) * dw;
+    const T dv_next = v_cmd;
+    const T dw_next = w_cmd;
 
-    // v_hist[1] <- v_hist[0] ...
-    for (int i = n - 1; i >= 1; i--) {
-        st.v_hist[static_cast<size_t>(i)] = st.v_hist[static_cast<size_t>(i - 1)];
-    }
-    st.v_hist[0] = v_next;
-    st.w_state = w_next;
+    // 非线性补偿：使用当前步的 (v,w)（即 x_model 中的 v_act/w_act）
+    const T sv = smooth_sgn(v, SGN_EPS);
+    const T sw = smooth_sgn(w, SGN_EPS);
 
-    // 输入延迟
-    st.v_cmd_z1 = v_cmd;
-    st.w_cmd_z1 = w_cmd;
+    v_next += dt * (T(CF1) * sv + T(CF2) * v * ceres::abs(w));
+    w_next += dt * (-T(CF3) * sw);
 
-    st.v_act = st.v_hist[0];
-    st.omega_act = st.w_state;
+    st.x_model(0) = xh_next;
+    st.x_model(1) = v_next;
+    st.x_model(2) = w_next;
+    st.x_model(3) = dv_next;
+    st.x_model(4) = dw_next;
+
+    // y = [v_act, w_act]
+    st.v_act = v_next;
+    st.omega_act = w_next;
 }
 
 template<typename T>
@@ -237,7 +257,7 @@ inline void prediction_step(
     const T w0 = st.omega_act;
 
     // 先更新执行器动态，再用 v_act/omega_act 推进位姿
-    model_step(params.model, st, v_cmd, omega_cmd);
+    model_step(st, params.dt, v_cmd, omega_cmd);
 
     const T v1 = st.v_act;
     const T w1 = st.omega_act;
@@ -358,7 +378,6 @@ struct FollowMPCCostFunctor {
         );
 
         model_init(
-            params_.model,
             st,
             T(start_status_.x()),
             T(start_status_.y()),
@@ -531,7 +550,6 @@ struct StopMPCCostFunctor {
         );
 
         model_init(
-            params_.model,
             st,
             T(start_status_.x()),
             T(start_status_.y()),
@@ -572,16 +590,23 @@ struct StopMPCCostFunctor {
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const auto dir_unit = dir / dir_norm;
 
+            // 方向场在非台阶区域可能存在小噪声。用 step_norm_threshold 做门控，避免“停止模式”在接近 0 速度时被拉回一个小正速度。
+            const T step_gate = smoothstep(
+                dir_norm,
+                T(params_.stop_limits.step_norm_threshold),
+                T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
+            );
+
             // 台阶方向对齐
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-            residuals[res_idx++] = T(params_.follow_weights.direction) * ceres::abs(heading_cross_dir);
+            residuals[res_idx++] = T(params_.stop_weights.direction) * step_gate * ceres::abs(heading_cross_dir);
 
             // 台阶区域速度保持
             const T cos_theta = heading.dot(dir_unit);
             const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
-            const T target_vel_step = weight_up * T(params_.follow_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.follow_limits.vel_step_down);
-            residuals[res_idx++] = T(params_.follow_weights.vel_on_step) * dir_norm * ceres::abs(st.v_act - target_vel_step);
+            const T target_vel_step = weight_up * T(params_.stop_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.stop_limits.vel_step_down);
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step) * step_gate * dir_norm * ceres::abs(st.v_act - target_vel_step);
             
             last_v_cmd = v_cmd;
             last_omega_cmd = omega_cmd;
@@ -594,8 +619,8 @@ struct StopMPCCostFunctor {
         const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
         const T step_gate = smoothstep(
             dir_norm,
-            T(params_.follow_limits.step_norm_threshold),
-            T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
+            T(params_.stop_limits.step_norm_threshold),
+            T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
         );
         residuals[res_idx++] = T(params_.stop_weights.step_terminal) * step_gate;
 
@@ -651,7 +676,6 @@ struct RecoveryMPCCostFunctor {
         );
 
         model_init(
-            params_.model,
             st,
             T(start_status_.x()),
             T(start_status_.y()),
@@ -710,8 +734,8 @@ struct RecoveryMPCCostFunctor {
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T step_gate = smoothstep(
                 dir_norm,
-                T(params_.follow_limits.step_norm_threshold),
-                T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
+                T(params_.recovery_limits.step_norm_threshold),
+                T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
             );
             residuals[res_idx++] = T(params_.recovery_weights.step) * step_gate;
 
@@ -732,8 +756,8 @@ struct RecoveryMPCCostFunctor {
         const T dir_normT = ceres::sqrt(dirT.squaredNorm() + T(1e-10));
         const T step_gateT = smoothstep(
             dir_normT,
-            T(params_.follow_limits.step_norm_threshold),
-            T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
+            T(params_.recovery_limits.step_norm_threshold),
+            T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
         );
         residuals[res_idx++] = T(params_.recovery_weights.step_terminal) * step_gateT;
 
@@ -765,7 +789,6 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     st.theta = chassis_pose_map.z();
 
     model_init(
-        params.model,
         st,
         chassis_status.x(),
         chassis_status.y(),

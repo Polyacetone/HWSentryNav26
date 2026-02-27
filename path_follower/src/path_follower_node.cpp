@@ -87,38 +87,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     }
 
     // ─── MPC 参数加载 ───
-    const int horizon = static_cast<int>(declare_parameter<int>("mpc.general.horizon"));
-    const double mpc_dt = declare_parameter<double>("mpc.general.dt");
-    const int max_iterations = static_cast<int>(declare_parameter<int>("mpc.general.max_iterations"));
-
-    // ─── 系统辨识执行器模型（离散） ───
-    MPCModel model;
-    model.v_order = static_cast<int>(declare_parameter<int>("mpc.model.v_order"));
-    const auto v_ar = declare_parameter<std::vector<double>>("mpc.model.v_ar");
-    model.v_w_coeff = declare_parameter<double>("mpc.model.v_w_coeff");
-    model.v_vcmd_z1_coeff = declare_parameter<double>("mpc.model.v_vcmd_z1_coeff");
-    model.w_alpha = declare_parameter<double>("mpc.model.w_alpha");
-    model.w_beta = declare_parameter<double>("mpc.model.w_beta");
-    if (model.v_order <= 0 || model.v_order > MPCModel::MAX_V_ORDER) {
-        RCLCPP_FATAL(get_logger(), "mpc.model.v_order must be in [1,%d], got %d", MPCModel::MAX_V_ORDER, model.v_order);
-        throw std::runtime_error("Invalid mpc.model.v_order");
-    }
-    if (v_ar.size() != static_cast<size_t>(model.v_order)) {
-        RCLCPP_FATAL(get_logger(), "mpc.model.v_ar size %zu != v_order %d", v_ar.size(), model.v_order);
-        throw std::runtime_error("Invalid mpc.model.v_ar");
-    }
-    for (int i = 0; i < MPCModel::MAX_V_ORDER; i++) {
-        model.v_ar[static_cast<size_t>(i)] = 0.0;
-    }
-    for (int i = 0; i < model.v_order; i++) {
-        model.v_ar[static_cast<size_t>(i)] = v_ar[static_cast<size_t>(i)];
-    }
-
     MPCParams mpc_params = {
-        .horizon = horizon,
-        .dt = mpc_dt,
-        .max_iterations = max_iterations,
-        .model = model,
+        .horizon = static_cast<int>(declare_parameter<int>("mpc.general.horizon")),
+        .dt = declare_parameter<double>("mpc.general.dt"),
+        .max_iterations = static_cast<int>(declare_parameter<int>("mpc.general.max_iterations")),
         .follow_limits = {
             .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
             .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
@@ -168,7 +140,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .alpha_max = declare_parameter<double>("mpc.stop.limits.alpha_max"),
             .vel_step_up = declare_parameter<double>("mpc.stop.limits.vel_step_up"),
             .vel_step_down = declare_parameter<double>("mpc.stop.limits.vel_step_down"),
-            .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max")
+            .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max"),
+            .step_norm_threshold = declare_parameter<double>("mpc.stop.limits.step_norm_threshold"),
+            .step_norm_transition = declare_parameter<double>("mpc.stop.limits.step_norm_transition")
         },
         .stop_weights = {
             .q_v = declare_parameter<double>("mpc.stop.weights.q_v"),
@@ -191,7 +165,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.recovery.limits.start_omega_cmd_act_diff_max"),
             .acc_max = declare_parameter<double>("mpc.recovery.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.recovery.limits.alpha_max"),
-            .a_lat_max = declare_parameter<double>("mpc.recovery.limits.a_lat_max")
+            .a_lat_max = declare_parameter<double>("mpc.recovery.limits.a_lat_max"),
+            .step_norm_threshold = declare_parameter<double>("mpc.recovery.limits.step_norm_threshold"),
+            .step_norm_transition = declare_parameter<double>("mpc.recovery.limits.step_norm_transition")
         },
         .recovery_weights = {
             .q_goal_xy = declare_parameter<double>("mpc.recovery.weights.q_goal_xy"),
