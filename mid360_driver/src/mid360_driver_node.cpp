@@ -12,7 +12,6 @@ namespace mid360_driver {
         if (!is_init) {
             pointcloud_publisher = node.create_publisher<sensor_msgs::msg::PointCloud2>(lidar_topic, 1000);
             imu_publisher = node.create_publisher<sensor_msgs::msg::Imu>(imu_topic, 1000);
-            filter_distance = node.declare_parameter<double>("filter_distance");
             is_init = true;
         }
     }
@@ -31,19 +30,13 @@ namespace mid360_driver {
             lidar_ip_str.append(std::to_string(static_cast<int>(lidar_ip_bytes[3])));
             pointcloud_publisher = node.create_publisher<sensor_msgs::msg::PointCloud2>(lidar_topic + lidar_ip_str, 1000);
             imu_publisher = node.create_publisher<sensor_msgs::msg::Imu>(imu_topic + lidar_ip_str, 1000);
-            filter_distance = node.declare_parameter<double>("filter_distance");
             is_init = true;
         }
     }
 
     void LidarPublisher::on_receive_pointcloud(const std::vector<Point> &points) {
         points_wait_to_publish.reserve(points_wait_to_publish.size() + points.size());
-        std::copy_if(points.begin(), points.end(), std::back_inserter(points_wait_to_publish),
-            [this](const Point &point) {
-                const double distance = std::hypot(point.x, point.y, point.z);
-                return distance >= filter_distance;
-            }
-        );
+        std::copy(points.begin(), points.end(), std::back_inserter(points_wait_to_publish));
     }
 
     void LidarPublisher::on_receive_imu(const ImuMsg &imu_msg) {

@@ -230,6 +230,14 @@ class PolynomialFit:
             + coeffs[9] * y**3
         )
 
+    # 前馈力矩多项式系数 u_d(l_l, l_r)  [4][10]
+    U_D_POLY = np.array([
+        [-0.356311,0.039795,0.039795,0.006540,-0.018493,0.006540,-0.001946,0.001525,0.001525,-0.001946],
+        [-0.356311,0.039795,0.039795,0.006540,-0.018493,0.006540,-0.001946,0.001525,0.001525,-0.001946],
+        [-0.708068,-0.025755,-0.025755,0.010758,-0.011525,0.010758,-0.000669,-0.000140,-0.000140,-0.000669],
+        [-0.708068,-0.025755,-0.025755,0.010758,-0.011525,0.010758,-0.000669,-0.000140,-0.000140,-0.000669],
+    ])
+
     @classmethod
     def get_K_matrix(cls, l_l: float, l_r: float) -> np.ndarray:
         K = np.zeros((4, 10))
@@ -237,6 +245,14 @@ class PolynomialFit:
             for j in range(10):
                 K[i, j] = cls.eval_poly33(cls.K_LQR_POLY[i, j], l_l, l_r)
         return K
+
+    @classmethod
+    def get_u_d(cls, l_l: float, l_r: float) -> np.ndarray:
+        """计算前馈力矩 u_d(l_l, l_r)，对应平衡点处的控制输入。"""
+        u_d = np.zeros(4)
+        for i in range(4):
+            u_d[i] = cls.eval_poly33(cls.U_D_POLY[i], l_l, l_r)
+        return u_d
 
 
 # =============================================================================
@@ -266,6 +282,7 @@ class WheelLegDynamics:
         self._cached_A: Optional[np.ndarray] = None
         self._cached_B: Optional[np.ndarray] = None
         self._cached_K: Optional[np.ndarray] = None
+        self._cached_u_d: Optional[np.ndarray] = None
 
     def reset(self, x: float, y: float, theta: float):
         self.state = np.zeros(10)
@@ -279,6 +296,7 @@ class WheelLegDynamics:
             self._cached_A = self._compute_A_matrix(l_l, l_r)
             self._cached_B = self._compute_B_matrix(l_l, l_r)
             self._cached_K = PolynomialFit.get_K_matrix(l_l, l_r)
+            self._cached_u_d = PolynomialFit.get_u_d(l_l, l_r)
 
     def _compute_A_matrix(self, l_l: float, l_r: float) -> np.ndarray:
         """计算状态空间A矩阵"""
@@ -409,6 +427,7 @@ class WheelLegDynamics:
         assert self._cached_A is not None
         assert self._cached_B is not None
         assert self._cached_K is not None
+        assert self._cached_u_d is not None
 
         x_ref = np.zeros(10)
         x_ref[self.IDX_S] = float(s_ref)
@@ -419,7 +438,7 @@ class WheelLegDynamics:
         x_err = self.state - x_ref
         x_err[self.IDX_PHI] = angle_diff(float(self.state[self.IDX_PHI]), float(theta_ref))
 
-        u = -self._cached_K @ x_err
+        u = -self._cached_K @ x_err + self._cached_u_d
 
         # 扰动叠加 + 限幅
         u = u + u_disturb

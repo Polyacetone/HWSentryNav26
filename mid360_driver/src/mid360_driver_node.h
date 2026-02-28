@@ -25,7 +25,6 @@ namespace mid360_driver {
         bool is_init = false;
         std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pointcloud_publisher;
         std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Imu>> imu_publisher;
-        double filter_distance;
 
     public:
         LidarPublisher() = default;

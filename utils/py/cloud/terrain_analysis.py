@@ -1,12 +1,266 @@
 import numpy as np
 import open3d as o3d
 import cv2
+import os
 import matplotlib.pyplot as plt
-from sklearn.cluster import KMeans
-from scipy.spatial import cKDTree
-import warnings
+import numba as nb
 
-warnings.filterwarnings('ignore')
+
+@nb.njit(parallel=True, fastmath=True, cache=True)
+def _classify_normals_numba(normals, ground_thr, slope_thr, label_ground, label_slope, label_obstacle):
+    n = normals.shape[0]
+    labels = np.empty(n, dtype=np.int32)
+    candidate = np.empty(n, dtype=np.uint8)
+
+    for i in nb.prange(n):
+        nz = normals[i, 2]
+        if nz < 0.0:
+            nz = -nz
+        if nz > 1.0:
+            nz = 1.0
+        theta = np.arccos(nz)
+
+        if theta <= ground_thr:
+            labels[i] = label_ground
+            candidate[i] = 0
+        elif theta <= slope_thr:
+            labels[i] = label_slope
+            candidate[i] = 0
+        else:
+            labels[i] = label_obstacle
+            candidate[i] = 1
+
+    return labels, candidate
+
+
+@nb.njit(cache=True)
+def _build_grid_csr_numba(px, py, min_x, min_y, cell_size, grid_w, grid_h):
+    n = px.shape[0]
+    n_cells = grid_w * grid_h
+    counts = np.zeros(n_cells, dtype=np.int32)
+
+    for i in range(n):
+        cx = int((px[i] - min_x) / cell_size)
+        cy = int((py[i] - min_y) / cell_size)
+        if cx < 0:
+            cx = 0
+        elif cx >= grid_w:
+            cx = grid_w - 1
+        if cy < 0:
+            cy = 0
+        elif cy >= grid_h:
+            cy = grid_h - 1
+        cell = cy * grid_w + cx
+        counts[cell] += 1
+
+    offsets = np.empty(n_cells + 1, dtype=np.int32)
+    offsets[0] = 0
+    for c in range(n_cells):
+        offsets[c + 1] = offsets[c] + counts[c]
+
+    cursor = offsets[:-1].copy()
+    indices = np.empty(n, dtype=np.int32)
+    for i in range(n):
+        cx = int((px[i] - min_x) / cell_size)
+        cy = int((py[i] - min_y) / cell_size)
+        if cx < 0:
+            cx = 0
+        elif cx >= grid_w:
+            cx = grid_w - 1
+        if cy < 0:
+            cy = 0
+        elif cy >= grid_h:
+            cy = grid_h - 1
+        cell = cy * grid_w + cx
+
+        pos = cursor[cell]
+        indices[pos] = i
+        cursor[cell] = pos + 1
+
+    return offsets, indices
+
+
+@nb.njit(parallel=True, fastmath=True, cache=True)
+def _analyze_candidates_numba(
+    points,
+    candidate_indices,
+    cell_offsets,
+    cell_indices,
+    min_x,
+    min_y,
+    cell_size,
+    grid_w,
+    grid_h,
+    neighbor_r2,
+    min_pts,
+    step_min_h,
+    step_max_h,
+    label_step,
+    label_obstacle,
+    refined_labels_out,
+    step_vectors_out,
+):
+    n_candidates = candidate_indices.shape[0]
+    radius = np.sqrt(neighbor_r2)
+    r_cells = int(np.ceil(radius / cell_size))
+    if r_cells < 1:
+        r_cells = 1
+
+    for k in nb.prange(n_candidates):
+        idx = candidate_indices[k]
+        qx = points[idx, 0]
+        qy = points[idx, 1]
+
+        cx = int((qx - min_x) / cell_size)
+        cy = int((qy - min_y) / cell_size)
+        if cx < 0:
+            cx = 0
+        elif cx >= grid_w:
+            cx = grid_w - 1
+        if cy < 0:
+            cy = 0
+        elif cy >= grid_h:
+            cy = grid_h - 1
+
+        n_nb = 0
+        z_min = 1e9
+        z_max = -1e9
+
+        x0 = cx - r_cells
+        x1 = cx + r_cells
+        y0 = cy - r_cells
+        y1 = cy + r_cells
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 >= grid_w:
+            x1 = grid_w - 1
+        if y1 >= grid_h:
+            y1 = grid_h - 1
+
+        for yy in range(y0, y1 + 1):
+            base = yy * grid_w
+            for xx in range(x0, x1 + 1):
+                cell = base + xx
+                start = cell_offsets[cell]
+                end = cell_offsets[cell + 1]
+                for ppos in range(start, end):
+                    j = cell_indices[ppos]
+                    dx = points[j, 0] - qx
+                    dy = points[j, 1] - qy
+                    d2 = dx * dx + dy * dy
+                    if d2 <= neighbor_r2:
+                        n_nb += 1
+                        z = points[j, 2]
+                        if z < z_min:
+                            z_min = z
+                        if z > z_max:
+                            z_max = z
+
+        if n_nb < min_pts * 2:
+            refined_labels_out[idx] = label_obstacle
+            continue
+
+        if (z_max - z_min) < step_min_h:
+            refined_labels_out[idx] = label_obstacle
+            continue
+
+        m_low = z_min
+        m_high = z_max
+
+        for _ in range(4):
+            t = 0.5 * (m_low + m_high)
+            sum_low = 0.0
+            sum_high = 0.0
+            cnt_low = 0
+            cnt_high = 0
+
+            for yy in range(y0, y1 + 1):
+                base = yy * grid_w
+                for xx in range(x0, x1 + 1):
+                    cell = base + xx
+                    start = cell_offsets[cell]
+                    end = cell_offsets[cell + 1]
+                    for ppos in range(start, end):
+                        j = cell_indices[ppos]
+                        dx = points[j, 0] - qx
+                        dy = points[j, 1] - qy
+                        d2 = dx * dx + dy * dy
+                        if d2 <= neighbor_r2:
+                            z = points[j, 2]
+                            if z < t:
+                                sum_low += z
+                                cnt_low += 1
+                            else:
+                                sum_high += z
+                                cnt_high += 1
+
+            if cnt_low == 0 or cnt_high == 0:
+                break
+            m_low = sum_low / cnt_low
+            m_high = sum_high / cnt_high
+
+        if m_high < m_low:
+            tmp = m_low
+            m_low = m_high
+            m_high = tmp
+
+        height_diff = m_high - m_low
+        t = 0.5 * (m_low + m_high)
+
+        sum_low_x = 0.0
+        sum_low_y = 0.0
+        sum_high_x = 0.0
+        sum_high_y = 0.0
+        cnt_low = 0
+        cnt_high = 0
+
+        for yy in range(y0, y1 + 1):
+            base = yy * grid_w
+            for xx in range(x0, x1 + 1):
+                cell = base + xx
+                start = cell_offsets[cell]
+                end = cell_offsets[cell + 1]
+                for ppos in range(start, end):
+                    j = cell_indices[ppos]
+                    dx = points[j, 0] - qx
+                    dy = points[j, 1] - qy
+                    d2 = dx * dx + dy * dy
+                    if d2 <= neighbor_r2:
+                        z = points[j, 2]
+                        if z < t:
+                            sum_low_x += points[j, 0]
+                            sum_low_y += points[j, 1]
+                            cnt_low += 1
+                        else:
+                            sum_high_x += points[j, 0]
+                            sum_high_y += points[j, 1]
+                            cnt_high += 1
+
+        if (
+            height_diff >= step_min_h
+            and height_diff <= step_max_h
+            and cnt_low >= min_pts
+            and cnt_high >= min_pts
+        ):
+            refined_labels_out[idx] = label_step
+            cx_low = sum_low_x / cnt_low
+            cy_low = sum_low_y / cnt_low
+            cx_high = sum_high_x / cnt_high
+            cy_high = sum_high_y / cnt_high
+
+            vx = cx_high - cx_low
+            vy = cy_high - cy_low
+            nrm = np.sqrt(vx * vx + vy * vy)
+            if nrm > 1e-6:
+                step_vectors_out[idx, 0] = vx / nrm
+                step_vectors_out[idx, 1] = vy / nrm
+            else:
+                step_vectors_out[idx, 0] = 0.0
+                step_vectors_out[idx, 1] = 0.0
+        else:
+            refined_labels_out[idx] = label_obstacle
 
 class TerrainAnalyzer:
     def __init__(self, 
@@ -58,110 +312,69 @@ class TerrainAnalyzer:
         return pcd
     
     def classify_by_normals(self, pcd):
-        """基于法向量倾角进行初步分类"""
-        points = np.asarray(pcd.points)
-        normals = np.asarray(pcd.normals)
-        
-        cos_theta = np.abs(normals[:, 2])
-        theta = np.arccos(np.clip(cos_theta, -1.0, 1.0))
-        
-        labels = np.full(len(points), self.LABEL_OBSTACLE, dtype=int)
-        
-        ground_mask = theta <= self.ground_angle_threshold
-        labels[ground_mask] = self.LABEL_GROUND
-        
-        slope_mask = (theta > self.ground_angle_threshold) & \
-                     (theta <= self.slope_angle_threshold)
-        labels[slope_mask] = self.LABEL_SLOPE
-        
-        candidate_mask = theta > self.slope_angle_threshold
-        labels[candidate_mask] = self.LABEL_OBSTACLE 
-        
-        return labels, candidate_mask
+        """基于法向量倾角进行初步分类（Numba 加速）"""
+        normals = np.asarray(pcd.normals, dtype=np.float32)
+        labels, candidate_mask_u8 = _classify_normals_numba(
+            normals,
+            float(self.ground_angle_threshold),
+            float(self.slope_angle_threshold),
+            self.LABEL_GROUND,
+            self.LABEL_SLOPE,
+            self.LABEL_OBSTACLE,
+        )
+        return labels, candidate_mask_u8.astype(bool)
     
     def analyze_candidate_region(self, points, candidate_indices):
-        """
-        对候选区域进行邻域分层分析，并计算台阶向量。
-        Returns:
-            refined_labels: 修正后的标签
-            step_vectors: 对应的台阶方向向量 (N, 2)，非台阶点为(0,0)
-        """
-        refined_labels = np.full(len(points), -1, dtype=int)
-        step_vectors = np.zeros((len(points), 2), dtype=float) # 存储 dx, dy
+        """候选区域邻域分析 + 台阶向量（Numba 并行加速）。"""
+        n_points = points.shape[0]
+        refined_labels = np.full(n_points, -1, dtype=np.int32)
+        step_vectors = np.zeros((n_points, 2), dtype=np.float32)
 
-        if len(candidate_indices) == 0:
+        if candidate_indices.size == 0:
             return refined_labels, step_vectors
-        
-        tree = cKDTree(points[:, :2])
-        
-        num_completed = 0
-        total_candidates = len(candidate_indices)
-        
-        for idx in candidate_indices:
-            num_completed += 1
-            if num_completed % 500 == 0:
-                print(f"分析进度: {round(num_completed / total_candidates * 100, 1)}% ({num_completed}/{total_candidates})")
-            
-            # 获取邻域点
-            query_point = points[idx, :2]
-            indices = tree.query_ball_point(query_point, self.neighbor_radius)
-            
-            if len(indices) < self.min_points_per_cluster * 2:
-                refined_labels[idx] = self.LABEL_OBSTACLE
-                continue
-            
-            neighbor_z = points[indices, 2]
-            neighbor_xy = points[indices, :2]
-            
-            try:
-                # K-Means 聚类高度 (Z轴)
-                kmeans = KMeans(n_clusters=2, n_init=5, random_state=42)
-                clusters = kmeans.fit_predict(neighbor_z.reshape(-1, 1))
-                centers = kmeans.cluster_centers_.flatten()
-                
-                # 确定哪个簇更高
-                if centers[0] > centers[1]:
-                    high_idx = 0
-                    low_idx = 1
-                else:
-                    high_idx = 1
-                    low_idx = 0
-                
-                height_diff = abs(centers[0] - centers[1])
-                
-                cluster_high_count = np.sum(clusters == high_idx)
-                cluster_low_count = np.sum(clusters == low_idx)
-                
-                # 判断是否为台阶
-                if (self.step_min_height <= height_diff <= self.step_max_height and
-                    cluster_high_count >= self.min_points_per_cluster and
-                    cluster_low_count >= self.min_points_per_cluster):
-                    
-                    refined_labels[idx] = self.LABEL_STEP
-                    
-                    # === 新增：计算台阶向量 ===
-                    # 获取高处点集和低处点集的重心 (XY平面)
-                    high_points_xy = neighbor_xy[clusters == high_idx]
-                    low_points_xy = neighbor_xy[clusters == low_idx]
-                    
-                    center_high_xy = np.mean(high_points_xy, axis=0)
-                    center_low_xy = np.mean(low_points_xy, axis=0)
-                    
-                    # 向量方向：从低处指向高处 (Ascending direction)
-                    vec = center_high_xy - center_low_xy
-                    norm = np.linalg.norm(vec)
-                    
-                    if norm > 1e-6:
-                        step_vectors[idx] = vec / norm # 归一化
-                    else:
-                        step_vectors[idx] = [0, 0]
-                        
-                else:
-                    refined_labels[idx] = self.LABEL_OBSTACLE
-                    
-            except Exception:
-                refined_labels[idx] = self.LABEL_OBSTACLE
-        
+
+        points_f32 = np.asarray(points, dtype=np.float32)
+        candidate_indices_i64 = np.asarray(candidate_indices, dtype=np.int64)
+
+        # 用 2D 栅格哈希替代 KDTree：构建 cell -> point indices 的 CSR 结构
+        min_xy = np.min(points_f32[:, :2], axis=0)
+        max_xy = np.max(points_f32[:, :2], axis=0)
+
+        cell_size = float(self.neighbor_radius)
+        grid_w = int(np.floor((max_xy[0] - min_xy[0]) / cell_size)) + 1
+        grid_h = int(np.floor((max_xy[1] - min_xy[1]) / cell_size)) + 1
+
+        cell_offsets, cell_indices = _build_grid_csr_numba(
+            points_f32[:, 0],
+            points_f32[:, 1],
+            float(min_xy[0]),
+            float(min_xy[1]),
+            float(cell_size),
+            grid_w,
+            grid_h,
+        )
+
+        neighbor_r2 = float(self.neighbor_radius * self.neighbor_radius)
+        _analyze_candidates_numba(
+            points_f32,
+            candidate_indices_i64,
+            cell_offsets,
+            cell_indices,
+            float(min_xy[0]),
+            float(min_xy[1]),
+            float(cell_size),
+            grid_w,
+            grid_h,
+            neighbor_r2,
+            int(self.min_points_per_cluster),
+            float(self.step_min_height),
+            float(self.step_max_height),
+            int(self.LABEL_STEP),
+            int(self.LABEL_OBSTACLE),
+            refined_labels,
+            step_vectors,
+        )
+
         return refined_labels, step_vectors
 
     def generate_navigation_map(self, points, labels, step_vectors):
@@ -172,50 +385,29 @@ class TerrainAnalyzer:
         B: 台阶 X 方向分量 (映射到 1-255)
         """
         # 1. 计算地图边界和尺寸
-        min_xy = [0, 0]
+        min_xy = np.min(points[:, :2], axis=0)
         max_xy = np.max(points[:, :2], axis=0)
-        
-        width = int(np.ceil((max_xy[0] - min_xy[0]) / self.map_resolution))
-        height = int(np.ceil((max_xy[1] - min_xy[1]) / self.map_resolution))
+
+        width = int(np.ceil((max_xy[0] - min_xy[0]) / self.map_resolution)) + 1
+        height = int(np.ceil((max_xy[1] - min_xy[1]) / self.map_resolution)) + 1
         
         print(f"地图尺寸: {width} x {height}")
         
         # 初始化图像 (H, W, 3) - OpenCV 格式
-        # grid_accumulators 用于累积同一个栅格内的向量，取平均值
         nav_map = np.zeros((height, width, 3), dtype=np.uint8)
-        
-        # 临时存储用于平均向量的数据
-        vec_accum = np.zeros((height, width, 2), dtype=float)
-        vec_count = np.zeros((height, width), dtype=float)
-        
-        # 障碍物临时掩码
-        obstacle_mask = np.zeros((height, width), dtype=np.uint8)
-        
-        # 2. 栅格化点云数据
-        for i, point in enumerate(points):
-            # 坐标转换：World -> Image Pixel
-            # img_x 对应 B 通道 (X向量), img_y 对应 G 通道 (Y向量)
-            # 注意：图像坐标系通常 y 轴向下，地图通常 y 轴向上。
-            # 这里我们做一个简单的平移缩放，保持 map_y 与 world_y 方向一致（可视化的习惯），
-            # 或者将其翻转。为了路径规划方便，通常保持物理坐标系方向一致，即 origin='lower'。
-            # 但 OpenCV 图像索引是 (row, col)，即 (y, x)。
-            
-            x_idx = int((point[0] - min_xy[0]) / self.map_resolution)
-            y_idx = int((point[1] - min_xy[1]) / self.map_resolution)
-            
-            if x_idx < 0 or x_idx >= width or y_idx < 0 or y_idx >= height:
-                continue
-            
-            label = labels[i]
-            
-            if label == self.LABEL_OBSTACLE:
-                obstacle_mask[y_idx, x_idx] = 255
-            
-            elif label == self.LABEL_STEP:
-                vec = step_vectors[i]
-                if abs(vec[0]) > 0 or abs(vec[1]) > 0:
-                    vec_accum[y_idx, x_idx] += vec
-                    vec_count[y_idx, x_idx] += 1
+        # 2. 栅格化点云数据（用 bincount 聚合，避免 Python 循环）
+        x_idx = ((points[:, 0] - min_xy[0]) / self.map_resolution).astype(np.int32)
+        y_idx = ((points[:, 1] - min_xy[1]) / self.map_resolution).astype(np.int32)
+        in_bounds = (x_idx >= 0) & (x_idx < width) & (y_idx >= 0) & (y_idx < height)
+
+        flat_size = height * width
+        cell_id = (y_idx.astype(np.int64) * width + x_idx.astype(np.int64))
+
+        # 障碍物掩码（写 255 是幂等的，重复写没影响）
+        obstacle_flat = np.zeros(flat_size, dtype=np.uint8)
+        obstacle_sel = in_bounds & (labels == self.LABEL_OBSTACLE)
+        obstacle_flat[cell_id[obstacle_sel]] = 255
+        obstacle_mask = obstacle_flat.reshape((height, width))
         
         # 3. 处理障碍物通道 (R 通道) - 包含闭合区域填充
         # 先做一次形态学闭操作，把密集的障碍物点连接成线/块
@@ -244,36 +436,43 @@ class TerrainAnalyzer:
         nav_map[:, :, 2] = obstacle_mask
         
         # 4. 处理台阶向量通道 (B, G 通道)
-        # 计算平均向量
-        mask_step = (vec_count > 0)
-        avg_vecs = np.zeros_like(vec_accum)
-        avg_vecs[mask_step] = vec_accum[mask_step] / vec_count[mask_step][..., None]
-        
-        # 再次归一化平均向量 (防止平均后长度变短)
-        norms = np.linalg.norm(avg_vecs, axis=2)
-        norm_mask = norms > 1e-6
-        avg_vecs[norm_mask] /= norms[norm_mask][..., None]
-        
-        # 映射到 [1, 255], 中心 128
-        # Formula: value = 128 + vec * 127
-        # B channel -> X component (vec[:,:,0])
-        # G channel -> Y component (vec[:,:,1])
-        
-        # 初始化为0
-        b_channel = np.zeros((height, width), dtype=np.uint8)
-        g_channel = np.zeros((height, width), dtype=np.uint8)
-        
-        # 只在有台阶的地方赋值
-        # X component
-        map_x = 128 + avg_vecs[:, :, 0] * 127
-        b_channel[mask_step] = np.clip(map_x[mask_step], 1, 255).astype(np.uint8)
-        
-        # Y component
-        map_y = 128 + avg_vecs[:, :, 1] * 127
-        g_channel[mask_step] = np.clip(map_y[mask_step], 1, 255).astype(np.uint8)
-        
-        nav_map[:, :, 0] = b_channel
-        nav_map[:, :, 1] = g_channel
+        step_vecs = np.asarray(step_vectors, dtype=np.float32)
+        step_nonzero = (np.abs(step_vecs[:, 0]) + np.abs(step_vecs[:, 1])) > 0
+        step_sel = in_bounds & (labels == self.LABEL_STEP) & step_nonzero
+
+        if np.any(step_sel):
+            ids = cell_id[step_sel]
+            cnt = np.bincount(ids, minlength=flat_size).astype(np.float32)
+            sum_x = np.bincount(ids, weights=step_vecs[step_sel, 0], minlength=flat_size).astype(np.float32)
+            sum_y = np.bincount(ids, weights=step_vecs[step_sel, 1], minlength=flat_size).astype(np.float32)
+
+            avg_x = np.zeros(flat_size, dtype=np.float32)
+            avg_y = np.zeros(flat_size, dtype=np.float32)
+            m = cnt > 0
+            avg_x[m] = sum_x[m] / cnt[m]
+            avg_y[m] = sum_y[m] / cnt[m]
+
+            # 归一化
+            norms = np.sqrt(avg_x * avg_x + avg_y * avg_y)
+            nm = norms > 1e-6
+            avg_x[nm] /= norms[nm]
+            avg_y[nm] /= norms[nm]
+
+            avg_x = avg_x.reshape((height, width))
+            avg_y = avg_y.reshape((height, width))
+            mask_step = (cnt.reshape((height, width)) > 0)
+
+            b_channel = np.zeros((height, width), dtype=np.uint8)
+            g_channel = np.zeros((height, width), dtype=np.uint8)
+
+            map_x = 128 + avg_x * 127
+            b_channel[mask_step] = np.clip(map_x[mask_step], 1, 255).astype(np.uint8)
+
+            map_y = 128 + avg_y * 127
+            g_channel[mask_step] = np.clip(map_y[mask_step], 1, 255).astype(np.uint8)
+
+            nav_map[:, :, 0] = b_channel
+            nav_map[:, :, 1] = g_channel
 
         # 5. 障碍物不是台阶
         red_mask = (nav_map[:, :, 2] == 255)
@@ -335,5 +534,5 @@ if __name__ == "__main__":
     # 使用示例
     analyzer = TerrainAnalyzer()
     cloud_path = input("请输入点云文件路径（.pcd 格式）：")
-    nav_map = analyzer.analyze_terrain(cloud_path, output_image_path="nav_map.png") 
+    nav_map = analyzer.analyze_terrain(cloud_path, output_image_path=os.path.splitext(cloud_path)[0] + ".png")
     print("处理完成。")

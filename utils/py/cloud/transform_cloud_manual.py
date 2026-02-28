@@ -9,7 +9,10 @@ class PointCloudApp:
         # 1. 初始化 App 和 窗口
         self.app = gui.Application.instance
         self.app.initialize()
-        self.app.set_font(gui.Application.DEFAULT_FONT_ID, gui.FontDescription("UbuntuMono-R"))
+        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+        font = gui.FontDescription(font_path)
+        font.add_typeface_for_language(font_path, "zh_all")
+        gui.Application.instance.set_font(gui.Application.DEFAULT_FONT_ID, font)
         self.window = self.app.create_window("交互式点云变换 (Open3D)", 1024, 768)
 
         # 2. 创建 3D 场景部件

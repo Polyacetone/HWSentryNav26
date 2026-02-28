@@ -38,7 +38,7 @@
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
           max_correspondence_distance: 1.0 # 最大对应点距离 (m)
         limits: # 运动限制
-          vel_max: 1.8 # 最大速度 (m/s)
+          vel_max: 1.5 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
@@ -98,8 +98,8 @@
         limits:
           vel_max: 0.5 # 最大线速度硬约束 (m/s)
           vel_min: -0.5 # 最小线速度硬约束 (m/s)
-          omega_max: 3.0 # 最大角速度硬约束 (rad/s)
-          omega_min: -3.0 # 最小角速度硬约束 (rad/s)
+          omega_max: 1.0 # 最大角速度硬约束 (rad/s)
+          omega_min: -1.0 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.2 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.4 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
@@ -111,9 +111,9 @@
           q_goal_xy: 0.2 # 每步目标点吸引（x/y误差）
           q_goal_theta: 0.1 # 朝向目标点
           r_v: 0.02 # 线速度正则
-          r_omega: 0.02 # 角速度正则
+          r_omega: 0.12 # 角速度正则
           r_dv: 0.04 # 线速度平滑
-          r_domega: 0.04 # 角速度平滑
+          r_domega: 0.12 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）

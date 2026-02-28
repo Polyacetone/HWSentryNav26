@@ -40,6 +40,7 @@ def main():
         'kMatureLqrPoly_whole',
         'kA_LPoly_whole',
         'kB_LPoly_whole',
+        'kUdPoly_whole',
     ]
     print("# generated python arrays from params.hpp")
     print("import numpy as np")
@@ -86,6 +87,18 @@ def main():
             coeffs = b_list[i][j]
             print(
                 f"B[{i}, {j}] = PolynomialFit.eval_poly33(\n"
+                f"    np.array({format_coeffs(coeffs)}), l_l, l_r)"
+            )
+
+    # generate u_d feedforward assignments
+    ud_block = extract_constant(text, 'kUdPoly_whole')
+    if ud_block is not None:
+        ud_list = ast.literal_eval(c_array_to_python(ud_block))
+        print("\n# assignments for get_u_d")
+        for i in range(len(ud_list)):
+            coeffs = ud_list[i]
+            print(
+                f"u_d[{i}] = PolynomialFit.eval_poly33(\n"
                 f"    np.array({format_coeffs(coeffs)}), l_l, l_r)"
             )
 

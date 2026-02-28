@@ -53,6 +53,9 @@ try:
 except ImportError as exc:
     raise RuntimeError("scipy is required: pip install scipy") from exc
 
+# Numba is a required dependency for this script (performance-critical).
+from numba import njit, prange
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 #  Constants
@@ -164,25 +167,104 @@ def _smooth_sgn(x: float, eps: float = SGN_EPS) -> float:
     return math.tanh(x / eps)
 
 
-def simulate_greybox(
-    params: np.ndarray,
+@njit(cache=True)
+def _smooth_sgn_nb(x: float, eps: float) -> float:
+    return math.tanh(x / eps)
+
+
+@njit(cache=True)
+def simulate_w_only_nb(
+    tau_w: float,
+    cf3: float,
+    w_cmd: np.ndarray,
+    w0: float,
+    N: int,
+    dt: float,
+    delay: int,
+    sgn_eps: float,
+) -> np.ndarray:
+    w_pred = np.empty(N, dtype=np.float64)
+    w_pred[0] = w0
+    inv_tau = 1.0 / max(abs(tau_w), 1e-4)
+    for k in range(N - 1):
+        kd = k - delay
+        wc = w_cmd[kd] if kd >= 0 else w_cmd[0]
+        sw = _smooth_sgn_nb(w_pred[k], sgn_eps)
+        dw = inv_tau * (wc - w_pred[k]) - cf3 * sw
+        w_next = w_pred[k] + dt * dw
+        w_pred[k + 1] = w_next
+        if abs(w_next) > 80.0:
+            for j in range(k + 1, N):
+                w_pred[j] = np.nan
+            break
+    return w_pred
+
+
+@njit(cache=True)
+def simulate_v_with_meas_w_nb(
+    a11: float,
+    a12: float,
+    a21: float,
+    a22: float,
+    b1: float,
+    b2: float,
+    cf1: float,
+    cf2: float,
+    xh0: float,
+    v_cmd: np.ndarray,
+    w_meas: np.ndarray,
+    v0: float,
+    N: int,
+    dt: float,
+    delay: int,
+    sgn_eps: float,
+) -> np.ndarray:
+    v_pred = np.empty(N, dtype=np.float64)
+    v_pred[0] = v0
+    x_h = xh0
+    for k in range(N - 1):
+        v = v_pred[k]
+        w = w_meas[k]
+        kd = k - delay
+        vc = v_cmd[kd] if kd >= 0 else v_cmd[0]
+        sv = _smooth_sgn_nb(v, sgn_eps)
+        dx_h = a11 * x_h + a12 * v + b1 * vc
+        dv = a21 * x_h + a22 * v + b2 * vc + cf1 * sv + cf2 * v * abs(w)
+        x_h = x_h + dt * dx_h
+        v_next = v + dt * dv
+        v_pred[k + 1] = v_next
+        if abs(v_next) > 50.0 or abs(x_h) > 200.0:
+            for j in range(k + 1, N):
+                v_pred[j] = np.nan
+            break
+    return v_pred
+
+
+@njit(cache=True)
+def simulate_greybox_nb(
+    a11: float,
+    a12: float,
+    a21: float,
+    a22: float,
+    b1: float,
+    b2: float,
+    cf1: float,
+    cf2: float,
+    tau_w: float,
+    cf3: float,
+    xh0: float,
     v_cmd: np.ndarray,
     w_cmd: np.ndarray,
     v0: float,
     w0: float,
     N: int,
-    use_rk4: bool = True,
+    dt: float,
+    delay: int,
+    sgn_eps: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Open-loop simulation of the grey-box MIMO model.
-
-    Returns (v_pred, w_pred, x_h_trace) arrays of length N.
-    """
-    a11, a12, a21, a22, b1, b2, cf1, cf2, tau_w, cf3 = params[:10]
-    xh0 = float(params[10]) if len(params) > 10 else 0.0
-
-    v_pred = np.empty(N, dtype=float)
-    w_pred = np.empty(N, dtype=float)
-    xh_trace = np.empty(N, dtype=float)
+    v_pred = np.empty(N, dtype=np.float64)
+    w_pred = np.empty(N, dtype=np.float64)
+    xh_trace = np.empty(N, dtype=np.float64)
 
     v_pred[0] = v0
     w_pred[0] = w0
@@ -190,27 +272,21 @@ def simulate_greybox(
 
     x_h = xh0
     inv_tau = 1.0 / max(abs(tau_w), 1e-4)
-    dt = DT
-    delay = INPUT_DELAY
 
     for k in range(N - 1):
         v = v_pred[k]
         w = w_pred[k]
-
-        # delayed commands
         kd = k - delay
         vc = v_cmd[kd] if kd >= 0 else v_cmd[0]
         wc = w_cmd[kd] if kd >= 0 else w_cmd[0]
 
-        # ── v sub-system (Euler) ──
-        sv = _smooth_sgn(v)
+        sv = _smooth_sgn_nb(v, sgn_eps)
         dx_h = a11 * x_h + a12 * v + b1 * vc
         dv = a21 * x_h + a22 * v + b2 * vc + cf1 * sv + cf2 * v * abs(w)
         x_h_new = x_h + dt * dx_h
         v_new = v + dt * dv
 
-        # ── w sub-system (Euler) ──
-        sw = _smooth_sgn(w)
+        sw = _smooth_sgn_nb(w, sgn_eps)
         dw = inv_tau * (wc - w) - cf3 * sw
         w_new = w + dt * dw
 
@@ -219,67 +295,33 @@ def simulate_greybox(
         w_pred[k + 1] = w_new
         xh_trace[k + 1] = x_h
 
-        # divergence guard
         if abs(v_new) > 50.0 or abs(w_new) > 80.0 or abs(x_h) > 200.0:
-            v_pred[k + 1 :] = np.nan
-            w_pred[k + 1 :] = np.nan
-            xh_trace[k + 1 :] = np.nan
+            for j in range(k + 1, N):
+                v_pred[j] = np.nan
+                w_pred[j] = np.nan
+                xh_trace[j] = np.nan
             break
 
     return v_pred, w_pred, xh_trace
 
 
-def simulate_w_only(
-    tau_w: float, cf3: float,
-    w_cmd: np.ndarray, w0: float, N: int,
-) -> np.ndarray:
-    """Simulate only the w sub-model (Euler)."""
-    w_pred = np.empty(N, dtype=float)
-    w_pred[0] = w0
-    inv_tau = 1.0 / max(abs(tau_w), 1e-4)
-    dt = DT
-    delay = INPUT_DELAY
-    for k in range(N - 1):
-        kd = k - delay
-        wc = w_cmd[kd] if kd >= 0 else w_cmd[0]
-        sw = _smooth_sgn(w_pred[k])
-        dw = inv_tau * (wc - w_pred[k]) - cf3 * sw
-        w_pred[k + 1] = w_pred[k] + dt * dw
-        if abs(w_pred[k + 1]) > 80.0:
-            w_pred[k + 1 :] = np.nan
-            break
-    return w_pred
 
-
-def simulate_v_with_meas_w(
-    v_params: np.ndarray,
+def simulate_greybox(
+    params: np.ndarray,
     v_cmd: np.ndarray,
-    w_meas: np.ndarray,
+    w_cmd: np.ndarray,
     v0: float,
+    w0: float,
     N: int,
-) -> np.ndarray:
-    """Simulate v sub-model only, using measured w for coupling (Euler)."""
-    a11, a12, a21, a22, b1, b2, cf1, cf2 = v_params[:8]
-    xh0 = float(v_params[8]) if len(v_params) > 8 else 0.0
-    v_pred = np.empty(N, dtype=float)
-    v_pred[0] = v0
-    x_h = xh0
-    dt = DT
-    delay = INPUT_DELAY
-    for k in range(N - 1):
-        v = v_pred[k]
-        w = w_meas[k]
-        kd = k - delay
-        vc = v_cmd[kd] if kd >= 0 else v_cmd[0]
-        sv = _smooth_sgn(v)
-        dx_h = a11 * x_h + a12 * v + b1 * vc
-        dv = a21 * x_h + a22 * v + b2 * vc + cf1 * sv + cf2 * v * abs(w)
-        x_h = x_h + dt * dx_h
-        v_pred[k + 1] = v + dt * dv
-        if abs(v_pred[k + 1]) > 50.0 or abs(x_h) > 200.0:
-            v_pred[k + 1 :] = np.nan
-            break
-    return v_pred
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Python wrapper around the numba-compiled simulator."""
+    a11, a12, a21, a22, b1, b2, cf1, cf2, tau_w, cf3 = params[:10]
+    xh0 = float(params[10]) if len(params) > 10 else 0.0
+    return simulate_greybox_nb(
+        float(a11), float(a12), float(a21), float(a22), float(b1), float(b2),
+        float(cf1), float(cf2), float(tau_w), float(cf3), float(xh0),
+        v_cmd, w_cmd, float(v0), float(w0), int(N), DT, INPUT_DELAY, SGN_EPS,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -287,16 +329,29 @@ def simulate_v_with_meas_w(
 # ════════════════════════════════════════════════════════════════════════════════
 
 def _cumintegrate(y: np.ndarray) -> np.ndarray:
-    """Cumulative trapezoidal-rule integration with dt = DT."""
-    # s[k] = DT * (y[0]/2 + y[1] + ... + y[k-1] + y[k]/2)   (trap rule)
-    return np.cumsum(y) * DT
+    """Cumulative trapezoidal-rule integration with dt = DT.
+
+    Returns s with s[0]=0 and s[k] approximating the integral of y from 0 to k*DT
+    using the trapezoidal rule.
+    """
+    y = _as_1d(y)
+    n = len(y)
+    if n == 0:
+        return y.copy()
+    if n == 1:
+        return np.zeros(1, dtype=float)
+    s = np.empty(n, dtype=float)
+    s[0] = 0.0
+    s[1:] = np.cumsum(0.5 * (y[:-1] + y[1:])) * DT
+    return s
 
 
 def trajectory_2d(v: np.ndarray, w: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """2D trajectory: x, y, phi from v and w."""
-    phi = np.cumsum(w) * DT
-    x = np.cumsum(v * np.cos(phi)) * DT
-    y = np.cumsum(v * np.sin(phi)) * DT
+    # Integrate heading and position using trapezoidal integration for better accuracy at 10Hz.
+    phi = _cumintegrate(w)
+    x = _cumintegrate(v * np.cos(phi))
+    y = _cumintegrate(v * np.sin(phi))
     return x, y, phi
 
 
@@ -311,79 +366,357 @@ def _safe_var(x: np.ndarray, minimum: float = 1e-6) -> float:
     return max(float(np.var(x)), minimum)
 
 
-def loss_w_only(w_params: np.ndarray, series_list: List[Series10Hz]) -> float:
-    tau_w, cf3 = w_params
-    total = 0.0
-    cnt = 0
-    for s in series_list:
-        N = len(s.w)
-        wp = simulate_w_only(tau_w, cf3, s.w_cmd, s.w[0], N)
-        if not np.all(np.isfinite(wp)):
-            return 1e12
-        ew = wp[BURN:] - s.w[BURN:]
-        phi_p = _cumintegrate(wp)
-        phi_m = _cumintegrate(s.w)
-        ephi = phi_p[BURN:] - phi_m[BURN:]
-        total += np.mean(ew ** 2) + 0.3 * np.mean(ephi ** 2) / _safe_var(phi_m[BURN:])
-        cnt += 1
-    return total / max(cnt, 1)
+@dataclass(frozen=True)
+class PackedSeries:
+    starts: np.ndarray  # int64 [M]
+    lens: np.ndarray    # int64 [M]
+    v: np.ndarray
+    w: np.ndarray
+    v_cmd: np.ndarray
+    w_cmd: np.ndarray
+    var_v: np.ndarray
+    var_w: np.ndarray
+    var_s: np.ndarray
+    var_phi: np.ndarray
 
 
-def loss_v_with_meas_w(
-    v_params: np.ndarray, series_list: List[Series10Hz], w_pos: float = 0.3,
-) -> float:
-    total = 0.0
-    cnt = 0
-    for s in series_list:
-        N = len(s.v)
-        vp = simulate_v_with_meas_w(v_params, s.v_cmd, s.w, s.v[0], N)
-        if not np.all(np.isfinite(vp)):
-            return 1e12
-        ev = vp[BURN:] - s.v[BURN:]
-        sp = _cumintegrate(vp)
+def pack_series_for_numba(series_list: List[Series10Hz], burn: int = BURN) -> PackedSeries:
+    m = len(series_list)
+    lens = np.asarray([len(s.v) for s in series_list], dtype=np.int64)
+    starts = np.empty(m, dtype=np.int64)
+    total_n = int(np.sum(lens))
+
+    v = np.empty(total_n, dtype=np.float64)
+    w = np.empty(total_n, dtype=np.float64)
+    v_cmd = np.empty(total_n, dtype=np.float64)
+    w_cmd = np.empty(total_n, dtype=np.float64)
+
+    var_v = np.empty(m, dtype=np.float64)
+    var_w = np.empty(m, dtype=np.float64)
+    var_s = np.empty(m, dtype=np.float64)
+    var_phi = np.empty(m, dtype=np.float64)
+
+    idx = 0
+    for i, s in enumerate(series_list):
+        n = int(lens[i])
+        starts[i] = idx
+        v[idx : idx + n] = s.v
+        w[idx : idx + n] = s.w
+        v_cmd[idx : idx + n] = s.v_cmd
+        w_cmd[idx : idx + n] = s.w_cmd
+
         sm = _cumintegrate(s.v)
-        es = sp[BURN:] - sm[BURN:]
-        total += np.mean(ev ** 2) + w_pos * np.mean(es ** 2) / _safe_var(sm[BURN:])
-        cnt += 1
-    return total / max(cnt, 1)
-
-
-def loss_v_with_meas_w_xh0(
-    params_with_xh0: np.ndarray, series_list: List[Series10Hz], w_pos: float = 0.3,
-) -> float:
-    """Same as loss_v_with_meas_w but last param is xh0."""
-    return loss_v_with_meas_w(params_with_xh0, series_list, w_pos)
-
-
-def loss_joint(
-    params: np.ndarray, series_list: List[Series10Hz],
-    w_vel: float = 1.0, w_pos: float = 0.3,
-) -> float:
-    total = 0.0
-    cnt = 0
-    for s in series_list:
-        N = len(s.v)
-        vp, wp, _ = simulate_greybox(params, s.v_cmd, s.w_cmd, s.v[0], s.w[0], N)
-        if not (np.all(np.isfinite(vp)) and np.all(np.isfinite(wp))):
-            return 1e12
-        n = N - BURN
-        if n <= 0:
-            continue
-        ev = vp[BURN:] - s.v[BURN:]
-        ew = wp[BURN:] - s.w[BURN:]
-        loss_vel = np.mean(ev ** 2) / _safe_var(s.v[BURN:]) + np.mean(ew ** 2) / _safe_var(s.w[BURN:])
-
-        sp = _cumintegrate(vp)
-        sm = _cumintegrate(s.v)
-        phip = _cumintegrate(wp)
         phim = _cumintegrate(s.w)
-        es = sp[BURN:] - sm[BURN:]
-        ephi = phip[BURN:] - phim[BURN:]
-        loss_pos = np.mean(es ** 2) / _safe_var(sm[BURN:]) + np.mean(ephi ** 2) / _safe_var(phim[BURN:])
+        var_v[i] = _safe_var(s.v[burn:])
+        var_w[i] = _safe_var(s.w[burn:])
+        var_s[i] = _safe_var(sm[burn:])
+        var_phi[i] = _safe_var(phim[burn:])
+        idx += n
 
-        total += n * (w_vel * loss_vel + w_pos * loss_pos)
-        cnt += n
-    return total / max(cnt, 1)
+    return PackedSeries(
+        starts=starts,
+        lens=lens,
+        v=v,
+        w=w,
+        v_cmd=v_cmd,
+        w_cmd=w_cmd,
+        var_v=var_v,
+        var_w=var_w,
+        var_s=var_s,
+        var_phi=var_phi,
+    )
+
+
+@njit(cache=True, parallel=True)
+def loss_w_only_packed(
+    tau_w: float,
+    cf3: float,
+    w_meas: np.ndarray,
+    w_cmd: np.ndarray,
+    starts: np.ndarray,
+    lens: np.ndarray,
+    var_phi: np.ndarray,
+    burn: int,
+    dt: float,
+    delay: int,
+    sgn_eps: float,
+) -> float:
+    m = lens.shape[0]
+    loss_each = np.empty(m, dtype=np.float64)
+    invalid = np.zeros(m, dtype=np.uint8)
+    for i in prange(m):
+        start = int(starts[i])
+        n = int(lens[i])
+        n_eff = n - burn
+        if n_eff <= 0:
+            loss_each[i] = 0.0
+            continue
+
+        inv_tau = 1.0 / max(abs(tau_w), 1e-4)
+        w0 = w_meas[start]
+        w_pred = w0
+        prev_wp = w0
+        prev_wm = w0
+        phi_p = 0.0
+        phi_m = 0.0
+        sum_ew2 = 0.0
+        sum_ephi2 = 0.0
+        wcmd0 = w_cmd[start]
+        valid = True
+
+        for k in range(n - 1):
+            kd = k - delay
+            wc = w_cmd[start + kd] if kd >= 0 else wcmd0
+            sw = _smooth_sgn_nb(w_pred, sgn_eps)
+            dw = inv_tau * (wc - w_pred) - cf3 * sw
+            w_next = w_pred + dt * dw
+            wm_next = w_meas[start + k + 1]
+
+            phi_p += 0.5 * dt * (prev_wp + w_next)
+            phi_m += 0.5 * dt * (prev_wm + wm_next)
+
+            if (k + 1) >= burn:
+                ew = w_next - wm_next
+                ephi = phi_p - phi_m
+                sum_ew2 += ew * ew
+                sum_ephi2 += ephi * ephi
+
+            w_pred = w_next
+            prev_wp = w_next
+            prev_wm = wm_next
+
+            if abs(w_next) > 80.0 or not math.isfinite(w_next):
+                valid = False
+                break
+
+        if not valid:
+            loss_each[i] = 1e12
+            invalid[i] = 1
+        else:
+            mse_w = sum_ew2 / n_eff
+            mse_phi = sum_ephi2 / n_eff
+            loss_each[i] = mse_w + 0.3 * mse_phi / max(var_phi[i], 1e-6)
+
+    if np.sum(invalid) > 0:
+        return 1e12
+    return float(np.mean(loss_each))
+
+
+@njit(cache=True, parallel=True)
+def loss_v_with_meas_w_packed(
+    v_params: np.ndarray,
+    v_meas: np.ndarray,
+    w_meas: np.ndarray,
+    v_cmd: np.ndarray,
+    starts: np.ndarray,
+    lens: np.ndarray,
+    var_s: np.ndarray,
+    w_pos: float,
+    burn: int,
+    dt: float,
+    delay: int,
+    sgn_eps: float,
+) -> float:
+    a11, a12, a21, a22, b1, b2, cf1, cf2 = (
+        float(v_params[0]), float(v_params[1]), float(v_params[2]), float(v_params[3]),
+        float(v_params[4]), float(v_params[5]), float(v_params[6]), float(v_params[7]),
+    )
+    xh0 = float(v_params[8])
+
+    m = lens.shape[0]
+    loss_each = np.empty(m, dtype=np.float64)
+    invalid = np.zeros(m, dtype=np.uint8)
+    for i in prange(m):
+        start = int(starts[i])
+        n = int(lens[i])
+        n_eff = n - burn
+        if n_eff <= 0:
+            loss_each[i] = 0.0
+            continue
+
+        v0 = v_meas[start]
+        x_h = xh0
+        v_pred = v0
+        prev_vp = v0
+        prev_vm = v0
+        s_p = 0.0
+        s_m = 0.0
+        sum_ev2 = 0.0
+        sum_es2 = 0.0
+        vcmd0 = v_cmd[start]
+        valid = True
+
+        for k in range(n - 1):
+            w_k = w_meas[start + k]
+            kd = k - delay
+            vc = v_cmd[start + kd] if kd >= 0 else vcmd0
+            sv = _smooth_sgn_nb(v_pred, sgn_eps)
+            dx_h = a11 * x_h + a12 * v_pred + b1 * vc
+            dv = a21 * x_h + a22 * v_pred + b2 * vc + cf1 * sv + cf2 * v_pred * abs(w_k)
+            x_h = x_h + dt * dx_h
+            v_next = v_pred + dt * dv
+
+            vm_next = v_meas[start + k + 1]
+            s_p += 0.5 * dt * (prev_vp + v_next)
+            s_m += 0.5 * dt * (prev_vm + vm_next)
+
+            if (k + 1) >= burn:
+                ev = v_next - vm_next
+                es = s_p - s_m
+                sum_ev2 += ev * ev
+                sum_es2 += es * es
+
+            v_pred = v_next
+            prev_vp = v_next
+            prev_vm = vm_next
+
+            if abs(v_next) > 50.0 or abs(x_h) > 200.0 or (not math.isfinite(v_next)):
+                valid = False
+                break
+
+        if not valid:
+            loss_each[i] = 1e12
+            invalid[i] = 1
+        else:
+            mse_v = sum_ev2 / n_eff
+            mse_s = sum_es2 / n_eff
+            loss_each[i] = mse_v + w_pos * mse_s / max(var_s[i], 1e-6)
+
+    if np.sum(invalid) > 0:
+        return 1e12
+    return float(np.mean(loss_each))
+
+
+@njit(cache=True, parallel=True)
+def loss_joint_packed(
+    params: np.ndarray,
+    v_meas: np.ndarray,
+    w_meas: np.ndarray,
+    v_cmd: np.ndarray,
+    w_cmd: np.ndarray,
+    starts: np.ndarray,
+    lens: np.ndarray,
+    var_v: np.ndarray,
+    var_w: np.ndarray,
+    var_s: np.ndarray,
+    var_phi: np.ndarray,
+    w_vel: float,
+    w_pos: float,
+    burn: int,
+    dt: float,
+    delay: int,
+    sgn_eps: float,
+) -> float:
+    a11, a12, a21, a22, b1, b2, cf1, cf2, tau_w, cf3 = (
+        float(params[0]), float(params[1]), float(params[2]), float(params[3]),
+        float(params[4]), float(params[5]), float(params[6]), float(params[7]),
+        float(params[8]), float(params[9]),
+    )
+    xh0 = float(params[10])
+
+    m = lens.shape[0]
+    totals = np.zeros(m, dtype=np.float64)
+    counts = np.zeros(m, dtype=np.float64)
+    invalid = np.zeros(m, dtype=np.uint8)
+
+    for i in prange(m):
+        start = int(starts[i])
+        n = int(lens[i])
+        n_eff = n - burn
+        if n_eff <= 0:
+            continue
+
+        inv_tau = 1.0 / max(abs(tau_w), 1e-4)
+        v0 = v_meas[start]
+        w0 = w_meas[start]
+        x_h = xh0
+        v_pred = v0
+        w_pred = w0
+
+        prev_vp = v0
+        prev_vm = v0
+        prev_wp = w0
+        prev_wm = w0
+
+        s_p = 0.0
+        s_m = 0.0
+        phi_p = 0.0
+        phi_m = 0.0
+
+        sum_ev2 = 0.0
+        sum_ew2 = 0.0
+        sum_es2 = 0.0
+        sum_ephi2 = 0.0
+
+        vcmd0 = v_cmd[start]
+        wcmd0 = w_cmd[start]
+        valid = True
+
+        for k in range(n - 1):
+            kd = k - delay
+            vc = v_cmd[start + kd] if kd >= 0 else vcmd0
+            wc = w_cmd[start + kd] if kd >= 0 else wcmd0
+
+            sv = _smooth_sgn_nb(v_pred, sgn_eps)
+            dx_h = a11 * x_h + a12 * v_pred + b1 * vc
+            dv = a21 * x_h + a22 * v_pred + b2 * vc + cf1 * sv + cf2 * v_pred * abs(w_pred)
+            x_h = x_h + dt * dx_h
+            v_next = v_pred + dt * dv
+
+            sw = _smooth_sgn_nb(w_pred, sgn_eps)
+            dw = inv_tau * (wc - w_pred) - cf3 * sw
+            w_next = w_pred + dt * dw
+
+            vm_next = v_meas[start + k + 1]
+            wm_next = w_meas[start + k + 1]
+
+            s_p += 0.5 * dt * (prev_vp + v_next)
+            s_m += 0.5 * dt * (prev_vm + vm_next)
+            phi_p += 0.5 * dt * (prev_wp + w_next)
+            phi_m += 0.5 * dt * (prev_wm + wm_next)
+
+            if (k + 1) >= burn:
+                ev = v_next - vm_next
+                ew = w_next - wm_next
+                es = s_p - s_m
+                ephi = phi_p - phi_m
+                sum_ev2 += ev * ev
+                sum_ew2 += ew * ew
+                sum_es2 += es * es
+                sum_ephi2 += ephi * ephi
+
+            v_pred = v_next
+            w_pred = w_next
+            prev_vp = v_next
+            prev_vm = vm_next
+            prev_wp = w_next
+            prev_wm = wm_next
+
+            if (
+                abs(v_next) > 50.0 or abs(w_next) > 80.0 or abs(x_h) > 200.0
+                or (not math.isfinite(v_next)) or (not math.isfinite(w_next))
+            ):
+                valid = False
+                break
+
+        if not valid:
+            totals[i] = 1e12
+            counts[i] = 1.0
+            invalid[i] = 1
+        else:
+            mse_v = (sum_ev2 / n_eff) / max(var_v[i], 1e-6)
+            mse_w = (sum_ew2 / n_eff) / max(var_w[i], 1e-6)
+            mse_s = (sum_es2 / n_eff) / max(var_s[i], 1e-6)
+            mse_phi = (sum_ephi2 / n_eff) / max(var_phi[i], 1e-6)
+            loss_i = w_vel * (mse_v + mse_w) + w_pos * (mse_s + mse_phi)
+            totals[i] = n_eff * loss_i
+            counts[i] = n_eff
+
+    if np.sum(invalid) > 0:
+        return 1e12
+    total = np.sum(totals)
+    cnt = np.sum(counts)
+    return float(total / max(cnt, 1.0))
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -425,7 +758,14 @@ def phase1_fit_w(series: List[Series10Hz], verbose: bool = True) -> Tuple[float,
     if verbose:
         print("═══ Phase 1: Fit ω model ═══")
     bounds_w = [(0.02, 8.0), (-2.0, 3.0)]
-    obj = lambda p: loss_w_only(p, series)
+    pack = pack_series_for_numba(series)
+    obj = lambda p: loss_w_only_packed(
+        float(p[0]), float(p[1]),
+        pack.w, pack.w_cmd,
+        pack.starts, pack.lens,
+        pack.var_phi,
+        BURN, DT, INPUT_DELAY, SGN_EPS,
+    )
     r = _de(obj, bounds_w, seeds=range(5), maxiter=300, popsize=25)
     x, f = _refine(obj, r.x, rounds=3)
     if verbose:
@@ -440,7 +780,15 @@ def phase2_fit_v(
     if verbose:
         print("═══ Phase 2: Fit v model (measured ω for coupling) ═══")
     bounds_v = list(PARAM_BOUNDS[:8]) + [PARAM_BOUNDS[10]]  # 8 v-params + xh0
-    obj = lambda p: loss_v_with_meas_w_xh0(p, series, w_pos=w_pos)
+    pack = pack_series_for_numba(series)
+    obj = lambda p: loss_v_with_meas_w_packed(
+        p,
+        pack.v, pack.w, pack.v_cmd,
+        pack.starts, pack.lens,
+        pack.var_s,
+        float(w_pos),
+        BURN, DT, INPUT_DELAY, SGN_EPS,
+    )
     r = _de(obj, bounds_v, seeds=range(5), maxiter=500, popsize=25)
     x, f = _refine(obj, r.x, rounds=3)
     if verbose:
@@ -461,7 +809,15 @@ def phase3_joint(
     """Joint refinement of all 11 parameters with coupled simulation."""
     if verbose:
         print("═══ Phase 3: Joint refinement ═══")
-    obj = lambda p: loss_joint(p, series, w_vel=w_vel, w_pos=w_pos)
+    pack = pack_series_for_numba(series)
+    obj = lambda p: loss_joint_packed(
+        p,
+        pack.v, pack.w, pack.v_cmd, pack.w_cmd,
+        pack.starts, pack.lens,
+        pack.var_v, pack.var_w, pack.var_s, pack.var_phi,
+        float(w_vel), float(w_pos),
+        BURN, DT, INPUT_DELAY, SGN_EPS,
+    )
 
     # local refinement (fast, no DE)
     best_x, best_f = _refine(obj, init_params, rounds=5)
