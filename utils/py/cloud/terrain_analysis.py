@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numba as nb
 
 
-@nb.njit(parallel=True, fastmath=True, cache=True)
+@nb.njit(parallel=True, fastmath=True, cache=False)
 def _classify_normals_numba(normals, ground_thr, slope_thr, label_ground, label_slope, label_obstacle):
     n = normals.shape[0]
     labels = np.empty(n, dtype=np.int32)
@@ -33,7 +33,7 @@ def _classify_normals_numba(normals, ground_thr, slope_thr, label_ground, label_
     return labels, candidate
 
 
-@nb.njit(cache=True)
+@nb.njit(cache=False)
 def _build_grid_csr_numba(px, py, min_x, min_y, cell_size, grid_w, grid_h):
     n = px.shape[0]
     n_cells = grid_w * grid_h
@@ -80,7 +80,7 @@ def _build_grid_csr_numba(px, py, min_x, min_y, cell_size, grid_w, grid_h):
     return offsets, indices
 
 
-@nb.njit(parallel=True, fastmath=True, cache=True)
+@nb.njit(parallel=True, fastmath=True, cache=False)
 def _analyze_candidates_numba(
     points,
     candidate_indices,

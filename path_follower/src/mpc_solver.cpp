@@ -145,33 +145,29 @@ inline double estimate_remaining_arclength(
 // ============================================================================
 
 namespace {
-constexpr int MODEL_NX = 5;
-constexpr double MODEL_DT = 0.1;
-constexpr double SGN_EPS = 0.05;
-
-// ── 非线性参数（连续时间，来自系统辨识） ──
-constexpr double CF1     = 0.1290127399527321;      // v Coulomb 摩擦
-constexpr double CF2     = -0.23875422796791232;    // v-w 耦合损耗
-constexpr double TAU_CF3 = 0.013021716474684808;    // τ_w · cf3（ZOH 摩擦积分系数）
-
-// ── v 子系统：精确 ZOH 离散矩阵 (expm) ──
-//    [x_h, v]^T[k+1] = Av · [x_h, v]^T[k] + Bv · dv[k]  (+ 非线性 Euler 修正)
-constexpr double AV00 = 0.8867511271568456;
-constexpr double AV01 = -0.5591074219492627;
-constexpr double AV10 = 0.06522799251713411;
-constexpr double AV11 = 0.9115093281652029;
-constexpr double BV0  = 0.5881965249953037;
-constexpr double BV1  = 0.060118970336377614;
-
-// ── w 子系统：精确 ZOH 离散 ──
-//    w[k+1] = AW · w[k] + BW · (dw[k] − TAU_CF3 · sgn(w[k]))
-constexpr double AW = 0.004338624521317869;
-constexpr double BW = 0.9956613754786822;
-
-constexpr double XH0_DEFAULT = -0.9942147268974454;
-
-// ── x_h Luenberger 观测器增益 ──
-constexpr double XH_OBSERVER_L = -10.0;
+// ── ZOH-discretized model constants (auto-generated) ──
+constexpr int    MODEL_NX  = 5;
+constexpr double SGN_EPS   = 0.05;
+constexpr double CF1       = 0.165228211850729;
+constexpr double CF2       = -0.2540837456046654;
+constexpr double CF3       = 158.3253296896363;
+constexpr double XH0       = -0.21025200714013356;
+// v-subsystem (2×2 ZOH via matrix exponential)
+constexpr double A00       = 0.9139449889277171;
+constexpr double A01       = -0.12300926036572889;
+constexpr double A03       = 0.13424472927847508;
+constexpr double A10       = 0.3063198986458846;
+constexpr double A11       = 0.8839525071310728;
+constexpr double A13       = 0.05667810891793699;
+// nonlinear gains (ZOH): Gnl = G·[0;1]
+constexpr double GNL_XH    = -0.006350167628446602;
+constexpr double GNL_V     = 0.09444462701008702;
+// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.000000 (positive!)
+constexpr double A22       = 0.0;
+constexpr double A24       = 1.0;
+constexpr double GAMMA_W   = 0.0001;
+// hidden-state observer gain (target pole = 0.6)
+constexpr double OBS_L     = 1.0248925724888915;
 
 template<typename T>
 inline T wrap_to_pi(const T& a) {
@@ -194,10 +190,10 @@ inline void model_init(
     const T& w_meas,
     const T& v_cmd_prev,
     const T& w_cmd_prev,
-    const T& xh_init
+    const T& x_h_init
 ) {
     st.x_model.setZero();
-    st.x_model(0) = xh_init;
+    st.x_model(0) = x_h_init;
     st.x_model(1) = v_meas;
     st.x_model(2) = w_meas;
     st.x_model(3) = v_cmd_prev; // dv = v_cmd[k-1]
@@ -225,27 +221,29 @@ inline void model_step(
     const T dv = st.x_model(3);
     const T dw = st.x_model(4);
 
-    // 非线性项在当前步冻结
+    // ZOH linear part
+    T xh_next = T(A00) * xh + T(A01) * v + T(A03) * dv;
+    T v_next = T(A10) * xh + T(A11) * v + T(A13) * dv;
+    T w_next = T(A22) * w + T(A24) * dw;
+    const T dv_next = v_cmd;
+    const T dw_next = w_cmd;
+
+    // ZOH nonlinear: gains from G matrix instead of plain dt
     const T sv = smooth_sgn(v, SGN_EPS);
     const T sw = smooth_sgn(w, SGN_EPS);
+    const T nl_v = T(CF1) * sv + T(CF2) * v * ceres::abs(w);
 
-    // v 子系统：精确 ZOH 线性 + Euler 非线性扰动
-    T xh_next = T(AV00) * xh + T(AV01) * v + T(BV0) * dv;
-    T v_next  = T(AV10) * xh + T(AV11) * v + T(BV1) * dv;
-    v_next += T(MODEL_DT) * (T(CF1) * sv + T(CF2) * v * ceres::abs(w));
+    xh_next += T(GNL_XH) * nl_v;
+    v_next  += T(GNL_V)  * nl_v;
+    w_next  += -T(GAMMA_W) * T(CF3) * sw;
 
-    // w 子系统：精确 ZOH（摩擦项精确积分至指数衰减内）
-    //   连续方程: ẇ = (1/τ)(w_cmd − w) − cf3·sgn(w)
-    //   冻结 sgn(w)=S 后精确解: w(dt) = α·w + β·(w_cmd − τ·cf3·S)
-    T w_next = T(AW) * w + T(BW) * (dw - T(TAU_CF3) * sw);
-
-    // 延迟状态
     st.x_model(0) = xh_next;
     st.x_model(1) = v_next;
     st.x_model(2) = w_next;
-    st.x_model(3) = v_cmd;
-    st.x_model(4) = w_cmd;
+    st.x_model(3) = dv_next;
+    st.x_model(4) = dw_next;
 
+    // y = [v_act, w_act]
     st.v_act = v_next;
     st.omega_act = w_next;
 }
@@ -360,20 +358,20 @@ struct FollowMPCCostFunctor {
         const double u0,
         const Eigen::Vector2d& start_status,
         const Eigen::Vector2d& start_cmd,
+        const double x_h_init,
         const MPCParams& params,
         const CostMap& merged_cost_map,
-        const DirectionMap& direction_map,
-        const double xh_estimate
+        const DirectionMap& direction_map
     ):
         ref_control_points_(ref_control_points),
         start_pose_(start_pose),
         u0_(u0),
         start_status_(start_status),
         start_cmd_(start_cmd),
+        x_h_init_(x_h_init),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
-        xh_estimate_(xh_estimate) {}
+        direction_map_(direction_map) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -399,7 +397,7 @@ struct FollowMPCCostFunctor {
             T(start_status_.y()),
             last_v_cmd,
             last_omega_cmd,
-            T(xh_estimate_)
+            T(x_h_init_)
         );
 
         size_t res_idx = 0;
@@ -523,10 +521,10 @@ struct FollowMPCCostFunctor {
     const double u0_;
     const Eigen::Vector2d& start_status_;
     const Eigen::Vector2d& start_cmd_;
+    const double x_h_init_;
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
-    const double xh_estimate_;
 };
 
 // ============================================================================
@@ -538,18 +536,18 @@ struct StopMPCCostFunctor {
         const Eigen::Vector3d& start_pose,
         const Eigen::Vector2d& start_status,
         const Eigen::Vector2d& start_cmd,
+        const double x_h_init,
         const MPCParams& params,
         const CostMap& merged_cost_map,
-        const DirectionMap& direction_map,
-        const double xh_estimate
+        const DirectionMap& direction_map
     ):
         start_pose_(start_pose),
         start_status_(start_status),
         start_cmd_(start_cmd),
+        x_h_init_(x_h_init),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
-        xh_estimate_(xh_estimate) {}
+        direction_map_(direction_map) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -575,7 +573,7 @@ struct StopMPCCostFunctor {
             T(start_status_.y()),
             last_v_cmd,
             last_omega_cmd,
-            T(xh_estimate_)
+            T(x_h_init_)
         );
 
         size_t res_idx = 0;
@@ -592,21 +590,25 @@ struct StopMPCCostFunctor {
             residuals[res_idx++] = T(params_.stop_weights.q_v) * st.v_act;
             residuals[res_idx++] = T(params_.stop_weights.q_omega) * st.omega_act;
 
-            // 2. 指令变化率约束
+            // 2 指令平滑（停止模式专用，不与其他模式混用）
+            residuals[res_idx++] = T(params_.stop_weights.r_dv) * dv_cmd;
+            residuals[res_idx++] = T(params_.stop_weights.r_domega) * domega_cmd;
+
+            // 3. 指令变化率约束
             const T dv_cmd_limit = T(params_.stop_limits.acc_max * params_.dt);
             const T domega_cmd_limit = T(params_.stop_limits.alpha_max * params_.dt);
             residuals[res_idx++] = T(params_.stop_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
             residuals[res_idx++] = T(params_.stop_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
-            // 3. 侧向加速度约束
+            // 4. 侧向加速度约束
             const T a_lat = ceres::abs(st.v_act * st.omega_act);
             residuals[res_idx++] = T(params_.stop_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
 
-            // 4. 避障
+            // 5. 避障
             const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
             residuals[res_idx++] = T(params_.stop_weights.obstacle) * (cost / T(255.0));
 
-            // 5. 台阶处理
+            // 6. 台阶处理
             const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const auto dir_unit = dir / dir_norm;
@@ -651,10 +653,10 @@ struct StopMPCCostFunctor {
     const Eigen::Vector3d& start_pose_;
     const Eigen::Vector2d& start_status_;
     const Eigen::Vector2d& start_cmd_;
+    const double x_h_init_;
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
-    const double xh_estimate_;
 };
 
 // ============================================================================
@@ -667,19 +669,19 @@ struct RecoveryMPCCostFunctor {
         const Eigen::Vector3d& start_pose,
         const Eigen::Vector2d& start_status,
         const Eigen::Vector2d& start_cmd,
+        const double x_h_init,
         const MPCParams& params,
         const CostMap& merged_cost_map,
-        const DirectionMap& direction_map,
-        const double xh_estimate
+        const DirectionMap& direction_map
     ):
         goal_map_(goal_map),
         start_pose_(start_pose),
         start_status_(start_status),
         start_cmd_(start_cmd),
+        x_h_init_(x_h_init),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
-        xh_estimate_(xh_estimate) {}
+        direction_map_(direction_map) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -705,7 +707,7 @@ struct RecoveryMPCCostFunctor {
             T(start_status_.y()),
             last_v_cmd,
             last_omega_cmd,
-            T(xh_estimate_)
+            T(x_h_init_)
         );
 
         const T gx = T(goal_map_.x());
@@ -793,10 +795,10 @@ struct RecoveryMPCCostFunctor {
     const Eigen::Vector3d& start_pose_;
     const Eigen::Vector2d& start_status_;
     const Eigen::Vector2d& start_cmd_;
+    const double x_h_init_;
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
-    const double xh_estimate_;
 };
 
 inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
@@ -804,8 +806,8 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
     const Eigen::Vector2d& cmd_prev,
-    const std::vector<std::array<double, 2>>& controls,
-    const double xh_estimate
+    const double x_h_init,
+    const std::vector<std::array<double, 2>>& controls
 ) {
     std::vector<Eigen::Vector2d> predicted_path_map;
     predicted_path_map.reserve(static_cast<size_t>(params.horizon) + 1);
@@ -821,7 +823,7 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
         chassis_status.y(),
         cmd_prev.x(),
         cmd_prev.y(),
-        xh_estimate
+        x_h_init
     );
 
     predicted_path_map.emplace_back(st.x, st.y);
@@ -865,34 +867,39 @@ void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
 
 void MPCSolver::reset_warm_start() {
     last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
-    xh_obs_ = {};  // 重置观测器
 }
 
-double MPCSolver::estimate_xh(const double v_meas_now, const double w_meas_now) const {
-    (void)w_meas_now; // 当前版本的观测器不使用 w_meas_now
-    if (!xh_obs_.initialized) {
-        return XH0_DEFAULT;
+void MPCSolver::update_observer(const double v_act, const double w_act) {
+    if (!observer_initialized_) {
+        // First call: no previous data, use default x_h
+        x_h_hat_ = XH0;
+        prev_v_act_ = v_act;
+        prev_w_act_ = w_act;
+        observer_initialized_ = true;
+        return;
     }
-    // 开环传播: x_h[k] = AV00 * x_h[k-1] + AV01 * v[k-1] + BV0 * dv[k-1]
-    const double xh_pred = AV00 * xh_obs_.xh + AV01 * xh_obs_.v_prev + BV0 * xh_obs_.dv_prev;
 
-    // Luenberger 修正: 用当前 v 量测和模型 v 预测的差距来修正 x_h
-    const double sv_prev = std::tanh(xh_obs_.v_prev / SGN_EPS);
-    const double v_pred = AV10 * xh_obs_.xh + AV11 * xh_obs_.v_prev + BV1 * xh_obs_.dv_prev
-                        + MODEL_DT * (CF1 * sv_prev + CF2 * xh_obs_.v_prev * std::abs(xh_obs_.w_prev));
-    const double v_innov = v_meas_now - v_pred;
+    const double v_prev = prev_v_act_;
+    const double w_prev = prev_w_act_;
+    const double vc_prev = last_cmd_.x();  // v_cmd sent at previous cycle
 
-    return xh_pred + XH_OBSERVER_L * v_innov;
-}
+    // Nonlinear term at previous step
+    const double sv_prev = std::tanh(v_prev / SGN_EPS);
+    const double nl_prev = CF1 * sv_prev + CF2 * v_prev * std::abs(w_prev);
 
-void MPCSolver::store_observer_state(
-    const double xh_est, const double v_meas, const double w_meas, const double dv_clamped
-) {
-    xh_obs_.xh = xh_est;
-    xh_obs_.v_prev = v_meas;
-    xh_obs_.w_prev = w_meas;
-    xh_obs_.dv_prev = dv_clamped;
-    xh_obs_.initialized = true;
+    // Predict x_h and v using ZOH model
+    const double xh_pred = A00 * x_h_hat_ + A01 * v_prev + A03 * vc_prev + GNL_XH * nl_prev;
+    const double v_pred  = A10 * x_h_hat_ + A11 * v_prev + A13 * vc_prev + GNL_V  * nl_prev;
+
+    // Innovation: observed v_act vs predicted v
+    const double innovation = v_act - v_pred;
+
+    // Correct hidden state
+    x_h_hat_ = xh_pred + OBS_L * innovation;
+
+    // Store for next cycle
+    prev_v_act_ = v_act;
+    prev_w_act_ = w_act;
 }
 
 std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::follow_path(
@@ -914,9 +921,6 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     last_u_ = u0;
 
     const Eigen::Vector2d start_cmd = last_cmd_;
-
-    // 观测器估计 x_h
-    const double xh_est = estimate_xh(chassis_status.x(), chassis_status.y());
 
     // 决策变量
     std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
@@ -944,10 +948,10 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         u0,
         chassis_status,
         start_cmd,
+        x_h_hat_,
         params_,
         merged_cost_map,
-        global_direction_map,
-        xh_est
+        global_direction_map
     ));
 
     // 添加参数块
@@ -1004,12 +1008,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.follow_limits.start_vel_cmd_act_diff_max, params_.follow_limits.acc_max, params_.dt),
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.follow_limits.start_omega_cmd_act_diff_max, params_.follow_limits.alpha_max, params_.dt)
     );
-
-    // 更新观测器状态
-    store_observer_state(xh_est, chassis_status.x(), chassis_status.y(), cmd_prev_clamped.x());
-
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
-        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls, xh_est
+        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
     );
     return std::tuple{cmd_v_omega, predicted_path_map};
 }
@@ -1021,9 +1021,6 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     const DirectionMap& global_direction_map
 ) {
     const Eigen::Vector2d start_cmd = last_cmd_;
-
-    // 观测器估计 x_h
-    const double xh_est = estimate_xh(chassis_status.x(), chassis_status.y());
 
     // 决策变量
     std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
@@ -1048,10 +1045,10 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         chassis_pose_map,
         chassis_status,
         start_cmd,
+        x_h_hat_,
         params_,
         merged_cost_map,
-        global_direction_map,
-        xh_est
+        global_direction_map
     ));
 
     for (int i = 0; i < params_.horizon; i++) {
@@ -1059,7 +1056,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     }
 
     // 每步8个残差 + 终端2个
-    cost_function->SetNumResiduals(8 * params_.horizon + 2);
+    // 每步10个残差（含 dv/domega 平滑） + 终端2个
+    cost_function->SetNumResiduals(10 * params_.horizon + 2);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
@@ -1104,12 +1102,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.stop_limits.start_vel_cmd_act_diff_max, params_.stop_limits.acc_max, params_.dt),
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.stop_limits.start_omega_cmd_act_diff_max, params_.stop_limits.alpha_max, params_.dt)
     );
-
-    // 更新观测器状态
-    store_observer_state(xh_est, chassis_status.x(), chassis_status.y(), cmd_prev_clamped.x());
-
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
-        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls, xh_est
+        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
     );
     return std::tuple{cmd_v_omega, predicted_path_map};
 }
@@ -1122,9 +1116,6 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
     const DirectionMap& global_direction_map
 ) {
     const Eigen::Vector2d start_cmd = last_cmd_;
-
-    // 观测器估计 x_h
-    const double xh_est = estimate_xh(chassis_status.x(), chassis_status.y());
 
     // 决策变量
     std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
@@ -1150,10 +1141,10 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         chassis_pose_map,
         chassis_status,
         start_cmd,
+        x_h_hat_,
         params_,
         merged_cost_map,
-        global_direction_map,
-        xh_est
+        global_direction_map
     ));
 
     for (int i = 0; i < params_.horizon; i++) {
@@ -1206,12 +1197,8 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.recovery_limits.start_vel_cmd_act_diff_max, params_.recovery_limits.acc_max, params_.dt),
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.recovery_limits.start_omega_cmd_act_diff_max, params_.recovery_limits.alpha_max, params_.dt)
     );
-
-    // 更新观测器状态
-    store_observer_state(xh_est, chassis_status.x(), chassis_status.y(), cmd_prev_clamped.x());
-
     const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
-        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, controls, xh_est
+        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
     );
     return std::tuple{cmd_v_omega, predicted_path_map};
 }

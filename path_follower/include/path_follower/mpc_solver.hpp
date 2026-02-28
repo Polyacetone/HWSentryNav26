@@ -77,6 +77,8 @@ struct MPCStopLimits {
 struct MPCStopWeights {
     double q_v;
     double q_omega;
+    double r_dv;
+    double r_domega;
 
     double acc_limit;
     double alpha_limit;
@@ -108,7 +110,6 @@ struct MPCRecoveryLimits {
 struct MPCRecoveryWeights {
     double q_goal_xy;
     double q_goal_theta;
-
     double r_v;
     double r_omega;
     double r_dv;
@@ -149,6 +150,13 @@ public:
     void set_last_cmd(const Eigen::Vector2d& cmd);
     void reset_warm_start();
 
+    /// Update the hidden-state observer with the latest measured velocities.
+    /// Must be called once per control cycle before any solve call.
+    void update_observer(double v_act, double w_act);
+
+    /// Current hidden-state estimate (pitch proxy).
+    [[nodiscard]] double hidden_state_estimate() const { return x_h_hat_; }
+
     std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,
@@ -175,26 +183,16 @@ public:
     [[nodiscard]] const MPCParams& params() const { return params_; }
 
 private:
-    /// 计算当前 x_h（pitch 隐藏状态）的 Luenberger 观测器估计值。
-    /// 在每次求解前调用，基于上一周期存储的状态与本周期的 v 量测进行修正。
-    double estimate_xh(double v_meas_now, double w_meas_now) const;
-
-    /// 求解后存储本周期信息，供下一周期观测器使用。
-    void store_observer_state(double xh_est, double v_meas, double w_meas, double dv_clamped);
-
     MPCParams params_;
     std::vector<Eigen::Vector2d> last_controls_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 
-    // ── x_h Luenberger 观测器状态 ──
-    struct XhObserver {
-        double xh = 0.0;       // 当前 x_h 估计
-        double v_prev = 0.0;   // 上一周期的 v 量测
-        double w_prev = 0.0;   // 上一周期的 w 量测（用于非线性项）
-        double dv_prev = 0.0;  // 上一周期的 dv（= 限幅后的 v_cmd_{k-1}）
-        bool initialized = false;
-    } xh_obs_;
+    // ── Hidden-state Luenberger observer ──
+    double x_h_hat_ = 0.0;        // current estimate of hidden pitch state
+    double prev_v_act_ = 0.0;     // v_act at previous cycle (for prediction)
+    double prev_w_act_ = 0.0;     // w_act at previous cycle (for nonlinear term)
+    bool observer_initialized_ = false;
 };
 
 }

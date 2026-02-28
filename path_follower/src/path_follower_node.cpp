@@ -147,6 +147,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .stop_weights = {
             .q_v = declare_parameter<double>("mpc.stop.weights.q_v"),
             .q_omega = declare_parameter<double>("mpc.stop.weights.q_omega"),
+            .r_dv = declare_parameter<double>("mpc.stop.weights.r_dv"),
+            .r_domega = declare_parameter<double>("mpc.stop.weights.r_domega"),
             .acc_limit = declare_parameter<double>("mpc.stop.weights.acc_limit"),
             .alpha_limit = declare_parameter<double>("mpc.stop.weights.alpha_limit"),
             .lat_acc = declare_parameter<double>("mpc.stop.weights.lat_acc"),

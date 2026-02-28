@@ -131,6 +131,9 @@ ControlOutput MainController::update(const ControlInput& input) {
     const FsmState prev_state = last_fsm_state_;
     mpc_controller_->set_last_cmd(last_cmd_);
 
+    // 0. 更新隐藏状态观测器（在 MPC 求解之前）
+    mpc_controller_->update_observer(input.chassis_status.x(), input.chassis_status.y());
+
     // 1. 组装 FSM 输入
     FsmInput fsm_input;
     fsm_input.has_path = input.global_path.has_value();

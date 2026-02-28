@@ -322,8 +322,9 @@ struct StStopping final : sc::state<StStopping, Machine> {
 
         m.stop_dest = compute_desired(in);
 
-        const double v = in.velocity;
-        const double w = in.omega;
+        // 使用上一周期的指令速度（而非实际速度）判断过渡条件，以保证指令信号的连续性
+        const double v = m.last_cmd_velocity;
+        const double w = m.last_cmd_omega;
         const auto& tp = m.params.transition;
 
         switch (m.stop_dest) {
