@@ -4,7 +4,7 @@
 This script identifies a physics-informed model mapping (v_cmd, w_cmd) → (v_act, w_act)
 for a wheel-leg balanced robot with LQR-controlled pitch dynamics.
 
-Model structure (continuous-time, Euler-discretized at 10Hz):
+Model structure (continuous-time, ZOH-discretized at 10Hz with sub-stepping):
 
   Longitudinal velocity (2nd order with hidden pitch state + nonlinear compensation):
     ẋ_h   = a11·x_h + a12·v_act + b1·v_cmd
@@ -17,6 +17,9 @@ Model structure (continuous-time, Euler-discretized at 10Hz):
     ẇ_act = (1/τ)·(w_cmd - w_act) − cf3·sgn(w_act)
 
 Input delay: 1 step (0.1s at 10Hz MPC rate).
+
+Simulation uses N_SUBSTEPS=10 Euler sub-steps per dt for accuracy with fast w dynamics.
+Discrete state-space export uses exact ZOH (matrix exponential) for MPC.
 
 Optimization:
   - Three-phase: w-only → v-only (with measured w) → joint refinement
@@ -49,6 +52,7 @@ import numpy as np
 
 try:
     from scipy import signal
+    from scipy.linalg import expm
     from scipy.optimize import differential_evolution, minimize
 except ImportError as exc:
     raise RuntimeError("scipy is required: pip install scipy") from exc
@@ -64,6 +68,7 @@ from numba import njit, prange
 DT = 0.1            # MPC timestep (10 Hz)
 INPUT_DELAY = 1      # command delay in MPC steps (0.1 s)
 SGN_EPS = 0.05       # smooth-sign softness: tanh(x / eps)
+N_SUBSTEPS = 10      # Euler sub-steps per DT for simulation accuracy
 
 PARAM_NAMES = ["a11", "a12", "a21", "a22", "b1", "b2", "cf1", "cf2", "tau_w", "cf3", "xh0"]
 N_PARAMS = len(PARAM_NAMES)
@@ -172,6 +177,57 @@ def _smooth_sgn_nb(x: float, eps: float) -> float:
     return math.tanh(x / eps)
 
 
+# ── Sub-stepping helpers (Euler with N_SUBSTEPS per DT) ──────────────────────
+
+@njit(cache=True)
+def _substep_w(w: float, wc: float, inv_tau: float, cf3: float,
+               dt: float, n_sub: int, sgn_eps: float) -> float:
+    """Advance w by one macro-step using n_sub Euler sub-steps."""
+    sub_dt = dt / n_sub
+    for _ in range(n_sub):
+        sw = _smooth_sgn_nb(w, sgn_eps)
+        dw = inv_tau * (wc - w) - cf3 * sw
+        w = w + sub_dt * dw
+    return w
+
+
+@njit(cache=True)
+def _substep_v(xh: float, v: float, w: float, vc: float,
+               a11: float, a12: float, a21: float, a22: float,
+               b1: float, b2: float, cf1: float, cf2: float,
+               dt: float, n_sub: int, sgn_eps: float):
+    """Advance (x_h, v) by one macro-step using n_sub Euler sub-steps.
+    w is held constant (measured) over the macro-step."""
+    sub_dt = dt / n_sub
+    for _ in range(n_sub):
+        sv = _smooth_sgn_nb(v, sgn_eps)
+        dx_h = a11 * xh + a12 * v + b1 * vc
+        dv = a21 * xh + a22 * v + b2 * vc + cf1 * sv + cf2 * v * abs(w)
+        xh = xh + sub_dt * dx_h
+        v = v + sub_dt * dv
+    return xh, v
+
+
+@njit(cache=True)
+def _substep_joint(xh: float, v: float, w: float, vc: float, wc: float,
+                   a11: float, a12: float, a21: float, a22: float,
+                   b1: float, b2: float, cf1: float, cf2: float,
+                   inv_tau: float, cf3: float,
+                   dt: float, n_sub: int, sgn_eps: float):
+    """Advance (x_h, v, w) by one macro-step using n_sub Euler sub-steps."""
+    sub_dt = dt / n_sub
+    for _ in range(n_sub):
+        sv = _smooth_sgn_nb(v, sgn_eps)
+        sw = _smooth_sgn_nb(w, sgn_eps)
+        dx_h = a11 * xh + a12 * v + b1 * vc
+        dv = a21 * xh + a22 * v + b2 * vc + cf1 * sv + cf2 * v * abs(w)
+        dw_val = inv_tau * (wc - w) - cf3 * sw
+        xh = xh + sub_dt * dx_h
+        v = v + sub_dt * dv
+        w = w + sub_dt * dw_val
+    return xh, v, w
+
+
 @njit(cache=True)
 def simulate_w_only_nb(
     tau_w: float,
@@ -189,12 +245,10 @@ def simulate_w_only_nb(
     for k in range(N - 1):
         kd = k - delay
         wc = w_cmd[kd] if kd >= 0 else w_cmd[0]
-        sw = _smooth_sgn_nb(w_pred[k], sgn_eps)
-        dw = inv_tau * (wc - w_pred[k]) - cf3 * sw
-        w_next = w_pred[k] + dt * dw
+        w_next = _substep_w(w_pred[k], wc, inv_tau, cf3, dt, N_SUBSTEPS, sgn_eps)
         w_pred[k + 1] = w_next
         if abs(w_next) > 80.0:
-            for j in range(k + 1, N):
+            for j in range(k + 2, N):
                 w_pred[j] = np.nan
             break
     return w_pred
@@ -223,18 +277,16 @@ def simulate_v_with_meas_w_nb(
     v_pred[0] = v0
     x_h = xh0
     for k in range(N - 1):
-        v = v_pred[k]
-        w = w_meas[k]
         kd = k - delay
         vc = v_cmd[kd] if kd >= 0 else v_cmd[0]
-        sv = _smooth_sgn_nb(v, sgn_eps)
-        dx_h = a11 * x_h + a12 * v + b1 * vc
-        dv = a21 * x_h + a22 * v + b2 * vc + cf1 * sv + cf2 * v * abs(w)
-        x_h = x_h + dt * dx_h
-        v_next = v + dt * dv
+        x_h, v_next = _substep_v(
+            x_h, v_pred[k], w_meas[k], vc,
+            a11, a12, a21, a22, b1, b2, cf1, cf2,
+            dt, N_SUBSTEPS, sgn_eps,
+        )
         v_pred[k + 1] = v_next
         if abs(v_next) > 50.0 or abs(x_h) > 200.0:
-            for j in range(k + 1, N):
+            for j in range(k + 2, N):
                 v_pred[j] = np.nan
             break
     return v_pred
@@ -274,29 +326,23 @@ def simulate_greybox_nb(
     inv_tau = 1.0 / max(abs(tau_w), 1e-4)
 
     for k in range(N - 1):
-        v = v_pred[k]
-        w = w_pred[k]
         kd = k - delay
         vc = v_cmd[kd] if kd >= 0 else v_cmd[0]
         wc = w_cmd[kd] if kd >= 0 else w_cmd[0]
 
-        sv = _smooth_sgn_nb(v, sgn_eps)
-        dx_h = a11 * x_h + a12 * v + b1 * vc
-        dv = a21 * x_h + a22 * v + b2 * vc + cf1 * sv + cf2 * v * abs(w)
-        x_h_new = x_h + dt * dx_h
-        v_new = v + dt * dv
+        x_h, v_new, w_new = _substep_joint(
+            x_h, v_pred[k], w_pred[k], vc, wc,
+            a11, a12, a21, a22, b1, b2, cf1, cf2,
+            inv_tau, cf3,
+            dt, N_SUBSTEPS, sgn_eps,
+        )
 
-        sw = _smooth_sgn_nb(w, sgn_eps)
-        dw = inv_tau * (wc - w) - cf3 * sw
-        w_new = w + dt * dw
-
-        x_h = x_h_new
         v_pred[k + 1] = v_new
         w_pred[k + 1] = w_new
         xh_trace[k + 1] = x_h
 
         if abs(v_new) > 50.0 or abs(w_new) > 80.0 or abs(x_h) > 200.0:
-            for j in range(k + 1, N):
+            for j in range(k + 2, N):
                 v_pred[j] = np.nan
                 w_pred[j] = np.nan
                 xh_trace[j] = np.nan
@@ -467,9 +513,7 @@ def loss_w_only_packed(
         for k in range(n - 1):
             kd = k - delay
             wc = w_cmd[start + kd] if kd >= 0 else wcmd0
-            sw = _smooth_sgn_nb(w_pred, sgn_eps)
-            dw = inv_tau * (wc - w_pred) - cf3 * sw
-            w_next = w_pred + dt * dw
+            w_next = _substep_w(w_pred, wc, inv_tau, cf3, dt, N_SUBSTEPS, sgn_eps)
             wm_next = w_meas[start + k + 1]
 
             phi_p += 0.5 * dt * (prev_wp + w_next)
@@ -550,11 +594,11 @@ def loss_v_with_meas_w_packed(
             w_k = w_meas[start + k]
             kd = k - delay
             vc = v_cmd[start + kd] if kd >= 0 else vcmd0
-            sv = _smooth_sgn_nb(v_pred, sgn_eps)
-            dx_h = a11 * x_h + a12 * v_pred + b1 * vc
-            dv = a21 * x_h + a22 * v_pred + b2 * vc + cf1 * sv + cf2 * v_pred * abs(w_k)
-            x_h = x_h + dt * dx_h
-            v_next = v_pred + dt * dv
+            x_h, v_next = _substep_v(
+                x_h, v_pred, w_k, vc,
+                a11, a12, a21, a22, b1, b2, cf1, cf2,
+                dt, N_SUBSTEPS, sgn_eps,
+            )
 
             vm_next = v_meas[start + k + 1]
             s_p += 0.5 * dt * (prev_vp + v_next)
@@ -657,15 +701,12 @@ def loss_joint_packed(
             vc = v_cmd[start + kd] if kd >= 0 else vcmd0
             wc = w_cmd[start + kd] if kd >= 0 else wcmd0
 
-            sv = _smooth_sgn_nb(v_pred, sgn_eps)
-            dx_h = a11 * x_h + a12 * v_pred + b1 * vc
-            dv = a21 * x_h + a22 * v_pred + b2 * vc + cf1 * sv + cf2 * v_pred * abs(w_pred)
-            x_h = x_h + dt * dx_h
-            v_next = v_pred + dt * dv
-
-            sw = _smooth_sgn_nb(w_pred, sgn_eps)
-            dw = inv_tau * (wc - w_pred) - cf3 * sw
-            w_next = w_pred + dt * dw
+            x_h, v_next, w_next = _substep_joint(
+                x_h, v_pred, w_pred, vc, wc,
+                a11, a12, a21, a22, b1, b2, cf1, cf2,
+                inv_tau, cf3,
+                dt, N_SUBSTEPS, sgn_eps,
+            )
 
             vm_next = v_meas[start + k + 1]
             wm_next = w_meas[start + k + 1]
@@ -900,12 +941,14 @@ def compute_metrics(
 # ════════════════════════════════════════════════════════════════════════════════
 
 def build_discrete_ss(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
-    """Build discrete-time state-space matrices for MPC.
+    """Build discrete-time state-space matrices for MPC via exact ZOH discretization.
 
     State: [x_h, v_act, w_act, dv(=v_cmd_{k-1}), dw(=w_cmd_{k-1})]
     Input: [v_cmd, w_cmd]
     Output: [v_act, w_act]
 
+    v subsystem (x_h, v) uses matrix exponential for ZOH.
+    w subsystem (1st order) uses analytic exp(-dt/tau).
     Linear part only (nonlinear terms exported separately in metadata).
     """
     a11, a12, a21, a22, b1, b2, cf1, cf2, tau_w, cf3 = params[:10]
@@ -913,25 +956,45 @@ def build_discrete_ss(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.nd
     dt = DT
     inv_tau = 1.0 / max(abs(tau_w), 1e-4)
 
+    # ── v subsystem: exact ZOH via matrix exponential ──
+    # Continuous: d/dt [x_h; v] = Ac_v [x_h; v] + Bc_v [v_cmd]
+    Ac_v = np.array([[a11, a12],
+                     [a21, a22]])
+    Bc_v = np.array([[b1],
+                     [b2]])
+
+    # Build augmented matrix [Ac Bc; 0 0] and expm
+    aug = np.zeros((3, 3))
+    aug[:2, :2] = Ac_v * dt
+    aug[:2, 2:3] = Bc_v * dt
+    eaug = expm(aug)
+    Ad_v = eaug[:2, :2]  # 2x2 discrete A for v subsystem
+    Bd_v = eaug[:2, 2]   # 2x1 discrete B for v subsystem
+
+    # ── w subsystem: analytic ZOH ──
+    aw = np.exp(-dt * inv_tau)               # AW
+    bw = (1.0 - aw)                          # BW = 1 - exp(-dt/tau)
+    # For friction term integrated: tau_cf3 = tau_w * cf3
+    tau_cf3 = tau_w * cf3
+
+    # ── Assemble full 5x5 system ──
     nx, nu, ny = 5, 2, 2
     A = np.zeros((nx, nx))
     B = np.zeros((nx, nu))
     C = np.zeros((ny, nx))
     D = np.zeros((ny, nu))
 
-    # x_h[k+1] = (1+dt·a11)x_h + dt·a12·v + dt·b1·dv
-    A[0, 0] = 1.0 + dt * a11
-    A[0, 1] = dt * a12
-    A[0, 3] = dt * b1
+    # v subsystem (ZOH)
+    A[0, 0] = Ad_v[0, 0]   # x_h ← x_h
+    A[0, 1] = Ad_v[0, 1]   # x_h ← v
+    A[0, 3] = Bd_v[0]      # x_h ← dv (v_cmd delayed)
+    A[1, 0] = Ad_v[1, 0]   # v ← x_h
+    A[1, 1] = Ad_v[1, 1]   # v ← v
+    A[1, 3] = Bd_v[1]      # v ← dv
 
-    # v[k+1] = dt·a21·x_h + (1+dt·a22)v + dt·b2·dv  (+ nonlinear terms)
-    A[1, 0] = dt * a21
-    A[1, 1] = 1.0 + dt * a22
-    A[1, 3] = dt * b2
-
-    # w[k+1] = (1-dt/τ)w + (dt/τ)dw  (+ nonlinear terms)
-    A[2, 2] = 1.0 - dt * inv_tau
-    A[2, 4] = dt * inv_tau
+    # w subsystem (ZOH)
+    A[2, 2] = aw            # w ← w
+    A[2, 4] = bw            # w ← dw (w_cmd delayed)
 
     # delay states: dv[k+1] = v_cmd[k], dw[k+1] = w_cmd[k]
     B[3, 0] = 1.0
@@ -943,6 +1006,7 @@ def build_discrete_ss(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.nd
 
     meta = {
         "model_type": "greybox_pitch_hidden_state",
+        "discretization": "ZOH (exact matrix exponential)",
         "dt": DT,
         "input_delay_steps": INPUT_DELAY,
         "sgn_eps": SGN_EPS,
@@ -954,10 +1018,18 @@ def build_discrete_ss(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.nd
         "xh0": xh0,
         "nonlinear_terms": {
             "v_equation": f"+ {cf1:.6f}*sgn(v) + {cf2:.6f}*v*|w|",
-            "w_equation": f"- {cf3:.6f}*sgn(w)",
+            "w_equation": f"- {tau_cf3:.6f}*sgn(w)  [tau_w*cf3, integrated into ZOH]",
             "cf1": float(cf1),
             "cf2": float(cf2),
             "cf3": float(cf3),
+            "tau_cf3": float(tau_cf3),
+        },
+        "zoh_constants": {
+            "AV00": float(Ad_v[0, 0]), "AV01": float(Ad_v[0, 1]),
+            "AV10": float(Ad_v[1, 0]), "AV11": float(Ad_v[1, 1]),
+            "BV0": float(Bd_v[0]), "BV1": float(Bd_v[1]),
+            "AW": float(aw), "BW": float(bw),
+            "TAU_CF3": float(tau_cf3),
         },
         "v_model": {
             "type": "2nd_order_greybox_with_hidden_pitch",
@@ -971,6 +1043,39 @@ def build_discrete_ss(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.nd
         },
     }
     return A, B, C, D, meta
+
+
+def print_cpp_constants(meta: Dict) -> None:
+    """Print C++ constexpr block for copy-paste into mpc_solver.cpp."""
+    zoh = meta["zoh_constants"]
+    nl = meta["nonlinear_terms"]
+    ct = meta["continuous_params"]
+
+    print("\n" + "=" * 72)
+    print("  C++ constants for mpc_solver.cpp (ZOH exact discretization)")
+    print("=" * 72)
+    print(f"""
+// ── ZOH discrete constants (dt = {meta['dt']:.2f}s) ──
+// v subsystem (2nd order, matrix exponential)
+constexpr double AV00 = {zoh['AV00']:.6f};
+constexpr double AV01 = {zoh['AV01']:.6f};
+constexpr double AV10 = {zoh['AV10']:.6f};
+constexpr double AV11 = {zoh['AV11']:.6f};
+constexpr double BV0  = {zoh['BV0']:.6f};
+constexpr double BV1  = {zoh['BV1']:.6f};
+// w subsystem (1st order lag, analytic ZOH)
+constexpr double AW   = {zoh['AW']:.6f};
+constexpr double BW   = {zoh['BW']:.6f};
+// Nonlinear terms
+constexpr double CF1  = {nl['cf1']:.6f};   // Coulomb friction on v
+constexpr double CF2  = {nl['cf2']:.6f};   // v-w coupling
+constexpr double TAU_CF3 = {nl['tau_cf3']:.6f};   // tau_w * cf3 (integrated friction on w)
+// Hidden state initial value
+constexpr double XH0  = {meta['xh0']:.6f};
+// Continuous params for reference: tau_w={ct['tau_w']:.6f}, cf3={ct['cf3']:.6f}
+// SGN_EPS = {meta['sgn_eps']:.4f}
+""")
+    print("=" * 72 + "\n")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1139,6 +1244,7 @@ def main() -> int:
 
     # ── Build state-space ──
     A, B, C, D, meta = build_discrete_ss(final_params)
+    print_cpp_constants(meta)
 
     # ── Save model ──
     npz_path = out_dir / "model_greybox_10hz.npz"
@@ -1159,7 +1265,7 @@ def main() -> int:
         f.write("# w model (continuous):\n")
         f.write("#   ẇ_act = (1/τ)·(w_cmd − w_act) − cf3·sgn(w_act)\n\n")
         np.set_printoptions(precision=6, suppress=True, linewidth=140)
-        f.write("# Discrete-time state-space (Euler, dt=0.1s):\n")
+        f.write("# Discrete-time state-space (ZOH exact, dt=0.1s):\n")
         f.write("# State: [x_h, v_act, w_act, dv(=v_cmd[k-1]), dw(=w_cmd[k-1])]\n\n")
         f.write("A =\n" + str(A) + "\n\n")
         f.write("B =\n" + str(B) + "\n\n")

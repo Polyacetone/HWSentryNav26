@@ -57,7 +57,7 @@
     # If CUDA is not compiled in, the node will fall back to CPU automatically.
     use_cuda_raycasting: true
     voxel_resolution: 0.01
-    pass_through_threshold: 2
+    pass_through_threshold: 3
 
     # ========== Downsample ==========
     enable_downsample: true

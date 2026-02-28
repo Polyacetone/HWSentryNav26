@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_TYPE Release)
-add_compile_options(-O3 -march=native -flto=auto -Wall -Wextra -Wpedantic)
+add_compile_options(-O3 -flto=auto -Wall -Wextra -Wpedantic)
 
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
