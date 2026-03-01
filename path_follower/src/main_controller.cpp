@@ -134,6 +134,9 @@ ControlOutput MainController::update(const ControlInput& input) {
     // 0. 更新隐藏状态观测器（在 MPC 求解之前）
     mpc_controller_->update_observer(input.chassis_status.x(), input.chassis_status.y());
 
+    // 0.5 更新能量状态
+    mpc_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
+
     // 1. 组装 FSM 输入
     FsmInput fsm_input;
     fsm_input.has_path = input.global_path.has_value();

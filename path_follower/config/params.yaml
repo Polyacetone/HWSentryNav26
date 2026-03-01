@@ -32,6 +32,11 @@
         horizon: 12 # 预测步数
         dt: 0.1 # 预测时间间隔
         max_iterations: 100 # 最大迭代次数
+      energy: # 能量感知参数
+        enable: true # 是否启用能量约束
+        threshold: 500.0 # 缓冲电容能量惩罚阈值(J)，低于此值开始惩罚
+        weight: 5.0 # 能量软约束权重
+        softplus_beta: 5.0 # softplus斜率(越大越接近硬折线惩罚)
       follow_path: # 路径跟随模式
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数
@@ -54,14 +59,14 @@
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
           step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
-          q_y: 0.5 # 横向误差权重
-          q_theta: 0.3 # 航向误差权重
-          q_u: 2.0 # 进度项权重
+          q_y: 0.4 # 横向误差权重
+          q_theta: 0.2 # 航向误差权重
+          q_u: 2.4 # 进度项权重
           q_v_final: 0.4 # 终点减速权重
           r_v: 0.01 # 线速度正则
           r_omega: 0.06 # 角速度正则
-          r_dv: 0.04 # 线速度平滑
-          r_domega: 0.10 # 角速度平滑
+          r_dv: 0.80 # 线速度平滑
+          r_domega: 0.20 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
@@ -86,8 +91,8 @@
         weights: # 权重
           q_v: 0.6 # 线速度正则
           q_omega: 0.6 # 角速度正则
-          r_dv: 0.04 # 线速度指令平滑
-          r_domega: 0.10 # 角速度指令平滑
+          r_dv: 0.80 # 线速度指令平滑
+          r_domega: 0.20 # 角速度指令平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
@@ -114,8 +119,8 @@
           q_goal_theta: 0.1 # 朝向目标点
           r_v: 0.02 # 线速度正则
           r_omega: 0.12 # 角速度正则
-          r_dv: 0.04 # 线速度平滑
-          r_domega: 0.12 # 角速度平滑
+          r_dv: 0.80 # 线速度平滑
+          r_domega: 0.20 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）

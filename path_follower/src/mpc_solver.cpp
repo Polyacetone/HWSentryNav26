@@ -36,6 +36,26 @@ inline T smoothstep(const T& x, const T& edge0, const T& edge1) {
     return smoothstep01((x - edge0) / denom);
 }
 
+template<typename T>
+inline T softplus(const T& x) {
+    // Numerically-stable softplus: log(1 + exp(x))
+    // Use mild branching to avoid overflow while keeping derivatives well-behaved.
+    if (x > T(20.0)) {
+        return x;
+    }
+    if (x < T(-20.0)) {
+        return ceres::exp(x);
+    }
+    return ceres::log(T(1.0) + ceres::exp(x));
+}
+
+template<typename T>
+inline T softplus_relu_approx(const T& x, const T& beta) {
+    // Smooth approximation of ReLU(x): softplus(beta*x)/beta
+    const T b = ceres::fmax(beta, T(1e-6));
+    return softplus(b * x) / b;
+}
+
 template <typename T>
 inline void eval_quadratic_uniform_bspline_2d(
     const std::vector<Eigen::Vector2d>& control_points,
@@ -168,6 +188,39 @@ constexpr double A24       = 1.0;
 constexpr double GAMMA_W   = 0.0001;
 // hidden-state observer gain (target pole = 0.6)
 constexpr double OBS_L     = 1.0248925724888915;
+
+// ── Power model coefficients (auto-generated from identification) ──
+// P(v,w,a,α) = Σ PWR_C[i] × φ_i(v,w,a,α)
+constexpr int    PWR_N      = 12;
+constexpr double PWR_EPS2   = 0.05 * 0.05;  // smooth |x| ≈ sqrt(x²+eps²), eps=0.05
+constexpr double PWR_C[PWR_N] = {
+    2.7110134710e+00,   // c0:  bias
+    3.6372787717e+01,   // c1:  v·a
+    1.0075311460e+00,   // c2:  ω·α
+    6.9483321596e+00,   // c3:  a²
+    3.0938208347e-02,   // c4:  α²
+    1.7413564345e+01,   // c5:  |v|
+    5.0106092100e+00,   // c6:  |ω|
+    7.5217098628e+00,   // c7:  v²
+    4.1360921007e-01,   // c8:  ω²
+    0.0000000000e+00,   // c9:  |a|
+    2.8789111183e-02,   // c10: |α|
+    0.0000000000e+00,   // c11: |v·ω|
+};
+
+template<typename T>
+inline T sabs(const T& x) { return ceres::sqrt(x * x + T(PWR_EPS2)); }
+
+template<typename T>
+inline T predict_power(const T& v, const T& w, const T& a, const T& alpha) {
+    return T(PWR_C[0])
+        + T(PWR_C[1]) * v * a     + T(PWR_C[2]) * w * alpha
+        + T(PWR_C[3]) * a * a     + T(PWR_C[4]) * alpha * alpha
+        + T(PWR_C[5]) * sabs(v)   + T(PWR_C[6]) * sabs(w)
+        + T(PWR_C[7]) * v * v     + T(PWR_C[8]) * w * w
+        + T(PWR_C[9]) * sabs(a)   + T(PWR_C[10]) * sabs(alpha)
+        + T(PWR_C[11]) * sabs(v * w);
+}
 
 template<typename T>
 inline T wrap_to_pi(const T& a) {
@@ -361,7 +414,9 @@ struct FollowMPCCostFunctor {
         const double x_h_init,
         const MPCParams& params,
         const CostMap& merged_cost_map,
-        const DirectionMap& direction_map
+        const DirectionMap& direction_map,
+        const double remaining_energy,
+        const double rfr_pwr_limit
     ):
         ref_control_points_(ref_control_points),
         start_pose_(start_pose),
@@ -371,7 +426,9 @@ struct FollowMPCCostFunctor {
         x_h_init_(x_h_init),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map) {}
+        direction_map_(direction_map),
+        remaining_energy_(remaining_energy),
+        rfr_pwr_limit_(rfr_pwr_limit) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -400,6 +457,10 @@ struct FollowMPCCostFunctor {
             T(x_h_init_)
         );
 
+        T energy = T(remaining_energy_);
+        T v_act_prev = T(start_status_.x());
+        T w_act_prev = T(start_status_.y());
+
         size_t res_idx = 0;
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
@@ -411,6 +472,11 @@ struct FollowMPCCostFunctor {
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
             prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
+
+            // 能量传播
+            const T a_k = (st.v_act - v_act_prev) / T(params_.dt);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(params_.dt);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(params_.dt);
 
             // 样条上的参考点
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -501,6 +567,17 @@ struct FollowMPCCostFunctor {
             const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
             residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), st.v_act - v_dec_profile); // 惩罚超速
 
+            // 10. 能量约束
+            const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
+            const T thr = T(std::max(params_.energy.threshold, 1.0));
+            const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
+            const T vio = (T(params_.energy.threshold) - energy) / thr;
+            // Make penalty EXACTLY zero for vio <= 0 (energy above threshold).
+            // softplus(beta*vio)/beta is > 0 even for vio < 0, which can cause a slow drift
+            // towards minimum speed just to keep "charging" in the prediction model.
+            const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
+            residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
+
             // 进度动力学
             T denom = T(1.0) - kappa * ey;
             const T denom_abs = ceres::abs(denom);
@@ -509,8 +586,11 @@ struct FollowMPCCostFunctor {
             const T dudt = dsdt / dsdu;
             u += dudt * T(params_.dt);
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
+
             last_v_cmd = v_cmd;
             last_omega_cmd = omega_cmd;
+            v_act_prev = st.v_act;
+            w_act_prev = st.omega_act;
         }
 
         return true;
@@ -525,6 +605,8 @@ struct FollowMPCCostFunctor {
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
+    const double remaining_energy_;
+    const double rfr_pwr_limit_;
 };
 
 // ============================================================================
@@ -539,7 +621,9 @@ struct StopMPCCostFunctor {
         const double x_h_init,
         const MPCParams& params,
         const CostMap& merged_cost_map,
-        const DirectionMap& direction_map
+        const DirectionMap& direction_map,
+        const double remaining_energy,
+        const double rfr_pwr_limit
     ):
         start_pose_(start_pose),
         start_status_(start_status),
@@ -547,7 +631,9 @@ struct StopMPCCostFunctor {
         x_h_init_(x_h_init),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map) {}
+        direction_map_(direction_map),
+        remaining_energy_(remaining_energy),
+        rfr_pwr_limit_(rfr_pwr_limit) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -576,6 +662,10 @@ struct StopMPCCostFunctor {
             T(x_h_init_)
         );
 
+        T energy = T(remaining_energy_);
+        T v_act_prev = T(start_status_.x());
+        T w_act_prev = T(start_status_.y());
+
         size_t res_idx = 0;
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
@@ -586,11 +676,16 @@ struct StopMPCCostFunctor {
 
             prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
 
-            // 1. 速度正则化（希望停止）
+            // 能量传播
+            const T a_k = (st.v_act - v_act_prev) / T(params_.dt);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(params_.dt);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(params_.dt);
+
+            // 1. 速度正则化
             residuals[res_idx++] = T(params_.stop_weights.q_v) * st.v_act;
             residuals[res_idx++] = T(params_.stop_weights.q_omega) * st.omega_act;
 
-            // 2 指令平滑（停止模式专用，不与其他模式混用）
+            // 2 指令平滑
             residuals[res_idx++] = T(params_.stop_weights.r_dv) * dv_cmd;
             residuals[res_idx++] = T(params_.stop_weights.r_domega) * domega_cmd;
 
@@ -630,9 +725,19 @@ struct StopMPCCostFunctor {
             const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
             const T target_vel_step = weight_up * T(params_.stop_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.stop_limits.vel_step_down);
             residuals[res_idx++] = T(params_.stop_weights.vel_on_step) * step_gate * dir_norm * ceres::abs(st.v_act - target_vel_step);
+
+            // 能量约束
+            const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
+            const T thr = T(std::max(params_.energy.threshold, 1.0));
+            const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
+            const T vio = (T(params_.energy.threshold) - energy) / thr;
+            const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
+            residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
             
             last_v_cmd = v_cmd;
             last_omega_cmd = omega_cmd;
+            v_act_prev = st.v_act;
+            w_act_prev = st.omega_act;
         }
 
         // 终端约束：不碰撞且不在台阶区域
@@ -657,6 +762,8 @@ struct StopMPCCostFunctor {
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
+    const double remaining_energy_;
+    const double rfr_pwr_limit_;
 };
 
 // ============================================================================
@@ -672,7 +779,9 @@ struct RecoveryMPCCostFunctor {
         const double x_h_init,
         const MPCParams& params,
         const CostMap& merged_cost_map,
-        const DirectionMap& direction_map
+        const DirectionMap& direction_map,
+        const double remaining_energy,
+        const double rfr_pwr_limit
     ):
         goal_map_(goal_map),
         start_pose_(start_pose),
@@ -681,7 +790,9 @@ struct RecoveryMPCCostFunctor {
         x_h_init_(x_h_init),
         params_(params),
         merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map) {}
+        direction_map_(direction_map),
+        remaining_energy_(remaining_energy),
+        rfr_pwr_limit_(rfr_pwr_limit) {}
 
     template<typename T>
     bool operator()(T const* const* parameters, T* residuals) const {
@@ -713,6 +824,10 @@ struct RecoveryMPCCostFunctor {
         const T gx = T(goal_map_.x());
         const T gy = T(goal_map_.y());
 
+        T energy = T(remaining_energy_);
+        T v_act_prev = T(start_status_.x());
+        T w_act_prev = T(start_status_.y());
+
         size_t res_idx = 0;
         for (int k = 0; k < params_.horizon; k++) {
             const T* uk = parameters[k];
@@ -722,6 +837,11 @@ struct RecoveryMPCCostFunctor {
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
             prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
+
+            // 能量传播
+            const T a_k = (st.v_act - v_act_prev) / T(params_.dt);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(params_.dt);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(params_.dt);
 
             // 1. 目标点吸引
             const T dx = st.x - gx;
@@ -766,8 +886,18 @@ struct RecoveryMPCCostFunctor {
             );
             residuals[res_idx++] = T(params_.recovery_weights.step) * step_gate;
 
+            // 能量约束
+            const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
+            const T thr = T(std::max(params_.energy.threshold, 1.0));
+            const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
+            const T vio = (T(params_.energy.threshold) - energy) / thr;
+            const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
+            residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
+
             last_v_cmd = v_cmd;
             last_omega_cmd = omega_cmd;
+            v_act_prev = st.v_act;
+            w_act_prev = st.omega_act;
         }
 
         // 终端：更强地要求到达目标且不在危险区域
@@ -799,6 +929,8 @@ struct RecoveryMPCCostFunctor {
     const MPCParams& params_;
     const CostMap& merged_cost_map_;
     const DirectionMap& direction_map_;
+    const double remaining_energy_;
+    const double rfr_pwr_limit_;
 };
 
 inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
@@ -867,6 +999,11 @@ void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
 
 void MPCSolver::reset_warm_start() {
     last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
+}
+
+void MPCSolver::set_energy_state(double remaining_energy, double rfr_pwr_limit) {
+    remaining_energy_ = remaining_energy;
+    rfr_pwr_limit_ = rfr_pwr_limit;
 }
 
 void MPCSolver::update_observer(const double v_act, const double w_act) {
@@ -951,15 +1088,17 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         x_h_hat_,
         params_,
         merged_cost_map,
-        global_direction_map
+        global_direction_map,
+        remaining_energy_,
+        rfr_pwr_limit_
     ));
 
     // 添加参数块
     for (int i = 0; i < params_.horizon; i++) {
         cost_function->AddParameterBlock(2);
     }
-    // 每步15个残差
-    cost_function->SetNumResiduals(15 * params_.horizon);
+    // 每步16个残差
+    cost_function->SetNumResiduals(16 * params_.horizon);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
@@ -1048,16 +1187,17 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         x_h_hat_,
         params_,
         merged_cost_map,
-        global_direction_map
+        global_direction_map,
+        remaining_energy_,
+        rfr_pwr_limit_
     ));
 
     for (int i = 0; i < params_.horizon; i++) {
         cost_function->AddParameterBlock(2);
     }
 
-    // 每步8个残差 + 终端2个
-    // 每步10个残差（含 dv/domega 平滑） + 终端2个
-    cost_function->SetNumResiduals(10 * params_.horizon + 2);
+    // 每步11个残差 + 终端2个
+    cost_function->SetNumResiduals(11 * params_.horizon + 2);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
@@ -1144,15 +1284,17 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         x_h_hat_,
         params_,
         merged_cost_map,
-        global_direction_map
+        global_direction_map,
+        remaining_energy_,
+        rfr_pwr_limit_
     ));
 
     for (int i = 0; i < params_.horizon; i++) {
         cost_function->AddParameterBlock(2);
     }
 
-    // 每步12个残差 + 终端4个
-    cost_function->SetNumResiduals(12 * params_.horizon + 4);
+    // 每步13个残差 + 终端4个
+    cost_function->SetNumResiduals(13 * params_.horizon + 4);
 
     std::vector<double*> parameter_blocks;
     parameter_blocks.reserve(static_cast<size_t>(params_.horizon));

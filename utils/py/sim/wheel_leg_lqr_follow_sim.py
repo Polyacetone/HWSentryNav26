@@ -19,6 +19,39 @@ from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 def wrap_to_pi(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
+# =============================================================================
+# 功率模型（与 C++ MPC 中的系数一致）
+# =============================================================================
+
+_PWR_C = (
+    2.7110134710e+00,   # c0:  bias
+    3.6372787717e+01,   # c1:  v·a
+    1.0075311460e+00,   # c2:  ω·α
+    6.9483321596e+00,   # c3:  a²
+    3.0938208347e-02,   # c4:  α²
+    1.7413564345e+01,   # c5:  |v|
+    5.0106092100e+00,   # c6:  |ω|
+    7.5217098628e+00,   # c7:  v²
+    4.1360921007e-01,   # c8:  ω²
+    0.0000000000e+00,   # c9:  |a|
+    2.8789111183e-02,   # c10: |α|
+    0.0000000000e+00,   # c11: |v·ω|
+)
+_PWR_EPS2 = 0.05 ** 2
+
+def predict_chassis_power(v: float, w: float, a: float, alpha: float) -> float:
+    """Predict chassis electrical power [W] from the identified model."""
+    def _sa(x: float) -> float:
+        return math.sqrt(x * x + _PWR_EPS2)
+    c = _PWR_C
+    return (c[0]
+            + c[1] * v * a      + c[2] * w * alpha
+            + c[3] * a * a      + c[4] * alpha * alpha
+            + c[5] * _sa(v)     + c[6] * _sa(w)
+            + c[7] * v * v      + c[8] * w * w
+            + c[9] * _sa(a)     + c[10] * _sa(alpha)
+            + c[11] * _sa(v * w))
+
 def angle_diff(a: float, b: float) -> float:
     return wrap_to_pi(a - b)
 
@@ -115,6 +148,12 @@ class SimConfig:
     SPIN_DRIFT_SPEED_MPS: float = 0.02  # 小陀螺位置漂移速度（m/s）
     SPIN_DRIFT_DIR_X: float = 1.0
     SPIN_DRIFT_DIR_Y: float = 0.0
+
+    # --- 功率/能量仿真 ---
+    RFR_PWR_LIMIT: float = 80.0           # 裁判系统最大取电功率 (W)
+    CAPACITOR_MAX_ENERGY: float = 1300.0   # 缓冲电容最大可用电量 (J)
+    CAPACITOR_INIT_ENERGY: float = 1300.0  # 初始电容电量 (J)
+    POWER_LOWPASS_HZ: float = 3.0         # 功率模型速度低通截频 (Hz)
 
     # --- Frame 约定 ---
     FRAME_IMU_WORLD: str = "imu_world"
@@ -657,6 +696,17 @@ class WheelLegLqrFollowSimNode(Node):
         self.dyn = WheelLegDynamics(self.params)
         self.dyn.reset(self.cfg.INIT_X, self.cfg.INIT_Y, self.cfg.INIT_THETA)
 
+        # energy simulation
+        self._energy = float(self.cfg.CAPACITOR_INIT_ENERGY)
+        self._current_power = 0.0
+        _lp_dt = 1.0 / self.cfg.LQR_FREQ_HZ
+        _lp_wc = 2.0 * math.pi * self.cfg.POWER_LOWPASS_HZ
+        self._pwr_lp_alpha = _lp_dt * _lp_wc / (1.0 + _lp_dt * _lp_wc)
+        self._v_filt = 0.0
+        self._w_filt = 0.0
+        self._v_filt_prev = 0.0
+        self._w_filt_prev = 0.0
+
         # command targets (10Hz input -> 1000Hz rate-limited application)
         self._last_cmd_time = self.get_clock().now()
         self._spin_slow = False
@@ -1072,6 +1122,19 @@ class WheelLegLqrFollowSimNode(Node):
                 self.dyn.world_pose[0] += ux * disp
                 self.dyn.world_pose[1] += uy * disp
 
+        # ─── Power model & energy tracking ───
+        v_now = float(self.dyn.v)
+        w_now = float(self.dyn.omega)
+        self._v_filt += self._pwr_lp_alpha * (v_now - self._v_filt)
+        self._w_filt += self._pwr_lp_alpha * (w_now - self._w_filt)
+        a_filt = (self._v_filt - self._v_filt_prev) / self._dt_lqr
+        alpha_filt = (self._w_filt - self._w_filt_prev) / self._dt_lqr
+        self._current_power = predict_chassis_power(self._v_filt, self._w_filt, a_filt, alpha_filt)
+        self._energy += (self.cfg.RFR_PWR_LIMIT - self._current_power) * self._dt_lqr
+        self._energy = float(np.clip(self._energy, 0.0, self.cfg.CAPACITOR_MAX_ENERGY))
+        self._v_filt_prev = self._v_filt
+        self._w_filt_prev = self._w_filt
+
         # push odom sample for delay
         self._odom_buf.append(
             OdomSample(
@@ -1101,6 +1164,9 @@ class WheelLegLqrFollowSimNode(Node):
         msg.velocity = float(self.dyn.v)
         msg.omega = float(self.dyn.omega)
         msg.leg_mode = 4
+        msg.remaining_energy = int(np.clip(self._energy, -32768, 32767))
+        msg.curr_chassis_pwr = int(np.clip(self._current_power, -32768, 32767))
+        msg.rfr_pwr_limit = int(np.clip(self.cfg.RFR_PWR_LIMIT, -32768, 32767))
         self.status_pub.publish(msg)
 
     def _pub_imu(self) -> None:

@@ -27,6 +27,10 @@ struct ControlInput {
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();  // (x, y, theta) in map
     Eigen::Vector2d chassis_status = Eigen::Vector2d::Zero();    // (v_act, ω_act)
 
+    // ─── 能量状态 ───
+    double remaining_energy = 0.0;                               // 缓冲电容剩余可用电量 (J)
+    double rfr_pwr_limit = 0.0;                                  // 裁判系统最大取电功率 (W)
+
     // ─── 底盘模式/比赛状态 ───
     uint8_t chassis_leg_mode = 0;                                // 参考 interfaces/msg/ChassisStatus.msg
     uint8_t comp_stage = 0;                                      // 参考 interfaces/msg/CompStage.msg

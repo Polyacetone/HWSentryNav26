@@ -127,6 +127,13 @@ struct MPCRecoveryWeights {
     double step_terminal;
 };
 
+struct EnergyParams {
+    bool enable = false;
+    double threshold = 60.0;   // 缓冲电容惩罚阈值 (J)
+    double weight = 2.0;       // 软约束权重
+    double softplus_beta = 10.0; // softplus 斜率(越大越接近 ReLU)，建议 5~30
+};
+
 struct MPCParams {
     int horizon;
     double dt;
@@ -141,6 +148,8 @@ struct MPCParams {
 
     MPCRecoveryLimits recovery_limits;
     MPCRecoveryWeights recovery_weights;
+
+    EnergyParams energy;
 };
 
 class MPCSolver {
@@ -153,6 +162,9 @@ public:
     /// Update the hidden-state observer with the latest measured velocities.
     /// Must be called once per control cycle before any solve call.
     void update_observer(double v_act, double w_act);
+
+    /// Set current energy state (remaining capacitor energy + charge power limit).
+    void set_energy_state(double remaining_energy, double rfr_pwr_limit);
 
     /// Current hidden-state estimate (pitch proxy).
     [[nodiscard]] double hidden_state_estimate() const { return x_h_hat_; }
@@ -193,6 +205,10 @@ private:
     double prev_v_act_ = 0.0;     // v_act at previous cycle (for prediction)
     double prev_w_act_ = 0.0;     // w_act at previous cycle (for nonlinear term)
     bool observer_initialized_ = false;
+
+    // ── Energy state (set each cycle from ChassisStatus) ──
+    double remaining_energy_ = 200.0;
+    double rfr_pwr_limit_ = 90.0;
 };
 
 }

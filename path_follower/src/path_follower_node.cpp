@@ -69,6 +69,8 @@ private:
     Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
     uint8_t chassis_leg_mode_ = 4;
     uint8_t comp_stage_ = 4;
+    double remaining_energy_ = 200.0;
+    double rfr_pwr_limit_ = 90.0;
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 };
@@ -186,6 +188,12 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .q_goal_xy_terminal = declare_parameter<double>("mpc.recovery.weights.q_goal_xy_terminal"),
             .obstacle_terminal = declare_parameter<double>("mpc.recovery.weights.obstacle_terminal"),
             .step_terminal = declare_parameter<double>("mpc.recovery.weights.step_terminal")
+        },
+        .energy = {
+            .enable = declare_parameter<bool>("mpc.energy.enable"),
+            .threshold = declare_parameter<double>("mpc.energy.threshold"),
+            .weight = declare_parameter<double>("mpc.energy.weight"),
+            .softplus_beta = declare_parameter<double>("mpc.energy.softplus_beta")
         }
     };
 
@@ -319,6 +327,8 @@ void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisSta
     chassis_status_.x() = msg->velocity;
     chassis_status_.y() = msg->omega;
     chassis_leg_mode_ = msg->leg_mode;
+    remaining_energy_ = static_cast<double>(msg->remaining_energy);
+    rfr_pwr_limit_ = static_cast<double>(msg->rfr_pwr_limit);
 }
 
 void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -363,6 +373,8 @@ void PathFollowerNode::control_timer_callback() {
     input.merged_cost_map = merged_cost_map_.get();
     input.global_direction_map = global_direction_map_.get();
     input.stamp = now();
+    input.remaining_energy = remaining_energy_;
+    input.rfr_pwr_limit = rfr_pwr_limit_;
 
     // 调用控制逻辑层
     const ControlOutput output = nav_controller_->update(input);
