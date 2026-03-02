@@ -5,6 +5,10 @@
       save_raw_mapping_frames: true
       output_root: "."
 
+      # Point range filter (imu_link frame). Set <= 0 to disable.
+      cloud_range_min: 0.6 # Points out of this range will be filtered out (imu_link frame)
+      cloud_range_max: 20.0 # Points out of this range will be filtered out (imu_link frame)
+
       # IMU refine optimization
       # refine IMU-rate trajectory using optimized odometry endpoints, then re-deskew keyframes using the refined trajectory
       enable_imu_refine: true

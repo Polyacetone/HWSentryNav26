@@ -27,6 +27,9 @@ struct AsyncMappingParams {
 	bool save_raw_mapping_frames;
 	std::string output_root;
 
+	double cloud_range_min;
+	double cloud_range_max;
+
 	bool enable_imu_refine;
 	int imu_refine_max_iterations;
 
@@ -59,6 +62,7 @@ private:
 
 	bool is_keyframe(const EstimationFrame& frame) const;
 	void accept_keyframe(const EstimationFrame& frame, const pcl::PointCloud<pcl::PointXYZ>& keyframe_cloud_imu);
+	pcl::PointCloud<pcl::PointXYZ> filter_cloud_by_range_imu(const pcl::PointCloud<pcl::PointXYZ>& cloud_imu) const;
 
 	void ensure_output_dir();
 	std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> build_keyframe_cloud_imu(

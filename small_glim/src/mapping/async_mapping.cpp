@@ -209,6 +209,9 @@ AsyncMappingParams::AsyncMappingParams(const Config::Ptr& config) {
     save_raw_mapping_frames = config->param<bool>("mapping.save_raw_mapping_frames");
     output_root = config->param<std::string>("mapping.output_root");
 
+    cloud_range_min = config->param<double>("mapping.cloud_range_min");
+    cloud_range_max = config->param<double>("mapping.cloud_range_max");
+
     enable_imu_refine = config->param<bool>("mapping.enable_imu_refine");
     imu_refine_max_iterations = config->param<int>("mapping.imu_refine_max_iterations");
 
@@ -353,12 +356,25 @@ void AsyncMapping::accept_keyframe(const EstimationFrame& frame, const pcl::Poin
 
     const Eigen::Isometry3d T_world_imu = frame.T_world_imu;
 
+    const pcl::PointCloud<pcl::PointXYZ> filtered_cloud_imu = filter_cloud_by_range_imu(keyframe_cloud_imu);
+    if (keyframe_cloud_imu.size() > 0 && filtered_cloud_imu.empty()) {
+        logger::warn(
+            "mapping",
+            "skip keyframe because all points filtered out (id={}, stamp={:.6f} range_min={:.3f} range_max={:.3f})",
+            frame.id,
+            frame.stamp,
+            params_.cloud_range_min,
+            params_.cloud_range_max
+        );
+        return;
+    }
+
     if (params_.save_raw_mapping_frames) {
-        save_keyframe_raw_cloud(keyframe_cloud_imu);
+        save_keyframe_raw_cloud(filtered_cloud_imu);
         append_pose(T_world_imu);
     }
 
-    integrate_cloud_into_map(keyframe_cloud_imu, T_world_imu);
+    integrate_cloud_into_map(filtered_cloud_imu, T_world_imu);
     keyframes_since_downsample_++;
     downsample_map_if_needed();
 
@@ -374,6 +390,33 @@ void AsyncMapping::accept_keyframe(const EstimationFrame& frame, const pcl::Poin
         frame.stamp,
         map_cloud_->size()
     );
+}
+
+pcl::PointCloud<pcl::PointXYZ> AsyncMapping::filter_cloud_by_range_imu(const pcl::PointCloud<pcl::PointXYZ>& cloud_imu) const {
+    const double min_r = params_.cloud_range_min;
+    const double max_r = params_.cloud_range_max;
+
+    const bool use_min = min_r > 0.0;
+    const bool use_max = max_r > 0.0;
+    if (!use_min && !use_max) {
+        return cloud_imu;
+    }
+
+    const double min_r2 = use_min ? (min_r * min_r) : 0.0;
+    const double max_r2 = use_max ? (max_r * max_r) : 0.0;
+
+    pcl::PointCloud<pcl::PointXYZ> out;
+    out.reserve(cloud_imu.size());
+    for (const auto& p : cloud_imu.points) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+            continue;
+        }
+        const double r2 = static_cast<double>(p.x) * p.x + static_cast<double>(p.y) * p.y + static_cast<double>(p.z) * p.z;
+        if (use_min && r2 < min_r2) continue;
+        if (use_max && r2 > max_r2) continue;
+        out.push_back(p);
+    }
+    return out;
 }
 
 void AsyncMapping::ensure_output_dir() {

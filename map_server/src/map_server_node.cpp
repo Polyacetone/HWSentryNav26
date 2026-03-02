@@ -221,7 +221,7 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
         return preprocessed;
     }
 
-    // 获取点云到地图的变换
+    // 获取点云到map的变换（用于后续与全局点云对齐/做代价图）
     Eigen::Isometry3d cloud_to_map;
     try {
         cloud_to_map = utils::convert_to<Eigen::Isometry3d>(
@@ -232,14 +232,24 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
         return preprocessed;
     }
 
-    // 获取激光雷达到地图的位移
-    Eigen::Vector3d lidar_to_map;
+    // 使用 imu_world (z轴竖直) 来做ROI判定
+    Eigen::Isometry3d cloud_to_imu_world;
     try {
-        lidar_to_map = utils::convert_to<Eigen::Isometry3d>(
-            tf_buffer_->lookupTransform("map", "lidar_link", tf2::TimePointZero).transform
+        cloud_to_imu_world = utils::convert_to<Eigen::Isometry3d>(
+            tf_buffer_->lookupTransform("imu_world", msg->header.frame_id, tf2::TimePointZero).transform
+        );
+    } catch (const std::exception& ex) {
+        RCLCPP_WARN(get_logger(), "Failed to lookup %s to imu_world: %s", msg->header.frame_id.c_str(), ex.what());
+        return preprocessed;
+    }
+
+    Eigen::Vector3d lidar_pos_imu_world;
+    try {
+        lidar_pos_imu_world = utils::convert_to<Eigen::Isometry3d>(
+            tf_buffer_->lookupTransform("imu_world", "lidar_link", tf2::TimePointZero).transform
         ).translation().head<3>();
     } catch (const std::exception& ex) {
-        RCLCPP_WARN(get_logger(), "Failed to lookup lidar_link to map: %s", ex.what());
+        RCLCPP_WARN(get_logger(), "Failed to lookup lidar_link to imu_world: %s", ex.what());
         return preprocessed;
     }
 
@@ -248,16 +258,19 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
     const size_t num_points = msg->width * msg->height;
     const uint8_t* data_ptr = msg->data.data();
     for (size_t i = 0; i < num_points; i++) {
-        const Eigen::Vector3d pt = cloud_to_map * Eigen::Vector3d(
+        const Eigen::Vector3d pt_cloud(
             *reinterpret_cast<const float*>(data_ptr + offset_x),
             *reinterpret_cast<const float*>(data_ptr + offset_y),
             *reinterpret_cast<const float*>(data_ptr + offset_z)
         );
-        const Eigen::Vector3d pt_lidar = pt - lidar_to_map;
-        const double distance_xy = std::hypot(pt_lidar.x(), pt_lidar.y());
+
+        const Eigen::Vector3d pt_map = cloud_to_map * pt_cloud;
+        const Eigen::Vector3d pt_imu_world = cloud_to_imu_world * pt_cloud;
+        const Eigen::Vector3d pt_rel = pt_imu_world - lidar_pos_imu_world;
+        const double distance_xy = std::hypot(pt_rel.x(), pt_rel.y());
         if (local_map_params_.roi_xy_radius_min < distance_xy && distance_xy < local_map_params_.roi_xy_radius_max &&
-            local_map_params_.roi_z_min < pt_lidar.z() && pt_lidar.z() < local_map_params_.roi_z_max) {
-            preprocessed->points.emplace_back(pt.x(), pt.y(), pt.z(), 1.0);
+            local_map_params_.roi_z_min < pt_rel.z() && pt_rel.z() < local_map_params_.roi_z_max) {
+            preprocessed->points.emplace_back(pt_map.x(), pt_map.y(), pt_map.z(), 1.0);
         }
         data_ptr += point_step;
     }

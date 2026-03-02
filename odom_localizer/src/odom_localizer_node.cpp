@@ -175,10 +175,17 @@ void OdomLocalizerNode::publish_timer_callback() {
 }
 
 void OdomLocalizerNode::robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg) {
+    if (initial_transform_initialized_) {
+        // 如果已经初始化过初始变换了，就不再接收
+        robot_status_sub_.reset();
+        return;
+    }
     initial_transform_initialized_ = true;
     if (msg->robot_color) { // true为红色
+        RCLCPP_DEBUG(get_logger(), "Robot color: RED");
         set_initial_transform(declare_parameter<std::vector<double>>("initial_transform_red"));
     } else { // false为蓝色
+        RCLCPP_DEBUG(get_logger(), "Robot color: BLUE");
         set_initial_transform(declare_parameter<std::vector<double>>("initial_transform_blue"));
     }
 }

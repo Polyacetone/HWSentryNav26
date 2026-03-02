@@ -51,8 +51,8 @@
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.4 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 0.8 # 上台阶期望速度 (m/s)
-          vel_step_down: 1.2 # 下台阶期望速度 (m/s)
+          vel_step_up: 1.0 # 上台阶期望速度 (m/s)
+          vel_step_down: 1.0 # 下台阶期望速度 (m/s)
           a_lat_max: 3.0 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
@@ -83,8 +83,8 @@
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.4 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 0.8 # 上台阶期望速度 (m/s)
-          vel_step_down: 1.2 # 下台阶期望速度 (m/s)
+          vel_step_up: 1.0 # 上台阶期望速度 (m/s)
+          vel_step_down: 1.0 # 下台阶期望速度 (m/s)
           a_lat_max: 3.0 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
           step_norm_transition: 0.05 # smoothstep过渡宽度
