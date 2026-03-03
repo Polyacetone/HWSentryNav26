@@ -933,7 +933,7 @@ struct RecoveryMPCCostFunctor {
     const double rfr_pwr_limit_;
 };
 
-inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
+inline MPCPrediction generate_predicted_path_map(
     const MPCParams& params,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
@@ -941,8 +941,12 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
     const double x_h_init,
     const std::vector<std::array<double, 2>>& controls
 ) {
-    std::vector<Eigen::Vector2d> predicted_path_map;
-    predicted_path_map.reserve(static_cast<size_t>(params.horizon) + 1);
+    MPCPrediction pred;
+    const size_t n = static_cast<size_t>(params.horizon) + 1;
+    pred.path_map.reserve(n);
+    pred.headings.reserve(n);
+    pred.v_pred.reserve(n);
+    pred.w_pred.reserve(n);
 
     PredictorState<double> st;
     st.x = chassis_pose_map.x();
@@ -958,7 +962,10 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
         x_h_init
     );
 
-    predicted_path_map.emplace_back(st.x, st.y);
+    pred.path_map.emplace_back(st.x, st.y);
+    pred.headings.push_back(st.theta);
+    pred.v_pred.push_back(st.v_act);
+    pred.w_pred.push_back(st.omega_act);
 
     double theta_cmd = chassis_pose_map.z();
     for (int i = 0; i < params.horizon; i++) {
@@ -966,10 +973,13 @@ inline std::vector<Eigen::Vector2d> generate_predicted_path_map(
         const double w_cmd = controls[static_cast<size_t>(i)][1];
         const double w_cmd_prev = (i == 0) ? cmd_prev.y() : controls[static_cast<size_t>(i - 1)][1];
         prediction_step(params, st, v_cmd, w_cmd, w_cmd_prev, theta_cmd);
-        predicted_path_map.emplace_back(st.x, st.y);
+        pred.path_map.emplace_back(st.x, st.y);
+        pred.headings.push_back(st.theta);
+        pred.v_pred.push_back(st.v_act);
+        pred.w_pred.push_back(st.omega_act);
     }
 
-    return predicted_path_map;
+    return pred;
 }
 
 inline double clamp_prev_cmd(
@@ -1039,7 +1049,7 @@ void MPCSolver::update_observer(const double v_act, const double w_act) {
     prev_w_act_ = w_act;
 }
 
-std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::follow_path(
+std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::follow_path(
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
@@ -1147,13 +1157,13 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.follow_limits.start_vel_cmd_act_diff_max, params_.follow_limits.acc_max, params_.dt),
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.follow_limits.start_omega_cmd_act_diff_max, params_.follow_limits.alpha_max, params_.dt)
     );
-    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
+    const MPCPrediction prediction = generate_predicted_path_map(
         params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
     );
-    return std::tuple{cmd_v_omega, predicted_path_map};
+    return std::tuple{cmd_v_omega, prediction};
 }
 
-std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::stop(
+std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::stop(
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
     const CostMap& merged_cost_map,
@@ -1242,13 +1252,13 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.stop_limits.start_vel_cmd_act_diff_max, params_.stop_limits.acc_max, params_.dt),
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.stop_limits.start_omega_cmd_act_diff_max, params_.stop_limits.alpha_max, params_.dt)
     );
-    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
+    const MPCPrediction prediction = generate_predicted_path_map(
         params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
     );
-    return std::tuple{cmd_v_omega, predicted_path_map};
+    return std::tuple{cmd_v_omega, prediction};
 }
 
-std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> MPCSolver::recover_to_point(
+std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::recover_to_point(
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
@@ -1339,10 +1349,10 @@ std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::st
         clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.recovery_limits.start_vel_cmd_act_diff_max, params_.recovery_limits.acc_max, params_.dt),
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.recovery_limits.start_omega_cmd_act_diff_max, params_.recovery_limits.alpha_max, params_.dt)
     );
-    const std::vector<Eigen::Vector2d> predicted_path_map = generate_predicted_path_map(
+    const MPCPrediction prediction = generate_predicted_path_map(
         params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
     );
-    return std::tuple{cmd_v_omega, predicted_path_map};
+    return std::tuple{cmd_v_omega, prediction};
 }
 
 }

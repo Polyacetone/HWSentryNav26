@@ -134,6 +134,14 @@ struct EnergyParams {
     double softplus_beta = 10.0; // softplus 斜率(越大越接近 ReLU)，建议 5~30
 };
 
+/// MPC 预测轨迹（灰箱模型输出）
+struct MPCPrediction {
+    std::vector<Eigen::Vector2d> path_map;  ///< (x, y) 位置, N+1 points（含初始点）
+    std::vector<double> headings;            ///< theta 朝向 (rad), N+1
+    std::vector<double> v_pred;              ///< 预测线速度响应, N+1
+    std::vector<double> w_pred;              ///< 预测角速度响应, N+1
+};
+
 struct MPCParams {
     int horizon;
     double dt;
@@ -169,7 +177,7 @@ public:
     /// Current hidden-state estimate (pitch proxy).
     [[nodiscard]] double hidden_state_estimate() const { return x_h_hat_; }
 
-    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> follow_path(
+    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> follow_path(
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
@@ -177,14 +185,14 @@ public:
         const DirectionMap& global_direction_map
     );
 
-    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> stop(
+    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> stop(
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
         const CostMap& merged_cost_map,
         const DirectionMap& global_direction_map
     );
 
-    std::expected<std::tuple<Eigen::Vector2d, std::vector<Eigen::Vector2d>>, std::string> recover_to_point(
+    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> recover_to_point(
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,

@@ -67,6 +67,8 @@ struct ControlOutput {
 
     // ─── 调试 ───
     std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;
+    std::optional<std::vector<double>> predicted_v;
+    std::optional<std::vector<double>> predicted_w;
 
     // ─── 有效性 ───
     bool valid = false;                 // false 时 Node 不应发布指令
@@ -78,10 +80,11 @@ struct NavigationParams {
     double stop_threshold_dist;
     double stop_threshold_u;
 
-    // 台阶检测
-    double step_check_back;
-    double step_check_front;
-    double step_check_sample_step;
+    // 台阶检测（基于MPC预测轨迹）
+    double step_detect_norm_threshold;    // 方向场模长阈值
+    double step_detect_dot_threshold;     // 朝向与方向场点积阈值
+    int step_on_count_threshold;          // 连续检测到台阶的次数才设置标志位
+    int step_off_count_threshold;         // 连续未检测到台阶的次数才取消标志位
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -120,7 +123,10 @@ private:
     void update_recovery_goal_if_needed(const ControlInput& input);
 
     // ─── 工具函数 ───
-    std::tuple<bool, bool> detect_steps_on_spline(const ControlInput& input, double u0) const;
+    std::tuple<bool, bool> detect_steps_on_prediction(
+        const MPCPrediction& prediction,
+        const DirectionMap& direction_map
+    );
 
     static double wrap_pi(double a) {
         return std::atan2(std::sin(a), std::cos(a));
@@ -141,6 +147,14 @@ private:
     rclcpp::Time recovery_goal_set_time_{0, 0, RCL_ROS_TIME};
     FsmState last_fsm_state_ = FsmState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
+
+    // ─── 台阶检测防抖状态 ───
+    int step_up_on_count_ = 0;
+    int step_up_off_count_ = 0;
+    int step_down_on_count_ = 0;
+    int step_down_off_count_ = 0;
+    bool step_up_flag_ = false;
+    bool step_down_flag_ = false;
 };
 
 }

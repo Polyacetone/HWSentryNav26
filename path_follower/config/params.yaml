@@ -9,17 +9,22 @@
     spin_cmd_sub_topic: "/decision/spin_cmd"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
 
-    stop_threshold_dist: 0.5 # 停止距离 (m)
-    stop_threshold_u: 0.99 # 停止样条参数u (0~1)
-
     debug:
       enable: true
       predicted_path_pub_topic: "/path_follower/debug/predicted_path"
+      v_pred_pub_topic: "/path_follower/debug/v_pred"
+      w_pred_pub_topic: "/path_follower/debug/w_pred"
+    
+    misc:
+      stop_threshold_dist: 0.5 # 停止距离 (m)
+      stop_threshold_u: 0.99 # 停止样条参数u (0~1)
+      remaining_energy_filter_alpha: 0.5 # 缓冲电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
 
-    step_ahead_flag: # 台阶标志位参数
-      window_back: 0.1 # 当前在全局路径上的后方窗口 (m)
-      window_front: 1.0 # 当前在全局路径上的前方窗口 (m)
-      sample_step: 0.05 # 沿样条弧长采样间隔 (m)
+    step_ahead_flag: # 台阶标志位参数（基于MPC预测轨迹 + 防抖）
+      detect_norm_threshold: 0.9 # 方向场模长阈值，>=该值认为经过台阶
+      detect_dot_threshold: 0.5 # 朝向与方向场点积阈值，用于区分上/下台阶
+      on_count_threshold: 4 # 连续检测到台阶的次数才设置标志位
+      off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
 
     state_machine: # 控制状态机参数
       follow_to_spin_vel_max: 0.2 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
@@ -59,8 +64,8 @@
           step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
           step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
-          q_y: 0.4 # 横向误差权重
-          q_theta: 0.2 # 航向误差权重
+          q_y: 0.5 # 横向误差权重
+          q_theta: 0.3 # 航向误差权重
           q_u: 2.4 # 进度项权重
           q_v_final: 0.4 # 终点减速权重
           r_v: 0.01 # 线速度正则

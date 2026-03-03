@@ -1230,7 +1230,7 @@ class WheelLegLqrFollowSimNode(Node):
         radius = 0.3
         period = 10.0
         cx = 6.5
-        cz = 0.6
+        cz = 0.2
         cy = 6.0 + 0.5 * math.sin(2.0 * math.pi * now.nanoseconds / 1e9 / period)
 
         # sample sphere surface with grid in spherical coordinates
@@ -1275,11 +1275,11 @@ class WheelLegLqrFollowSimNode(Node):
         now = self.get_clock().now()
         tf = TransformStamped()
         tf.header.stamp = now.to_msg()
-        tf.header.frame_id = self.cfg.FRAME_ODOM
-        tf.child_frame_id = "map"
+        tf.header.frame_id = "map"
+        tf.child_frame_id = self.cfg.FRAME_ODOM
         tf.transform.translation.x = 0.0
         tf.transform.translation.y = 0.0
-        tf.transform.translation.z = 0.0
+        tf.transform.translation.z = 0.4
         tf.transform.rotation.w = 1.0
         tf.transform.rotation.x = 0.0
         tf.transform.rotation.y = 0.0

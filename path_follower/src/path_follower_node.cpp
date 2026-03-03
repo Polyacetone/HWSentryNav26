@@ -9,6 +9,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
 #include <interfaces/msg/chassis_cmd.hpp>
@@ -52,12 +53,15 @@ private:
     rclcpp::Subscription<interfaces::msg::CompStage>::SharedPtr comp_stage_sub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_predicted_path_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 
     // ─── 参数 ───
     bool enable_debug_;
+    double remaining_energy_filter_alpha_ = 1.0;  // 一阶惯性滤波系数
 
     // ─── 核心组件 ───
     std::unique_ptr<MainController> nav_controller_;
@@ -69,8 +73,8 @@ private:
     Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
     uint8_t chassis_leg_mode_ = 4;
     uint8_t comp_stage_ = 4;
-    double remaining_energy_ = 200.0;
     double rfr_pwr_limit_ = 90.0;
+    double remaining_energy_filtered_ = 1400.0;
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 };
@@ -86,6 +90,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
         debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.predicted_path_pub_topic"), 1);
+        debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.v_pred_pub_topic"), 1);
+        debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.w_pred_pub_topic"), 1);
     }
 
     // ─── MPC 参数加载 ───
@@ -231,14 +237,18 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
 
     // ─── MainController 参数 ───
     NavigationParams nav_params;
-    nav_params.stop_threshold_dist = declare_parameter<double>("stop_threshold_dist");
-    nav_params.stop_threshold_u = declare_parameter<double>("stop_threshold_u");
-    nav_params.step_check_back = declare_parameter<double>("step_ahead_flag.window_back");
-    nav_params.step_check_front = declare_parameter<double>("step_ahead_flag.window_front");
-    nav_params.step_check_sample_step = declare_parameter<double>("step_ahead_flag.sample_step");
+    nav_params.stop_threshold_dist = declare_parameter<double>("misc.stop_threshold_dist");
+    nav_params.stop_threshold_u = declare_parameter<double>("misc.stop_threshold_u");
+    nav_params.step_detect_norm_threshold = declare_parameter<double>("step_ahead_flag.detect_norm_threshold");
+    nav_params.step_detect_dot_threshold = declare_parameter<double>("step_ahead_flag.detect_dot_threshold");
+    nav_params.step_on_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.on_count_threshold"));
+    nav_params.step_off_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.off_count_threshold"));
 
     // ─── 创建 MainController ───
     nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
+
+    // ─── 功率限制滤波参数 ───
+    remaining_energy_filter_alpha_ = declare_parameter<double>("misc.remaining_energy_filter_alpha");
 
     // ─── 订阅 / 发布 ───
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -327,8 +337,8 @@ void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisSta
     chassis_status_.x() = msg->velocity;
     chassis_status_.y() = msg->omega;
     chassis_leg_mode_ = msg->leg_mode;
-    remaining_energy_ = static_cast<double>(msg->remaining_energy);
     rfr_pwr_limit_ = static_cast<double>(msg->rfr_pwr_limit);
+    remaining_energy_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy) + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_filtered_;
 }
 
 void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -373,7 +383,7 @@ void PathFollowerNode::control_timer_callback() {
     input.merged_cost_map = merged_cost_map_.get();
     input.global_direction_map = global_direction_map_.get();
     input.stamp = now();
-    input.remaining_energy = remaining_energy_;
+    input.remaining_energy = remaining_energy_filtered_;
     input.rfr_pwr_limit = rfr_pwr_limit_;
 
     // 调用控制逻辑层
@@ -388,8 +398,17 @@ void PathFollowerNode::control_timer_callback() {
     // 发布指令
     if (output.valid) {
         publish_chassis_cmd(output);
-        if (enable_debug_ && output.predicted_path_map) {
-            debug_predicted_path_pub_->publish(path_to_nav_msg(*output.predicted_path_map));
+        if (enable_debug_) {
+            if (output.predicted_path_map) {
+                debug_predicted_path_pub_->publish(path_to_nav_msg(*output.predicted_path_map));
+            }
+            if (output.predicted_v && output.predicted_w) {
+                std_msgs::msg::Float64 v_msg, w_msg;
+                v_msg.data = (*output.predicted_v)[0];
+                w_msg.data = (*output.predicted_w)[0];
+                debug_v_pred_pub_->publish(v_msg);
+                debug_w_pred_pub_->publish(w_msg);
+            }
         }
     }
 }

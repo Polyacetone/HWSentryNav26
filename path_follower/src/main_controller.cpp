@@ -253,14 +253,17 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         last_reference_u_ = 0.0;
     }
 
-    // 台阶检测
-    const auto [step_up, step_down] = detect_steps_on_spline(input, u0);
+    // 台阶检测（基于 MPC 预测轨迹）
+    const auto& [cmd, prediction] = *result;
+    const auto [step_up, step_down] = detect_steps_on_prediction(prediction, *input.global_direction_map);
 
-    out.velocity = std::get<0>(*result).x();
-    out.omega = std::get<0>(*result).y();
+    out.velocity = cmd.x();
+    out.omega = cmd.y();
     out.step_up_ahead = step_up;
     out.step_down_ahead = step_down;
-    out.predicted_path_map = std::get<1>(*result);
+    out.predicted_path_map = prediction.path_map;
+    out.predicted_v = prediction.v_pred;
+    out.predicted_w = prediction.w_pred;
     out.valid = true;
     return out;
 }
@@ -301,13 +304,22 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
 
     out.velocity = std::get<0>(*result).x();
     out.omega = std::get<0>(*result).y();
-    out.predicted_path_map = std::get<1>(*result);
+    out.predicted_path_map = std::get<1>(*result).path_map;
+    out.predicted_v = std::get<1>(*result).v_pred;
+    out.predicted_w = std::get<1>(*result).w_pred;
     out.valid = true;
     return out;
 }
 
 void MainController::on_state_transition(const FsmState prev, const FsmState next) {
     if (prev == next) return;
+
+    // 离开 FOLLOW 时重置台阶检测防抖状态
+    if (prev == FsmState::FOLLOW && next != FsmState::FOLLOW) {
+        step_up_on_count_ = step_up_off_count_ = 0;
+        step_down_on_count_ = step_down_off_count_ = 0;
+        step_up_flag_ = step_down_flag_ = false;
+    }
 
     // DEAD 只是临时冻结；不要让它打断 HAZARD_RECOVERY 的恢复目标/计时
     if (next == FsmState::HAZARD_RECOVERY && prev != FsmState::DEAD) {
@@ -386,7 +398,9 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
 
     out.velocity = std::get<0>(*result).x();
     out.omega = std::get<0>(*result).y();
-    out.predicted_path_map = std::get<1>(*result);
+    out.predicted_path_map = std::get<1>(*result).path_map;
+    out.predicted_v = std::get<1>(*result).v_pred;
+    out.predicted_w = std::get<1>(*result).w_pred;
     out.valid = true;
     return out;
 }
@@ -402,63 +416,56 @@ ControlOutput MainController::execute_stuck_reverse(const ControlInput& input) {
     return out;
 }
 
-// ═══════════════════ 台阶检测 ════════════════════════════════
+// ═══════════════════ 台阶检测（基于 MPC 预测轨迹 + 防抖） ════════════════════
 
-std::tuple<bool, bool> MainController::detect_steps_on_spline(const ControlInput& input, const double u0) const {
-    constexpr double dir_norm_threshold = 0.5;
-    constexpr double dot_threshold = 0.5;
+std::tuple<bool, bool> MainController::detect_steps_on_prediction(
+    const MPCPrediction& prediction,
+    const DirectionMap& direction_map
+) {
+    bool raw_step_up = false;
+    bool raw_step_down = false;
 
-    if (!input.global_direction_map || !input.global_path) return {false, false};
-    if (nav_params_.step_check_front <= 0.0 && nav_params_.step_check_back <= 0.0) return {false, false};
-    if (nav_params_.step_check_sample_step <= 1e-6) return {false, false};
+    for (size_t i = 0; i < prediction.path_map.size(); ++i) {
+        const Eigen::Vector2d& pos = prediction.path_map[i];
+        const double theta = prediction.headings[i];
 
-    const Eigen::Vector2d heading(
-        std::cos(input.chassis_pose_map.z()),
-        std::sin(input.chassis_pose_map.z())
-    );
-    bool step_up = false, step_down = false;
+        const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
+        if (!direction_map.is_valid_coord(Eigen::Vector2i(
+                static_cast<int>(std::floor(g.x())),
+                static_cast<int>(std::floor(g.y()))))) continue;
 
-    const auto& path = *input.global_path;
-    const auto& dir_map = *input.global_direction_map;
+        const Eigen::Vector2d dir = direction_map.interpolate(g);
+        const double norm = dir.norm();
+        if (norm < nav_params_.step_detect_norm_threshold) continue;
 
-    const auto sample_at_u = [&](double u) {
-        const Eigen::Vector2d p_map = path.evaluate(u);
-        const Eigen::Vector2d g = dir_map.map_coord_to_grid(p_map);
-        const Eigen::Vector2d dir = dir_map.interpolate(g);
-        const double n = dir.norm();
-        if (n < dir_norm_threshold) return;
+        const Eigen::Vector2d heading(std::cos(theta), std::sin(theta));
         const double dot = dir.normalized().dot(heading);
-        if (dot > dot_threshold) step_up = true;
-        if (dot < -dot_threshold) step_down = true;
-    };
-
-    sample_at_u(u0);
-
-    // 向前采样
-    double u_fwd = u0, dist_fwd = 0.0;
-    const double target_fwd = std::max(0.0, nav_params_.step_check_front);
-    while (dist_fwd + 1e-9 < target_fwd && u_fwd < 1.0 - 1e-9 && !(step_up && step_down)) {
-        const Eigen::Vector2d d1 = path.derivative(u_fwd, 1);
-        const double dsdu = std::max(1e-6, d1.norm());
-        const double du = nav_params_.step_check_sample_step / dsdu;
-        u_fwd = std::min(1.0, u_fwd + du);
-        dist_fwd += nav_params_.step_check_sample_step;
-        sample_at_u(u_fwd);
+        if (dot > nav_params_.step_detect_dot_threshold) raw_step_up = true;
+        if (dot < -nav_params_.step_detect_dot_threshold) raw_step_down = true;
     }
 
-    // 向后采样
-    double u_bwd = u0, dist_bwd = 0.0;
-    const double target_bwd = std::max(0.0, nav_params_.step_check_back);
-    while (dist_bwd + 1e-9 < target_bwd && u_bwd > 1e-9 && !(step_up && step_down)) {
-        const Eigen::Vector2d d1 = path.derivative(u_bwd, 1);
-        const double dsdu = std::max(1e-6, d1.norm());
-        const double du = nav_params_.step_check_sample_step / dsdu;
-        u_bwd = std::max(0.0, u_bwd - du);
-        dist_bwd += nav_params_.step_check_sample_step;
-        sample_at_u(u_bwd);
+    // 防抖：连续多次检测到才设置标志位，连续多次未检测到才取消
+    if (raw_step_up) {
+        step_up_on_count_++;
+        step_up_off_count_ = 0;
+        if (step_up_on_count_ >= nav_params_.step_on_count_threshold) step_up_flag_ = true;
+    } else {
+        step_up_off_count_++;
+        step_up_on_count_ = 0;
+        if (step_up_off_count_ >= nav_params_.step_off_count_threshold) step_up_flag_ = false;
     }
 
-    return {step_up, step_down};
+    if (raw_step_down) {
+        step_down_on_count_++;
+        step_down_off_count_ = 0;
+        if (step_down_on_count_ >= nav_params_.step_on_count_threshold) step_down_flag_ = true;
+    } else {
+        step_down_off_count_++;
+        step_down_on_count_ = 0;
+        if (step_down_off_count_ >= nav_params_.step_off_count_threshold) step_down_flag_ = false;
+    }
+
+    return {step_up_flag_, step_down_flag_};
 }
 
 }

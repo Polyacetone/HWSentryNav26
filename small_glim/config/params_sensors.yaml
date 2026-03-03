@@ -8,7 +8,7 @@
       imu_int_noise: 0.001 # Integration noise
       imu_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # IMU bias
       imu_bias_noise: 0.00001 # Bias randomwalk noise
-      imu_acc_saturation_thresh: 235.0 # Accelerometer saturation threshold (m/s^2)
+      imu_acc_saturation_thresh: 230.0 # Accelerometer saturation threshold (m/s^2)
       imu_gyro_saturation_thresh: 34.5 # Gyroscope saturation threshold (rad/s)
       imu_saturation_mult: 1.0 # Covariance multiplier when saturated
 
