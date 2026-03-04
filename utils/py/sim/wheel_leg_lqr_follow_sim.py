@@ -121,7 +121,7 @@ class SimConfig:
     TOPIC_CMD: str = "/path_follower/chassis_cmd"
     TOPIC_JOINT: str = "/serial_bridge/joint_state"
     TOPIC_ODOM: str = "/small_glim/odometry"
-    TOPIC_IMU: str = "/serial_bridge/imu"
+    TOPIC_IMU: str = "/serial_bridge/imu_pose"
     TOPIC_STATUS: str = "/serial_bridge/chassis_status"
     TOPIC_CLOUD: str = "/small_glim/registered_cloud"
 

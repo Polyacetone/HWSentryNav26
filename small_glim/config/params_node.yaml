@@ -7,7 +7,7 @@
       imu_time_offset: 0.0
       points_time_offset: 0.0
       acc_scale: 1.0
-      imu_sub_topic: "/serial_bridge/imu"
+      imu_sub_topic: "/serial_bridge/imu_raw"
       points_sub_topic: "/mid360_driver/lidar"
       odometry_pub_topic: "/small_glim/odometry"
       registered_cloud_pub_topic: "/small_glim/registered_cloud"

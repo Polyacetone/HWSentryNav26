@@ -14,7 +14,7 @@
       predicted_path_pub_topic: "/path_follower/debug/predicted_path"
       v_pred_pub_topic: "/path_follower/debug/v_pred"
       w_pred_pub_topic: "/path_follower/debug/w_pred"
-    
+
     misc:
       stop_threshold_dist: 0.5 # 停止距离 (m)
       stop_threshold_u: 0.99 # 停止样条参数u (0~1)
