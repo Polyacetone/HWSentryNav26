@@ -239,9 +239,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
-    const double dt = mpc_controller_->params().dt;
-    if (solve_ms > dt * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     } else {
         RCLCPP_DEBUG(logger_, "MPCSolver(Follow) solve time: %.2f ms", solve_ms);
     }
@@ -295,9 +294,8 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
-    const double dt = mpc_controller_->params().dt;
-    if (solve_ms > dt * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     } else {
         RCLCPP_DEBUG(logger_, "MPCSolver(Stop) solve time: %.2f ms", solve_ms);
     }
@@ -389,9 +387,8 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
-    const double dt = mpc_controller_->params().dt;
-    if (solve_ms > dt * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, dt * 500.0);
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     } else {
         RCLCPP_DEBUG(logger_, "MPCSolver(Recovery) solve time: %.2f ms", solve_ms);
     }

@@ -4,7 +4,7 @@
 This script identifies a physics-informed model mapping (v_cmd, w_cmd) → (v_act, w_act)
 for a wheel-leg balanced robot with LQR-controlled pitch dynamics.
 
-Model structure (continuous-time, Euler-discretized at 10Hz):
+Model structure (continuous-time, ZOH-discretized at MPC rate):
 
   Longitudinal velocity (2nd order with hidden pitch state + nonlinear compensation):
     ẋ_h   = a11·x_h + a12·v_act + b1·v_cmd
@@ -16,7 +16,7 @@ Model structure (continuous-time, Euler-discretized at 10Hz):
   Angular velocity (1st order lag + nonlinear friction):
     ẇ_act = (1/τ)·(w_cmd - w_act) − cf3·sgn(w_act)
 
-Input delay: 1 step (0.1s at 10Hz MPC rate).
+Input delay: 1 step (dt at MPC rate).
 
 Optimization:
   - Three-phase: w-only → v-only (with measured w) → joint refinement
@@ -24,8 +24,8 @@ Optimization:
   - Global search (differential_evolution) + multi-pass local refinement
 
 Outputs (saved to identify_result/<run_stamp>/):
-  - model_greybox_10hz.npz     (A, B, C, D + nonlinear params + metadata)
-  - model_greybox_10hz.txt     (human-readable)
+    - model_greybox_<rate>.npz   (A, B, C, D + nonlinear params + metadata)
+    - model_greybox_<rate>.txt   (human-readable)
   - per_file_metrics.csv
   - plots/*.png                (velocity, residuals, displacement, trajectory)
 
@@ -61,9 +61,10 @@ from numba import njit, prange
 #  Constants
 # ════════════════════════════════════════════════════════════════════════════════
 
-DT = 0.1            # MPC timestep (10 Hz)
-INPUT_DELAY = 1      # command delay in MPC steps (0.1 s)
+DT = 0.05            # MPC timestep (20 Hz)
+INPUT_DELAY = 1      # command delay in MPC steps (dt seconds)
 SGN_EPS = 0.05       # smooth-sign softness: tanh(x / eps)
+MPC_RATE_HZ = int(round(1.0 / DT))
 
 PARAM_NAMES = ["a11", "a12", "a21", "a22", "b1", "b2", "cf1", "cf2", "tau_w", "cf3", "xh0"]
 N_PARAMS = len(PARAM_NAMES)
@@ -89,7 +90,7 @@ PARAM_BOUNDS = [
 # ════════════════════════════════════════════════════════════════════════════════
 
 @dataclass
-class Series10Hz:
+class SeriesMPC:
     name: str
     t: np.ndarray
     v: np.ndarray
@@ -126,13 +127,13 @@ def robust_fs_from_t(t: np.ndarray) -> float:
     return 1.0 / max(float(np.median(dt)), 1e-6) if len(dt) > 0 else 20.0
 
 
-def load_all_npz_to_10hz(
-    data_dir: Path, *, cutoff_hz: float = 4.0, raw_to_mpc_q: int = 2
-) -> List[Series10Hz]:
+def load_all_npz_to_mpc_rate(
+    data_dir: Path, *, cutoff_hz: float = 4.0, raw_to_mpc_q: Optional[int] = None
+) -> List[SeriesMPC]:
     files = sorted(Path(data_dir).glob("*.npz"))
     if not files:
         raise FileNotFoundError(f"No .npz files in {data_dir}")
-    out: List[Series10Hz] = []
+    out: List[SeriesMPC] = []
     for p in files:
         with np.load(p, allow_pickle=True) as z:
             t = _as_1d(z["t"])
@@ -142,17 +143,18 @@ def load_all_npz_to_10hz(
             wc = _as_1d(z["w_cmd"])
             meta = z["meta"].item() if "meta" in z else {}
         fs = robust_fs_from_t(t)
-        kw = dict(fs_hz=fs, cutoff_hz=cutoff_hz, q=raw_to_mpc_q)
+        q = max(1, round(fs * DT)) if raw_to_mpc_q is None else max(1, int(raw_to_mpc_q))
+        kw = dict(fs_hz=fs, cutoff_hz=cutoff_hz, q=q)
         v10 = lowpass_then_downsample(v, **kw)
         w10 = lowpass_then_downsample(w, **kw)
         vc10 = lowpass_then_downsample(vc, **kw)
         wc10 = lowpass_then_downsample(wc, **kw)
-        t10 = t[::raw_to_mpc_q].copy()
+        t10 = t[::q].copy()
         t10 -= float(t10[0])
         n = min(len(t10), len(v10), len(w10), len(vc10), len(wc10))
         if n < 20:
             continue
-        out.append(Series10Hz(
+        out.append(SeriesMPC(
             name=p.stem, t=t10[:n], v=v10[:n], w=w10[:n],
             v_cmd=vc10[:n], w_cmd=wc10[:n], meta=meta,
         ))
@@ -436,7 +438,7 @@ def _cumintegrate(y: np.ndarray) -> np.ndarray:
 
 def trajectory_2d(v: np.ndarray, w: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """2D trajectory: x, y, phi from v and w."""
-    # Integrate heading and position using trapezoidal integration for better accuracy at 10Hz.
+    # Integrate heading and position using trapezoidal integration for better accuracy at MPC rate.
     phi = _cumintegrate(w)
     x = _cumintegrate(v * np.cos(phi))
     y = _cumintegrate(v * np.sin(phi))
@@ -468,7 +470,7 @@ class PackedSeries:
     var_phi: np.ndarray
 
 
-def pack_series_for_numba(series_list: List[Series10Hz], burn: int = BURN) -> PackedSeries:
+def pack_series_for_numba(series_list: List[SeriesMPC], burn: int = BURN) -> PackedSeries:
     m = len(series_list)
     lens = np.asarray([len(s.v) for s in series_list], dtype=np.int64)
     starts = np.empty(m, dtype=np.int64)
@@ -845,7 +847,7 @@ def _refine(func, x0, rounds=2):
     return best_x, best_f
 
 
-def phase1_fit_w(series: List[Series10Hz], verbose: bool = True) -> Tuple[float, float]:
+def phase1_fit_w(series: List[SeriesMPC], verbose: bool = True) -> Tuple[float, float]:
     """Fit w model independently (2 parameters)."""
     if verbose:
         print("═══ Phase 1: Fit ω model ═══")
@@ -866,7 +868,7 @@ def phase1_fit_w(series: List[Series10Hz], verbose: bool = True) -> Tuple[float,
 
 
 def phase2_fit_v(
-    series: List[Series10Hz], w_pos: float = 0.3, verbose: bool = True,
+    series: List[SeriesMPC], w_pos: float = 0.3, verbose: bool = True,
 ) -> np.ndarray:
     """Fit v model using measured w for coupling (8+1 parameters: v_params + xh0)."""
     if verbose:
@@ -892,7 +894,7 @@ def phase2_fit_v(
 
 
 def phase3_joint(
-    series: List[Series10Hz],
+    series: List[SeriesMPC],
     init_params: np.ndarray,
     w_vel: float = 1.0,
     w_pos: float = 0.3,
@@ -950,7 +952,7 @@ def phase3_joint(
 # ════════════════════════════════════════════════════════════════════════════════
 
 def compute_metrics(
-    params: np.ndarray, series_list: List[Series10Hz], burn: int = BURN,
+    params: np.ndarray, series_list: List[SeriesMPC], burn: int = BURN,
 ) -> List[Dict]:
     results = []
     for s in series_list:
@@ -1134,7 +1136,7 @@ def generate_cpp_constants(params: np.ndarray) -> str:
 # ════════════════════════════════════════════════════════════════════════════════
 
 def generate_plots(
-    series: List[Series10Hz],
+    series: List[SeriesMPC],
     results: List[Dict],
     plots_dir: Path,
     params: np.ndarray,
@@ -1250,7 +1252,7 @@ def main() -> int:
     ap.add_argument("--data-dir", type=str, default="identify_data")
     ap.add_argument("--out-dir", type=str, default="identify_result")
     ap.add_argument("--cutoff-hz", type=float, default=4.0,
-                    help="Anti-alias lowpass cutoff (Hz) before 20→10Hz downsample")
+                    help="Anti-alias lowpass cutoff (Hz) before raw→MPC-rate downsample")
     ap.add_argument("--w-vel", type=float, default=1.0, help="Weight for velocity RMSE term")
     ap.add_argument("--w-pos", type=float, default=4.0, help="Weight for displacement integral term")
     args = ap.parse_args()
@@ -1269,7 +1271,7 @@ def main() -> int:
     print(f"Cutoff:   {args.cutoff_hz} Hz\n")
 
     # ── Load data ──
-    series = load_all_npz_to_10hz(data_dir, cutoff_hz=args.cutoff_hz)
+    series = load_all_npz_to_mpc_rate(data_dir, cutoff_hz=args.cutoff_hz)
     if not series:
         raise RuntimeError("No usable data after preprocessing")
     for s in series:
@@ -1297,13 +1299,14 @@ def main() -> int:
     A, B, C, D, meta = build_discrete_ss(final_params)
 
     # ── Save model ──
-    npz_path = out_dir / "model_greybox_10hz.npz"
+    rate_tag = f"{MPC_RATE_HZ}hz"
+    npz_path = out_dir / f"model_greybox_{rate_tag}.npz"
     np.savez(npz_path, A=A, B=B, C=C, D=D, params=final_params,
              meta=json.dumps(meta, ensure_ascii=False))
 
-    txt_path = out_dir / "model_greybox_10hz.txt"
+    txt_path = out_dir / f"model_greybox_{rate_tag}.txt"
     with txt_path.open("w") as f:
-        f.write("# Grey-box 10Hz MIMO model for MPC\n")
+        f.write(f"# Grey-box {MPC_RATE_HZ}Hz MIMO model for MPC\n")
         f.write(f"# Model: hidden pitch state + nonlinear friction/coupling\n")
         f.write(f"# w_vel={args.w_vel}, w_pos={args.w_pos}, cutoff={args.cutoff_hz}Hz\n\n")
         f.write("# Continuous-time parameters:\n")
@@ -1315,7 +1318,7 @@ def main() -> int:
         f.write("# w model (continuous):\n")
         f.write("#   ẇ_act = (1/τ)·(w_cmd − w_act) − cf3·sgn(w_act)\n\n")
         np.set_printoptions(precision=6, suppress=True, linewidth=140)
-        f.write("# Discrete-time state-space (ZOH, dt=0.1s):\n")
+        f.write(f"# Discrete-time state-space (ZOH, dt={DT}s):\n")
         f.write("# State: [x_h, v_act, w_act, dv(=v_cmd[k-1]), dw(=w_cmd[k-1])]\n\n")
         f.write("A =\n" + str(A) + "\n\n")
         f.write("B =\n" + str(B) + "\n\n")
@@ -1347,7 +1350,7 @@ def main() -> int:
 
     # ── Console summary ──
     print("\n" + "=" * 60)
-    print("  Grey-box Identification Summary (10Hz)")
+    print(f"  Grey-box Identification Summary ({MPC_RATE_HZ}Hz)")
     print("=" * 60)
     print(f"Datasets: {len(series)}")
     print(f"\nIdentified parameters (continuous-time):")

@@ -96,9 +96,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
 
     // ─── MPC 参数加载 ───
     MPCParams mpc_params = {
-        .horizon = static_cast<int>(declare_parameter<int>("mpc.general.horizon")),
-        .dt = declare_parameter<double>("mpc.general.dt"),
-        .max_iterations = static_cast<int>(declare_parameter<int>("mpc.general.max_iterations")),
         .follow_limits = {
             .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
             .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
@@ -311,7 +308,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     );
 
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("chassis_cmd_pub_topic"), 1);
-    control_timer_ = create_wall_timer(std::chrono::duration<double>(mpc_params.dt), [this]() { control_timer_callback(); });
+    control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_DT), [this]() { control_timer_callback(); });
 }
 
 // ═══════════════════════ ROS 回调 ════════════════════════════

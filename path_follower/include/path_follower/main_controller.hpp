@@ -28,7 +28,7 @@ struct ControlInput {
     Eigen::Vector2d chassis_status = Eigen::Vector2d::Zero();    // (v_act, ω_act)
 
     // ─── 能量状态 ───
-    double remaining_energy = 0.0;                               // 缓冲电容剩余可用电量 (J)
+    double remaining_energy = 0.0;                               // 电容剩余可用电量 (J)
     double rfr_pwr_limit = 0.0;                                  // 裁判系统最大取电功率 (W)
 
     // ─── 底盘模式/比赛状态 ───

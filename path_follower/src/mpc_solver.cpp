@@ -1,5 +1,7 @@
 #include <ceres/ceres.h>
+#include <ceres/cubic_interpolation.h>
 #include <algorithm>
+#include <array>
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <uniform_bspline_ceres/uniform_bspline_ceres_generator.hpp>
 #include <path_follower/mpc_solver.hpp>
@@ -161,6 +163,109 @@ inline double estimate_remaining_arclength(
 }
 
 // ============================================================================
+//                          弧长查找表预计算
+// ============================================================================
+
+constexpr int ARCLENGTH_TABLE_SIZE = 128;
+using ArclengthTable = std::array<double, ARCLENGTH_TABLE_SIZE + 1>;
+
+inline ArclengthTable build_arclength_table(
+    const std::vector<Eigen::Vector2d>& control_points,
+    const int num_samples
+) {
+    ArclengthTable table{};
+    for (int i = 0; i <= ARCLENGTH_TABLE_SIZE; i++) {
+        const double u = static_cast<double>(i) / static_cast<double>(ARCLENGTH_TABLE_SIZE);
+        table[static_cast<size_t>(i)] = estimate_remaining_arclength(control_points, u, num_samples);
+    }
+    return table;
+}
+
+inline double lookup_remaining_arclength(
+    const ArclengthTable& table,
+    double u
+) {
+    u = std::max(0.0, std::min(1.0, u));
+    const double idx = u * static_cast<double>(ARCLENGTH_TABLE_SIZE);
+    const int i0 = std::min(static_cast<int>(std::floor(idx)), ARCLENGTH_TABLE_SIZE - 1);
+    const int i1 = i0 + 1;
+    const double t = idx - static_cast<double>(i0);
+    return (1.0 - t) * table[static_cast<size_t>(i0)] + t * table[static_cast<size_t>(i1)];
+}
+
+// ============================================================================
+//                     Ceres 插值器类型别名与辅助函数
+// ============================================================================
+
+using CostGrid  = ceres::Grid2D<double, 1>;
+using CostInterp = ceres::BiCubicInterpolator<CostGrid>;
+using DirGrid   = ceres::Grid2D<double, 2>;
+using DirInterp = ceres::BiCubicInterpolator<DirGrid>;
+
+struct GridInfo {
+    double origin_x, origin_y, resolution;
+    int width, height;
+};
+
+/// 将 CostMap / DirectionMap 数据转换为 Grid2D 所需的 double 数组
+inline void prepare_grid_data(
+    const CostMap& cost_map,
+    const DirectionMap& dir_map,
+    std::vector<double>& cost_data_out,
+    std::vector<double>& dir_data_out
+) {
+    cost_data_out.resize(static_cast<size_t>(cost_map.width * cost_map.height));
+    for (size_t i = 0; i < cost_data_out.size(); i++) {
+        cost_data_out[i] = static_cast<double>(cost_map.data[i]);
+    }
+    dir_data_out.resize(static_cast<size_t>(dir_map.width * dir_map.height) * 2);
+    for (size_t i = 0; i < dir_map.data.size(); i++) {
+        dir_data_out[2 * i]     = dir_map.data[i].x();
+        dir_data_out[2 * i + 1] = dir_map.data[i].y();
+    }
+}
+
+template<typename T>
+inline T eval_cost_interp(
+    const CostInterp& interp,
+    const GridInfo& info,
+    const T& x_map, const T& y_map
+) {
+    const T gx = (x_map - T(info.origin_x)) / T(info.resolution);
+    const T gy = (y_map - T(info.origin_y)) / T(info.resolution);
+    const double gxs = scalar_value(gx);
+    const double gys = scalar_value(gy);
+    if (gxs < 0.0 || gys < 0.0 ||
+        gxs >= static_cast<double>(info.width - 1) ||
+        gys >= static_cast<double>(info.height - 1)) {
+        return T(255.0);
+    }
+    T result;
+    interp.Evaluate(gy, gx, &result);
+    return result;
+}
+
+template<typename T>
+inline Eigen::Matrix<T, 2, 1> eval_dir_interp(
+    const DirInterp& interp,
+    const GridInfo& info,
+    const T& x_map, const T& y_map
+) {
+    const T gx = (x_map - T(info.origin_x)) / T(info.resolution);
+    const T gy = (y_map - T(info.origin_y)) / T(info.resolution);
+    const double gxs = scalar_value(gx);
+    const double gys = scalar_value(gy);
+    if (gxs < 0.0 || gys < 0.0 ||
+        gxs >= static_cast<double>(info.width - 1) ||
+        gys >= static_cast<double>(info.height - 1)) {
+        return Eigen::Matrix<T, 2, 1>(T(0.0), T(0.0));
+    }
+    T vals[2];
+    interp.Evaluate(gy, gx, vals);
+    return Eigen::Matrix<T, 2, 1>(vals[0], vals[1]);
+}
+
+// ============================================================================
 //                                 MPC预测模型
 // ============================================================================
 
@@ -173,21 +278,21 @@ constexpr double CF2       = -0.2540837456046654;
 constexpr double CF3       = 158.3253296896363;
 constexpr double XH0       = -0.21025200714013356;
 // v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.9139449889277171;
-constexpr double A01       = -0.12300926036572889;
-constexpr double A03       = 0.13424472927847508;
-constexpr double A10       = 0.3063198986458846;
-constexpr double A11       = 0.8839525071310728;
-constexpr double A13       = 0.05667810891793699;
+constexpr double A00       = 0.9614079562356709;
+constexpr double A01       = -0.06450106040529008;
+constexpr double A03       = 0.06921310202926386;
+constexpr double A10       = 0.1606216978070186;
+constexpr double A11       = 0.9456811246840857;
+constexpr double A13       = 0.02341646545486502;
 // nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.006350167628446602;
-constexpr double GNL_V     = 0.09444462701008702;
+constexpr double GNL_XH    = -0.001636849410576965;
+constexpr double GNL_V     = 0.04867577816186058;
 // ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.000000 (positive!)
 constexpr double A22       = 0.0;
 constexpr double A24       = 1.0;
 constexpr double GAMMA_W   = 0.0001;
 // hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = 1.0248925724888915;
+constexpr double OBS_L     = 2.2500567806975;
 
 // ── Power model coefficients (auto-generated from identification) ──
 // P(v,w,a,α) = Σ PWR_C[i] × φ_i(v,w,a,α)
@@ -214,17 +319,12 @@ inline T sabs(const T& x) { return ceres::sqrt(x * x + T(PWR_EPS2)); }
 template<typename T>
 inline T predict_power(const T& v, const T& w, const T& a, const T& alpha) {
     return T(PWR_C[0])
-        + T(PWR_C[1]) * v * a     + T(PWR_C[2]) * w * alpha
-        + T(PWR_C[3]) * a * a     + T(PWR_C[4]) * alpha * alpha
-        + T(PWR_C[5]) * sabs(v)   + T(PWR_C[6]) * sabs(w)
-        + T(PWR_C[7]) * v * v     + T(PWR_C[8]) * w * w
-        + T(PWR_C[9]) * sabs(a)   + T(PWR_C[10]) * sabs(alpha)
+        + T(PWR_C[1]) * v * a + T(PWR_C[2]) * w * alpha
+        + T(PWR_C[3]) * a * a + T(PWR_C[4]) * alpha * alpha
+        + T(PWR_C[5]) * sabs(v) + T(PWR_C[6]) * sabs(w)
+        + T(PWR_C[7]) * v * v + T(PWR_C[8]) * w * w
+        + T(PWR_C[9]) * sabs(a) + T(PWR_C[10]) * sabs(alpha)
         + T(PWR_C[11]) * sabs(v * w);
-}
-
-template<typename T>
-inline T wrap_to_pi(const T& a) {
-    return ceres::atan2(ceres::sin(a), ceres::cos(a));
 }
 
 template<typename T>
@@ -303,19 +403,18 @@ inline void model_step(
 
 template<typename T>
 inline void prediction_step(
-    const MPCParams& params,
     PredictorState<T>& st,
     const T& v_cmd,
     const T& omega_cmd,
     const T& omega_cmd_prev,
     T& theta_cmd
 ) {
-    const T dt = T(params.dt);
+    const T dt = T(MPC_DT);
 
     // 梯形积分（Heun/Trapezoidal）：
     // - theta_cmd 用 (omega_cmd_prev, omega_cmd) 的均值积分
     // - 位姿用 (v_act, omega_act) 在步前/步后取均值积分
-    const T theta_cmd_next = wrap_to_pi(theta_cmd + (omega_cmd_prev + omega_cmd) * (dt * T(0.5)));
+    const T theta_cmd_next = theta_cmd + (omega_cmd_prev + omega_cmd) * (dt * T(0.5));
 
     const T theta0 = st.theta;
     const T v0 = st.v_act;
@@ -326,78 +425,13 @@ inline void prediction_step(
 
     const T v1 = st.v_act;
     const T w1 = st.omega_act;
-    const T theta1 = wrap_to_pi(theta0 + (w0 + w1) * (dt * T(0.5)));
+    const T theta1 = theta0 + (w0 + w1) * (dt * T(0.5));
 
     st.x += (v0 * ceres::cos(theta0) + v1 * ceres::cos(theta1)) * (dt * T(0.5));
     st.y += (v0 * ceres::sin(theta0) + v1 * ceres::sin(theta1)) * (dt * T(0.5));
     st.theta = theta1;
     theta_cmd = theta_cmd_next;
 }
-}
-
-// ============================================================================
-//                         代价地图/方向地图插值（Jet兼容）
-// ============================================================================
-
-template<typename T>
-inline T interpolate_cost_map(const CostMap& cost_map, const T& x_map, const T& y_map) {
-    const T gx = (x_map - T(cost_map.origin_x)) / T(cost_map.resolution);
-    const T gy = (y_map - T(cost_map.origin_y)) / T(cost_map.resolution);
-
-    const double gxs = scalar_value(gx);
-    const double gys = scalar_value(gy);
-
-    const int x0 = static_cast<int>(std::floor(gxs));
-    const int y0 = static_cast<int>(std::floor(gys));
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
-
-    if (x0 < 0 || y0 < 0 || x1 >= cost_map.width || y1 >= cost_map.height) {
-        return T(255.0);
-    }
-
-    const T dx = gx - T(x0);
-    const T dy = gy - T(y0);
-
-    const double c00 = static_cast<double>(cost_map.at({x0, y0}));
-    const double c10 = static_cast<double>(cost_map.at({x1, y0}));
-    const double c01 = static_cast<double>(cost_map.at({x0, y1}));
-    const double c11 = static_cast<double>(cost_map.at({x1, y1}));
-
-    return (T(1.0) - dx) * (T(1.0) - dy) * T(c00) + dx * (T(1.0) - dy) * T(c10) + (T(1.0) - dx) * dy * T(c01) + dx * dy * T(c11);
-}
-
-template<typename T>
-inline Eigen::Matrix<T, 2, 1> interpolate_direction_map(const DirectionMap& dir_map, const T& x_map, const T& y_map) {
-    const T gx = (x_map - T(dir_map.origin_x)) / T(dir_map.resolution);
-    const T gy = (y_map - T(dir_map.origin_y)) / T(dir_map.resolution);
-
-    const double gxs = scalar_value(gx);
-    const double gys = scalar_value(gy);
-
-    const int x0 = static_cast<int>(std::floor(gxs));
-    const int y0 = static_cast<int>(std::floor(gys));
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
-
-    if (x0 < 0 || y0 < 0 || x1 >= dir_map.width || y1 >= dir_map.height) {
-        return Eigen::Matrix<T, 2, 1>(T(0.0), T(0.0));
-    }
-
-    const T dx = gx - T(x0);
-    const T dy = gy - T(y0);
-
-    const auto at = [&](int x, int y) {
-        const Eigen::Vector2d v = dir_map.data[static_cast<size_t>(y * dir_map.width + x)];
-        return Eigen::Matrix<T, 2, 1>(T(v.x()), T(v.y()));
-    };
-
-    const auto v00 = at(x0, y0);
-    const auto v10 = at(x1, y0);
-    const auto v01 = at(x0, y1);
-    const auto v11 = at(x1, y1);
-
-    return (T(1.0) - dx) * (T(1.0) - dy) * v00 + dx * (T(1.0) - dy) * v10 + (T(1.0) - dx) * dy * v01 + dx * dy * v11;
 }
 
 // ============================================================================
@@ -413,8 +447,11 @@ struct FollowMPCCostFunctor {
         const Eigen::Vector2d& start_cmd,
         const double x_h_init,
         const MPCParams& params,
-        const CostMap& merged_cost_map,
-        const DirectionMap& direction_map,
+        const CostInterp& cost_interp,
+        const GridInfo& cost_info,
+        const DirInterp& dir_interp,
+        const GridInfo& dir_info,
+        const ArclengthTable& arclength_table,
         const double remaining_energy,
         const double rfr_pwr_limit
     ):
@@ -425,13 +462,16 @@ struct FollowMPCCostFunctor {
         start_cmd_(start_cmd),
         x_h_init_(x_h_init),
         params_(params),
-        merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
+        cost_interp_(cost_interp),
+        cost_info_(cost_info),
+        dir_interp_(dir_interp),
+        dir_info_(dir_info),
+        arclength_table_(arclength_table),
         remaining_energy_(remaining_energy),
         rfr_pwr_limit_(rfr_pwr_limit) {}
 
     template<typename T>
-    bool operator()(T const* const* parameters, T* residuals) const {
+    bool operator()(const T* const parameters, T* residuals) const {
         PredictorState<T> st;
         st.x = T(start_pose_.x());
         st.y = T(start_pose_.y());
@@ -440,12 +480,12 @@ struct FollowMPCCostFunctor {
         T theta_cmd = T(start_pose_.z());
         // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束 & 作为辨识模型的 z^-1 输入状态
         T last_v_cmd = ceres::fmax(
-            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.follow_limits.start_vel_cmd_act_diff_max - params_.follow_limits.acc_max * params_.dt)),
-            T(start_status_.x() - params_.follow_limits.start_vel_cmd_act_diff_max + params_.follow_limits.acc_max * params_.dt)
+            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.follow_limits.start_vel_cmd_act_diff_max - params_.follow_limits.acc_max * MPC_DT)),
+            T(start_status_.x() - params_.follow_limits.start_vel_cmd_act_diff_max + params_.follow_limits.acc_max * MPC_DT)
         );
         T last_omega_cmd = ceres::fmax(
-            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.follow_limits.start_omega_cmd_act_diff_max - params_.follow_limits.alpha_max * params_.dt)),
-            T(start_status_.y() - params_.follow_limits.start_omega_cmd_act_diff_max + params_.follow_limits.alpha_max * params_.dt)
+            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.follow_limits.start_omega_cmd_act_diff_max - params_.follow_limits.alpha_max * MPC_DT)),
+            T(start_status_.y() - params_.follow_limits.start_omega_cmd_act_diff_max + params_.follow_limits.alpha_max * MPC_DT)
         );
 
         model_init(
@@ -462,21 +502,20 @@ struct FollowMPCCostFunctor {
         T w_act_prev = T(start_status_.y());
 
         size_t res_idx = 0;
-        for (int k = 0; k < params_.horizon; k++) {
-            const T* uk = parameters[k];
-            const T v_cmd = uk[0];
-            const T omega_cmd = uk[1];
+        for (int k = 0; k < MPC_HORIZON; k++) {
+            const T v_cmd = parameters[2 * k];
+            const T omega_cmd = parameters[2 * k + 1];
 
             // 指令变化
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
+            prediction_step(st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
 
             // 能量传播
-            const T a_k = (st.v_act - v_act_prev) / T(params_.dt);
-            const T alpha_k = (st.omega_act - w_act_prev) / T(params_.dt);
-            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(params_.dt);
+            const T a_k = (st.v_act - v_act_prev) / T(MPC_DT);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(MPC_DT);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(MPC_DT);
 
             // 样条上的参考点
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
@@ -494,12 +533,8 @@ struct FollowMPCCostFunctor {
             const T dsdu = ceres::sqrt(dx * dx + dy * dy) + T(1e-6);
             const T kappa = (dx * ddy - dy * ddx) / (dsdu * dsdu * dsdu);
 
-            // 终点剩余里程：只需要数值用于限速，不需要其导数。用 double 做数值积分，并将结果提升为 T，显式阻断 AutoDiff 的巨大循环计算图。
-            const double s_remain_d = estimate_remaining_arclength(
-                ref_control_points_,
-                scalar_value(u),
-                params_.follow_limits.slow_down_num_samples
-            );
+            // 终点剩余里程：O(1) 查表替代循环积分
+            const double s_remain_d = lookup_remaining_arclength(arclength_table_, scalar_value(u));
             const T s_remain = T(s_remain_d);
 
             // Frenet误差
@@ -525,8 +560,8 @@ struct FollowMPCCostFunctor {
             residuals[res_idx++] = T(params_.follow_weights.r_domega) * domega_cmd;
 
             // 5. 指令变化率软约束
-            const T dv_cmd_limit = T(params_.follow_limits.acc_max * params_.dt);
-            const T domega_cmd_limit = T(params_.follow_limits.alpha_max * params_.dt);
+            const T dv_cmd_limit = T(params_.follow_limits.acc_max * MPC_DT);
+            const T domega_cmd_limit = T(params_.follow_limits.alpha_max * MPC_DT);
             residuals[res_idx++] = T(params_.follow_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
             residuals[res_idx++] = T(params_.follow_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
@@ -534,12 +569,12 @@ struct FollowMPCCostFunctor {
             const T a_lat = ceres::abs(st.v_act * st.omega_act);
             residuals[res_idx++] = T(params_.follow_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
 
-            // 7. 避障
-            const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
+            // 7. 避障（Ceres BiCubicInterpolator）
+            const T cost = eval_cost_interp(cost_interp_, cost_info_, st.x, st.y);
             residuals[res_idx++] = T(params_.follow_weights.obstacle) * (cost / T(255.0));
 
-            // 8. 台阶处理
-            const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
+            // 8. 台阶处理（Ceres BiCubicInterpolator）
+            const auto dir = eval_dir_interp(dir_interp_, dir_info_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const auto dir_unit = dir / dir_norm;
 
@@ -584,7 +619,7 @@ struct FollowMPCCostFunctor {
             denom = denom / (denom_abs + T(1e-6)) * ceres::fmax(denom_abs, T(0.1));
             const T dsdt = st.v_act * ceres::cos(etheta) / denom;
             const T dudt = dsdt / dsdu;
-            u += dudt * T(params_.dt);
+            u += dudt * T(MPC_DT);
             u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
 
             last_v_cmd = v_cmd;
@@ -603,8 +638,11 @@ struct FollowMPCCostFunctor {
     const Eigen::Vector2d& start_cmd_;
     const double x_h_init_;
     const MPCParams& params_;
-    const CostMap& merged_cost_map_;
-    const DirectionMap& direction_map_;
+    const CostInterp& cost_interp_;
+    const GridInfo cost_info_;
+    const DirInterp& dir_interp_;
+    const GridInfo dir_info_;
+    const ArclengthTable arclength_table_;
     const double remaining_energy_;
     const double rfr_pwr_limit_;
 };
@@ -620,8 +658,10 @@ struct StopMPCCostFunctor {
         const Eigen::Vector2d& start_cmd,
         const double x_h_init,
         const MPCParams& params,
-        const CostMap& merged_cost_map,
-        const DirectionMap& direction_map,
+        const CostInterp& cost_interp,
+        const GridInfo& cost_info,
+        const DirInterp& dir_interp,
+        const GridInfo& dir_info,
         const double remaining_energy,
         const double rfr_pwr_limit
     ):
@@ -630,13 +670,15 @@ struct StopMPCCostFunctor {
         start_cmd_(start_cmd),
         x_h_init_(x_h_init),
         params_(params),
-        merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
+        cost_interp_(cost_interp),
+        cost_info_(cost_info),
+        dir_interp_(dir_interp),
+        dir_info_(dir_info),
         remaining_energy_(remaining_energy),
         rfr_pwr_limit_(rfr_pwr_limit) {}
 
     template<typename T>
-    bool operator()(T const* const* parameters, T* residuals) const {
+    bool operator()(const T* const parameters, T* residuals) const {
         PredictorState<T> st;
         st.x = T(start_pose_.x());
         st.y = T(start_pose_.y());
@@ -645,12 +687,12 @@ struct StopMPCCostFunctor {
 
         // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束 & 作为辨识模型的 z^-1 输入状态
         T last_v_cmd = ceres::fmax(
-            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.stop_limits.start_vel_cmd_act_diff_max - params_.stop_limits.acc_max * params_.dt)),
-            T(start_status_.x() - params_.stop_limits.start_vel_cmd_act_diff_max + params_.stop_limits.acc_max * params_.dt)
+            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.stop_limits.start_vel_cmd_act_diff_max - params_.stop_limits.acc_max * MPC_DT)),
+            T(start_status_.x() - params_.stop_limits.start_vel_cmd_act_diff_max + params_.stop_limits.acc_max * MPC_DT)
         );
         T last_omega_cmd = ceres::fmax(
-            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.stop_limits.start_omega_cmd_act_diff_max - params_.stop_limits.alpha_max * params_.dt)),
-            T(start_status_.y() - params_.stop_limits.start_omega_cmd_act_diff_max + params_.stop_limits.alpha_max * params_.dt)
+            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.stop_limits.start_omega_cmd_act_diff_max - params_.stop_limits.alpha_max * MPC_DT)),
+            T(start_status_.y() - params_.stop_limits.start_omega_cmd_act_diff_max + params_.stop_limits.alpha_max * MPC_DT)
         );
 
         model_init(
@@ -667,19 +709,18 @@ struct StopMPCCostFunctor {
         T w_act_prev = T(start_status_.y());
 
         size_t res_idx = 0;
-        for (int k = 0; k < params_.horizon; k++) {
-            const T* uk = parameters[k];
-            const T v_cmd = uk[0];
-            const T omega_cmd = uk[1];
+        for (int k = 0; k < MPC_HORIZON; k++) {
+            const T v_cmd = parameters[2 * k];
+            const T omega_cmd = parameters[2 * k + 1];
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
+            prediction_step(st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
 
             // 能量传播
-            const T a_k = (st.v_act - v_act_prev) / T(params_.dt);
-            const T alpha_k = (st.omega_act - w_act_prev) / T(params_.dt);
-            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(params_.dt);
+            const T a_k = (st.v_act - v_act_prev) / T(MPC_DT);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(MPC_DT);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(MPC_DT);
 
             // 1. 速度正则化
             residuals[res_idx++] = T(params_.stop_weights.q_v) * st.v_act;
@@ -690,8 +731,8 @@ struct StopMPCCostFunctor {
             residuals[res_idx++] = T(params_.stop_weights.r_domega) * domega_cmd;
 
             // 3. 指令变化率约束
-            const T dv_cmd_limit = T(params_.stop_limits.acc_max * params_.dt);
-            const T domega_cmd_limit = T(params_.stop_limits.alpha_max * params_.dt);
+            const T dv_cmd_limit = T(params_.stop_limits.acc_max * MPC_DT);
+            const T domega_cmd_limit = T(params_.stop_limits.alpha_max * MPC_DT);
             residuals[res_idx++] = T(params_.stop_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
             residuals[res_idx++] = T(params_.stop_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
@@ -700,15 +741,15 @@ struct StopMPCCostFunctor {
             residuals[res_idx++] = T(params_.stop_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
 
             // 5. 避障
-            const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
+            const T cost = eval_cost_interp(cost_interp_, cost_info_, st.x, st.y);
             residuals[res_idx++] = T(params_.stop_weights.obstacle) * (cost / T(255.0));
 
             // 6. 台阶处理
-            const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
+            const auto dir = eval_dir_interp(dir_interp_, dir_info_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const auto dir_unit = dir / dir_norm;
 
-            // 方向场在非台阶区域可能存在小噪声。用 step_norm_threshold 做门控，避免“停止模式”在接近 0 速度时被拉回一个小正速度。
+            // 方向场在非台阶区域可能存在小噪声。用 step_norm_threshold 做门控，避免"停止模式"在接近 0 速度时被拉回一个小正速度。
             const T step_gate = smoothstep(
                 dir_norm,
                 T(params_.stop_limits.step_norm_threshold),
@@ -741,9 +782,9 @@ struct StopMPCCostFunctor {
         }
 
         // 终端约束：不碰撞且不在台阶区域
-        const T cost_terminal = interpolate_cost_map(merged_cost_map_, st.x, st.y);
+        const T cost_terminal = eval_cost_interp(cost_interp_, cost_info_, st.x, st.y);
         residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal) * (cost_terminal / T(255.0));
-        const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
+        const auto dir = eval_dir_interp(dir_interp_, dir_info_, st.x, st.y);
         const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
         const T step_gate = smoothstep(
             dir_norm,
@@ -760,8 +801,10 @@ struct StopMPCCostFunctor {
     const Eigen::Vector2d& start_cmd_;
     const double x_h_init_;
     const MPCParams& params_;
-    const CostMap& merged_cost_map_;
-    const DirectionMap& direction_map_;
+    const CostInterp& cost_interp_;
+    const GridInfo cost_info_;
+    const DirInterp& dir_interp_;
+    const GridInfo dir_info_;
     const double remaining_energy_;
     const double rfr_pwr_limit_;
 };
@@ -778,8 +821,10 @@ struct RecoveryMPCCostFunctor {
         const Eigen::Vector2d& start_cmd,
         const double x_h_init,
         const MPCParams& params,
-        const CostMap& merged_cost_map,
-        const DirectionMap& direction_map,
+        const CostInterp& cost_interp,
+        const GridInfo& cost_info,
+        const DirInterp& dir_interp,
+        const GridInfo& dir_info,
         const double remaining_energy,
         const double rfr_pwr_limit
     ):
@@ -789,13 +834,15 @@ struct RecoveryMPCCostFunctor {
         start_cmd_(start_cmd),
         x_h_init_(x_h_init),
         params_(params),
-        merged_cost_map_(merged_cost_map),
-        direction_map_(direction_map),
+        cost_interp_(cost_interp),
+        cost_info_(cost_info),
+        dir_interp_(dir_interp),
+        dir_info_(dir_info),
         remaining_energy_(remaining_energy),
         rfr_pwr_limit_(rfr_pwr_limit) {}
 
     template<typename T>
-    bool operator()(T const* const* parameters, T* residuals) const {
+    bool operator()(const T* const parameters, T* residuals) const {
         PredictorState<T> st;
         st.x = T(start_pose_.x());
         st.y = T(start_pose_.y());
@@ -804,12 +851,12 @@ struct RecoveryMPCCostFunctor {
 
         // 上一时刻指令（经过起始指令与实际状态差值限幅），用于平滑约束 & 作为辨识模型的 z^-1 输入状态
         T last_v_cmd = ceres::fmax(
-            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.recovery_limits.start_vel_cmd_act_diff_max - params_.recovery_limits.acc_max * params_.dt)),
-            T(start_status_.x() - params_.recovery_limits.start_vel_cmd_act_diff_max + params_.recovery_limits.acc_max * params_.dt)
+            ceres::fmin(T(start_cmd_.x()), T(start_status_.x() + params_.recovery_limits.start_vel_cmd_act_diff_max - params_.recovery_limits.acc_max * MPC_DT)),
+            T(start_status_.x() - params_.recovery_limits.start_vel_cmd_act_diff_max + params_.recovery_limits.acc_max * MPC_DT)
         );
         T last_omega_cmd = ceres::fmax(
-            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.recovery_limits.start_omega_cmd_act_diff_max - params_.recovery_limits.alpha_max * params_.dt)),
-            T(start_status_.y() - params_.recovery_limits.start_omega_cmd_act_diff_max + params_.recovery_limits.alpha_max * params_.dt)
+            ceres::fmin(T(start_cmd_.y()), T(start_status_.y() + params_.recovery_limits.start_omega_cmd_act_diff_max - params_.recovery_limits.alpha_max * MPC_DT)),
+            T(start_status_.y() - params_.recovery_limits.start_omega_cmd_act_diff_max + params_.recovery_limits.alpha_max * MPC_DT)
         );
 
         model_init(
@@ -829,25 +876,24 @@ struct RecoveryMPCCostFunctor {
         T w_act_prev = T(start_status_.y());
 
         size_t res_idx = 0;
-        for (int k = 0; k < params_.horizon; k++) {
-            const T* uk = parameters[k];
-            const T v_cmd = uk[0];
-            const T omega_cmd = uk[1];
+        for (int k = 0; k < MPC_HORIZON; k++) {
+            const T v_cmd = parameters[2 * k];
+            const T omega_cmd = parameters[2 * k + 1];
             const T dv_cmd = v_cmd - last_v_cmd;
             const T domega_cmd = omega_cmd - last_omega_cmd;
 
-            prediction_step(params_, st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
+            prediction_step(st, v_cmd, omega_cmd, last_omega_cmd, theta_cmd);
 
             // 能量传播
-            const T a_k = (st.v_act - v_act_prev) / T(params_.dt);
-            const T alpha_k = (st.omega_act - w_act_prev) / T(params_.dt);
-            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(params_.dt);
+            const T a_k = (st.v_act - v_act_prev) / T(MPC_DT);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(MPC_DT);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(MPC_DT);
 
             // 1. 目标点吸引
-            const T dx = st.x - gx;
-            const T dy = st.y - gy;
-            residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * dx;
-            residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * dy;
+            const T ddx = st.x - gx;
+            const T ddy = st.y - gy;
+            residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * ddx;
+            residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * ddy;
 
             // 2. 朝向目标（前后朝向均可，使用sin）
             const T desired_theta = ceres::atan2(gy - st.y, gx - st.x);
@@ -863,8 +909,8 @@ struct RecoveryMPCCostFunctor {
             residuals[res_idx++] = T(params_.recovery_weights.r_domega) * domega_cmd;
 
             // 5. 指令变化率硬约束（软惩罚实现）
-            const T dv_cmd_limit = T(params_.recovery_limits.acc_max * params_.dt);
-            const T domega_cmd_limit = T(params_.recovery_limits.alpha_max * params_.dt);
+            const T dv_cmd_limit = T(params_.recovery_limits.acc_max * MPC_DT);
+            const T domega_cmd_limit = T(params_.recovery_limits.alpha_max * MPC_DT);
             residuals[res_idx++] = T(params_.recovery_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
             residuals[res_idx++] = T(params_.recovery_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
 
@@ -873,11 +919,11 @@ struct RecoveryMPCCostFunctor {
             residuals[res_idx++] = T(params_.recovery_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.recovery_limits.a_lat_max));
 
             // 7. 避障
-            const T cost = interpolate_cost_map(merged_cost_map_, st.x, st.y);
+            const T cost = eval_cost_interp(cost_interp_, cost_info_, st.x, st.y);
             residuals[res_idx++] = T(params_.recovery_weights.obstacle) * (cost / T(255.0));
 
             // 8. 台阶方向场：视为不可通行区域
-            const auto dir = interpolate_direction_map(direction_map_, st.x, st.y);
+            const auto dir = eval_dir_interp(dir_interp_, dir_info_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const T step_gate = smoothstep(
                 dir_norm,
@@ -889,9 +935,9 @@ struct RecoveryMPCCostFunctor {
             // 能量约束
             const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
             const T thr = T(std::max(params_.energy.threshold, 1.0));
-            const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
+            const T beta_e = T(std::max(params_.energy.softplus_beta, 1e-6));
             const T vio = (T(params_.energy.threshold) - energy) / thr;
-            const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
+            const T relu_soft = softplus(beta_e * vio) / beta_e - softplus(T(0.0)) / beta_e;
             residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
 
             last_v_cmd = v_cmd;
@@ -906,10 +952,10 @@ struct RecoveryMPCCostFunctor {
         residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy_terminal) * dxT;
         residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy_terminal) * dyT;
 
-        const T cost_terminal = interpolate_cost_map(merged_cost_map_, st.x, st.y);
+        const T cost_terminal = eval_cost_interp(cost_interp_, cost_info_, st.x, st.y);
         residuals[res_idx++] = T(params_.recovery_weights.obstacle_terminal) * (cost_terminal / T(255.0));
 
-        const auto dirT = interpolate_direction_map(direction_map_, st.x, st.y);
+        const auto dirT = eval_dir_interp(dir_interp_, dir_info_, st.x, st.y);
         const T dir_normT = ceres::sqrt(dirT.squaredNorm() + T(1e-10));
         const T step_gateT = smoothstep(
             dir_normT,
@@ -927,22 +973,27 @@ struct RecoveryMPCCostFunctor {
     const Eigen::Vector2d& start_cmd_;
     const double x_h_init_;
     const MPCParams& params_;
-    const CostMap& merged_cost_map_;
-    const DirectionMap& direction_map_;
+    const CostInterp& cost_interp_;
+    const GridInfo cost_info_;
+    const DirInterp& dir_interp_;
+    const GridInfo dir_info_;
     const double remaining_energy_;
     const double rfr_pwr_limit_;
 };
 
+// ============================================================================
+//                          生成预测轨迹
+// ============================================================================
+
 inline MPCPrediction generate_predicted_path_map(
-    const MPCParams& params,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
     const Eigen::Vector2d& cmd_prev,
     const double x_h_init,
-    const std::vector<std::array<double, 2>>& controls
+    const double* controls
 ) {
     MPCPrediction pred;
-    const size_t n = static_cast<size_t>(params.horizon) + 1;
+    constexpr size_t n = static_cast<size_t>(MPC_HORIZON) + 1;
     pred.path_map.reserve(n);
     pred.headings.reserve(n);
     pred.v_pred.reserve(n);
@@ -968,11 +1019,11 @@ inline MPCPrediction generate_predicted_path_map(
     pred.w_pred.push_back(st.omega_act);
 
     double theta_cmd = chassis_pose_map.z();
-    for (int i = 0; i < params.horizon; i++) {
-        const double v_cmd = controls[static_cast<size_t>(i)][0];
-        const double w_cmd = controls[static_cast<size_t>(i)][1];
-        const double w_cmd_prev = (i == 0) ? cmd_prev.y() : controls[static_cast<size_t>(i - 1)][1];
-        prediction_step(params, st, v_cmd, w_cmd, w_cmd_prev, theta_cmd);
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        const double v_cmd = controls[2 * i];
+        const double w_cmd = controls[2 * i + 1];
+        const double w_cmd_prev = (i == 0) ? cmd_prev.y() : controls[2 * (i - 1) + 1];
+        prediction_step(st, v_cmd, w_cmd, w_cmd_prev, theta_cmd);
         pred.path_map.emplace_back(st.x, st.y);
         pred.headings.push_back(st.theta);
         pred.v_pred.push_back(st.v_act);
@@ -1000,7 +1051,7 @@ inline double clamp_prev_cmd(
 // ============================================================================
 
 MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
-    last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
+    last_controls_.fill(0.0);
 }
 
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
@@ -1008,7 +1059,7 @@ void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
 }
 
 void MPCSolver::reset_warm_start() {
-    last_controls_.assign(static_cast<size_t>(params_.horizon), Eigen::Vector2d::Zero());
+    last_controls_.fill(0.0);
 }
 
 void MPCSolver::set_energy_state(double remaining_energy, double rfr_pwr_limit) {
@@ -1069,70 +1120,72 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     const Eigen::Vector2d start_cmd = last_cmd_;
 
-    // 决策变量
-    std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
+    // ── 构建 Ceres 插值器（栈上变量，生命周期覆盖整个 Solve）──
+    std::vector<double> cost_data, dir_data;
+    prepare_grid_data(merged_cost_map, global_direction_map, cost_data, dir_data);
+    const CostGrid cost_grid(cost_data.data(), 0, merged_cost_map.height, 0, merged_cost_map.width);
+    const CostInterp cost_interp(cost_grid);
+    const GridInfo cost_info{merged_cost_map.origin_x, merged_cost_map.origin_y, merged_cost_map.resolution, merged_cost_map.width, merged_cost_map.height};
+    const DirGrid dir_grid(dir_data.data(), 0, global_direction_map.height, 0, global_direction_map.width);
+    const DirInterp dir_interp(dir_grid);
+    const GridInfo dir_info{global_direction_map.origin_x, global_direction_map.origin_y, global_direction_map.resolution, global_direction_map.width, global_direction_map.height};
+
+    // ── 预计算弧长查找表 ──
+    const ArclengthTable arclength_table = build_arclength_table(
+        global_path.getControlPoints(),
+        params_.follow_limits.slow_down_num_samples
+    );
+
+    // 决策变量（单一平坦参数块）
+    std::array<double, MPC_PARAM_SIZE> controls{};
 
     // Warm start
-    if (last_controls_.size() == static_cast<size_t>(params_.horizon)) {
-        for (int i = 0; i < params_.horizon; i++) {
-            const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[static_cast<size_t>(i + 1)] : last_controls_.back();
-            controls[static_cast<size_t>(i)][0] = init.x();
-            controls[static_cast<size_t>(i)][1] = init.y();
-        }
-    } else {
-        for (int i = 0; i < params_.horizon; i++) {
-            controls[static_cast<size_t>(i)][0] = chassis_status.x();
-            controls[static_cast<size_t>(i)][1] = chassis_status.y();
-        }
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        const int src = (i + 1 < MPC_HORIZON) ? (i + 1) : (MPC_HORIZON - 1);
+        controls[static_cast<size_t>(2 * i)]     = last_controls_[static_cast<size_t>(2 * src)];
+        controls[static_cast<size_t>(2 * i + 1)] = last_controls_[static_cast<size_t>(2 * src + 1)];
     }
 
     // 构建优化问题
     ceres::Problem problem;
 
-    auto* cost_function = new ceres::DynamicAutoDiffCostFunction<FollowMPCCostFunctor>(new FollowMPCCostFunctor(
-        global_path.getControlPoints(),
-        chassis_pose_map,
-        u0,
-        chassis_status,
-        start_cmd,
-        x_h_hat_,
-        params_,
-        merged_cost_map,
-        global_direction_map,
-        remaining_energy_,
-        rfr_pwr_limit_
-    ));
+    constexpr int FOLLOW_NUM_RESIDUALS = 16 * MPC_HORIZON;
+    auto* cost_function = new ceres::AutoDiffCostFunction<
+        FollowMPCCostFunctor, FOLLOW_NUM_RESIDUALS, MPC_PARAM_SIZE>(
+        new FollowMPCCostFunctor(
+            global_path.getControlPoints(),
+            chassis_pose_map,
+            u0,
+            chassis_status,
+            start_cmd,
+            x_h_hat_,
+            params_,
+            cost_interp,
+            cost_info,
+            dir_interp,
+            dir_info,
+            arclength_table,
+            remaining_energy_,
+            rfr_pwr_limit_
+        )
+    );
 
-    // 添加参数块
-    for (int i = 0; i < params_.horizon; i++) {
-        cost_function->AddParameterBlock(2);
-    }
-    // 每步16个残差
-    cost_function->SetNumResiduals(16 * params_.horizon);
-
-    std::vector<double*> parameter_blocks;
-    parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
-
-    for (auto& c: controls) {
-        parameter_blocks.push_back(c.data());
-    }
-
-    problem.AddResidualBlock(cost_function, nullptr, parameter_blocks);
+    problem.AddResidualBlock(cost_function, nullptr, controls.data());
 
     // 设置边界
-    for (int i = 0; i < params_.horizon; i++) {
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, params_.follow_limits.vel_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.follow_limits.vel_max);
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.follow_limits.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.follow_limits.omega_max);
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        problem.SetParameterLowerBound(controls.data(), 2 * i,     params_.follow_limits.vel_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i,     params_.follow_limits.vel_max);
+        problem.SetParameterLowerBound(controls.data(), 2 * i + 1, params_.follow_limits.omega_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i + 1, params_.follow_limits.omega_max);
     }
 
     // 求解
     ceres::Solver::Options options;
     options.minimizer_type = ceres::TRUST_REGION;
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.linear_solver_type = ceres::DENSE_QR;
-    options.max_num_iterations = params_.max_iterations;
+    options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = MPC_MAX_ITERATIONS;
     options.minimizer_progress_to_stdout = false;
     options.logging_type = ceres::SILENT;
 
@@ -1144,21 +1197,18 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     }
 
     // 输出
-    Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    Eigen::Vector2d cmd_v_omega(controls[0], controls[1]);
     last_cmd_ = cmd_v_omega;
 
     // 保存warm start
-    last_controls_.resize(static_cast<size_t>(params_.horizon));
-    for (int i = 0; i < params_.horizon; i++) {
-        last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
-    }
+    last_controls_ = controls;
 
     const Eigen::Vector2d cmd_prev_clamped(
-        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.follow_limits.start_vel_cmd_act_diff_max, params_.follow_limits.acc_max, params_.dt),
-        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.follow_limits.start_omega_cmd_act_diff_max, params_.follow_limits.alpha_max, params_.dt)
+        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.follow_limits.start_vel_cmd_act_diff_max, params_.follow_limits.acc_max, MPC_DT),
+        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.follow_limits.start_omega_cmd_act_diff_max, params_.follow_limits.alpha_max, MPC_DT)
     );
     const MPCPrediction prediction = generate_predicted_path_map(
-        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
+        chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls.data()
     );
     return std::tuple{cmd_v_omega, prediction};
 }
@@ -1171,64 +1221,61 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 ) {
     const Eigen::Vector2d start_cmd = last_cmd_;
 
+    // ── 构建 Ceres 插值器 ──
+    std::vector<double> cost_data, dir_data;
+    prepare_grid_data(merged_cost_map, global_direction_map, cost_data, dir_data);
+    const CostGrid cost_grid(cost_data.data(), 0, merged_cost_map.height, 0, merged_cost_map.width);
+    const CostInterp cost_interp(cost_grid);
+    const GridInfo cost_info{merged_cost_map.origin_x, merged_cost_map.origin_y, merged_cost_map.resolution, merged_cost_map.width, merged_cost_map.height};
+    const DirGrid dir_grid(dir_data.data(), 0, global_direction_map.height, 0, global_direction_map.width);
+    const DirInterp dir_interp(dir_grid);
+    const GridInfo dir_info{global_direction_map.origin_x, global_direction_map.origin_y, global_direction_map.resolution, global_direction_map.width, global_direction_map.height};
+
     // 决策变量
-    std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
+    std::array<double, MPC_PARAM_SIZE> controls{};
 
     // Warm start
-    if (last_controls_.size() == static_cast<size_t>(params_.horizon)) {
-        for (int i = 0; i < params_.horizon; i++) {
-            const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[static_cast<size_t>(i + 1)] : last_controls_.back();
-            controls[static_cast<size_t>(i)][0] = std::max(0.0, init.x());
-            controls[static_cast<size_t>(i)][1] = init.y();
-        }
-    } else {
-        for (int i = 0; i < params_.horizon; i++) {
-            controls[static_cast<size_t>(i)][0] = std::max(0.0, chassis_status.x());
-            controls[static_cast<size_t>(i)][1] = chassis_status.y();
-        }
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        const int src = (i + 1 < MPC_HORIZON) ? (i + 1) : (MPC_HORIZON - 1);
+        controls[static_cast<size_t>(2 * i)]     = std::max(0.0, last_controls_[static_cast<size_t>(2 * src)]);
+        controls[static_cast<size_t>(2 * i + 1)] = last_controls_[static_cast<size_t>(2 * src + 1)];
     }
 
     ceres::Problem problem;
 
-    auto* cost_function = new ceres::DynamicAutoDiffCostFunction<StopMPCCostFunctor>(new StopMPCCostFunctor(
-        chassis_pose_map,
-        chassis_status,
-        start_cmd,
-        x_h_hat_,
-        params_,
-        merged_cost_map,
-        global_direction_map,
-        remaining_energy_,
-        rfr_pwr_limit_
-    ));
+    constexpr int STOP_NUM_RESIDUALS = 11 * MPC_HORIZON + 2;
+    auto* cost_function = new ceres::AutoDiffCostFunction<
+        StopMPCCostFunctor, STOP_NUM_RESIDUALS, MPC_PARAM_SIZE>(
+        new StopMPCCostFunctor(
+            chassis_pose_map,
+            chassis_status,
+            start_cmd,
+            x_h_hat_,
+            params_,
+            cost_interp,
+            cost_info,
+            dir_interp,
+            dir_info,
+            remaining_energy_,
+            rfr_pwr_limit_
+        )
+    );
 
-    for (int i = 0; i < params_.horizon; i++) {
-        cost_function->AddParameterBlock(2);
-    }
-
-    // 每步11个残差 + 终端2个
-    cost_function->SetNumResiduals(11 * params_.horizon + 2);
-
-    std::vector<double*> parameter_blocks;
-    parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
-    for (auto& c: controls) {
-        parameter_blocks.push_back(c.data());
-    }
-    problem.AddResidualBlock(cost_function, nullptr, parameter_blocks);
+    problem.AddResidualBlock(cost_function, nullptr, controls.data());
 
     // 边界
-    for (int i = 0; i < params_.horizon; i++) {
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, 0.0);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.stop_limits.vel_max);
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.stop_limits.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.stop_limits.omega_max);
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        problem.SetParameterLowerBound(controls.data(), 2 * i,     0.0);
+        problem.SetParameterUpperBound(controls.data(), 2 * i,     params_.stop_limits.vel_max);
+        problem.SetParameterLowerBound(controls.data(), 2 * i + 1, params_.stop_limits.omega_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i + 1, params_.stop_limits.omega_max);
     }
 
     ceres::Solver::Options options;
     options.minimizer_type = ceres::TRUST_REGION;
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.linear_solver_type = ceres::DENSE_QR;
-    options.max_num_iterations = params_.max_iterations;
+    options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = MPC_MAX_ITERATIONS;
     options.minimizer_progress_to_stdout = false;
     options.logging_type = ceres::SILENT;
 
@@ -1239,21 +1286,18 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         return std::unexpected(summary.BriefReport());
     }
 
-    Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    Eigen::Vector2d cmd_v_omega(controls[0], controls[1]);
     last_cmd_ = cmd_v_omega;
 
     // 保存warm start
-    last_controls_.resize(static_cast<size_t>(params_.horizon));
-    for (int i = 0; i < params_.horizon; i++) {
-        last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
-    }
+    last_controls_ = controls;
 
     const Eigen::Vector2d cmd_prev_clamped(
-        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.stop_limits.start_vel_cmd_act_diff_max, params_.stop_limits.acc_max, params_.dt),
-        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.stop_limits.start_omega_cmd_act_diff_max, params_.stop_limits.alpha_max, params_.dt)
+        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.stop_limits.start_vel_cmd_act_diff_max, params_.stop_limits.acc_max, MPC_DT),
+        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.stop_limits.start_omega_cmd_act_diff_max, params_.stop_limits.alpha_max, MPC_DT)
     );
     const MPCPrediction prediction = generate_predicted_path_map(
-        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
+        chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls.data()
     );
     return std::tuple{cmd_v_omega, prediction};
 }
@@ -1267,65 +1311,62 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 ) {
     const Eigen::Vector2d start_cmd = last_cmd_;
 
+    // ── 构建 Ceres 插值器 ──
+    std::vector<double> cost_data, dir_data;
+    prepare_grid_data(merged_cost_map, global_direction_map, cost_data, dir_data);
+    const CostGrid cost_grid(cost_data.data(), 0, merged_cost_map.height, 0, merged_cost_map.width);
+    const CostInterp cost_interp(cost_grid);
+    const GridInfo cost_info{merged_cost_map.origin_x, merged_cost_map.origin_y, merged_cost_map.resolution, merged_cost_map.width, merged_cost_map.height};
+    const DirGrid dir_grid(dir_data.data(), 0, global_direction_map.height, 0, global_direction_map.width);
+    const DirInterp dir_interp(dir_grid);
+    const GridInfo dir_info{global_direction_map.origin_x, global_direction_map.origin_y, global_direction_map.resolution, global_direction_map.width, global_direction_map.height};
+
     // 决策变量
-    std::vector<std::array<double, 2>> controls(static_cast<size_t>(params_.horizon), {0.0, 0.0});
+    std::array<double, MPC_PARAM_SIZE> controls{};
 
     // Warm start
-    if (last_controls_.size() == static_cast<size_t>(params_.horizon)) {
-        for (int i = 0; i < params_.horizon; i++) {
-            const Eigen::Vector2d init = (i + 1 < params_.horizon) ? last_controls_[static_cast<size_t>(i + 1)] : last_controls_.back();
-            controls[static_cast<size_t>(i)][0] = std::max(0.0, init.x());
-            controls[static_cast<size_t>(i)][1] = init.y();
-        }
-    } else {
-        for (int i = 0; i < params_.horizon; i++) {
-            controls[static_cast<size_t>(i)][0] = std::max(0.0, chassis_status.x());
-            controls[static_cast<size_t>(i)][1] = chassis_status.y();
-        }
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        const int src = (i + 1 < MPC_HORIZON) ? (i + 1) : (MPC_HORIZON - 1);
+        controls[static_cast<size_t>(2 * i)]     = std::max(0.0, last_controls_[static_cast<size_t>(2 * src)]);
+        controls[static_cast<size_t>(2 * i + 1)] = last_controls_[static_cast<size_t>(2 * src + 1)];
     }
 
     ceres::Problem problem;
 
-    auto* cost_function = new ceres::DynamicAutoDiffCostFunction<RecoveryMPCCostFunctor>(new RecoveryMPCCostFunctor(
-        goal_map,
-        chassis_pose_map,
-        chassis_status,
-        start_cmd,
-        x_h_hat_,
-        params_,
-        merged_cost_map,
-        global_direction_map,
-        remaining_energy_,
-        rfr_pwr_limit_
-    ));
+    constexpr int RECOVERY_NUM_RESIDUALS = 13 * MPC_HORIZON + 4;
+    auto* cost_function = new ceres::AutoDiffCostFunction<
+        RecoveryMPCCostFunctor, RECOVERY_NUM_RESIDUALS, MPC_PARAM_SIZE>(
+        new RecoveryMPCCostFunctor(
+            goal_map,
+            chassis_pose_map,
+            chassis_status,
+            start_cmd,
+            x_h_hat_,
+            params_,
+            cost_interp,
+            cost_info,
+            dir_interp,
+            dir_info,
+            remaining_energy_,
+            rfr_pwr_limit_
+        )
+    );
 
-    for (int i = 0; i < params_.horizon; i++) {
-        cost_function->AddParameterBlock(2);
-    }
-
-    // 每步13个残差 + 终端4个
-    cost_function->SetNumResiduals(13 * params_.horizon + 4);
-
-    std::vector<double*> parameter_blocks;
-    parameter_blocks.reserve(static_cast<size_t>(params_.horizon));
-    for (auto& c: controls) {
-        parameter_blocks.push_back(c.data());
-    }
-    problem.AddResidualBlock(cost_function, nullptr, parameter_blocks);
+    problem.AddResidualBlock(cost_function, nullptr, controls.data());
 
     // 边界
-    for (int i = 0; i < params_.horizon; i++) {
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 0, params_.recovery_limits.vel_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 0, params_.recovery_limits.vel_max);
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(i)].data(), 1, params_.recovery_limits.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(i)].data(), 1, params_.recovery_limits.omega_max);
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        problem.SetParameterLowerBound(controls.data(), 2 * i,     params_.recovery_limits.vel_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i,     params_.recovery_limits.vel_max);
+        problem.SetParameterLowerBound(controls.data(), 2 * i + 1, params_.recovery_limits.omega_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i + 1, params_.recovery_limits.omega_max);
     }
 
     ceres::Solver::Options options;
     options.minimizer_type = ceres::TRUST_REGION;
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.linear_solver_type = ceres::DENSE_QR;
-    options.max_num_iterations = params_.max_iterations;
+    options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = MPC_MAX_ITERATIONS;
     options.minimizer_progress_to_stdout = false;
     options.logging_type = ceres::SILENT;
 
@@ -1336,21 +1377,18 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         return std::unexpected(summary.BriefReport());
     }
 
-    Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    Eigen::Vector2d cmd_v_omega(controls[0], controls[1]);
     last_cmd_ = cmd_v_omega;
 
     // 保存warm start
-    last_controls_.resize(static_cast<size_t>(params_.horizon));
-    for (int i = 0; i < params_.horizon; i++) {
-        last_controls_[static_cast<size_t>(i)] = Eigen::Vector2d(controls[static_cast<size_t>(i)][0], controls[static_cast<size_t>(i)][1]);
-    }
+    last_controls_ = controls;
 
     const Eigen::Vector2d cmd_prev_clamped(
-        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.recovery_limits.start_vel_cmd_act_diff_max, params_.recovery_limits.acc_max, params_.dt),
-        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.recovery_limits.start_omega_cmd_act_diff_max, params_.recovery_limits.alpha_max, params_.dt)
+        clamp_prev_cmd(start_cmd.x(), chassis_status.x(), params_.recovery_limits.start_vel_cmd_act_diff_max, params_.recovery_limits.acc_max, MPC_DT),
+        clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.recovery_limits.start_omega_cmd_act_diff_max, params_.recovery_limits.alpha_max, MPC_DT)
     );
     const MPCPrediction prediction = generate_predicted_path_map(
-        params_, chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls
+        chassis_pose_map, chassis_status, cmd_prev_clamped, x_h_hat_, controls.data()
     );
     return std::tuple{cmd_v_omega, prediction};
 }

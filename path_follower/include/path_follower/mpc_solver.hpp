@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <expected>
 #include <string>
 #include <Eigen/Dense>
@@ -7,6 +8,12 @@
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
+
+// ── MPC 编译期常量 ──
+constexpr int    MPC_HORIZON        = 16;
+constexpr double MPC_DT             = 0.05;
+constexpr int    MPC_MAX_ITERATIONS = 80;
+constexpr int    MPC_PARAM_SIZE     = 2 * MPC_HORIZON;
 
 struct MPCFollowLimits {
     double vel_max;
@@ -129,24 +136,20 @@ struct MPCRecoveryWeights {
 
 struct EnergyParams {
     bool enable = false;
-    double threshold = 60.0;   // 缓冲电容惩罚阈值 (J)
-    double weight = 2.0;       // 软约束权重
+    double threshold = 60.0;     // 电容惩罚阈值 (J)
+    double weight = 2.0;         // 软约束权重
     double softplus_beta = 10.0; // softplus 斜率(越大越接近 ReLU)，建议 5~30
 };
 
 /// MPC 预测轨迹（灰箱模型输出）
 struct MPCPrediction {
-    std::vector<Eigen::Vector2d> path_map;  ///< (x, y) 位置, N+1 points（含初始点）
+    std::vector<Eigen::Vector2d> path_map;   ///< (x, y) 位置, N+1 points（含初始点）
     std::vector<double> headings;            ///< theta 朝向 (rad), N+1
     std::vector<double> v_pred;              ///< 预测线速度响应, N+1
     std::vector<double> w_pred;              ///< 预测角速度响应, N+1
 };
 
 struct MPCParams {
-    int horizon;
-    double dt;
-    int max_iterations;
-
     MPCFollowLimits follow_limits;
     MPCFollowWeights follow_weights;
     MPCFollowProjection follow_projection;
@@ -204,7 +207,7 @@ public:
 
 private:
     MPCParams params_;
-    std::vector<Eigen::Vector2d> last_controls_;
+    std::array<double, MPC_PARAM_SIZE> last_controls_{};
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 

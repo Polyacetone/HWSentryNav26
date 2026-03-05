@@ -129,7 +129,7 @@ class ChassisCmdPublisher(Node):
         super().__init__('chassis_cmd_sine_profile_publisher')
 
         self.declare_parameter('topic', '/path_follower/chassis_cmd')
-        self.declare_parameter('rate_hz', 10.0)
+        self.declare_parameter('rate_hz', 20.0)
 
         self.declare_parameter('max_velocity', 1.0)  # m/s
         self.declare_parameter('max_palstance', 6.0)  # rad/s

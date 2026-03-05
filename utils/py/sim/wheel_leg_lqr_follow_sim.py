@@ -77,8 +77,8 @@ class SimConfig:
     IMU_PUB_HZ: float = 100.0
     JOINT_PUB_HZ: float = 20.0
     STATUS_PUB_HZ: float = 20.0
-    ODOM_PUB_HZ: float = 10.0
-    CLOUD_PUB_HZ: float = 10.0
+    ODOM_PUB_HZ: float = 20.0
+    CLOUD_PUB_HZ: float = 20.0
     TF_PUB_HZ: float = 1.0
 
     # --- 超时 ---
@@ -151,7 +151,7 @@ class SimConfig:
 
     # --- 功率/能量仿真 ---
     RFR_PWR_LIMIT: float = 80.0           # 裁判系统最大取电功率 (W)
-    CAPACITOR_MAX_ENERGY: float = 1300.0   # 缓冲电容最大可用电量 (J)
+    CAPACITOR_MAX_ENERGY: float = 1300.0   # 电容最大可用电量 (J)
     CAPACITOR_INIT_ENERGY: float = 1300.0  # 初始电容电量 (J)
     POWER_LOWPASS_HZ: float = 3.0         # 功率模型速度低通截频 (Hz)
 
@@ -707,7 +707,7 @@ class WheelLegLqrFollowSimNode(Node):
         self._v_filt_prev = 0.0
         self._w_filt_prev = 0.0
 
-        # command targets (10Hz input -> 1000Hz rate-limited application)
+        # command targets (MPC-rate input -> 1000Hz rate-limited application)
         self._last_cmd_time = self.get_clock().now()
         self._spin_slow = False
         self._spin_fast = False

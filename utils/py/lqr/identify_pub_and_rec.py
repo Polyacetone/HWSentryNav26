@@ -433,7 +433,7 @@ def main() -> int:
     parser.add_argument("--list-v-profiles", action="store_true", help="列出所有 v profiles 并退出")
     parser.add_argument("--list-w-profiles", action="store_true", help="列出所有 w profiles 并退出")
     parser.add_argument("--tag", type=str, default="", help="附加标签，会写入文件名")
-    parser.add_argument("--cmd-hz", type=float, default=10.0, help="发布指令频率")
+    parser.add_argument("--cmd-hz", type=float, default=20.0, help="发布指令频率")
     parser.add_argument("--warmup", type=float, default=5.0, help="预热时长(s)")
     parser.add_argument("--margin", type=float, default=0.6, help="限幅裕度(0~1)，越小越保守")
     parser.add_argument("--out-dir", type=str, default="identify_data", help="输出目录")
