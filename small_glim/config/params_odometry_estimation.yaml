@@ -30,4 +30,4 @@
       vgicp_voxelmap_scaling_factor: 2.0 # Multi-resolution voxelmap scaling factor (for VGICP)
 
       # MISC
-      num_threads: 8 # Number of threads for odometry estimation
+      num_threads: 12 # Number of threads for odometry estimation

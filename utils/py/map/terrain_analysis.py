@@ -377,7 +377,7 @@ class TerrainAnalyzer:
 
         return refined_labels, step_vectors
 
-    def generate_navigation_map(self, points, labels, step_vectors):
+    def generate_navigation_map(self, points, labels, step_vectors, min_xy=None, max_xy=None):
         """
         生成符合要求的三通道 BGR 导航地图。
         R: 障碍物 (255)，包含闭合填充
@@ -385,13 +385,17 @@ class TerrainAnalyzer:
         B: 台阶 X 方向分量 (映射到 1-255)
         """
         # 1. 计算地图边界和尺寸
-        min_xy = np.min(points[:, :2], axis=0)
-        max_xy = np.max(points[:, :2], axis=0)
+        if min_xy is None:
+            min_xy = np.min(points[:, :2], axis=0)
+        if max_xy is None:
+            max_xy = np.max(points[:, :2], axis=0)
 
         width = int(np.ceil((max_xy[0] - min_xy[0]) / self.map_resolution)) + 1
         height = int(np.ceil((max_xy[1] - min_xy[1]) / self.map_resolution)) + 1
         
         print(f"地图尺寸: {width} x {height}")
+        print(f"地图边界: min_xy={min_xy}, max_xy={max_xy}")
+        print(f"地图分辨率: {self.map_resolution} m/像素")
         
         # 初始化图像 (H, W, 3) - OpenCV 格式
         nav_map = np.zeros((height, width, 3), dtype=np.uint8)
@@ -515,7 +519,7 @@ class TerrainAnalyzer:
                     final_step_vectors[idx] = step_vectors[idx]
         
         print("5. 生成 BGR 导航地图...")
-        nav_map, origin, res = self.generate_navigation_map(points, final_labels, final_step_vectors)
+        nav_map, origin, res = self.generate_navigation_map(points, final_labels, final_step_vectors, min_xy=(0, 0))
         
         print(f"6. 保存地图至 {output_image_path}")
         cv2.imwrite(output_image_path, nav_map)

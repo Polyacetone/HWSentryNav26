@@ -12,4 +12,4 @@
       outlier_std_mul_factor: 1.0 # Standard deviation multiplier for outlier removal
       enable_cropbox_filter: false # If true, filter points out points within box
       k_correspondences: 10 # Number of neighbors for covariance estimation
-      num_threads: 4 # Number of threads for preprocessing
+      num_threads: 6 # Number of threads for preprocessing

@@ -1251,10 +1251,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data-dir", type=str, default="identify_data")
     ap.add_argument("--out-dir", type=str, default="identify_result")
-    ap.add_argument("--cutoff-hz", type=float, default=4.0,
+    ap.add_argument("--cutoff-hz", type=float, default=8.0,
                     help="Anti-alias lowpass cutoff (Hz) before raw→MPC-rate downsample")
     ap.add_argument("--w-vel", type=float, default=1.0, help="Weight for velocity RMSE term")
-    ap.add_argument("--w-pos", type=float, default=4.0, help="Weight for displacement integral term")
+    ap.add_argument("--w-pos", type=float, default=2.0, help="Weight for displacement integral term")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)

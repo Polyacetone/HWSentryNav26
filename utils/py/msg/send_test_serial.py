@@ -14,21 +14,14 @@ class ChassisCmdPublisher(Node):
     def timer_callback(self):
         msg = ChassisCmd()
 
-        msg.velocity = 1.4
-        msg.omega = 1.0
-        msg.step_up_ahead = True
-        msg.step_down_ahead = False
+        msg.velocity = 0.0
+        msg.omega = 0.0
+        msg.step_up_ahead = False
+        msg.step_down_ahead = True
         msg.slow_spin = False
         msg.fast_spin = False
         self.chassis_cmd_publisher_.publish(msg)
         self.get_logger().info('Published ChassisCmd message')
-
-        msg = ShootCmd()
-        msg.yaw = 0.514
-        msg.pitch = 1.14
-        msg.shoot_interval = -1
-        self.shoot_cmd_publisher_.publish(msg)
-        self.get_logger().info('Published ShootCmd message')
 
 def main(args=None):
     rclpy.init(args=args)

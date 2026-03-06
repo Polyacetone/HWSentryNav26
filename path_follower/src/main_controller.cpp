@@ -11,9 +11,9 @@ namespace path_follower {
 namespace {
 
 inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_status) {
-    // leg_mode: 0:死亡, 1:恢复, 6:异常
+    // leg_mode: 4:Mature
     // comp_status: 4:比赛中
-    return leg_mode == 0u || leg_mode == 1u || leg_mode == 6u || comp_status != 4u;
+    return leg_mode != 4u || comp_status != 4u;
 }
 
 }
@@ -428,8 +428,9 @@ std::tuple<bool, bool> MainController::detect_steps_on_prediction(
 
         const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
         if (!direction_map.is_valid_coord(Eigen::Vector2i(
-                static_cast<int>(std::floor(g.x())),
-                static_cast<int>(std::floor(g.y()))))) continue;
+            static_cast<int>(std::floor(g.x())),
+            static_cast<int>(std::floor(g.y())))
+        )) continue;
 
         const Eigen::Vector2d dir = direction_map.interpolate(g);
         const double norm = dir.norm();

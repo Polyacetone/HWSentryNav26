@@ -56,7 +56,7 @@
     # If built with -DMAP_OPTIMIZER_USE_CUDA=ON, enables CUDA raycasting.
     # If CUDA is not compiled in, the node will fall back to CPU automatically.
     use_cuda_raycasting: true
-    voxel_resolution: 0.01
+    voxel_resolution: 0.005
     pass_through_threshold: 3
 
     # ========== Downsample ==========

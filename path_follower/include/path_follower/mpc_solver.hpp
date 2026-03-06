@@ -12,7 +12,7 @@ namespace path_follower {
 // ── MPC 编译期常量 ──
 constexpr int    MPC_HORIZON        = 16;
 constexpr double MPC_DT             = 0.05;
-constexpr int    MPC_MAX_ITERATIONS = 80;
+constexpr int    MPC_MAX_ITERATIONS = 60;
 constexpr int    MPC_PARAM_SIZE     = 2 * MPC_HORIZON;
 
 struct MPCFollowLimits {

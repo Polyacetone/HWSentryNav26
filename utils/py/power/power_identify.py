@@ -589,7 +589,7 @@ def main() -> int:
                         help="directory with .npz recordings (must include curr_chassis_pwr field)")
     parser.add_argument("--out-dir", type=str, default="",
                         help="output directory (default: power_identify_result/<timestamp>)")
-    parser.add_argument("--cutoff-hz", type=float, default=3.0,
+    parser.add_argument("--cutoff-hz", type=float, default=4.0,
                         help="lowpass cutoff frequency for preprocessing")
     parser.add_argument("--regularize", type=str, default="ridge",
                         choices=["none", "ridge"],

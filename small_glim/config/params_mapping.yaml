@@ -6,7 +6,7 @@
       output_root: "."
 
       # Point range filter (imu_link frame). Set <= 0 to disable.
-      cloud_range_min: 0.6 # Points out of this range will be filtered out (imu_link frame)
+      cloud_range_min: 0.8 # Points out of this range will be filtered out (imu_link frame)
       cloud_range_max: 20.0 # Points out of this range will be filtered out (imu_link frame)
 
       # IMU refine optimization

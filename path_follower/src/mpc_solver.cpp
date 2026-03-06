@@ -273,44 +273,44 @@ namespace {
 // ── ZOH-discretized model constants (auto-generated) ──
 constexpr int    MODEL_NX  = 5;
 constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = 0.165228211850729;
-constexpr double CF2       = -0.2540837456046654;
-constexpr double CF3       = 158.3253296896363;
-constexpr double XH0       = -0.21025200714013356;
+constexpr double CF1       = 0.026829611608016123;
+constexpr double CF2       = -0.2010928891690858;
+constexpr double CF3       = -0.5171878055992227;
+constexpr double XH0       = -3.9704078719129248;
 // v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.9614079562356709;
-constexpr double A01       = -0.06450106040529008;
-constexpr double A03       = 0.06921310202926386;
-constexpr double A10       = 0.1606216978070186;
-constexpr double A11       = 0.9456811246840857;
-constexpr double A13       = 0.02341646545486502;
+constexpr double A00       = 0.9483617718409404;
+constexpr double A01       = -2.4476243257126464;
+constexpr double A03       = 2.798730623635046;
+constexpr double A10       = 0.0033272418652128084;
+constexpr double A11       = 0.9605359128145212;
+constexpr double A13       = 0.014581231780666865;
 // nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.001636849410576965;
-constexpr double GNL_V     = 0.04867577816186058;
-// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.000000 (positive!)
-constexpr double A22       = 0.0;
-constexpr double A24       = 1.0;
-constexpr double GAMMA_W   = 0.0001;
+constexpr double GNL_XH    = -0.06210638535453685;
+constexpr double GNL_V     = 0.04904295219367288;
+// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.425957 (positive!)
+constexpr double A22       = 0.42595701520417945;
+constexpr double A24       = 0.5740429847958206;
+constexpr double GAMMA_W   = 0.0336320398873947;
 // hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = 2.2500567806975;
+constexpr double OBS_L     = 104.69986431799704;
 
 // ── Power model coefficients (auto-generated from identification) ──
 // P(v,w,a,α) = Σ PWR_C[i] × φ_i(v,w,a,α)
 constexpr int    PWR_N      = 12;
 constexpr double PWR_EPS2   = 0.05 * 0.05;  // smooth |x| ≈ sqrt(x²+eps²), eps=0.05
 constexpr double PWR_C[PWR_N] = {
-    2.7110134710e+00,   // c0:  bias
-    3.6372787717e+01,   // c1:  v·a
-    1.0075311460e+00,   // c2:  ω·α
-    6.9483321596e+00,   // c3:  a²
-    3.0938208347e-02,   // c4:  α²
-    1.7413564345e+01,   // c5:  |v|
-    5.0106092100e+00,   // c6:  |ω|
-    7.5217098628e+00,   // c7:  v²
-    4.1360921007e-01,   // c8:  ω²
-    0.0000000000e+00,   // c9:  |a|
-    2.8789111183e-02,   // c10: |α|
-    0.0000000000e+00,   // c11: |v·ω|
+    3.1183599570e+00,  // c0: 1 (bias)
+    3.4172476463e+01,  // c1: v·a
+    1.0359111933e+00,  // c2: ω·α
+    3.6371494354e+00,  // c3: a²
+    2.3486803448e-02,  // c4: α²
+    2.7300289323e+01,  // c5: |v|
+    2.6315570711e+00,  // c6: |ω|
+    1.8359691253e+00,  // c7: v²
+    1.1200532785e+00,  // c8: ω²
+    2.6043584920e-01,  // c9: |a|
+    5.2574769643e-02, // c10: |α|
+    0.0000000000e+00  // c11: |v·ω|
 };
 
 template<typename T>

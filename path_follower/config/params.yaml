@@ -23,7 +23,7 @@
     step_ahead_flag: # 台阶标志位参数（基于MPC预测轨迹 + 防抖）
       detect_norm_threshold: 0.9 # 方向场模长阈值，>=该值认为经过台阶
       detect_dot_threshold: 0.5 # 朝向与方向场点积阈值，用于区分上/下台阶
-      on_count_threshold: 4 # 连续检测到台阶的次数才设置标志位
+      on_count_threshold: 2 # 连续检测到台阶的次数才设置标志位
       off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
 
     state_machine: # 控制状态机参数
@@ -71,7 +71,7 @@
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 1.0 # 台阶区域速度保持权重
+          vel_on_step: 3.0 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障权重（全局+局部）
           direction: 3.0 # 台阶方向对齐权重
           step: 0.01 # 经过台阶惩罚
