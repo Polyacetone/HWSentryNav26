@@ -10,63 +10,63 @@
 namespace path_follower {
 
 // ── MPC 编译期常量 ──
-constexpr int MPC_HORIZON = 20;
-constexpr double MPC_DT = 0.05;
-constexpr int MPC_MAX_ITERATIONS = 60;
-constexpr int MPC_CONTROL_SIZE = 2;
-constexpr int MPC_STATE_SIZE = 10;
-constexpr int MPC_PARAM_SIZE = MPC_CONTROL_SIZE * MPC_HORIZON;
+constexpr int    MPC_HORIZON         = 20;
+constexpr double MPC_DT              = 0.05;
+constexpr double MPC_MAX_SOLVER_TIME = 0.03;
+constexpr int    MPC_PARAM_SIZE      = 2 * MPC_HORIZON;
 
-constexpr int ARCLENGTH_TABLE_SIZE = 128;
-
+// ── ZOH-discretized model constants (auto-generated) ──
+constexpr int    MODEL_NX  = 5;
 constexpr double SGN_EPS   = 0.05;
 constexpr double CF1       = 0.026829611608016123;
 constexpr double CF2       = -0.2010928891690858;
 constexpr double CF3       = -0.5171878055992227;
 constexpr double XH0       = -3.9704078719129248;
+// v-subsystem (2×2 ZOH via matrix exponential)
 constexpr double A00       = 0.9483617718409404;
 constexpr double A01       = -2.4476243257126464;
 constexpr double A03       = 2.798730623635046;
 constexpr double A10       = 0.0033272418652128084;
 constexpr double A11       = 0.9605359128145212;
 constexpr double A13       = 0.014581231780666865;
+// nonlinear gains (ZOH): Gnl = G·[0;1]
 constexpr double GNL_XH    = -0.06210638535453685;
 constexpr double GNL_V     = 0.04904295219367288;
+// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.425957 (positive!)
 constexpr double A22       = 0.42595701520417945;
 constexpr double A24       = 0.5740429847958206;
 constexpr double GAMMA_W   = 0.0336320398873947;
+// hidden-state observer gain (target pole = 0.6)
 constexpr double OBS_L     = 104.69986431799704;
 
+// ── Power model coefficients (auto-generated from identification) ──
+// P(v,w,a,α) = Σ PWR_C[i] × φ_i(v,w,a,α)
 constexpr int    PWR_N      = 12;
-constexpr double PWR_EPS2   = 0.05 * 0.05;
+constexpr double PWR_EPS2   = 0.05 * 0.05;  // smooth |x| ≈ sqrt(x²+eps²), eps=0.05
 constexpr double PWR_C[PWR_N] = {
-    3.1183599570e+00,
-    3.4172476463e+01,
-    1.0359111933e+00,
-    3.6371494354e+00,
-    2.3486803448e-02,
-    2.7300289323e+01,
-    2.6315570711e+00,
-    1.8359691253e+00,
-    1.1200532785e+00,
-    2.6043584920e-01,
-    5.2574769643e-02,
-    0.0000000000e+00
+    3.1183599570e+00,  // c0: 1 (bias)
+    3.4172476463e+01,  // c1: v·a
+    1.0359111933e+00,  // c2: ω·α
+    3.6371494354e+00,  // c3: a²
+    2.3486803448e-02,  // c4: α²
+    2.7300289323e+01,  // c5: |v|
+    2.6315570711e+00,  // c6: |ω|
+    1.8359691253e+00,  // c7: v²
+    1.1200532785e+00,  // c8: ω²
+    2.6043584920e-01,  // c9: |a|
+    5.2574769643e-02, // c10: |α|
+    0.0000000000e+00  // c11: |v·ω|
 };
-
-constexpr std::array<double, MPC_STATE_SIZE> DYNAMICS_WEIGHTS = {
-    2000.0, 2000.0, 1000.0, // X, Y, Theta
-    500.0,  500.0, 500.0,   // XH, V_ACT, W_ACT
-    500.0, 500.0,  // V_CMD_Z1, W_CMD_Z1
-    1000.0, 10.0   // PATH_U, ENERGY
-};
+ 
+// 弧长查找表类型
+constexpr int ARCLENGTH_TABLE_SIZE = 128;
+using ArclengthTable = std::array<double, ARCLENGTH_TABLE_SIZE + 1>;
 
 struct MPCFollowLimits {
     double vel_max;
     double vel_min;
     double omega_max;
     double omega_min;
-
     double start_vel_cmd_act_diff_max;
     double start_omega_cmd_act_diff_max;
     double acc_max;
@@ -256,6 +256,11 @@ private:
     std::array<double, MPC_PARAM_SIZE> last_controls_{};
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
+
+    // 缓存的弧长查找表，避免每次 follow_path 重新计算
+    std::vector<Eigen::Vector2d> prev_ref_control_points_;
+    int prev_arc_samples_ = -1;
+    ArclengthTable prev_arclength_table_{};
 
     // ── Hidden-state Luenberger observer ──
     double x_h_hat_ = 0.0;        // current estimate of hidden pitch state

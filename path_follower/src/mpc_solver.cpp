@@ -1,16 +1,14 @@
 #include <ceres/ceres.h>
-
+#include <ceres/cubic_interpolation.h>
 #include <algorithm>
 #include <array>
-#include <cmath>
-
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <uniform_bspline_ceres/uniform_bspline_ceres_generator.hpp>
-
 #include <path_follower/mpc_solver.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
+
 // ============================================================================
 //                                  工具函数
 // ============================================================================
@@ -29,18 +27,8 @@ inline int clamp_int(const int v, const int lo, const int hi) {
 }
 
 template<typename T>
-inline T clamp01(const T& v) {
-    return ceres::fmin(T(1.0), ceres::fmax(T(0.0), v));
-}
-
-template<typename T>
-inline T normalize_angle(const T& angle) {
-    return ceres::atan2(ceres::sin(angle), ceres::cos(angle));
-}
-
-template<typename T>
 inline T smoothstep01(const T& t_in) {
-    const T t = clamp01(t_in);
+    const T t = ceres::fmin(T(1.0), ceres::fmax(T(0.0), t_in));
     return t * t * (T(3.0) - T(2.0) * t);
 }
 
@@ -52,6 +40,8 @@ inline T smoothstep(const T& x, const T& edge0, const T& edge1) {
 
 template<typename T>
 inline T softplus(const T& x) {
+    // Numerically-stable softplus: log(1 + exp(x))
+    // Use mild branching to avoid overflow while keeping derivatives well-behaved.
     if (x > T(20.0)) {
         return x;
     }
@@ -83,9 +73,11 @@ inline void eval_quadratic_uniform_bspline_2d(
         return;
     }
 
+    // 对应 ubs::ControlPointsContainer::updatedShape()：scale = (n - Degree) / (upper - lower)
+    // 这里 Degree=2, bounds=[0,1]，所以 scale = n - 2。
     const double scale_d = static_cast<double>(n - 2);
 
-    const T u = clamp01(u_in);
+    const T u = ceres::fmin(ceres::fmax(u_in, T(0.0)), T(1.0));
     const T base_x = u * T(scale_d);
 
     const int xi_unclamped = static_cast<int>(std::floor(scalar_value(base_x)));
@@ -113,6 +105,8 @@ inline void eval_quadratic_uniform_bspline_2d(
         *p = b0 * p0 + b1 * p1 + b2 * p2;
     }
 
+    // 一阶/二阶导数：先对局部参数 t 求导，再乘以 dt/du。
+    // base_x = u * scale, t = base_x - xi，所以 dt/du = scale（xi 对 u 的导数为 0）。
     const T scale = T(scale_d);
 
     if (d1) {
@@ -121,6 +115,7 @@ inline void eval_quadratic_uniform_bspline_2d(
     }
 
     if (d2) {
+        // 二阶基函数对 t 的导数常数：b0''=1, b1''=-2, b2''=1
         const Eigen::Matrix<T, 2, 1> d2p_dt2 = p0 - T(2.0) * p1 + p2;
         *d2 = d2p_dt2 * (scale * scale);
     }
@@ -164,7 +159,22 @@ inline double estimate_remaining_arclength(
 //                          弧长查找表预计算
 // ============================================================================
 
-using ArclengthTable = std::array<double, ARCLENGTH_TABLE_SIZE + 1>;
+inline bool same_control_points(
+    const std::vector<Eigen::Vector2d>& lhs,
+    const std::vector<Eigen::Vector2d>& rhs
+) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+
+    for (size_t i = 0; i < lhs.size(); i++) {
+        if (lhs[i].x() != rhs[i].x() || lhs[i].y() != rhs[i].y()) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 inline ArclengthTable build_arclength_table(
     const std::vector<Eigen::Vector2d>& control_points,
@@ -191,92 +201,122 @@ inline double lookup_remaining_arclength(
 }
 
 // ============================================================================
-//                           零拷贝双线性采样
+//                       零拷贝栅格视图与双线性采样
 // ============================================================================
 
 struct GridInfo {
-    double origin_x;
-    double origin_y;
-    double resolution;
-    int width;
-    int height;
+    double origin_x, origin_y, inv_resolution;
+    int width, height;
+};
+
+template<typename MapT>
+inline GridInfo make_grid_info(const MapT& map) {
+    return GridInfo{map.origin_x, map.origin_y, 1.0 / map.resolution, map.width, map.height};
+}
+
+struct CostMapGridView {
+    enum { DATA_DIMENSION = 1 };
+
+    explicit CostMapGridView(const CostMap& map): map_(map) {}
+
+    EIGEN_STRONG_INLINE double value_at_clamped(const int row, const int col) const {
+        const int row_idx = clamp_int(row, 0, map_.height - 1);
+        const int col_idx = clamp_int(col, 0, map_.width - 1);
+        return static_cast<double>(map_.data[static_cast<size_t>(row_idx * map_.width + col_idx)]);
+    }
+
+    const CostMap& map_;
+};
+
+struct DirectionMapGridView {
+    enum { DATA_DIMENSION = 2 };
+
+    explicit DirectionMapGridView(const DirectionMap& map): map_(map) {}
+
+    EIGEN_STRONG_INLINE Eigen::Vector2d value_at_clamped(const int row, const int col) const {
+        const int row_idx = clamp_int(row, 0, map_.height - 1);
+        const int col_idx = clamp_int(col, 0, map_.width - 1);
+        return map_.data[static_cast<size_t>(row_idx * map_.width + col_idx)];
+    }
+
+    const DirectionMap& map_;
 };
 
 template<typename T>
 inline T eval_cost_bilinear(
-    const CostMap& cost_map,
+    const CostMapGridView& grid,
     const GridInfo& info,
-    const T& x_map,
-    const T& y_map
+    const T& x_map, const T& y_map
 ) {
     if (info.width < 2 || info.height < 2) {
         return T(255.0);
     }
 
-    const T gx = (x_map - T(info.origin_x)) / T(info.resolution);
-    const T gy = (y_map - T(info.origin_y)) / T(info.resolution);
-    const double gxv = scalar_value(gx);
-    const double gyv = scalar_value(gy);
-    if (gxv < 0.0 || gyv < 0.0 ||
-        gxv >= static_cast<double>(info.width - 1) ||
-        gyv >= static_cast<double>(info.height - 1)) {
+    const T gx = (x_map - T(info.origin_x)) * T(info.inv_resolution);
+    const T gy = (y_map - T(info.origin_y)) * T(info.inv_resolution);
+    const double gxs = scalar_value(gx);
+    const double gys = scalar_value(gy);
+    if (gxs < 0.0 || gys < 0.0 ||
+        gxs >= static_cast<double>(info.width - 1) ||
+        gys >= static_cast<double>(info.height - 1)) {
         return T(255.0);
     }
 
-    const int x0 = clamp_int(static_cast<int>(std::floor(gxv)), 0, info.width - 2);
-    const int y0 = clamp_int(static_cast<int>(std::floor(gyv)), 0, info.height - 2);
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
+    const int x0 = static_cast<int>(std::floor(gxs));
+    const int y0 = static_cast<int>(std::floor(gys));
     const T dx = gx - T(x0);
     const T dy = gy - T(y0);
 
-    const auto at = [&](const int x, const int y) {
-        return T(cost_map.data[static_cast<size_t>(y * info.width + x)]);
-    };
+    const T v00 = T(grid.value_at_clamped(y0, x0));
+    const T v01 = T(grid.value_at_clamped(y0, x0 + 1));
+    const T v10 = T(grid.value_at_clamped(y0 + 1, x0));
+    const T v11 = T(grid.value_at_clamped(y0 + 1, x0 + 1));
 
-    return (T(1.0) - dx) * (T(1.0) - dy) * at(x0, y0)
-        + dx * (T(1.0) - dy) * at(x1, y0)
-        + (T(1.0) - dx) * dy * at(x0, y1)
-        + dx * dy * at(x1, y1);
+    const T one_minus_dx = T(1.0) - dx;
+    const T one_minus_dy = T(1.0) - dy;
+    return one_minus_dy * (one_minus_dx * v00 + dx * v01)
+        + dy * (one_minus_dx * v10 + dx * v11);
 }
 
 template<typename T>
 inline Eigen::Matrix<T, 2, 1> eval_dir_bilinear(
-    const DirectionMap& dir_map,
+    const DirectionMapGridView& grid,
     const GridInfo& info,
-    const T& x_map,
-    const T& y_map
+    const T& x_map, const T& y_map
 ) {
     if (info.width < 2 || info.height < 2) {
         return Eigen::Matrix<T, 2, 1>(T(0.0), T(0.0));
     }
 
-    const T gx = (x_map - T(info.origin_x)) / T(info.resolution);
-    const T gy = (y_map - T(info.origin_y)) / T(info.resolution);
-    const double gxv = scalar_value(gx);
-    const double gyv = scalar_value(gy);
-    if (gxv < 0.0 || gyv < 0.0 ||
-        gxv >= static_cast<double>(info.width - 1) ||
-        gyv >= static_cast<double>(info.height - 1)) {
+    const T gx = (x_map - T(info.origin_x)) * T(info.inv_resolution);
+    const T gy = (y_map - T(info.origin_y)) * T(info.inv_resolution);
+    const double gxs = scalar_value(gx);
+    const double gys = scalar_value(gy);
+    if (gxs < 0.0 || gys < 0.0 ||
+        gxs >= static_cast<double>(info.width - 1) ||
+        gys >= static_cast<double>(info.height - 1)) {
         return Eigen::Matrix<T, 2, 1>(T(0.0), T(0.0));
     }
 
-    const int x0 = clamp_int(static_cast<int>(std::floor(gxv)), 0, info.width - 2);
-    const int y0 = clamp_int(static_cast<int>(std::floor(gyv)), 0, info.height - 2);
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
+    const int x0 = static_cast<int>(std::floor(gxs));
+    const int y0 = static_cast<int>(std::floor(gys));
     const T dx = gx - T(x0);
     const T dy = gy - T(y0);
 
-    const auto at = [&](const int x, const int y) {
-        const Eigen::Vector2d& dir = dir_map.data[static_cast<size_t>(y * info.width + x)];
-        return Eigen::Matrix<T, 2, 1>(T(dir.x()), T(dir.y()));
-    };
+    const Eigen::Vector2d v00d = grid.value_at_clamped(y0, x0);
+    const Eigen::Vector2d v01d = grid.value_at_clamped(y0, x0 + 1);
+    const Eigen::Vector2d v10d = grid.value_at_clamped(y0 + 1, x0);
+    const Eigen::Vector2d v11d = grid.value_at_clamped(y0 + 1, x0 + 1);
 
-    return (T(1.0) - dx) * (T(1.0) - dy) * at(x0, y0)
-        + dx * (T(1.0) - dy) * at(x1, y0)
-        + (T(1.0) - dx) * dy * at(x0, y1)
-        + dx * dy * at(x1, y1);
+    const Eigen::Matrix<T, 2, 1> v00(T(v00d.x()), T(v00d.y()));
+    const Eigen::Matrix<T, 2, 1> v01(T(v01d.x()), T(v01d.y()));
+    const Eigen::Matrix<T, 2, 1> v10(T(v10d.x()), T(v10d.y()));
+    const Eigen::Matrix<T, 2, 1> v11(T(v11d.x()), T(v11d.y()));
+
+    const T one_minus_dx = T(1.0) - dx;
+    const T one_minus_dy = T(1.0) - dy;
+    return one_minus_dy * (one_minus_dx * v00 + dx * v01)
+        + dy * (one_minus_dx * v10 + dx * v11);
 }
 
 // ============================================================================
@@ -284,47 +324,8 @@ inline Eigen::Matrix<T, 2, 1> eval_dir_bilinear(
 // ============================================================================
 
 namespace {
-enum StateIndex : int {
-    IDX_X = 0,
-    IDX_Y = 1,
-    IDX_THETA = 2,
-    IDX_XH = 3,
-    IDX_V_ACT = 4,
-    IDX_W_ACT = 5,
-    IDX_V_CMD_Z1 = 6,
-    IDX_W_CMD_Z1 = 7,
-    IDX_PATH_U = 8,
-    IDX_ENERGY = 9
-};
-
-using ControlBlock = std::array<double, MPC_CONTROL_SIZE>;
-using ControlTrajectory = std::array<ControlBlock, MPC_HORIZON>;
-using StateBlock = std::array<double, MPC_STATE_SIZE>;
-using StateTrajectory = std::array<StateBlock, MPC_HORIZON + 1>;
-
 template<typename T>
-using ShootingState = Eigen::Matrix<T, MPC_STATE_SIZE, 1>;
-
-template<typename T>
-inline ShootingState<T> load_state(const T* block) {
-    ShootingState<T> state;
-    for (int i = 0; i < MPC_STATE_SIZE; i++) {
-        state(i) = block[i];
-    }
-    return state;
-}
-
-template<typename T>
-inline void store_state(const ShootingState<T>& state, T* block) {
-    for (int i = 0; i < MPC_STATE_SIZE; i++) {
-        block[i] = state(i);
-    }
-}
-
-template<typename T>
-inline T sabs(const T& x) {
-    return ceres::sqrt(x * x + T(PWR_EPS2));
-}
+inline T sabs(const T& x) { return ceres::sqrt(x * x + T(PWR_EPS2)); }
 
 template<typename T>
 inline T predict_power(const T& v, const T& w, const T& a, const T& alpha) {
@@ -338,6 +339,35 @@ inline T predict_power(const T& v, const T& w, const T& a, const T& alpha) {
 }
 
 template<typename T>
+struct PredictorState {
+    T x, y, theta;
+    T v_act, omega_act;
+
+    // greybox 模型内部状态 x = [x_h, v_act, w_act, dv, dw]
+    Eigen::Matrix<T, MODEL_NX, 1> x_model;
+};
+
+template<typename T>
+inline void model_init(
+    PredictorState<T>& st,
+    const T& v_meas,
+    const T& w_meas,
+    const T& v_cmd_prev,
+    const T& w_cmd_prev,
+    const T& x_h_init
+) {
+    st.x_model.setZero();
+    st.x_model(0) = x_h_init;
+    st.x_model(1) = v_meas;
+    st.x_model(2) = w_meas;
+    st.x_model(3) = v_cmd_prev; // dv = v_cmd[k-1]
+    st.x_model(4) = w_cmd_prev; // dw = w_cmd[k-1]
+
+    st.v_act = v_meas;
+    st.omega_act = w_meas;
+}
+
+template<typename T>
 inline T smooth_sgn(const T& x, const double eps) {
     const T e = ceres::fmax(T(1e-6), T(eps));
     return ceres::tanh(x / e);
@@ -345,170 +375,634 @@ inline T smooth_sgn(const T& x, const double eps) {
 
 template<typename T>
 inline void model_step(
-    const T& xh,
-    const T& v,
-    const T& w,
-    const T& v_cmd_z1,
-    const T& w_cmd_z1,
-    T* xh_next,
-    T* v_next,
-    T* w_next
+    PredictorState<T>& st,
+    const T& v_cmd,
+    const T& w_cmd
 ) {
-    *xh_next = T(A00) * xh + T(A01) * v + T(A03) * v_cmd_z1;
-    *v_next = T(A10) * xh + T(A11) * v + T(A13) * v_cmd_z1;
-    *w_next = T(A22) * w + T(A24) * w_cmd_z1;
+    const T xh = st.x_model(0);
+    const T v = st.x_model(1);
+    const T w = st.x_model(2);
+    const T dv = st.x_model(3);
+    const T dw = st.x_model(4);
 
+    // ZOH linear part
+    T xh_next = T(A00) * xh + T(A01) * v + T(A03) * dv;
+    T v_next = T(A10) * xh + T(A11) * v + T(A13) * dv;
+    T w_next = T(A22) * w + T(A24) * dw;
+    const T dv_next = v_cmd;
+    const T dw_next = w_cmd;
+
+    // ZOH nonlinear: gains from G matrix instead of plain dt
     const T sv = smooth_sgn(v, SGN_EPS);
     const T sw = smooth_sgn(w, SGN_EPS);
     const T nl_v = T(CF1) * sv + T(CF2) * v * ceres::abs(w);
 
-    *xh_next += T(GNL_XH) * nl_v;
-    *v_next  += T(GNL_V)  * nl_v;
-    *w_next  += -T(GAMMA_W) * T(CF3) * sw;
+    xh_next += T(GNL_XH) * nl_v;
+    v_next  += T(GNL_V)  * nl_v;
+    w_next  += -T(GAMMA_W) * T(CF3) * sw;
+
+    st.x_model(0) = xh_next;
+    st.x_model(1) = v_next;
+    st.x_model(2) = w_next;
+    st.x_model(3) = dv_next;
+    st.x_model(4) = dw_next;
+
+    // y = [v_act, w_act]
+    st.v_act = v_next;
+    st.omega_act = w_next;
 }
 
 template<typename T>
-struct PathReferenceSample {
-    Eigen::Matrix<T, 2, 1> position;
-    Eigen::Matrix<T, 2, 1> d1;
-    Eigen::Matrix<T, 2, 1> d2;
-    T theta;
-    T dsdu;
-    T kappa;
+inline void prediction_step(
+    PredictorState<T>& st,
+    const T& v_cmd,
+    const T& omega_cmd
+) {
+    const T dt = T(MPC_DT);
+
+    const T theta0 = st.theta;
+    const T v0 = st.v_act;
+    const T w0 = st.omega_act;
+
+    // 先更新执行器动态，再用 v_act/omega_act 推进位姿
+    model_step(st, v_cmd, omega_cmd);
+
+    const T v1 = st.v_act;
+    const T w1 = st.omega_act;
+    const T theta1 = theta0 + (w0 + w1) * (dt * T(0.5));
+
+    st.x += (v0 * ceres::cos(theta0) + v1 * ceres::cos(theta1)) * (dt * T(0.5));
+    st.y += (v0 * ceres::sin(theta0) + v1 * ceres::sin(theta1)) * (dt * T(0.5));
+    st.theta = theta1;
+}
+}
+
+// ============================================================================
+//                         Follow 模式 Cost Functor
+// ============================================================================
+
+struct FollowMPCCostFunctor {
+    FollowMPCCostFunctor(
+        const std::vector<Eigen::Vector2d>& ref_control_points,
+        const Eigen::Vector3d& start_pose,
+        const double u0,
+        const Eigen::Vector2d& start_status,
+        const Eigen::Vector2d& start_cmd_clamped,
+        const double x_h_init,
+        const MPCParams& params,
+        const CostMapGridView& cost_grid,
+        const GridInfo& cost_info,
+        const DirectionMapGridView& dir_grid,
+        const GridInfo& dir_info,
+        const ArclengthTable& arclength_table,
+        const double remaining_energy,
+        const double rfr_pwr_limit
+    ):
+        ref_control_points_(ref_control_points),
+        start_pose_(start_pose),
+        u0_(u0),
+        start_status_(start_status),
+        start_cmd_clamped_(start_cmd_clamped),
+        x_h_init_(x_h_init),
+        params_(params),
+        cost_grid_(cost_grid),
+        cost_info_(cost_info),
+        dir_grid_(dir_grid),
+        dir_info_(dir_info),
+        arclength_table_(arclength_table),
+        remaining_energy_(remaining_energy),
+        rfr_pwr_limit_(rfr_pwr_limit) {}
+
+    template<typename T>
+    bool operator()(const T* const parameters, T* residuals) const {
+        PredictorState<T> st;
+        st.x = T(start_pose_.x());
+        st.y = T(start_pose_.y());
+        st.theta = T(start_pose_.z());
+        T u = T(u0_);
+        T last_v_cmd = T(start_cmd_clamped_.x());
+        T last_omega_cmd = T(start_cmd_clamped_.y());
+
+        model_init(
+            st,
+            T(start_status_.x()),
+            T(start_status_.y()),
+            last_v_cmd,
+            last_omega_cmd,
+            T(x_h_init_)
+        );
+
+        T energy = T(remaining_energy_);
+        T v_act_prev = T(start_status_.x());
+        T w_act_prev = T(start_status_.y());
+
+        size_t res_idx = 0;
+        for (int k = 0; k < MPC_HORIZON; k++) {
+            const T v_cmd = parameters[2 * k];
+            const T omega_cmd = parameters[2 * k + 1];
+
+            // 指令变化
+            const T dv_cmd = v_cmd - last_v_cmd;
+            const T domega_cmd = omega_cmd - last_omega_cmd;
+
+            prediction_step(st, v_cmd, omega_cmd);
+
+            // 能量传播
+            const T a_k = (st.v_act - v_act_prev) / T(MPC_DT);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(MPC_DT);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(MPC_DT);
+
+            // 样条上的参考点
+            u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
+            Eigen::Matrix<T, 2, 1> pr;
+            Eigen::Matrix<T, 2, 1> d1;
+            Eigen::Matrix<T, 2, 1> d2;
+            eval_quadratic_uniform_bspline_2d<T>(ref_control_points_, u, &pr, &d1, &d2);
+
+            const T dx = d1.x();
+            const T dy = d1.y();
+            const T ddx = d2.x();
+            const T ddy = d2.y();
+
+            const T thetar = ceres::atan2(dy, dx);
+            const T dsdu = ceres::sqrt(dx * dx + dy * dy) + T(1e-6);
+            const T kappa = (dx * ddy - dy * ddx) / (dsdu * dsdu * dsdu);
+
+            // 终点剩余里程：O(1) 查表替代循环积分
+            const double s_remain_d = lookup_remaining_arclength(arclength_table_, scalar_value(u));
+            const T s_remain = T(s_remain_d);
+
+            // Frenet误差
+            const T ex = st.x - pr.x();
+            const T ey_world = st.y - pr.y();
+            const T ey = -ex * ceres::sin(thetar) + ey_world * ceres::cos(thetar);
+            T etheta = st.theta - thetar;
+            etheta = ceres::atan2(ceres::sin(etheta), ceres::cos(etheta));
+
+            // 1. 路径跟踪
+            residuals[res_idx++] = T(params_.follow_weights.q_y) * ey;
+            residuals[res_idx++] = T(params_.follow_weights.q_theta) * etheta;
+
+            // 2. 进度推进
+            residuals[res_idx++] = T(params_.follow_weights.q_u) * (T(1.0) - u);
+
+            // 3. 控制正则化
+            residuals[res_idx++] = T(params_.follow_weights.r_v) * v_cmd;
+            residuals[res_idx++] = T(params_.follow_weights.r_omega) * omega_cmd;
+
+            // 4. 控制平滑
+            residuals[res_idx++] = T(params_.follow_weights.r_dv) * dv_cmd;
+            residuals[res_idx++] = T(params_.follow_weights.r_domega) * domega_cmd;
+
+            // 5. 指令变化率软约束
+            const T dv_cmd_limit = T(params_.follow_limits.acc_max * MPC_DT);
+            const T domega_cmd_limit = T(params_.follow_limits.alpha_max * MPC_DT);
+            residuals[res_idx++] = T(params_.follow_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
+            residuals[res_idx++] = T(params_.follow_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
+
+            // 6. 侧向加速度约束
+            const T a_lat = ceres::abs(st.v_act * st.omega_act);
+            residuals[res_idx++] = T(params_.follow_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
+
+            // 7. 避障（零拷贝双线性采样）
+            const T cost = eval_cost_bilinear(cost_grid_, cost_info_, st.x, st.y);
+            residuals[res_idx++] = T(params_.follow_weights.obstacle) * (cost / T(255.0));
+
+            // 8. 台阶处理（零拷贝双线性采样）
+            const auto dir = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
+            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
+            const auto dir_unit = dir / dir_norm;
+
+            // 台阶惩罚使用接近门控，避免不必要地接近台阶
+            const T step_gate = smoothstep(
+                dir_norm,
+                T(params_.follow_limits.step_norm_threshold),
+                T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
+            );
+            residuals[res_idx++] = T(params_.follow_weights.step) * step_gate;
+
+            // 台阶方向对齐
+            const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
+            const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
+            residuals[res_idx++] = T(params_.follow_weights.direction) * ceres::abs(heading_cross_dir);
+
+            // 台阶区域速度保持
+            const T cos_theta = heading.dot(dir_unit);
+            const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
+            const T target_vel_step = weight_up * T(params_.follow_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.follow_limits.vel_step_down);
+            residuals[res_idx++] = T(params_.follow_weights.vel_on_step) * dir_norm * ceres::abs(st.v_act - target_vel_step);
+
+            // 9. 终点减速
+            const T deceleration = T(params_.follow_limits.slow_down_deceleration); // 期望的减速加速度
+            const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
+            residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), st.v_act - v_dec_profile); // 惩罚超速
+
+            // 10. 能量约束
+            const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
+            const T thr = T(std::max(params_.energy.threshold, 1.0));
+            const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
+            const T vio = (T(params_.energy.threshold) - energy) / thr;
+            // Make penalty EXACTLY zero for vio <= 0 (energy above threshold).
+            // softplus(beta*vio)/beta is > 0 even for vio < 0, which can cause a slow drift
+            // towards minimum speed just to keep "charging" in the prediction model.
+            const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
+            residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
+
+            // 进度动力学
+            T denom = T(1.0) - kappa * ey;
+            const T denom_abs = ceres::abs(denom);
+            denom = denom / (denom_abs + T(1e-6)) * ceres::fmax(denom_abs, T(0.1));
+            const T dsdt = st.v_act * ceres::cos(etheta) / denom;
+            const T dudt = dsdt / dsdu;
+            u += dudt * T(MPC_DT);
+            u = ceres::fmin(ceres::fmax(u, T(0.0)), T(1.0));
+
+            last_v_cmd = v_cmd;
+            last_omega_cmd = omega_cmd;
+            v_act_prev = st.v_act;
+            w_act_prev = st.omega_act;
+        }
+
+        return true;
+    }
+
+    const std::vector<Eigen::Vector2d>& ref_control_points_;
+    const Eigen::Vector3d& start_pose_;
+    const double u0_;
+    const Eigen::Vector2d& start_status_;
+    const Eigen::Vector2d start_cmd_clamped_;
+    const double x_h_init_;
+    const MPCParams& params_;
+    const CostMapGridView& cost_grid_;
+    const GridInfo cost_info_;
+    const DirectionMapGridView& dir_grid_;
+    const GridInfo dir_info_;
+    const ArclengthTable& arclength_table_;
+    const double remaining_energy_;
+    const double rfr_pwr_limit_;
 };
 
-template<typename T>
-inline PathReferenceSample<T> sample_path_reference(
-    const std::vector<Eigen::Vector2d>& ref_control_points,
-    const T& u_in
-) {
-    PathReferenceSample<T> sample;
-    const T u = clamp01(u_in);
-    eval_quadratic_uniform_bspline_2d<T>(ref_control_points, u, &sample.position, &sample.d1, &sample.d2);
-    const T dx = sample.d1.x();
-    const T dy = sample.d1.y();
-    const T ddx = sample.d2.x();
-    const T ddy = sample.d2.y();
-    sample.theta = ceres::atan2(dy, dx);
-    sample.dsdu = ceres::sqrt(dx * dx + dy * dy) + T(1e-6);
-    sample.kappa = (dx * ddy - dy * ddx) / (sample.dsdu * sample.dsdu * sample.dsdu);
-    return sample;
-}
+// ============================================================================
+//                            Stop 模式 Cost Functor
+// ============================================================================
 
-template<typename T>
-inline ShootingState<T> propagate_state(
-    const ShootingState<T>& current,
-    const T& v_cmd,
-    const T& w_cmd,
-    const std::vector<Eigen::Vector2d>* ref_control_points,
-    const double rfr_pwr_limit
-) {
-    ShootingState<T> next = current;
+struct StopMPCCostFunctor {
+    StopMPCCostFunctor(
+        const Eigen::Vector3d& start_pose,
+        const Eigen::Vector2d& start_status,
+        const Eigen::Vector2d& start_cmd_clamped,
+        const double x_h_init,
+        const MPCParams& params,
+        const CostMapGridView& cost_grid,
+        const GridInfo& cost_info,
+        const DirectionMapGridView& dir_grid,
+        const GridInfo& dir_info,
+        const double remaining_energy,
+        const double rfr_pwr_limit
+    ):
+        start_pose_(start_pose),
+        start_status_(start_status),
+        start_cmd_clamped_(start_cmd_clamped),
+        x_h_init_(x_h_init),
+        params_(params),
+        cost_grid_(cost_grid),
+        cost_info_(cost_info),
+        dir_grid_(dir_grid),
+        dir_info_(dir_info),
+        remaining_energy_(remaining_energy),
+        rfr_pwr_limit_(rfr_pwr_limit) {}
 
-    T xh_next;
-    T v_next;
-    T w_next;
-    model_step(
-        current(IDX_XH),
-        current(IDX_V_ACT),
-        current(IDX_W_ACT),
-        current(IDX_V_CMD_Z1),
-        current(IDX_W_CMD_Z1),
-        &xh_next,
-        &v_next,
-        &w_next
+    template<typename T>
+    bool operator()(const T* const parameters, T* residuals) const {
+        PredictorState<T> st;
+        st.x = T(start_pose_.x());
+        st.y = T(start_pose_.y());
+        st.theta = T(start_pose_.z());
+        T last_v_cmd = T(start_cmd_clamped_.x());
+        T last_omega_cmd = T(start_cmd_clamped_.y());
+
+        model_init(
+            st,
+            T(start_status_.x()),
+            T(start_status_.y()),
+            last_v_cmd,
+            last_omega_cmd,
+            T(x_h_init_)
+        );
+
+        T energy = T(remaining_energy_);
+        T v_act_prev = T(start_status_.x());
+        T w_act_prev = T(start_status_.y());
+
+        size_t res_idx = 0;
+        for (int k = 0; k < MPC_HORIZON; k++) {
+            const T v_cmd = parameters[2 * k];
+            const T omega_cmd = parameters[2 * k + 1];
+            const T dv_cmd = v_cmd - last_v_cmd;
+            const T domega_cmd = omega_cmd - last_omega_cmd;
+
+            prediction_step(st, v_cmd, omega_cmd);
+
+            // 能量传播
+            const T a_k = (st.v_act - v_act_prev) / T(MPC_DT);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(MPC_DT);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(MPC_DT);
+
+            // 1. 速度正则化
+            residuals[res_idx++] = T(params_.stop_weights.q_v) * st.v_act;
+            residuals[res_idx++] = T(params_.stop_weights.q_omega) * st.omega_act;
+
+            // 2 指令平滑
+            residuals[res_idx++] = T(params_.stop_weights.r_dv) * dv_cmd;
+            residuals[res_idx++] = T(params_.stop_weights.r_domega) * domega_cmd;
+
+            // 3. 指令变化率约束
+            const T dv_cmd_limit = T(params_.stop_limits.acc_max * MPC_DT);
+            const T domega_cmd_limit = T(params_.stop_limits.alpha_max * MPC_DT);
+            residuals[res_idx++] = T(params_.stop_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
+            residuals[res_idx++] = T(params_.stop_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
+
+            // 4. 侧向加速度约束
+            const T a_lat = ceres::abs(st.v_act * st.omega_act);
+            residuals[res_idx++] = T(params_.stop_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
+
+            // 5. 避障
+            const T cost = eval_cost_bilinear(cost_grid_, cost_info_, st.x, st.y);
+            residuals[res_idx++] = T(params_.stop_weights.obstacle) * (cost / T(255.0));
+
+            // 6. 台阶处理
+            const auto dir = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
+            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
+            const auto dir_unit = dir / dir_norm;
+
+            // 方向场在非台阶区域可能存在小噪声。用 step_norm_threshold 做门控，避免"停止模式"在接近 0 速度时被拉回一个小正速度。
+            const T step_gate = smoothstep(
+                dir_norm,
+                T(params_.stop_limits.step_norm_threshold),
+                T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
+            );
+
+            // 台阶方向对齐
+            const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
+            const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
+            residuals[res_idx++] = T(params_.stop_weights.direction) * step_gate * ceres::abs(heading_cross_dir);
+
+            // 台阶区域速度保持
+            const T cos_theta = heading.dot(dir_unit);
+            const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
+            const T target_vel_step = weight_up * T(params_.stop_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.stop_limits.vel_step_down);
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step) * step_gate * dir_norm * ceres::abs(st.v_act - target_vel_step);
+
+            // 能量约束
+            const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
+            const T thr = T(std::max(params_.energy.threshold, 1.0));
+            const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
+            const T vio = (T(params_.energy.threshold) - energy) / thr;
+            const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
+            residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
+            
+            last_v_cmd = v_cmd;
+            last_omega_cmd = omega_cmd;
+            v_act_prev = st.v_act;
+            w_act_prev = st.omega_act;
+        }
+
+        // 终端约束：不碰撞且不在台阶区域
+        const T cost_terminal = eval_cost_bilinear(cost_grid_, cost_info_, st.x, st.y);
+        residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal) * (cost_terminal / T(255.0));
+        const auto dir = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
+        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
+        const T step_gate = smoothstep(
+            dir_norm,
+            T(params_.stop_limits.step_norm_threshold),
+            T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
+        );
+        residuals[res_idx++] = T(params_.stop_weights.step_terminal) * step_gate;
+
+        return true;
+    }
+
+    const Eigen::Vector3d& start_pose_;
+    const Eigen::Vector2d& start_status_;
+    const Eigen::Vector2d start_cmd_clamped_;
+    const double x_h_init_;
+    const MPCParams& params_;
+    const CostMapGridView& cost_grid_;
+    const GridInfo cost_info_;
+    const DirectionMapGridView& dir_grid_;
+    const GridInfo dir_info_;
+    const double remaining_energy_;
+    const double rfr_pwr_limit_;
+};
+
+// ============================================================================
+//                       Recovery-To-Point 模式 Cost Functor
+// ============================================================================
+
+struct RecoveryMPCCostFunctor {
+    RecoveryMPCCostFunctor(
+        const Eigen::Vector2d& goal_map,
+        const Eigen::Vector3d& start_pose,
+        const Eigen::Vector2d& start_status,
+        const Eigen::Vector2d& start_cmd_clamped,
+        const double x_h_init,
+        const MPCParams& params,
+        const CostMapGridView& cost_grid,
+        const GridInfo& cost_info,
+        const DirectionMapGridView& dir_grid,
+        const GridInfo& dir_info,
+        const double remaining_energy,
+        const double rfr_pwr_limit
+    ):
+        goal_map_(goal_map),
+        start_pose_(start_pose),
+        start_status_(start_status),
+        start_cmd_clamped_(start_cmd_clamped),
+        x_h_init_(x_h_init),
+        params_(params),
+        cost_grid_(cost_grid),
+        cost_info_(cost_info),
+        dir_grid_(dir_grid),
+        dir_info_(dir_info),
+        remaining_energy_(remaining_energy),
+        rfr_pwr_limit_(rfr_pwr_limit) {}
+
+    template<typename T>
+    bool operator()(const T* const parameters, T* residuals) const {
+        PredictorState<T> st;
+        st.x = T(start_pose_.x());
+        st.y = T(start_pose_.y());
+        st.theta = T(start_pose_.z());
+        T last_v_cmd = T(start_cmd_clamped_.x());
+        T last_omega_cmd = T(start_cmd_clamped_.y());
+
+        model_init(
+            st,
+            T(start_status_.x()),
+            T(start_status_.y()),
+            last_v_cmd,
+            last_omega_cmd,
+            T(x_h_init_)
+        );
+
+        const T gx = T(goal_map_.x());
+        const T gy = T(goal_map_.y());
+
+        T energy = T(remaining_energy_);
+        T v_act_prev = T(start_status_.x());
+        T w_act_prev = T(start_status_.y());
+
+        size_t res_idx = 0;
+        for (int k = 0; k < MPC_HORIZON; k++) {
+            const T v_cmd = parameters[2 * k];
+            const T omega_cmd = parameters[2 * k + 1];
+            const T dv_cmd = v_cmd - last_v_cmd;
+            const T domega_cmd = omega_cmd - last_omega_cmd;
+
+            prediction_step(st, v_cmd, omega_cmd);
+
+            // 能量传播
+            const T a_k = (st.v_act - v_act_prev) / T(MPC_DT);
+            const T alpha_k = (st.omega_act - w_act_prev) / T(MPC_DT);
+            energy += (T(rfr_pwr_limit_) - predict_power(st.v_act, st.omega_act, a_k, alpha_k)) * T(MPC_DT);
+
+            // 1. 目标点吸引
+            const T ddx = st.x - gx;
+            const T ddy = st.y - gy;
+            residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * ddx;
+            residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * ddy;
+
+            // 2. 朝向目标（前后朝向均可，使用sin）
+            const T desired_theta = ceres::atan2(gy - st.y, gx - st.x);
+            const T heading_cross_desired = ceres::sin(st.theta - desired_theta);
+            residuals[res_idx++] = T(params_.recovery_weights.q_goal_theta) * ceres::abs(heading_cross_desired);
+
+            // 3. 指令正则
+            residuals[res_idx++] = T(params_.recovery_weights.r_v) * v_cmd;
+            residuals[res_idx++] = T(params_.recovery_weights.r_omega) * omega_cmd;
+
+            // 4. 指令平滑
+            residuals[res_idx++] = T(params_.recovery_weights.r_dv) * dv_cmd;
+            residuals[res_idx++] = T(params_.recovery_weights.r_domega) * domega_cmd;
+
+            // 5. 指令变化率硬约束（软惩罚实现）
+            const T dv_cmd_limit = T(params_.recovery_limits.acc_max * MPC_DT);
+            const T domega_cmd_limit = T(params_.recovery_limits.alpha_max * MPC_DT);
+            residuals[res_idx++] = T(params_.recovery_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
+            residuals[res_idx++] = T(params_.recovery_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
+
+            // 6. 侧向加速度约束
+            const T a_lat = ceres::abs(st.v_act * st.omega_act);
+            residuals[res_idx++] = T(params_.recovery_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.recovery_limits.a_lat_max));
+
+            // 7. 避障
+            const T cost = eval_cost_bilinear(cost_grid_, cost_info_, st.x, st.y);
+            residuals[res_idx++] = T(params_.recovery_weights.obstacle) * (cost / T(255.0));
+
+            // 8. 台阶方向场：视为不可通行区域
+            const auto dir = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
+            const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
+            const T step_gate = smoothstep(
+                dir_norm,
+                T(params_.recovery_limits.step_norm_threshold),
+                T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
+            );
+            residuals[res_idx++] = T(params_.recovery_weights.step) * step_gate;
+
+            // 能量约束
+            const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
+            const T thr = T(std::max(params_.energy.threshold, 1.0));
+            const T beta_e = T(std::max(params_.energy.softplus_beta, 1e-6));
+            const T vio = (T(params_.energy.threshold) - energy) / thr;
+            const T relu_soft = softplus(beta_e * vio) / beta_e - softplus(T(0.0)) / beta_e;
+            residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
+
+            last_v_cmd = v_cmd;
+            last_omega_cmd = omega_cmd;
+            v_act_prev = st.v_act;
+            w_act_prev = st.omega_act;
+        }
+
+        // 终端：更强地要求到达目标且不在危险区域
+        const T dxT = st.x - T(goal_map_.x());
+        const T dyT = st.y - T(goal_map_.y());
+        residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy_terminal) * dxT;
+        residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy_terminal) * dyT;
+
+        const T cost_terminal = eval_cost_bilinear(cost_grid_, cost_info_, st.x, st.y);
+        residuals[res_idx++] = T(params_.recovery_weights.obstacle_terminal) * (cost_terminal / T(255.0));
+
+        const auto dirT = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
+        const T dir_normT = ceres::sqrt(dirT.squaredNorm() + T(1e-10));
+        const T step_gateT = smoothstep(
+            dir_normT,
+            T(params_.recovery_limits.step_norm_threshold),
+            T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
+        );
+        residuals[res_idx++] = T(params_.recovery_weights.step_terminal) * step_gateT;
+
+        return true;
+    }
+
+    const Eigen::Vector2d& goal_map_;
+    const Eigen::Vector3d& start_pose_;
+    const Eigen::Vector2d& start_status_;
+    const Eigen::Vector2d start_cmd_clamped_;
+    const double x_h_init_;
+    const MPCParams& params_;
+    const CostMapGridView& cost_grid_;
+    const GridInfo cost_info_;
+    const DirectionMapGridView& dir_grid_;
+    const GridInfo dir_info_;
+    const double remaining_energy_;
+    const double rfr_pwr_limit_;
+};
+
+// ============================================================================
+//                          生成预测轨迹
+// ============================================================================
+
+inline MPCPrediction generate_predicted_path_map(
+    const Eigen::Vector3d& chassis_pose_map,
+    const Eigen::Vector2d& chassis_status,
+    const Eigen::Vector2d& cmd_prev,
+    const double x_h_init,
+    const double* controls
+) {
+    MPCPrediction pred;
+    constexpr size_t n = static_cast<size_t>(MPC_HORIZON) + 1;
+    pred.path_map.reserve(n);
+    pred.headings.reserve(n);
+    pred.v_pred.reserve(n);
+    pred.w_pred.reserve(n);
+
+    PredictorState<double> st;
+    st.x = chassis_pose_map.x();
+    st.y = chassis_pose_map.y();
+    st.theta = chassis_pose_map.z();
+
+    model_init(
+        st,
+        chassis_status.x(),
+        chassis_status.y(),
+        cmd_prev.x(),
+        cmd_prev.y(),
+        x_h_init
     );
 
-    const T theta0 = current(IDX_THETA);
-    const T theta1 = theta0 + (current(IDX_W_ACT) + w_next) * (T(MPC_DT) * T(0.5));
+    pred.path_map.emplace_back(st.x, st.y);
+    pred.headings.push_back(st.theta);
+    pred.v_pred.push_back(st.v_act);
+    pred.w_pred.push_back(st.omega_act);
 
-    next(IDX_X) = current(IDX_X) + (current(IDX_V_ACT) * ceres::cos(theta0) + v_next * ceres::cos(theta1)) * (T(MPC_DT) * T(0.5));
-    next(IDX_Y) = current(IDX_Y) + (current(IDX_V_ACT) * ceres::sin(theta0) + v_next * ceres::sin(theta1)) * (T(MPC_DT) * T(0.5));
-    next(IDX_THETA) = theta1;
-    next(IDX_XH) = xh_next;
-    next(IDX_V_ACT) = v_next;
-    next(IDX_W_ACT) = w_next;
-    next(IDX_V_CMD_Z1) = v_cmd;
-    next(IDX_W_CMD_Z1) = w_cmd;
-
-    const T a_k = (v_next - current(IDX_V_ACT)) / T(MPC_DT);
-    const T alpha_k = (w_next - current(IDX_W_ACT)) / T(MPC_DT);
-    next(IDX_ENERGY) = current(IDX_ENERGY) + (T(rfr_pwr_limit) - predict_power(v_next, w_next, a_k, alpha_k)) * T(MPC_DT);
-
-    if (ref_control_points && ref_control_points->size() >= 3) {
-        const T u = clamp01(current(IDX_PATH_U));
-        const auto ref = sample_path_reference(*ref_control_points, u);
-        const T ex = next(IDX_X) - ref.position.x();
-        const T ey_world = next(IDX_Y) - ref.position.y();
-        const T ey = -ex * ceres::sin(ref.theta) + ey_world * ceres::cos(ref.theta);
-        const T etheta = normalize_angle(next(IDX_THETA) - ref.theta);
-        T denom = T(1.0) - ref.kappa * ey;
-        const T denom_abs = ceres::abs(denom);
-        denom = denom / (denom_abs + T(1e-6)) * ceres::fmax(denom_abs, T(0.1));
-        const T dsdt = next(IDX_V_ACT) * ceres::cos(etheta) / denom;
-        const T dudt = dsdt / ref.dsdu;
-        next(IDX_PATH_U) = clamp01(u + dudt * T(MPC_DT));
-    }
-
-    return next;
-}
-
-inline ControlTrajectory warm_start_controls(const std::array<double, MPC_PARAM_SIZE>& last_controls, const bool nonnegative_v) {
-    ControlTrajectory controls{};
     for (int i = 0; i < MPC_HORIZON; i++) {
-        const int src = (i + 1 < MPC_HORIZON) ? (i + 1) : (MPC_HORIZON - 1);
-        controls[static_cast<size_t>(i)][0] = last_controls[static_cast<size_t>(2 * src)];
-        controls[static_cast<size_t>(i)][1] = last_controls[static_cast<size_t>(2 * src + 1)];
-        if (nonnegative_v) {
-            controls[static_cast<size_t>(i)][0] = std::max(0.0, controls[static_cast<size_t>(i)][0]);
-        }
-    }
-    return controls;
-}
-
-inline void flatten_controls(const ControlTrajectory& controls, std::array<double, MPC_PARAM_SIZE>* flat) {
-    for (int i = 0; i < MPC_HORIZON; i++) {
-        (*flat)[static_cast<size_t>(2 * i)] = controls[static_cast<size_t>(i)][0];
-        (*flat)[static_cast<size_t>(2 * i + 1)] = controls[static_cast<size_t>(i)][1];
-    }
-}
-
-inline StateTrajectory initialize_states_from_controls(
-    const StateBlock& initial_state,
-    const ControlTrajectory& controls,
-    const std::vector<Eigen::Vector2d>* ref_control_points,
-    const double rfr_pwr_limit
-) {
-    StateTrajectory states{};
-    states[0] = initial_state;
-
-    for (int k = 0; k < MPC_HORIZON; k++) {
-        ShootingState<double> current = load_state(states[static_cast<size_t>(k)].data());
-        const auto next = propagate_state(
-            current,
-            controls[static_cast<size_t>(k)][0],
-            controls[static_cast<size_t>(k)][1],
-            ref_control_points,
-            rfr_pwr_limit
-        );
-        store_state(next, states[static_cast<size_t>(k + 1)].data());
-    }
-
-    return states;
-}
-
-inline MPCPrediction prediction_from_states(const StateTrajectory& states) {
-    MPCPrediction pred;
-    pred.path_map.reserve(states.size());
-    pred.headings.reserve(states.size());
-    pred.v_pred.reserve(states.size());
-    pred.w_pred.reserve(states.size());
-
-    for (const auto& state : states) {
-        pred.path_map.emplace_back(state[IDX_X], state[IDX_Y]);
-        pred.headings.push_back(state[IDX_THETA]);
-        pred.v_pred.push_back(state[IDX_V_ACT]);
-        pred.w_pred.push_back(state[IDX_W_ACT]);
+        const double v_cmd = controls[2 * i];
+        const double w_cmd = controls[2 * i + 1];
+        prediction_step(st, v_cmd, w_cmd);
+        pred.path_map.emplace_back(st.x, st.y);
+        pred.headings.push_back(st.theta);
+        pred.v_pred.push_back(st.v_act);
+        pred.w_pred.push_back(st.omega_act);
     }
 
     return pred;
@@ -526,394 +1020,6 @@ inline double clamp_prev_cmd(
         status - cmd_act_diff_max + rate_max * dt
     );
 }
-
-inline StateBlock build_initial_state(
-    const Eigen::Vector3d& chassis_pose_map,
-    const Eigen::Vector2d& chassis_status,
-    const Eigen::Vector2d& start_cmd_clamped,
-    const double x_h_init,
-    const double u0,
-    const double remaining_energy
-) {
-    StateBlock initial{};
-    initial[IDX_X] = chassis_pose_map.x();
-    initial[IDX_Y] = chassis_pose_map.y();
-    initial[IDX_THETA] = chassis_pose_map.z();
-    initial[IDX_XH] = x_h_init;
-    initial[IDX_V_ACT] = chassis_status.x();
-    initial[IDX_W_ACT] = chassis_status.y();
-    initial[IDX_V_CMD_Z1] = start_cmd_clamped.x();
-    initial[IDX_W_CMD_Z1] = start_cmd_clamped.y();
-    initial[IDX_PATH_U] = u0;
-    initial[IDX_ENERGY] = remaining_energy;
-    return initial;
-}
-
-inline ceres::Solver::Options make_solver_options() {
-    ceres::Solver::Options options;
-    options.minimizer_type = ceres::TRUST_REGION;
-    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
-    options.max_num_iterations = MPC_MAX_ITERATIONS;
-    options.minimizer_progress_to_stdout = false;
-    options.logging_type = ceres::SILENT;
-    options.num_threads = 4;
-    return options;
-}
-
-struct DynamicsFunctor {
-    DynamicsFunctor(
-        const std::vector<Eigen::Vector2d>* ref_control_points,
-        const double rfr_pwr_limit
-    ):
-        ref_control_points_(ref_control_points),
-        rfr_pwr_limit_(rfr_pwr_limit) {}
-
-    template<typename T>
-    bool operator()(const T* const state_k, const T* const control_k, const T* const state_k1, T* residuals) const {
-        const auto current = load_state(state_k);
-        const auto predicted = propagate_state(current, control_k[0], control_k[1], ref_control_points_, rfr_pwr_limit_);
-        const auto next = load_state(state_k1);
-
-        for (int i = 0; i < MPC_STATE_SIZE; i++) {
-            residuals[i] = T(DYNAMICS_WEIGHTS[static_cast<size_t>(i)]) * (next(i) - predicted(i));
-        }
-        return true;
-    }
-
-    const std::vector<Eigen::Vector2d>* ref_control_points_;
-    const double rfr_pwr_limit_;
-};
-
-struct FollowCostFunctor {
-    FollowCostFunctor(
-        const std::vector<Eigen::Vector2d>& ref_control_points,
-        const MPCParams& params,
-        const CostMap& cost_map,
-        const GridInfo& cost_info,
-        const DirectionMap& dir_map,
-        const GridInfo& dir_info,
-        const ArclengthTable& arclength_table
-    ):
-        ref_control_points_(ref_control_points),
-        params_(params),
-        cost_map_(cost_map),
-        cost_info_(cost_info),
-        dir_map_(dir_map),
-        dir_info_(dir_info),
-        arclength_table_(arclength_table) {}
-
-    template<typename T>
-    bool operator()(const T* const state_k, const T* const control_k, const T* const state_k1, T* residuals) const {
-        const auto current = load_state(state_k);
-        const auto next = load_state(state_k1);
-        const T v_cmd = control_k[0];
-        const T omega_cmd = control_k[1];
-        const T dv_cmd = v_cmd - current(IDX_V_CMD_Z1);
-        const T domega_cmd = omega_cmd - current(IDX_W_CMD_Z1);
-
-        const T u = clamp01(current(IDX_PATH_U));
-        const auto ref = sample_path_reference(ref_control_points_, u);
-        const double s_remain_d = lookup_remaining_arclength(arclength_table_, scalar_value(u));
-        const T s_remain = T(s_remain_d);
-
-        const T ex = next(IDX_X) - ref.position.x();
-        const T ey_world = next(IDX_Y) - ref.position.y();
-        const T ey = -ex * ceres::sin(ref.theta) + ey_world * ceres::cos(ref.theta);
-        const T etheta = normalize_angle(next(IDX_THETA) - ref.theta);
-
-        size_t res_idx = 0;
-        residuals[res_idx++] = T(params_.follow_weights.q_y) * ey;
-        residuals[res_idx++] = T(params_.follow_weights.q_theta) * etheta;
-        residuals[res_idx++] = T(params_.follow_weights.q_u) * (T(1.0) - u);
-        residuals[res_idx++] = T(params_.follow_weights.r_v) * v_cmd;
-        residuals[res_idx++] = T(params_.follow_weights.r_omega) * omega_cmd;
-        residuals[res_idx++] = T(params_.follow_weights.r_dv) * dv_cmd;
-        residuals[res_idx++] = T(params_.follow_weights.r_domega) * domega_cmd;
-
-        const T dv_cmd_limit = T(params_.follow_limits.acc_max * MPC_DT);
-        const T domega_cmd_limit = T(params_.follow_limits.alpha_max * MPC_DT);
-        residuals[res_idx++] = T(params_.follow_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
-        residuals[res_idx++] = T(params_.follow_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
-
-        const T a_lat = ceres::abs(next(IDX_V_ACT) * next(IDX_W_ACT));
-        residuals[res_idx++] = T(params_.follow_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.follow_limits.a_lat_max));
-
-        const T cost = eval_cost_bilinear(cost_map_, cost_info_, next(IDX_X), next(IDX_Y));
-        residuals[res_idx++] = T(params_.follow_weights.obstacle) * (cost / T(255.0));
-
-        const auto dir = eval_dir_bilinear(dir_map_, dir_info_, next(IDX_X), next(IDX_Y));
-        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-        const T step_gate = smoothstep(
-            dir_norm,
-            T(params_.follow_limits.step_norm_threshold),
-            T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
-        );
-        residuals[res_idx++] = T(params_.follow_weights.step) * step_gate;
-
-        const Eigen::Matrix<T, 2, 1> heading(ceres::cos(next(IDX_THETA)), ceres::sin(next(IDX_THETA)));
-        const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-        residuals[res_idx++] = T(params_.follow_weights.direction) * ceres::abs(heading_cross_dir);
-
-        const auto dir_unit = dir / (dir_norm + T(1e-6));
-        const T cos_theta = heading.dot(dir_unit);
-        const T weight_up = (cos_theta + T(1.0)) / T(2.0);
-        const T target_vel_step = weight_up * T(params_.follow_limits.vel_step_up)
-                                + (T(1.0) - weight_up) * T(params_.follow_limits.vel_step_down);
-        residuals[res_idx++] = T(params_.follow_weights.vel_on_step) * dir_norm * ceres::abs(next(IDX_V_ACT) - target_vel_step);
-
-        const T deceleration = T(params_.follow_limits.slow_down_deceleration);
-        const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01));
-        residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), next(IDX_V_ACT) - v_dec_profile);
-
-        const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
-        const T thr = T(std::max(params_.energy.threshold, 1.0));
-        const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
-        const T vio = (T(params_.energy.threshold) - next(IDX_ENERGY)) / thr;
-        const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
-        residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
-        return true;
-    }
-
-    const std::vector<Eigen::Vector2d>& ref_control_points_;
-    const MPCParams& params_;
-    const CostMap& cost_map_;
-    const GridInfo cost_info_;
-    const DirectionMap& dir_map_;
-    const GridInfo dir_info_;
-    const ArclengthTable arclength_table_;
-};
-
-struct StopCostFunctor {
-    StopCostFunctor(
-        const MPCParams& params,
-        const CostMap& cost_map,
-        const GridInfo& cost_info,
-        const DirectionMap& dir_map,
-        const GridInfo& dir_info
-    ):
-        params_(params),
-        cost_map_(cost_map),
-        cost_info_(cost_info),
-        dir_map_(dir_map),
-        dir_info_(dir_info) {}
-
-    template<typename T>
-    bool operator()(const T* const state_k, const T* const control_k, const T* const state_k1, T* residuals) const {
-        const auto current = load_state(state_k);
-        const auto next = load_state(state_k1);
-        const T dv_cmd = control_k[0] - current(IDX_V_CMD_Z1);
-        const T domega_cmd = control_k[1] - current(IDX_W_CMD_Z1);
-
-        size_t res_idx = 0;
-        residuals[res_idx++] = T(params_.stop_weights.q_v) * next(IDX_V_ACT);
-        residuals[res_idx++] = T(params_.stop_weights.q_omega) * next(IDX_W_ACT);
-        residuals[res_idx++] = T(params_.stop_weights.r_dv) * dv_cmd;
-        residuals[res_idx++] = T(params_.stop_weights.r_domega) * domega_cmd;
-
-        const T dv_cmd_limit = T(params_.stop_limits.acc_max * MPC_DT);
-        const T domega_cmd_limit = T(params_.stop_limits.alpha_max * MPC_DT);
-        residuals[res_idx++] = T(params_.stop_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
-        residuals[res_idx++] = T(params_.stop_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
-
-        const T a_lat = ceres::abs(next(IDX_V_ACT) * next(IDX_W_ACT));
-        residuals[res_idx++] = T(params_.stop_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.stop_limits.a_lat_max));
-
-        const T cost = eval_cost_bilinear(cost_map_, cost_info_, next(IDX_X), next(IDX_Y));
-        residuals[res_idx++] = T(params_.stop_weights.obstacle) * (cost / T(255.0));
-
-        const auto dir = eval_dir_bilinear(dir_map_, dir_info_, next(IDX_X), next(IDX_Y));
-        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-        const T step_gate = smoothstep(
-            dir_norm,
-            T(params_.stop_limits.step_norm_threshold),
-            T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
-        );
-
-        const Eigen::Matrix<T, 2, 1> heading(ceres::cos(next(IDX_THETA)), ceres::sin(next(IDX_THETA)));
-        const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-        residuals[res_idx++] = T(params_.stop_weights.direction) * step_gate * ceres::abs(heading_cross_dir);
-
-        const auto dir_unit = dir / (dir_norm + T(1e-6));
-        const T cos_theta = heading.dot(dir_unit);
-        const T weight_up = (cos_theta + T(1.0)) / T(2.0);
-        const T target_vel_step = weight_up * T(params_.stop_limits.vel_step_up)
-                                + (T(1.0) - weight_up) * T(params_.stop_limits.vel_step_down);
-        residuals[res_idx++] = T(params_.stop_weights.vel_on_step) * step_gate * dir_norm * ceres::abs(next(IDX_V_ACT) - target_vel_step);
-
-        const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
-        const T thr = T(std::max(params_.energy.threshold, 1.0));
-        const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
-        const T vio = (T(params_.energy.threshold) - next(IDX_ENERGY)) / thr;
-        const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
-        residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
-        return true;
-    }
-
-    const MPCParams& params_;
-    const CostMap& cost_map_;
-    const GridInfo cost_info_;
-    const DirectionMap& dir_map_;
-    const GridInfo dir_info_;
-};
-
-struct StopTerminalCostFunctor {
-    StopTerminalCostFunctor(
-        const MPCParams& params,
-        const CostMap& cost_map,
-        const GridInfo& cost_info,
-        const DirectionMap& dir_map,
-        const GridInfo& dir_info
-    ):
-        params_(params),
-        cost_map_(cost_map),
-        cost_info_(cost_info),
-        dir_map_(dir_map),
-        dir_info_(dir_info) {}
-
-    template<typename T>
-    bool operator()(const T* const state_n, T* residuals) const {
-        const auto state = load_state(state_n);
-        const T cost_terminal = eval_cost_bilinear(cost_map_, cost_info_, state(IDX_X), state(IDX_Y));
-        residuals[0] = T(params_.stop_weights.obstacle_terminal) * (cost_terminal / T(255.0));
-
-        const auto dir = eval_dir_bilinear(dir_map_, dir_info_, state(IDX_X), state(IDX_Y));
-        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-        const T step_gate = smoothstep(
-            dir_norm,
-            T(params_.stop_limits.step_norm_threshold),
-            T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
-        );
-        residuals[1] = T(params_.stop_weights.step_terminal) * step_gate;
-        return true;
-    }
-
-    const MPCParams& params_;
-    const CostMap& cost_map_;
-    const GridInfo cost_info_;
-    const DirectionMap& dir_map_;
-    const GridInfo dir_info_;
-};
-
-struct RecoveryCostFunctor {
-    RecoveryCostFunctor(
-        const Eigen::Vector2d& goal_map,
-        const MPCParams& params,
-        const CostMap& cost_map,
-        const GridInfo& cost_info,
-        const DirectionMap& dir_map,
-        const GridInfo& dir_info
-    ):
-        goal_map_(goal_map),
-        params_(params),
-        cost_map_(cost_map),
-        cost_info_(cost_info),
-        dir_map_(dir_map),
-        dir_info_(dir_info) {}
-
-    template<typename T>
-    bool operator()(const T* const state_k, const T* const control_k, const T* const state_k1, T* residuals) const {
-        const auto current = load_state(state_k);
-        const auto next = load_state(state_k1);
-        const T dv_cmd = control_k[0] - current(IDX_V_CMD_Z1);
-        const T domega_cmd = control_k[1] - current(IDX_W_CMD_Z1);
-        const T gx = T(goal_map_.x());
-        const T gy = T(goal_map_.y());
-
-        size_t res_idx = 0;
-        residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * (next(IDX_X) - gx);
-        residuals[res_idx++] = T(params_.recovery_weights.q_goal_xy) * (next(IDX_Y) - gy);
-
-        const T desired_theta = ceres::atan2(gy - next(IDX_Y), gx - next(IDX_X));
-        residuals[res_idx++] = T(params_.recovery_weights.q_goal_theta) * ceres::abs(ceres::sin(next(IDX_THETA) - desired_theta));
-
-        residuals[res_idx++] = T(params_.recovery_weights.r_v) * control_k[0];
-        residuals[res_idx++] = T(params_.recovery_weights.r_omega) * control_k[1];
-        residuals[res_idx++] = T(params_.recovery_weights.r_dv) * dv_cmd;
-        residuals[res_idx++] = T(params_.recovery_weights.r_domega) * domega_cmd;
-
-        const T dv_cmd_limit = T(params_.recovery_limits.acc_max * MPC_DT);
-        const T domega_cmd_limit = T(params_.recovery_limits.alpha_max * MPC_DT);
-        residuals[res_idx++] = T(params_.recovery_weights.acc_limit) * ceres::fmax(T(0.0), ceres::abs(dv_cmd) - dv_cmd_limit);
-        residuals[res_idx++] = T(params_.recovery_weights.alpha_limit) * ceres::fmax(T(0.0), ceres::abs(domega_cmd) - domega_cmd_limit);
-
-        const T a_lat = ceres::abs(next(IDX_V_ACT) * next(IDX_W_ACT));
-        residuals[res_idx++] = T(params_.recovery_weights.lat_acc) * ceres::fmax(T(0.0), a_lat - T(params_.recovery_limits.a_lat_max));
-
-        const T cost = eval_cost_bilinear(cost_map_, cost_info_, next(IDX_X), next(IDX_Y));
-        residuals[res_idx++] = T(params_.recovery_weights.obstacle) * (cost / T(255.0));
-
-        const auto dir = eval_dir_bilinear(dir_map_, dir_info_, next(IDX_X), next(IDX_Y));
-        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-        const T step_gate = smoothstep(
-            dir_norm,
-            T(params_.recovery_limits.step_norm_threshold),
-            T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
-        );
-        residuals[res_idx++] = T(params_.recovery_weights.step) * step_gate;
-
-        const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
-        const T thr = T(std::max(params_.energy.threshold, 1.0));
-        const T beta = T(std::max(params_.energy.softplus_beta, 1e-6));
-        const T vio = (T(params_.energy.threshold) - next(IDX_ENERGY)) / thr;
-        const T relu_soft = softplus(beta * vio) / beta - softplus(T(0.0)) / beta;
-        residuals[res_idx++] = w_e * ceres::fmax(T(0.0), relu_soft);
-        return true;
-    }
-
-    const Eigen::Vector2d& goal_map_;
-    const MPCParams& params_;
-    const CostMap& cost_map_;
-    const GridInfo cost_info_;
-    const DirectionMap& dir_map_;
-    const GridInfo dir_info_;
-};
-
-struct RecoveryTerminalCostFunctor {
-    RecoveryTerminalCostFunctor(
-        const Eigen::Vector2d& goal_map,
-        const MPCParams& params,
-        const CostMap& cost_map,
-        const GridInfo& cost_info,
-        const DirectionMap& dir_map,
-        const GridInfo& dir_info
-    ):
-        goal_map_(goal_map),
-        params_(params),
-        cost_map_(cost_map),
-        cost_info_(cost_info),
-        dir_map_(dir_map),
-        dir_info_(dir_info) {}
-
-    template<typename T>
-    bool operator()(const T* const state_n, T* residuals) const {
-        const auto state = load_state(state_n);
-        residuals[0] = T(params_.recovery_weights.q_goal_xy_terminal) * (state(IDX_X) - T(goal_map_.x()));
-        residuals[1] = T(params_.recovery_weights.q_goal_xy_terminal) * (state(IDX_Y) - T(goal_map_.y()));
-
-        const T cost_terminal = eval_cost_bilinear(cost_map_, cost_info_, state(IDX_X), state(IDX_Y));
-        residuals[2] = T(params_.recovery_weights.obstacle_terminal) * (cost_terminal / T(255.0));
-
-        const auto dir = eval_dir_bilinear(dir_map_, dir_info_, state(IDX_X), state(IDX_Y));
-        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-        const T step_gate = smoothstep(
-            dir_norm,
-            T(params_.recovery_limits.step_norm_threshold),
-            T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
-        );
-        residuals[3] = T(params_.recovery_weights.step_terminal) * step_gate;
-        return true;
-    }
-
-    const Eigen::Vector2d& goal_map_;
-    const MPCParams& params_;
-    const CostMap& cost_map_;
-    const GridInfo cost_info_;
-    const DirectionMap& dir_map_;
-    const GridInfo dir_info_;
-};
-
-}  // namespace
 
 // ============================================================================
 //                            MPCSolver 实现
@@ -938,6 +1044,7 @@ void MPCSolver::set_energy_state(double remaining_energy, double rfr_pwr_limit) 
 
 void MPCSolver::update_observer(const double v_act, const double w_act) {
     if (!observer_initialized_) {
+        // First call: no previous data, use default x_h
         x_h_hat_ = XH0;
         prev_v_act_ = v_act;
         prev_w_act_ = w_act;
@@ -947,17 +1054,23 @@ void MPCSolver::update_observer(const double v_act, const double w_act) {
 
     const double v_prev = prev_v_act_;
     const double w_prev = prev_w_act_;
-    const double vc_prev = last_cmd_.x();
+    const double vc_prev = last_cmd_.x();  // v_cmd sent at previous cycle
 
+    // Nonlinear term at previous step
     const double sv_prev = std::tanh(v_prev / SGN_EPS);
     const double nl_prev = CF1 * sv_prev + CF2 * v_prev * std::abs(w_prev);
 
+    // Predict x_h and v using ZOH model
     const double xh_pred = A00 * x_h_hat_ + A01 * v_prev + A03 * vc_prev + GNL_XH * nl_prev;
     const double v_pred  = A10 * x_h_hat_ + A11 * v_prev + A13 * vc_prev + GNL_V  * nl_prev;
 
+    // Innovation: observed v_act vs predicted v
     const double innovation = v_act - v_pred;
+
+    // Correct hidden state
     x_h_hat_ = xh_pred + OBS_L * innovation;
 
+    // Store for next cycle
     prev_v_act_ = v_act;
     prev_w_act_ = w_act;
 }
@@ -969,6 +1082,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const CostMap& merged_cost_map,
     const DirectionMap& global_direction_map
 ) {
+    // 投影到样条
+    const auto& ref_control_points = global_path.getControlPoints();
     const double u0 = project_to_spline_u(
         global_path,
         chassis_pose_map.head<2>(),
@@ -985,73 +1100,93 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.follow_limits.start_omega_cmd_act_diff_max, params_.follow_limits.alpha_max, MPC_DT)
     );
 
-    const GridInfo cost_info{merged_cost_map.origin_x, merged_cost_map.origin_y, merged_cost_map.resolution, merged_cost_map.width, merged_cost_map.height};
-    const GridInfo dir_info{global_direction_map.origin_x, global_direction_map.origin_y, global_direction_map.resolution, global_direction_map.width, global_direction_map.height};
-    const ArclengthTable arclength_table = build_arclength_table(global_path.getControlPoints(), params_.follow_limits.slow_down_num_samples);
+    const CostMapGridView cost_grid(merged_cost_map);
+    const GridInfo cost_info = make_grid_info(merged_cost_map);
+    const DirectionMapGridView dir_grid(global_direction_map);
+    const GridInfo dir_info = make_grid_info(global_direction_map);
 
-    ControlTrajectory controls = warm_start_controls(last_controls_, false);
-    const StateBlock initial_state = build_initial_state(
-        chassis_pose_map,
-        chassis_status,
-        start_cmd_clamped,
-        x_h_hat_,
-        u0,
-        remaining_energy_
-    );
-    const auto& ref_control_points = global_path.getControlPoints();
-    StateTrajectory states = initialize_states_from_controls(initial_state, controls, &ref_control_points, rfr_pwr_limit_);
+    // ── 路径未变化时复用弧长查找表 ──
+    const ArclengthTable& arclength_table = [&]() -> const ArclengthTable& {
+        const int samples = params_.follow_limits.slow_down_num_samples;
+        if (prev_arc_samples_ != samples || !same_control_points(prev_ref_control_points_, ref_control_points)) {
+            prev_arclength_table_ = build_arclength_table(ref_control_points, samples);
+            prev_ref_control_points_ = ref_control_points;
+            prev_arc_samples_ = samples;
+        }
+        return prev_arclength_table_;
+    }();
 
-    ceres::Problem problem;
-    problem.AddParameterBlock(states[0].data(), MPC_STATE_SIZE);
-    problem.SetParameterBlockConstant(states[0].data());
+    // 决策变量（单一平坦参数块）
+    std::array<double, MPC_PARAM_SIZE> controls{};
 
-    for (int k = 0; k < MPC_HORIZON; k++) {
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<DynamicsFunctor, MPC_STATE_SIZE, MPC_STATE_SIZE, MPC_CONTROL_SIZE, MPC_STATE_SIZE>(
-                new DynamicsFunctor(&ref_control_points, rfr_pwr_limit_)
-            ),
-            nullptr,
-            states[static_cast<size_t>(k)].data(),
-            controls[static_cast<size_t>(k)].data(),
-            states[static_cast<size_t>(k + 1)].data()
-        );
-
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<FollowCostFunctor, 16, MPC_STATE_SIZE, MPC_CONTROL_SIZE, MPC_STATE_SIZE>(
-                new FollowCostFunctor(
-                    ref_control_points,
-                    params_,
-                    merged_cost_map,
-                    cost_info,
-                    global_direction_map,
-                    dir_info,
-                    arclength_table
-                )
-            ),
-            nullptr,
-            states[static_cast<size_t>(k)].data(),
-            controls[static_cast<size_t>(k)].data(),
-            states[static_cast<size_t>(k + 1)].data()
-        );
-
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(k)].data(), 0, params_.follow_limits.vel_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(k)].data(), 0, params_.follow_limits.vel_max);
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(k)].data(), 1, params_.follow_limits.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(k)].data(), 1, params_.follow_limits.omega_max);
+    // Warm start
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        const int src = (i + 1 < MPC_HORIZON) ? (i + 1) : (MPC_HORIZON - 1);
+        controls[static_cast<size_t>(2 * i)]     = last_controls_[static_cast<size_t>(2 * src)];
+        controls[static_cast<size_t>(2 * i + 1)] = last_controls_[static_cast<size_t>(2 * src + 1)];
     }
 
+    // 构建优化问题
+    ceres::Problem problem;
+
+    constexpr int FOLLOW_NUM_RESIDUALS = 16 * MPC_HORIZON;
+    auto* cost_function = new ceres::AutoDiffCostFunction<
+        FollowMPCCostFunctor, FOLLOW_NUM_RESIDUALS, MPC_PARAM_SIZE>(
+        new FollowMPCCostFunctor(
+            ref_control_points,
+            chassis_pose_map,
+            u0,
+            chassis_status,
+            start_cmd_clamped,
+            x_h_hat_,
+            params_,
+            cost_grid,
+            cost_info,
+            dir_grid,
+            dir_info,
+            arclength_table,
+            remaining_energy_,
+            rfr_pwr_limit_
+        )
+    );
+
+    problem.AddResidualBlock(cost_function, nullptr, controls.data());
+
+    // 设置边界
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        problem.SetParameterLowerBound(controls.data(), 2 * i,     params_.follow_limits.vel_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i,     params_.follow_limits.vel_max);
+        problem.SetParameterLowerBound(controls.data(), 2 * i + 1, params_.follow_limits.omega_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i + 1, params_.follow_limits.omega_max);
+    }
+
+    // 求解
+    ceres::Solver::Options options;
+    options.minimizer_type = ceres::TRUST_REGION;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
+    options.max_solver_time_in_seconds = MPC_MAX_SOLVER_TIME;
+    options.minimizer_progress_to_stdout = false;
+    options.logging_type = ceres::SILENT;
+
     ceres::Solver::Summary summary;
-    ceres::Solver::Options options = make_solver_options();
     ceres::Solve(options, &problem, &summary);
 
     if (!summary.IsSolutionUsable()) {
         return std::unexpected(summary.BriefReport());
     }
 
-    flatten_controls(controls, &last_controls_);
-    const Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    // 输出
+    Eigen::Vector2d cmd_v_omega(controls[0], controls[1]);
     last_cmd_ = cmd_v_omega;
-    return std::tuple{cmd_v_omega, prediction_from_states(states)};
+
+    // 保存warm start
+    last_controls_ = controls;
+
+    const MPCPrediction prediction = generate_predicted_path_map(
+        chassis_pose_map, chassis_status, start_cmd_clamped, x_h_hat_, controls.data()
+    );
+    return std::tuple{cmd_v_omega, prediction};
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::stop(
@@ -1066,71 +1201,76 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.stop_limits.start_omega_cmd_act_diff_max, params_.stop_limits.alpha_max, MPC_DT)
     );
 
-    const GridInfo cost_info{merged_cost_map.origin_x, merged_cost_map.origin_y, merged_cost_map.resolution, merged_cost_map.width, merged_cost_map.height};
-    const GridInfo dir_info{global_direction_map.origin_x, global_direction_map.origin_y, global_direction_map.resolution, global_direction_map.width, global_direction_map.height};
+    const CostMapGridView cost_grid(merged_cost_map);
+    const GridInfo cost_info = make_grid_info(merged_cost_map);
+    const DirectionMapGridView dir_grid(global_direction_map);
+    const GridInfo dir_info = make_grid_info(global_direction_map);
 
-    ControlTrajectory controls = warm_start_controls(last_controls_, true);
-    const StateBlock initial_state = build_initial_state(
-        chassis_pose_map,
-        chassis_status,
-        start_cmd_clamped,
-        x_h_hat_,
-        0.0,
-        remaining_energy_
-    );
-    StateTrajectory states = initialize_states_from_controls(initial_state, controls, nullptr, rfr_pwr_limit_);
+    // 决策变量
+    std::array<double, MPC_PARAM_SIZE> controls{};
 
-    ceres::Problem problem;
-    problem.AddParameterBlock(states[0].data(), MPC_STATE_SIZE);
-    problem.SetParameterBlockConstant(states[0].data());
-
-    for (int k = 0; k < MPC_HORIZON; k++) {
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<DynamicsFunctor, MPC_STATE_SIZE, MPC_STATE_SIZE, MPC_CONTROL_SIZE, MPC_STATE_SIZE>(
-                new DynamicsFunctor(nullptr, rfr_pwr_limit_)
-            ),
-            nullptr,
-            states[static_cast<size_t>(k)].data(),
-            controls[static_cast<size_t>(k)].data(),
-            states[static_cast<size_t>(k + 1)].data()
-        );
-
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<StopCostFunctor, 11, MPC_STATE_SIZE, MPC_CONTROL_SIZE, MPC_STATE_SIZE>(
-                new StopCostFunctor(params_, merged_cost_map, cost_info, global_direction_map, dir_info)
-            ),
-            nullptr,
-            states[static_cast<size_t>(k)].data(),
-            controls[static_cast<size_t>(k)].data(),
-            states[static_cast<size_t>(k + 1)].data()
-        );
-
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(k)].data(), 0, 0.0);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(k)].data(), 0, params_.stop_limits.vel_max);
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(k)].data(), 1, params_.stop_limits.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(k)].data(), 1, params_.stop_limits.omega_max);
+    // Warm start
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        const int src = (i + 1 < MPC_HORIZON) ? (i + 1) : (MPC_HORIZON - 1);
+        controls[static_cast<size_t>(2 * i)]     = std::max(0.0, last_controls_[static_cast<size_t>(2 * src)]);
+        controls[static_cast<size_t>(2 * i + 1)] = last_controls_[static_cast<size_t>(2 * src + 1)];
     }
 
-    problem.AddResidualBlock(
-        new ceres::AutoDiffCostFunction<StopTerminalCostFunctor, 2, MPC_STATE_SIZE>(
-            new StopTerminalCostFunctor(params_, merged_cost_map, cost_info, global_direction_map, dir_info)
-        ),
-        nullptr,
-        states.back().data()
+    ceres::Problem problem;
+
+    constexpr int STOP_NUM_RESIDUALS = 11 * MPC_HORIZON + 2;
+    auto* cost_function = new ceres::AutoDiffCostFunction<
+        StopMPCCostFunctor, STOP_NUM_RESIDUALS, MPC_PARAM_SIZE>(
+        new StopMPCCostFunctor(
+            chassis_pose_map,
+            chassis_status,
+            start_cmd_clamped,
+            x_h_hat_,
+            params_,
+            cost_grid,
+            cost_info,
+            dir_grid,
+            dir_info,
+            remaining_energy_,
+            rfr_pwr_limit_
+        )
     );
 
+    problem.AddResidualBlock(cost_function, nullptr, controls.data());
+
+    // 边界
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        problem.SetParameterLowerBound(controls.data(), 2 * i,     0.0);
+        problem.SetParameterUpperBound(controls.data(), 2 * i,     params_.stop_limits.vel_max);
+        problem.SetParameterLowerBound(controls.data(), 2 * i + 1, params_.stop_limits.omega_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i + 1, params_.stop_limits.omega_max);
+    }
+
+    ceres::Solver::Options options;
+    options.minimizer_type = ceres::TRUST_REGION;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
+    options.max_solver_time_in_seconds = MPC_MAX_SOLVER_TIME;
+    options.minimizer_progress_to_stdout = false;
+    options.logging_type = ceres::SILENT;
+
     ceres::Solver::Summary summary;
-    ceres::Solver::Options options = make_solver_options();
     ceres::Solve(options, &problem, &summary);
 
     if (!summary.IsSolutionUsable()) {
         return std::unexpected(summary.BriefReport());
     }
 
-    flatten_controls(controls, &last_controls_);
-    const Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    Eigen::Vector2d cmd_v_omega(controls[0], controls[1]);
     last_cmd_ = cmd_v_omega;
-    return std::tuple{cmd_v_omega, prediction_from_states(states)};
+
+    // 保存warm start
+    last_controls_ = controls;
+
+    const MPCPrediction prediction = generate_predicted_path_map(
+        chassis_pose_map, chassis_status, start_cmd_clamped, x_h_hat_, controls.data()
+    );
+    return std::tuple{cmd_v_omega, prediction};
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::recover_to_point(
@@ -1146,71 +1286,77 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         clamp_prev_cmd(start_cmd.y(), chassis_status.y(), params_.recovery_limits.start_omega_cmd_act_diff_max, params_.recovery_limits.alpha_max, MPC_DT)
     );
 
-    const GridInfo cost_info{merged_cost_map.origin_x, merged_cost_map.origin_y, merged_cost_map.resolution, merged_cost_map.width, merged_cost_map.height};
-    const GridInfo dir_info{global_direction_map.origin_x, global_direction_map.origin_y, global_direction_map.resolution, global_direction_map.width, global_direction_map.height};
+    const CostMapGridView cost_grid(merged_cost_map);
+    const GridInfo cost_info = make_grid_info(merged_cost_map);
+    const DirectionMapGridView dir_grid(global_direction_map);
+    const GridInfo dir_info = make_grid_info(global_direction_map);
 
-    ControlTrajectory controls = warm_start_controls(last_controls_, true);
-    const StateBlock initial_state = build_initial_state(
-        chassis_pose_map,
-        chassis_status,
-        start_cmd_clamped,
-        x_h_hat_,
-        0.0,
-        remaining_energy_
-    );
-    StateTrajectory states = initialize_states_from_controls(initial_state, controls, nullptr, rfr_pwr_limit_);
+    // 决策变量
+    std::array<double, MPC_PARAM_SIZE> controls{};
 
-    ceres::Problem problem;
-    problem.AddParameterBlock(states[0].data(), MPC_STATE_SIZE);
-    problem.SetParameterBlockConstant(states[0].data());
-
-    for (int k = 0; k < MPC_HORIZON; k++) {
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<DynamicsFunctor, MPC_STATE_SIZE, MPC_STATE_SIZE, MPC_CONTROL_SIZE, MPC_STATE_SIZE>(
-                new DynamicsFunctor(nullptr, rfr_pwr_limit_)
-            ),
-            nullptr,
-            states[static_cast<size_t>(k)].data(),
-            controls[static_cast<size_t>(k)].data(),
-            states[static_cast<size_t>(k + 1)].data()
-        );
-
-        problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<RecoveryCostFunctor, 13, MPC_STATE_SIZE, MPC_CONTROL_SIZE, MPC_STATE_SIZE>(
-                new RecoveryCostFunctor(goal_map, params_, merged_cost_map, cost_info, global_direction_map, dir_info)
-            ),
-            nullptr,
-            states[static_cast<size_t>(k)].data(),
-            controls[static_cast<size_t>(k)].data(),
-            states[static_cast<size_t>(k + 1)].data()
-        );
-
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(k)].data(), 0, params_.recovery_limits.vel_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(k)].data(), 0, params_.recovery_limits.vel_max);
-        problem.SetParameterLowerBound(controls[static_cast<size_t>(k)].data(), 1, params_.recovery_limits.omega_min);
-        problem.SetParameterUpperBound(controls[static_cast<size_t>(k)].data(), 1, params_.recovery_limits.omega_max);
+    // Warm start
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        const int src = (i + 1 < MPC_HORIZON) ? (i + 1) : (MPC_HORIZON - 1);
+        controls[static_cast<size_t>(2 * i)]     = std::max(0.0, last_controls_[static_cast<size_t>(2 * src)]);
+        controls[static_cast<size_t>(2 * i + 1)] = last_controls_[static_cast<size_t>(2 * src + 1)];
     }
 
-    problem.AddResidualBlock(
-        new ceres::AutoDiffCostFunction<RecoveryTerminalCostFunctor, 4, MPC_STATE_SIZE>(
-            new RecoveryTerminalCostFunctor(goal_map, params_, merged_cost_map, cost_info, global_direction_map, dir_info)
-        ),
-        nullptr,
-        states.back().data()
+    ceres::Problem problem;
+
+    constexpr int RECOVERY_NUM_RESIDUALS = 13 * MPC_HORIZON + 4;
+    auto* cost_function = new ceres::AutoDiffCostFunction<
+        RecoveryMPCCostFunctor, RECOVERY_NUM_RESIDUALS, MPC_PARAM_SIZE>(
+        new RecoveryMPCCostFunctor(
+            goal_map,
+            chassis_pose_map,
+            chassis_status,
+            start_cmd_clamped,
+            x_h_hat_,
+            params_,
+            cost_grid,
+            cost_info,
+            dir_grid,
+            dir_info,
+            remaining_energy_,
+            rfr_pwr_limit_
+        )
     );
 
+    problem.AddResidualBlock(cost_function, nullptr, controls.data());
+
+    // 边界
+    for (int i = 0; i < MPC_HORIZON; i++) {
+        problem.SetParameterLowerBound(controls.data(), 2 * i,     params_.recovery_limits.vel_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i,     params_.recovery_limits.vel_max);
+        problem.SetParameterLowerBound(controls.data(), 2 * i + 1, params_.recovery_limits.omega_min);
+        problem.SetParameterUpperBound(controls.data(), 2 * i + 1, params_.recovery_limits.omega_max);
+    }
+
+    ceres::Solver::Options options;
+    options.minimizer_type = ceres::TRUST_REGION;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
+    options.max_solver_time_in_seconds = MPC_MAX_SOLVER_TIME;
+    options.minimizer_progress_to_stdout = false;
+    options.logging_type = ceres::SILENT;
+
     ceres::Solver::Summary summary;
-    ceres::Solver::Options options = make_solver_options();
     ceres::Solve(options, &problem, &summary);
 
     if (!summary.IsSolutionUsable()) {
         return std::unexpected(summary.BriefReport());
     }
 
-    flatten_controls(controls, &last_controls_);
-    const Eigen::Vector2d cmd_v_omega(controls[0][0], controls[0][1]);
+    Eigen::Vector2d cmd_v_omega(controls[0], controls[1]);
     last_cmd_ = cmd_v_omega;
-    return std::tuple{cmd_v_omega, prediction_from_states(states)};
+
+    // 保存warm start
+    last_controls_ = controls;
+
+    const MPCPrediction prediction = generate_predicted_path_map(
+        chassis_pose_map, chassis_status, start_cmd_clamped, x_h_hat_, controls.data()
+    );
+    return std::tuple{cmd_v_omega, prediction};
 }
 
 }

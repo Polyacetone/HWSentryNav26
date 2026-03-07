@@ -62,22 +62,22 @@
         weights: # 权重
           q_y: 0.5 # 横向误差权重
           q_theta: 0.3 # 航向误差权重
-          q_u: 2.4 # 进度项权重
+          q_u: 2.0 # 进度项权重
           q_v_final: 0.4 # 终点减速权重
           r_v: 0.01 # 线速度正则
           r_omega: 0.06 # 角速度正则
-          r_dv: 0.80 # 线速度平滑
-          r_domega: 0.20 # 角速度平滑
+          r_dv: 0.8 # 线速度平滑
+          r_domega: 0.2 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 3.0 # 台阶区域速度保持权重
+          vel_on_step: 0.0 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障权重（全局+局部）
           direction: 3.0 # 台阶方向对齐权重
           step: 0.01 # 经过台阶惩罚
       stop: # 停止模式
         limits: # 运动限制
-          vel_max: 2.8 # 最大线速度硬约束 (m/s)
+          vel_max: 1.5 # 最大线速度硬约束 (m/s)
           omega_max: 12.5 # 最大角速度硬约束 (rad/s)
           omega_min: -12.5 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
@@ -92,16 +92,16 @@
         weights: # 权重
           q_v: 0.6 # 线速度正则
           q_omega: 0.6 # 角速度正则
-          r_dv: 0.80 # 线速度指令平滑
-          r_domega: 0.20 # 角速度指令平滑
+          r_dv: 0.8 # 线速度指令平滑
+          r_domega: 0.2 # 角速度指令平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 3.0 # 台阶区域速度保持权重
-          obstacle: 3.0 # 避障惩罚
-          obstacle_terminal: 6.0 # 终端避障惩罚（防止停在障碍上）
+          vel_on_step: 6.0 # 台阶区域速度保持权重
+          obstacle: 6.0 # 避障惩罚
+          obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
           direction: 3.0 # 在台阶上要求朝向与台阶方向对齐
-          step_terminal: 6.0 # 终端台阶惩罚（防止停在台阶上）
+          step_terminal: 10.0 # 终端台阶惩罚（防止停在台阶上）
       recovery: # 恢复模式（向安全点移动）
         limits:
           vel_max: 0.5 # 最大线速度硬约束 (m/s)
