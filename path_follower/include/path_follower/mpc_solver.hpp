@@ -10,10 +10,56 @@
 namespace path_follower {
 
 // ── MPC 编译期常量 ──
-constexpr int    MPC_HORIZON        = 16;
-constexpr double MPC_DT             = 0.05;
-constexpr int    MPC_MAX_ITERATIONS = 60;
-constexpr int    MPC_PARAM_SIZE     = 2 * MPC_HORIZON;
+constexpr int MPC_HORIZON = 20;
+constexpr double MPC_DT = 0.05;
+constexpr int MPC_MAX_ITERATIONS = 60;
+constexpr int MPC_CONTROL_SIZE = 2;
+constexpr int MPC_STATE_SIZE = 10;
+constexpr int MPC_PARAM_SIZE = MPC_CONTROL_SIZE * MPC_HORIZON;
+
+constexpr int ARCLENGTH_TABLE_SIZE = 128;
+
+constexpr double SGN_EPS   = 0.05;
+constexpr double CF1       = 0.026829611608016123;
+constexpr double CF2       = -0.2010928891690858;
+constexpr double CF3       = -0.5171878055992227;
+constexpr double XH0       = -3.9704078719129248;
+constexpr double A00       = 0.9483617718409404;
+constexpr double A01       = -2.4476243257126464;
+constexpr double A03       = 2.798730623635046;
+constexpr double A10       = 0.0033272418652128084;
+constexpr double A11       = 0.9605359128145212;
+constexpr double A13       = 0.014581231780666865;
+constexpr double GNL_XH    = -0.06210638535453685;
+constexpr double GNL_V     = 0.04904295219367288;
+constexpr double A22       = 0.42595701520417945;
+constexpr double A24       = 0.5740429847958206;
+constexpr double GAMMA_W   = 0.0336320398873947;
+constexpr double OBS_L     = 104.69986431799704;
+
+constexpr int    PWR_N      = 12;
+constexpr double PWR_EPS2   = 0.05 * 0.05;
+constexpr double PWR_C[PWR_N] = {
+    3.1183599570e+00,
+    3.4172476463e+01,
+    1.0359111933e+00,
+    3.6371494354e+00,
+    2.3486803448e-02,
+    2.7300289323e+01,
+    2.6315570711e+00,
+    1.8359691253e+00,
+    1.1200532785e+00,
+    2.6043584920e-01,
+    5.2574769643e-02,
+    0.0000000000e+00
+};
+
+constexpr std::array<double, MPC_STATE_SIZE> DYNAMICS_WEIGHTS = {
+    2000.0, 2000.0, 1000.0, // X, Y, Theta
+    500.0,  500.0, 500.0,   // XH, V_ACT, W_ACT
+    500.0, 500.0,  // V_CMD_Z1, W_CMD_Z1
+    1000.0, 10.0   // PATH_U, ENERGY
+};
 
 struct MPCFollowLimits {
     double vel_max;
