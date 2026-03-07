@@ -104,7 +104,6 @@ struct HazardLogic {
         }
 
         const Eigen::Vector2d pos = chassis_pose_map.head<2>();
-        const double dist = (pos - *recovery_goal_map).norm();
 
         const Eigen::Vector2d gc = cost_map.map_coord_to_grid(pos);
         const double cost_now = cost_map.interpolate(gc);
@@ -112,7 +111,7 @@ struct HazardLogic {
         const double step_now = dir_map.interpolate(gd).norm();
         const bool safe = (cost_now < p.safe_cost_threshold) && (step_now < p.safe_step_norm_threshold);
 
-        if (safe && dist <= p.goal_reached_dist) {
+        if (safe) {
             if (!safe_since) safe_since = now;
             if ((now - *safe_since).seconds() >= p.safe_hold_time) {
                 RCLCPP_INFO(logger, "Exit HAZARD_RECOVERY (safe for %.2f s)", (now - *safe_since).seconds());

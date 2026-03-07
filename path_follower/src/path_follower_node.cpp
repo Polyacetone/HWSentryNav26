@@ -109,6 +109,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .vel_step_down = declare_parameter<double>("mpc.follow_path.limits.vel_step_down"),
             .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
             .slow_down_deceleration = declare_parameter<double>("mpc.follow_path.limits.slow_down_deceleration"),
+            .slow_down_target_vel = declare_parameter<double>("mpc.follow_path.limits.slow_down_target_vel"),
             .slow_down_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples")),
             .step_norm_threshold = declare_parameter<double>("mpc.follow_path.limits.step_norm_threshold"),
             .step_norm_transition = declare_parameter<double>("mpc.follow_path.limits.step_norm_transition")
@@ -219,7 +220,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .circ_radius = declare_parameter<double>("recovery.search.circ_radius"),
         .circ_angle_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_angle_samples")),
         .circ_radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_radius_samples")),
-        .goal_reached_dist = declare_parameter<double>("recovery.exit.goal_reached_dist"),
         .safe_hold_time = declare_parameter<double>("recovery.exit.safe_hold_time"),
         .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout"),
     };

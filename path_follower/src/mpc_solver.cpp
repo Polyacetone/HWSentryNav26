@@ -594,7 +594,7 @@ struct FollowMPCCostFunctor {
 
             // 9. 终点减速
             const T deceleration = T(params_.follow_limits.slow_down_deceleration); // 期望的减速加速度
-            const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(0.01)); // 基于物理的限速 (v^2 = 2 * a * s)
+            const T v_dec_profile = ceres::sqrt(T(2.0) * deceleration * s_remain + T(params_.follow_limits.slow_down_target_vel * params_.follow_limits.slow_down_target_vel)); // 基于物理的限速 (v1^2 - v0^2 = 2 * a * s)
             residuals[res_idx++] = T(params_.follow_weights.q_v_final) * ceres::fmax(T(0.0), st.v_act - v_dec_profile); // 惩罚超速
 
             // 10. 能量约束

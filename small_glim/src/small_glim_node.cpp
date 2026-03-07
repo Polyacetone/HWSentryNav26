@@ -107,7 +107,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     // Subscribers
     imu_sub = create_subscription<sensor_msgs::msg::Imu>(
         imu_sub_topic,
-        rclcpp::QoS(1),
+        rclcpp::QoS(3),
         [this](const sensor_msgs::msg::Imu::SharedPtr msg) { imu_callback(msg); }
     );
     points_sub = create_subscription<sensor_msgs::msg::PointCloud2>(

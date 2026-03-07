@@ -77,6 +77,7 @@ struct MPCFollowLimits {
     double a_lat_max;
 
     double slow_down_deceleration;
+    double slow_down_target_vel;
     int slow_down_num_samples;
 
     double step_norm_threshold;

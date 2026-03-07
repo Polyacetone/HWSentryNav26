@@ -39,7 +39,6 @@ struct RecoveryParams {
     int circ_radius_samples;
 
     // 退出条件
-    double goal_reached_dist;
     double safe_hold_time;
     double goal_timeout;
 };

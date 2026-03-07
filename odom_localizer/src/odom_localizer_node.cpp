@@ -203,12 +203,18 @@ bool OdomLocalizerNode::perform_gicp_registration() {
     reg.optimizer.max_iterations = gicp_max_iterations_;
     reg.rejector.max_dist_sq = gicp_max_correspondence_distance_ * gicp_max_correspondence_distance_;
 
-    double min_normalized_error = std::numeric_limits<double>::max();
+    double min_normalized_error = std::numeric_limits<double>::infinity();
     double max_overlap = 0.0;
     const auto align = [&](const Eigen::Isometry3d& init) {
         const auto result = reg.align(*map_cloud_, *source_cloud_, *map_kd_tree_, init);
-        const double normalized_error = result.error / static_cast<double>(result.num_inliers);
-        const double overlap = static_cast<double>(result.num_inliers) / static_cast<double>(source_cloud_->size());
+        double normalized_error, overlap;
+        if (result.num_inliers == 0) {
+            normalized_error = std::numeric_limits<double>::infinity();
+            overlap = 0.0;
+        } else {
+            normalized_error = result.error / static_cast<double>(result.num_inliers);
+            overlap = static_cast<double>(result.num_inliers) / static_cast<double>(source_cloud_->size());
+        }
         min_normalized_error = std::min(min_normalized_error, normalized_error);
         max_overlap = std::max(max_overlap, overlap);
         RCLCPP_DEBUG(get_logger(), "Normalized error: %.4f, Overlap: %.4f", normalized_error, overlap);
@@ -236,7 +242,7 @@ bool OdomLocalizerNode::perform_gicp_registration() {
         }
     }
 
-    RCLCPP_INFO(get_logger(), "All GICP attempts failed for this frame! Minimum normalized error: %.4f, Maximum overlap: %.4f", min_normalized_error, max_overlap);
+    RCLCPP_INFO(get_logger(), "GICP failed for all initial guesses! Minimum normalized error: %.4f, maximum overlap: %.4f", min_normalized_error, max_overlap);
     return false;
 }
 
@@ -308,14 +314,23 @@ small_gicp::PointCloud::Ptr OdomLocalizerNode::convert_pointcloud2_to_small_gicp
     const size_t point_step = msg->point_step;
     const size_t num_points = msg->width * msg->height;
     const uint8_t* data_ptr = msg->data.data();
+    bool has_invalid_points = false;
     for (size_t i = 0; i < num_points; i++) {
-        cloud->points.emplace_back(
-            *reinterpret_cast<const float*>(data_ptr + offset_x),
-            *reinterpret_cast<const float*>(data_ptr + offset_y),
-            *reinterpret_cast<const float*>(data_ptr + offset_z),
-            1.0
-        );
+        float x = *reinterpret_cast<const float*>(data_ptr + offset_x);
+        float y = *reinterpret_cast<const float*>(data_ptr + offset_y);
+        float z = *reinterpret_cast<const float*>(data_ptr + offset_z);
         data_ptr += point_step;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            has_invalid_points = true;
+            continue;
+        }
+        cloud->points.emplace_back(x, y, z, 1.0);
+    }
+    if (cloud->points.empty()) {
+        RCLCPP_WARN(get_logger(), "Converted point cloud contains no valid points");
+    }
+    if (has_invalid_points) {
+        RCLCPP_WARN(get_logger(), "Converted point cloud contains invalid points (NaN/Inf)");
     }
     return cloud;
 }
