@@ -4,8 +4,8 @@
       # Initialization
       use_init_world_imu: false # If true, parameter init_T_world_imu and init_v_world_imu should be given instead of estimated
       init_pose_damping_scale: 1000000000.0 # Damping scale for the initial pose (to fix the gauge freedom)
-      initialization_window_size: 3.0 # Initialization window size for the "LOOSE" initialization mode [sec]
-      
+      initialization_window_size: 1.0 # Initialization window size for the "LOOSE" initialization mode [sec]
+
       # Optimization
       smoother_lag: 1.0 # Fixed-lag smoothing window size [sec]
       use_isam2_dogleg: false # Use the dogleg optimizer as the backend of ISAM2 that is slow but more robust
@@ -14,15 +14,15 @@
       fix_imu_bias: false # If true, disable IMU bias estimation and use the initial IMU bias
 
       # Registration
-      registration_type: "VGICP" # Registration type (GICP or VGICP)
+      registration_type: "GICP" # Registration type (GICP or VGICP)
       keyframe_window_size: 1 # Keyframe window size for pairwise registration
       keyframe_delta: 5 # Keyframe delta
       lru_thresh: 100 # LRU cache threshold
       target_downsampling_rate: 0.1 # Downsampling rate for points to be inserted into the target
 
       # GICP + iVox
-      ivox_resolution: 1.0 # iVox resolution
-      ivox_min_dist: 0.2 # Minimum distance between points in an iVox cell
+      ivox_resolution: 0.3 # iVox resolution
+      ivox_min_dist: 0.1 # Minimum distance between points in an iVox cell
 
       # VGICP
       vgicp_resolution: 0.25 # Voxelmap resolution (for VGICP)

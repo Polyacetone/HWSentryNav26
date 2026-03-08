@@ -14,13 +14,20 @@
       predicted_path_pub_topic: "/path_follower/debug/predicted_path"
       v_pred_pub_topic: "/path_follower/debug/v_pred"
       w_pred_pub_topic: "/path_follower/debug/w_pred"
+      merged_cost_map_pub_topic: "/path_follower/debug/merged_cost_map"
 
     misc:
       stop_threshold_dist: 0.8 # 停止距离 (m)
       stop_threshold_u: 0.99 # 停止样条参数u (0~1)
       remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
+    
+    step_erase: # 台阶擦除参数
+      dot_threshold: 0.6 # 朝向与台阶方向点积阈值，>=该值认为需要擦除
+      full_erase_radius: 0.3 # 完全擦除半径 (m)，小于该距离完全擦除
+      cutoff_radius: 0.6 # 擦除截止半径 (m)，超过该距离不擦除
+      length_num_samples: 100 # 路径长度估计采样数
 
-    step_ahead_flag: # 台阶标志位参数（基于MPC预测轨迹 + 防抖）
+    step_ahead_flag: # 台阶标志位参数
       detect_norm_threshold: 0.9 # 方向场模长阈值，>=该值认为经过台阶
       detect_dot_threshold: 0.5 # 朝向与方向场点积阈值，用于区分上/下台阶
       on_count_threshold: 2 # 连续检测到台阶的次数才设置标志位
@@ -75,7 +82,7 @@
           vel_on_step: 0.0 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障权重（全局+局部）
           direction: 3.0 # 台阶方向对齐权重
-          step: 0.1 # 经过台阶惩罚
+          step: 0.0 # 经过台阶惩罚
       stop: # 停止模式
         limits: # 运动限制
           vel_max: 1.5 # 最大线速度硬约束 (m/s)
