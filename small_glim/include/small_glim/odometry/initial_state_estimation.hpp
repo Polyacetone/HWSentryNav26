@@ -11,9 +11,18 @@
 namespace small_glim {
 
 /**
-* @brief Naive initial state estimator that simply calculates a pose that aligns linear acc with the gravity direction
-*        Would not work well when the sensor is moving
-*/
+ * @brief Initial state estimator used by odometry subsystem.
+ *
+ * The estimator has two operating modes controlled by configuration:
+ *   - graph-based (default): builds a small factor graph combining LiDAR
+ *     odometry and IMU measurements to estimate initial pose, velocity, and
+ *     biases.  This is the original, more sophisticated algorithm.
+ *   - naive: when `odometry_estimation.naive_initialization` is true the
+ *     estimator simply averages the direction of accelerations collected over
+ *     the initialization window and assumes gravity-aligned z axis with zero
+ *     initial position.  This mode is cheap and sufficient for many cases where
+ *     the platform is stationary at startup.
+ */
 class InitialStateEstimation {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -47,6 +56,8 @@ private:
     bool force_init;
     Eigen::Vector3d init_v_world_imu;
     Eigen::Isometry3d init_T_world_imu;
+    bool naive_mode;
+    bool align_initial_odom_to_imu;
 
     std::unique_ptr<CloudCovarianceEstimation> covariance_estimation;
     std::shared_ptr<gtsam_points::iVox> target_ivox;

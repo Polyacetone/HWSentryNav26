@@ -25,7 +25,7 @@ public:
 
     void timer_callback();
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
-    size_t points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
+    size_t lidar_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
 
     void pub_odometry(const EstimationFrame::ConstPtr frame);
     void pub_cloud(const EstimationFrame::ConstPtr frame, const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher);
@@ -43,17 +43,18 @@ private:
     std::unique_ptr<AsyncMapping> mapping;
 
     double imu_time_offset;
-    double points_time_offset;
+    double lidar_time_offset;
     double acc_scale;
     bool enable_mapping;
     bool enable_tf_publish;
 
     std::string intensity_field, ring_field;
+    std::string imu_frame_id, lidar_frame_id, odometry_frame_id;
 
     // ROS-related
     rclcpp::TimerBase::SharedPtr timer;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_sub;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_cloud_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr ivox_cloud_pub;
@@ -84,11 +85,14 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     }
 
     imu_time_offset = config->param<double>("node.imu_time_offset");
-    points_time_offset = config->param<double>("node.points_time_offset");
+    lidar_time_offset = config->param<double>("node.lidar_time_offset");
     acc_scale = config->param<double>("node.acc_scale");
 
     intensity_field = config->param<std::string>("sensors.intensity_field");
     ring_field = config->param<std::string>("sensors.ring_field");
+    imu_frame_id = config->param<std::string>("node.imu_frame_id");
+    lidar_frame_id = config->param<std::string>("node.lidar_frame_id");
+    odometry_frame_id = config->param<std::string>("node.odometry_frame_id");
 
     // Preprocessing
     time_keeper = std::make_unique<TimeKeeper>(config);
@@ -99,7 +103,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 
     // ROS-related
     const std::string imu_sub_topic = config->param<std::string>("node.imu_sub_topic");
-    const std::string points_sub_topic = config->param<std::string>("node.points_sub_topic");
+    const std::string lidar_sub_topic = config->param<std::string>("node.lidar_sub_topic");
     const std::string odometry_pub_topic = config->param<std::string>("node.odometry_pub_topic");
     const std::string registered_cloud_pub_topic = config->param<std::string>("node.registered_cloud_pub_topic");
     const std::string ivox_cloud_pub_topic = config->param<std::string>("node.ivox_cloud_pub_topic");
@@ -110,10 +114,10 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
         rclcpp::QoS(3),
         [this](const sensor_msgs::msg::Imu::SharedPtr msg) { imu_callback(msg); }
     );
-    points_sub = create_subscription<sensor_msgs::msg::PointCloud2>(
-        points_sub_topic,
+    lidar_sub = create_subscription<sensor_msgs::msg::PointCloud2>(
+        lidar_sub_topic,
         rclcpp::QoS(1),
-        [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { points_callback(msg); }
+        [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { lidar_callback(msg); }
     );
     odometry_pub = create_publisher<nav_msgs::msg::Odometry>(odometry_pub_topic, rclcpp::QoS(1));
     registered_cloud_pub = create_publisher<sensor_msgs::msg::PointCloud2>(registered_cloud_pub_topic, rclcpp::QoS(1));
@@ -151,13 +155,13 @@ void SmallGlimNode::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
     odometry_estimation->insert_imu(imu_stamp, linear_acc, angular_vel);
 }
 
-size_t SmallGlimNode::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+size_t SmallGlimNode::lidar_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
     const auto raw_points = std::make_shared<RawPoints>(*msg, intensity_field, ring_field);
     if (raw_points == nullptr) {
         logger::warn("node", "failed to extract points from message");
         return 0;
     }
-    raw_points->stamp += points_time_offset;
+    raw_points->stamp += lidar_time_offset;
     time_keeper->process(raw_points);
     auto preprocessed = preprocessor->preprocess(raw_points);
     odometry_estimation->insert_frame(preprocessed);
@@ -193,22 +197,22 @@ void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {
 
     if (enable_tf_publish) {
         geometry_msgs::msg::TransformStamped tf_lidar_to_imu;
-        tf_lidar_to_imu.header.frame_id = "imu_link";
-        tf_lidar_to_imu.child_frame_id = "lidar_link";
+        tf_lidar_to_imu.header.frame_id = imu_frame_id;
+        tf_lidar_to_imu.child_frame_id = lidar_frame_id;
         tf_lidar_to_imu.header.stamp = stamp;
         utils::convert(T_lidar_imu.inverse(), tf_lidar_to_imu.transform);
         tf_static_broadcaster->sendTransform(tf_lidar_to_imu);
         geometry_msgs::msg::TransformStamped tf_imu_to_odom;
-        tf_imu_to_odom.header.frame_id = "odom";
-        tf_imu_to_odom.child_frame_id = "imu_link";
+        tf_imu_to_odom.header.frame_id = odometry_frame_id;
+        tf_imu_to_odom.child_frame_id = imu_frame_id;
         tf_imu_to_odom.header.stamp = stamp;
         utils::convert(T_odom_imu, tf_imu_to_odom.transform);
         tf_broadcaster->sendTransform(tf_imu_to_odom);
     }
 
     nav_msgs::msg::Odometry odom;
-    odom.header.frame_id = "odom";
-    odom.child_frame_id = "imu_link";
+    odom.header.frame_id = odometry_frame_id;
+    odom.child_frame_id = imu_frame_id;
     odom.header.stamp = stamp;
     utils::convert(T_odom_imu, odom.pose.pose);
     utils::convert(v_odom_imu, odom.twist.twist.linear);
@@ -222,7 +226,7 @@ void SmallGlimNode::pub_cloud(
     const size_t num_points = frame->frame->num_points;
     const auto& points = frame->frame->points;
     sensor_msgs::msg::PointCloud2 msg;
-    msg.header.frame_id = "odom";
+    msg.header.frame_id = odometry_frame_id;
     msg.header.stamp = rclcpp::Time(static_cast<int64_t>(frame->stamp * 1e9));
     msg.height = 1;
     msg.width = static_cast<uint32_t>(num_points);

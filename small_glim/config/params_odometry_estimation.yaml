@@ -4,7 +4,9 @@
       # Initialization
       use_init_world_imu: false # If true, parameter init_T_world_imu and init_v_world_imu should be given instead of estimated
       init_pose_damping_scale: 1000000000.0 # Damping scale for the initial pose (to fix the gauge freedom)
-      initialization_window_size: 1.0 # Initialization window size for the "LOOSE" initialization mode [sec]
+      initialization_window_size: 1.0 # Initialization window size [sec]
+      naive_initialization: true # If true, skip the graph-based solver and estimate initial attitude by averaging early IMU accelerations (z axis up, position zero)
+      align_initial_odom_to_imu: true # If true, after gravity leveling, use the initial IMU x-axis heading to fix the yaw gauge
 
       # Optimization
       smoother_lag: 1.0 # Fixed-lag smoothing window size [sec]
@@ -21,7 +23,7 @@
       target_downsampling_rate: 0.1 # Downsampling rate for points to be inserted into the target
 
       # GICP + iVox
-      ivox_resolution: 0.3 # iVox resolution
+      ivox_resolution: 0.5 # iVox resolution
       ivox_min_dist: 0.1 # Minimum distance between points in an iVox cell
 
       # VGICP
