@@ -133,8 +133,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .slow_down_deceleration = declare_parameter<double>("mpc.follow_path.limits.slow_down_deceleration"),
             .slow_down_target_vel = declare_parameter<double>("mpc.follow_path.limits.slow_down_target_vel"),
             .slow_down_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples")),
-            .step_norm_threshold = declare_parameter<double>("mpc.follow_path.limits.step_norm_threshold"),
-            .step_norm_transition = declare_parameter<double>("mpc.follow_path.limits.step_norm_transition")
         },
         .follow_weights = {
             .q_y = declare_parameter<double>("mpc.follow_path.weights.q_y"),
@@ -151,7 +149,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .vel_on_step = declare_parameter<double>("mpc.follow_path.weights.vel_on_step"),
             .obstacle = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
             .direction = declare_parameter<double>("mpc.follow_path.weights.direction"),
-            .step = declare_parameter<double>("mpc.follow_path.weights.step")
         },
         .follow_projection = {
             .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.projection.num_samples")),
@@ -169,8 +166,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .vel_step_up = declare_parameter<double>("mpc.stop.limits.vel_step_up"),
             .vel_step_down = declare_parameter<double>("mpc.stop.limits.vel_step_down"),
             .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max"),
-            .step_norm_threshold = declare_parameter<double>("mpc.stop.limits.step_norm_threshold"),
-            .step_norm_transition = declare_parameter<double>("mpc.stop.limits.step_norm_transition")
         },
         .stop_weights = {
             .q_v = declare_parameter<double>("mpc.stop.weights.q_v"),
@@ -196,8 +191,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .acc_max = declare_parameter<double>("mpc.recovery.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.recovery.limits.alpha_max"),
             .a_lat_max = declare_parameter<double>("mpc.recovery.limits.a_lat_max"),
-            .step_norm_threshold = declare_parameter<double>("mpc.recovery.limits.step_norm_threshold"),
-            .step_norm_transition = declare_parameter<double>("mpc.recovery.limits.step_norm_transition")
         },
         .recovery_weights = {
             .q_goal_xy = declare_parameter<double>("mpc.recovery.weights.q_goal_xy"),

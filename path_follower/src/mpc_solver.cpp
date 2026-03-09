@@ -27,18 +27,6 @@ inline int clamp_int(const int v, const int lo, const int hi) {
 }
 
 template<typename T>
-inline T smoothstep01(const T& t_in) {
-    const T t = ceres::fmin(T(1.0), ceres::fmax(T(0.0), t_in));
-    return t * t * (T(3.0) - T(2.0) * t);
-}
-
-template<typename T>
-inline T smoothstep(const T& x, const T& edge0, const T& edge1) {
-    const T denom = ceres::fmax(T(1e-12), edge1 - edge0);
-    return smoothstep01((x - edge0) / denom);
-}
-
-template<typename T>
 inline T softplus(const T& x) {
     // Numerically-stable softplus: log(1 + exp(x))
     // Use mild branching to avoid overflow while keeping derivatives well-behaved.
@@ -573,14 +561,6 @@ struct FollowMPCCostFunctor {
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const auto dir_unit = dir / dir_norm;
 
-            // 台阶惩罚使用接近门控，避免不必要地接近台阶
-            const T step_gate = smoothstep(
-                dir_norm,
-                T(params_.follow_limits.step_norm_threshold),
-                T(params_.follow_limits.step_norm_threshold + params_.follow_limits.step_norm_transition)
-            );
-            residuals[res_idx++] = T(params_.follow_weights.step) * step_gate;
-
             // 台阶方向对齐
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
@@ -735,23 +715,16 @@ struct StopMPCCostFunctor {
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
             const auto dir_unit = dir / dir_norm;
 
-            // 方向场在非台阶区域可能存在小噪声。用 step_norm_threshold 做门控，避免"停止模式"在接近 0 速度时被拉回一个小正速度。
-            const T step_gate = smoothstep(
-                dir_norm,
-                T(params_.stop_limits.step_norm_threshold),
-                T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
-            );
-
             // 台阶方向对齐
             const Eigen::Matrix<T, 2, 1> heading(ceres::cos(st.theta), ceres::sin(st.theta));
             const T heading_cross_dir = heading.x() * dir.y() - heading.y() * dir.x();
-            residuals[res_idx++] = T(params_.stop_weights.direction) * step_gate * ceres::abs(heading_cross_dir);
+            residuals[res_idx++] = T(params_.stop_weights.direction) * dir_norm * ceres::abs(heading_cross_dir);
 
             // 台阶区域速度保持
             const T cos_theta = heading.dot(dir_unit);
             const T weight_up = (cos_theta + T(1.0)) / T(2.0); // weight_up 为 1 时表示完全上坡，为 0 时表示完全下坡
             const T target_vel_step = weight_up * T(params_.stop_limits.vel_step_up) + (T(1.0) - weight_up) * T(params_.stop_limits.vel_step_down);
-            residuals[res_idx++] = T(params_.stop_weights.vel_on_step) * step_gate * dir_norm * ceres::abs(st.v_act - target_vel_step);
+            residuals[res_idx++] = T(params_.stop_weights.vel_on_step) * dir_norm * dir_norm * ceres::abs(st.v_act - target_vel_step);
 
             // 能量约束
             const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
@@ -772,12 +745,7 @@ struct StopMPCCostFunctor {
         residuals[res_idx++] = T(params_.stop_weights.obstacle_terminal) * (cost_terminal / T(255.0));
         const auto dir = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
         const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-        const T step_gate = smoothstep(
-            dir_norm,
-            T(params_.stop_limits.step_norm_threshold),
-            T(params_.stop_limits.step_norm_threshold + params_.stop_limits.step_norm_transition)
-        );
-        residuals[res_idx++] = T(params_.stop_weights.step_terminal) * step_gate;
+        residuals[res_idx++] = T(params_.stop_weights.step_terminal) * dir_norm;
 
         return true;
     }
@@ -902,12 +870,7 @@ struct RecoveryMPCCostFunctor {
             // 8. 台阶方向场：视为不可通行区域
             const auto dir = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
             const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
-            const T step_gate = smoothstep(
-                dir_norm,
-                T(params_.recovery_limits.step_norm_threshold),
-                T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
-            );
-            residuals[res_idx++] = T(params_.recovery_weights.step) * step_gate;
+            residuals[res_idx++] = T(params_.recovery_weights.step) * dir_norm;
 
             // 能量约束
             const T w_e = T(params_.energy.enable ? params_.energy.weight : 0.0);
@@ -932,14 +895,9 @@ struct RecoveryMPCCostFunctor {
         const T cost_terminal = eval_cost_bilinear(cost_grid_, cost_info_, st.x, st.y);
         residuals[res_idx++] = T(params_.recovery_weights.obstacle_terminal) * (cost_terminal / T(255.0));
 
-        const auto dirT = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
-        const T dir_normT = ceres::sqrt(dirT.squaredNorm() + T(1e-10));
-        const T step_gateT = smoothstep(
-            dir_normT,
-            T(params_.recovery_limits.step_norm_threshold),
-            T(params_.recovery_limits.step_norm_threshold + params_.recovery_limits.step_norm_transition)
-        );
-        residuals[res_idx++] = T(params_.recovery_weights.step_terminal) * step_gateT;
+        const auto dir = eval_dir_bilinear(dir_grid_, dir_info_, st.x, st.y);
+        const T dir_norm = ceres::sqrt(dir.squaredNorm() + T(1e-10));
+        residuals[res_idx++] = T(params_.recovery_weights.step_terminal) * dir_norm;
 
         return true;
     }
@@ -1129,7 +1087,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     // 构建优化问题
     ceres::Problem problem;
 
-    constexpr int FOLLOW_NUM_RESIDUALS = 16 * MPC_HORIZON;
+    constexpr int FOLLOW_NUM_RESIDUALS = 15 * MPC_HORIZON;
     auto* cost_function = new ceres::AutoDiffCostFunction<
         FollowMPCCostFunctor, FOLLOW_NUM_RESIDUALS, MPC_PARAM_SIZE>(
         new FollowMPCCostFunctor(

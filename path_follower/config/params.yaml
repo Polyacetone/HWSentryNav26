@@ -23,8 +23,8 @@
     
     step_erase: # 台阶擦除参数
       dot_threshold: 0.6 # 朝向与台阶方向点积阈值，>=该值认为需要擦除
-      full_erase_radius: 0.3 # 完全擦除半径 (m)，小于该距离完全擦除
-      cutoff_radius: 0.6 # 擦除截止半径 (m)，超过该距离不擦除
+      full_erase_radius: 0.4 # 完全擦除半径 (m)，小于该距离完全擦除
+      cutoff_radius: 0.8 # 擦除截止半径 (m)，超过该距离不擦除
       length_num_samples: 100 # 路径长度估计采样数
 
     step_ahead_flag: # 台阶标志位参数
@@ -65,24 +65,21 @@
           slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
           slow_down_target_vel: 0.3 # 终点减速目标速度 (m/s)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
-          step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
-          step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
-          q_y: 0.4 # 横向误差权重
-          q_theta: 0.2 # 航向误差权重
-          q_u: 2.0 # 进度项权重
+          q_y: 0.6 # 横向误差权重
+          q_theta: 0.3 # 航向误差权重
+          q_u: 2.4 # 进度项权重
           q_v_final: 0.4 # 终点减速权重
           r_v: 0.01 # 线速度正则
-          r_omega: 0.04 # 角速度正则
-          r_dv: 0.8 # 线速度平滑
-          r_domega: 0.2 # 角速度平滑
+          r_omega: 0.01 # 角速度正则
+          r_dv: 0.1 # 线速度平滑
+          r_domega: 0.1 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
           vel_on_step: 0.0 # 台阶区域速度保持权重
           obstacle: 3.0 # 避障权重（全局+局部）
           direction: 3.0 # 台阶方向对齐权重
-          step: 0.0 # 经过台阶惩罚
       stop: # 停止模式
         limits: # 运动限制
           vel_max: 1.5 # 最大线速度硬约束 (m/s)
@@ -95,8 +92,6 @@
           vel_step_up: 1.0 # 上台阶期望速度 (m/s)
           vel_step_down: 1.0 # 下台阶期望速度 (m/s)
           a_lat_max: 3.0 # 侧向加速度限制：|v_act*omega_act| (m/s²)
-          step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
-          step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
           q_v: 0.6 # 线速度正则
           q_omega: 0.6 # 角速度正则
@@ -121,8 +116,6 @@
           acc_max: 2.4 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           a_lat_max: 3.0 # 侧向加速度限制：|v_act*omega_act| (m/s²)
-          step_norm_threshold: 0.01 # 台阶方向场模长阈值：>=该值认为进入台阶区域
-          step_norm_transition: 0.05 # smoothstep过渡宽度
         weights: # 权重
           q_goal_xy: 0.2 # 每步目标点吸引（x/y误差）
           q_goal_theta: 0.1 # 朝向目标点

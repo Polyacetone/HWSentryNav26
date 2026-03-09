@@ -79,9 +79,6 @@ struct MPCFollowLimits {
     double slow_down_deceleration;
     double slow_down_target_vel;
     int slow_down_num_samples;
-
-    double step_norm_threshold;
-    double step_norm_transition;
 };
 
 struct MPCFollowWeights {
@@ -101,7 +98,6 @@ struct MPCFollowWeights {
     double vel_on_step;
     double obstacle;
     double direction;
-    double step;
 };
 
 struct MPCFollowProjection {
@@ -123,9 +119,6 @@ struct MPCStopLimits {
     double vel_step_up;
     double vel_step_down;
     double a_lat_max;
-
-    double step_norm_threshold;
-    double step_norm_transition;
 };
 
 struct MPCStopWeights {
@@ -156,9 +149,6 @@ struct MPCRecoveryLimits {
     double acc_max;
     double alpha_max;
     double a_lat_max;
-
-    double step_norm_threshold;
-    double step_norm_transition;
 };
 
 struct MPCRecoveryWeights {

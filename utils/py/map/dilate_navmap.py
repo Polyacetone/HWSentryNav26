@@ -153,6 +153,6 @@ if __name__ == "__main__":
     original_map = cv2.imread(map_path)
     robot_radius = 1  # 像素
     cutoff_radius = 4  # 像素
-    decay_alpha = 1.0  # 衰减系数
+    decay_alpha = 0.5  # 衰减系数
     inflated_map = inflate_navigation_map(original_map, robot_radius, cutoff_radius, decay_alpha)
     cv2.imwrite(save_path, inflated_map)
