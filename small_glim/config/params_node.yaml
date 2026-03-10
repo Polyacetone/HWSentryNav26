@@ -6,12 +6,12 @@
       enable_tf_publish: false
       imu_time_offset: 0.0
       lidar_time_offset: 0.0
-      acc_scale: 9.80665
-      imu_sub_topic: "/mid360_driver/imu"
+      acc_scale: 1.0
+      imu_sub_topic: "/serial_bridge/imu_raw"
       lidar_sub_topic: "/mid360_driver/lidar"
       odometry_pub_topic: "/small_glim/odometry"
       registered_cloud_pub_topic: "/small_glim/registered_cloud"
       ivox_cloud_pub_topic: "/small_glim/ivox_cloud"
-      imu_frame_id: "livox_imu_link"
+      imu_frame_id: "imu_link"
       lidar_frame_id: "lidar_link"
       odometry_frame_id: "odom"

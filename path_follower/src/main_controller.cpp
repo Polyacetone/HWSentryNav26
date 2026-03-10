@@ -317,6 +317,12 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         step_up_on_count_ = step_up_off_count_ = 0;
         step_down_on_count_ = step_down_off_count_ = 0;
         step_up_flag_ = step_down_flag_ = false;
+        last_reference_u_ = 0.0;
+        mpc_controller_->reset_warm_start();
+    }
+
+    if (next == FsmState::FOLLOW && prev != FsmState::FOLLOW) {
+        last_reference_u_ = 0.0;
     }
 
     // DEAD 只是临时冻结；不要让它打断 HAZARD_RECOVERY 的恢复目标/计时

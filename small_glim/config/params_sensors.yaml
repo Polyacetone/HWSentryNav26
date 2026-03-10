@@ -8,13 +8,13 @@
       imu_int_noise: 0.001 # Integration noise
       imu_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # IMU bias
       imu_bias_noise: 0.0001 # Bias randomwalk noise
-      imu_acc_saturation_thresh: 39.0 # Accelerometer saturation threshold (m/s^2)
+      imu_acc_saturation_thresh: 240.0 # Accelerometer saturation threshold (m/s^2)
       imu_gyro_saturation_thresh: 34.5 # Gyroscope saturation threshold (rad/s)
       imu_saturation_mult: 1.0 # Covariance multiplier when saturated
 
       # LiDAR
       global_shutter_lidar: false # If true, fill per-point timestamps with zero and disable points deskewing
-      T_lidar_imu: [0.006, -0.012, 0.008, 0.0, 0.0, 0.0, 1.0] # LiDAR-IMU transformation (xyz, xyzw)
+      T_lidar_imu: [-0.10809, -0.01049, 0.1179, 1.0, 0.0, 0.0, 0.0] # LiDAR-IMU transformation (xyz, xyzw)
       intensity_field: "intensity" # Field name used for extracting point intensity from PointCloud2 message
       ring_field: "line" # Field name used for extracting ring number (laser ID) from PointCloud2 message
       autoconf_perpoint_times: true # If true, automatically configure per-point timestamps. If false, use the following settings.
