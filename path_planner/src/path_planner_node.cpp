@@ -7,10 +7,11 @@
 #include <nav_msgs/msg/odometry.hpp>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <geometry_msgs/msg/point_stamped.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <interfaces/msg/nav_goal.hpp>
+#include <interfaces/msg/global_path.hpp>
 
 #include <path_planner/nav_map.hpp>
 #include <path_planner/a_star_planner.hpp>
@@ -26,8 +27,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_sub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr control_points_pub_;
+    rclcpp::Subscription<interfaces::msg::NavGoal>::SharedPtr goal_sub_;
+    rclcpp::Publisher<interfaces::msg::GlobalPath>::SharedPtr control_points_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_optimized_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -49,7 +50,7 @@ private:
     double start_prediction_collision_check_step_;
 
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
-    void goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
+    void goal_callback(const interfaces::msg::NavGoal::SharedPtr msg);
     void plan_new_path();
     void update_optimized_path();
     bool is_map_point_feasible(const Eigen::Vector2d& map_pt) const;
@@ -58,7 +59,8 @@ private:
     void publish_path(
         const std::vector<Eigen::Vector2d>& control_points,
         const std::vector<Eigen::Vector2d>& rough_path,
-        const std::vector<Eigen::Vector2d>& optimized_path
+        const std::vector<Eigen::Vector2d>& optimized_path,
+        bool fixed = false
     );
 };
 
@@ -130,9 +132,9 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         }
     );
     std::string goal_sub_topic = declare_parameter<std::string>("goal_sub_topic");
-    goal_sub_ = create_subscription<geometry_msgs::msg::PointStamped>(
+    goal_sub_ = create_subscription<interfaces::msg::NavGoal>(
         goal_sub_topic, 1,
-        [this](const geometry_msgs::msg::PointStamped::SharedPtr msg) { goal_callback(msg); }
+        [this](const interfaces::msg::NavGoal::SharedPtr msg) { goal_callback(msg); }
     );
     std::string odom_sub_topic = declare_parameter<std::string>("odom_sub_topic");
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
@@ -140,7 +142,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         [this](const nav_msgs::msg::Odometry::SharedPtr msg) { last_odom_msg_ = msg; }
     );
     std::string control_points_pub_topic = declare_parameter<std::string>("control_points_pub_topic");
-    control_points_pub_ = create_publisher<nav_msgs::msg::Path>(control_points_pub_topic, 1);
+    control_points_pub_ = create_publisher<interfaces::msg::GlobalPath>(control_points_pub_topic, 1);
 }
 
 bool PathPlannerNode::is_map_point_feasible(const Eigen::Vector2d& map_pt) const {
@@ -201,10 +203,10 @@ Eigen::Vector2d PathPlannerNode::predict_start_map(const Eigen::Vector2d& curren
     return adjust_reachable_start_on_segment(current_map, predicted);
 }
 
-void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg) {
-    if (!global_cost_map_ || !global_direction_map_) { // 确保地图已经准备好
+void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr msg) {
+    if (!global_cost_map_ || !global_direction_map_) {
         RCLCPP_ERROR(get_logger(), "Map not ready yet!");
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, msg->fixed);
         return;
     }
 
@@ -215,14 +217,16 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
         );
     } catch (const std::exception& ex) {
         RCLCPP_ERROR(get_logger(), "Failed to lookup chassis_link to map: %s", ex.what());
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, msg->fixed);
         return;
     }
 
-    const Eigen::Vector2d goal_map(msg->point.x, msg->point.y);
+    const Eigen::Vector2d goal_map(msg->x, msg->y);
     const Eigen::Vector2d current_map(chassis_to_map.getOrigin().x(), chassis_to_map.getOrigin().y());
+    const bool fixed = msg->fixed;
 
-    if ((goal_map - current_map).norm() < lazy_distance_) {
+    // fixed 目标不受 lazy_distance 限制
+    if (!fixed && (goal_map - current_map).norm() < lazy_distance_) {
         RCLCPP_INFO(get_logger(), "New goal is within lazy distance (%.2f m)", lazy_distance_);
         publish_path({}, {}, {});
         return;
@@ -234,31 +238,42 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
 
     if (!global_cost_map_->is_valid_coord(start_grid)) {
         RCLCPP_WARN(get_logger(), "Start (%.2f, %.2f) is out of bound!", start_map.x(), start_map.y());
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, fixed);
         return;
     }
 
     if (!is_map_point_feasible(start_map)) {
         RCLCPP_ERROR(get_logger(), "Start (%.2f, %.2f) is not feasible!", start_map.x(), start_map.y());
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, fixed);
         return;
     }
 
     if (!global_cost_map_->is_valid_coord(goal_grid)) {
         RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is out of bound!", goal_map.x(), goal_map.y());
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, fixed);
         return;
     }
 
     if (!is_map_point_feasible(goal_map)) {
         RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is not feasible!", goal_map.x(), goal_map.y());
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, fixed);
+        return;
+    }
+
+    // fixed 目标距离起点很近时，直接发布以目标点为中心的最小路径
+    const double dist = (goal_map - start_map).norm();
+    if (fixed && dist < global_cost_map_->resolution * 2.0) {
+        RCLCPP_INFO(get_logger(), "Fixed goal very close to start (%.4f m), publishing minimal path", dist);
+        const Eigen::Vector2d goal_g = goal_grid;
+        const std::vector<Eigen::Vector2d> cps = {goal_g, goal_g, goal_g};
+        publish_path(cps, {}, {}, true);
         return;
     }
 
     RCLCPP_INFO(
-        get_logger(), "New valid goal: Src(%.2f, %.2f) -> Dst(%.2f, %.2f)",
-        start_map.x(), start_map.y(), goal_map.x(), goal_map.y()
+        get_logger(), "New valid goal: Src(%.2f, %.2f) -> Dst(%.2f, %.2f)%s",
+        start_map.x(), start_map.y(), goal_map.x(), goal_map.y(),
+        fixed ? " [FIXED]" : ""
     );
 
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -272,7 +287,7 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
     );
     if (!plan_result) {
         RCLCPP_ERROR(get_logger(), "Path planning failed: %s", plan_result.error().c_str());
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, fixed);
         return;
     }
     std::vector<Eigen::Vector2d> rough_path;
@@ -298,7 +313,7 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
     );
     if (!optimize_result) {
         RCLCPP_ERROR(get_logger(), "Path optimization failed: %s", optimize_result.error().c_str());
-        publish_path({}, {}, {});
+        publish_path({}, {}, {}, fixed);
         return;
     }
     std::tie(control_points, optimized_path) = *optimize_result;
@@ -310,13 +325,14 @@ void PathPlannerNode::goal_callback(const geometry_msgs::msg::PointStamped::Shar
         static_cast<int>(optimized_path.size())
     );
 
-    publish_path(control_points, rough_path, optimized_path);
+    publish_path(control_points, rough_path, optimized_path, fixed);
 }
 
 void PathPlannerNode::publish_path(
     const std::vector<Eigen::Vector2d>& control_points,
     const std::vector<Eigen::Vector2d>& rough_path,
-    const std::vector<Eigen::Vector2d>& optimized_path
+    const std::vector<Eigen::Vector2d>& optimized_path,
+    bool fixed
 ) {
     // 发布路径转换到地图坐标系
     const auto to_map_coord = [this](const std::vector<Eigen::Vector2d>& points) {
@@ -326,7 +342,16 @@ void PathPlannerNode::publish_path(
         }
         return map_points;
     };
-    control_points_pub_->publish(path_to_nav_msg(to_map_coord(control_points)));
+    const auto map_cps = to_map_coord(control_points);
+    interfaces::msg::GlobalPath gp_msg;
+    gp_msg.x.reserve(map_cps.size());
+    gp_msg.y.reserve(map_cps.size());
+    for (const auto& pt : map_cps) {
+        gp_msg.x.push_back(static_cast<float>(pt.x()));
+        gp_msg.y.push_back(static_cast<float>(pt.y()));
+    }
+    gp_msg.fixed = fixed;
+    control_points_pub_->publish(gp_msg);
     if (enable_debug_) {
         debug_rough_path_pub_->publish(path_to_nav_msg(to_map_coord(rough_path)));
         debug_optimized_path_pub_->publish(path_to_nav_msg(to_map_coord(optimized_path)));

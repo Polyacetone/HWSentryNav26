@@ -23,6 +23,10 @@ struct ControlInput {
     // ─── 路径 ───
     std::optional<SplineD> global_path;
 
+    // ─── fixed 目标 ───
+    bool fixed_goal = false;                                     // 当前目标为 fixed 类型
+    Eigen::Vector2d fixed_goal_pos = Eigen::Vector2d::Zero();    // fixed 目标位置 (map)
+
     // ─── 底盘状态 ───
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();  // (x, y, theta) in map
     Eigen::Vector2d chassis_status = Eigen::Vector2d::Zero();    // (v_act, ω_act)
@@ -118,6 +122,7 @@ private:
     ControlOutput execute_stop(const ControlInput& input);
     ControlOutput execute_recovery(const ControlInput& input);
     ControlOutput execute_stuck_reverse(const ControlInput& input);
+    ControlOutput execute_fixed(const ControlInput& input);
 
     void on_state_transition(FsmState prev, FsmState next);
     void update_recovery_goal_if_needed(const ControlInput& input);

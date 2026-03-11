@@ -139,6 +139,7 @@ struct StStopping;
 struct StDead;
 struct StHazardRecovery;
 struct StStuckReverse;
+struct StFixed;
 
 // ═══════════════════════ 状态机本体 ═════════════════════════
 
@@ -163,6 +164,9 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
 
     // ──── Hazard Recovery 恢复后目标态 ────
     FsmState hazard_resume_state = FsmState::IDLE;
+
+    // ──── Spin 恢复后目标态（用于 FIXED → SPIN → FIXED） ────
+    FsmState spin_resume_state = FsmState::IDLE;
 
     // ──── 恢复目标搜索逻辑 ────
     HazardLogic hazard_logic;
@@ -248,6 +252,11 @@ struct StFollow final : sc::state<StFollow, Machine> {
             return transit<StStuckReverse>();
         }
 
+        // FOLLOW → FIXED：fixed 目标且距离足够近
+        if (in.fixed_goal && in.close_to_fixed_goal) {
+            return transit<StFixed>();
+        }
+
         const auto desired = compute_desired(in);
         if (desired == NormalDest::FOLLOW) return discard_event();
 
@@ -277,14 +286,27 @@ struct StSpin final : sc::state<StSpin, Machine> {
         }
 
         if (m.params.recovery.enable && in.merged_cost_map && in.global_direction_map) {
-            if (HazardLogic::is_pose_hazard(m.params.recovery, *in.merged_cost_map, *in.global_direction_map, in.chassis_pose_map.head<2>())) {
-                m.hazard_resume_state = FsmState::SPIN;
-                return transit<StHazardRecovery>();
+            // FIXED 不响应 hazard recovery，从 FIXED 进入的 SPIN 也不响应
+            if (m.spin_resume_state != FsmState::FIXED) {
+                if (HazardLogic::is_pose_hazard(m.params.recovery, *in.merged_cost_map, *in.global_direction_map, in.chassis_pose_map.head<2>())) {
+                    m.hazard_resume_state = FsmState::SPIN;
+                    m.spin_resume_state = FsmState::IDLE;
+                    return transit<StHazardRecovery>();
+                }
             }
         }
 
         const auto desired = compute_desired(in);
         if (desired == NormalDest::SPIN) return discard_event();
+
+        // SPIN 结束，检查是否需要返回 FIXED
+        if (m.spin_resume_state == FsmState::FIXED) {
+            m.spin_resume_state = FsmState::IDLE;
+            if (in.fixed_goal) {
+                return transit<StFixed>();
+            }
+            // fixed 目标已取消，走正常流程
+        }
 
         m.stop_dest = desired;
         return transit<StStopping>();
@@ -388,9 +410,13 @@ struct StDead final : sc::state<StDead, Machine> {
         if (resume == FsmState::HAZARD_RECOVERY && !m.params.recovery.enable) {
             resume = desired_state;
         }
+        if (resume == FsmState::FIXED && !in.fixed_goal) {
+            resume = desired_state;
+        }
 
         switch (resume) {
             case FsmState::HAZARD_RECOVERY: return transit<StHazardRecovery>();
+            case FsmState::FIXED: return transit<StFixed>();
             case FsmState::FOLLOW: return transit<StFollow>();
             case FsmState::SPIN: return transit<StSpin>();
             case FsmState::IDLE: return transit<StIdle>();
@@ -482,6 +508,12 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
 
         const double elapsed = (in.stamp - m.reverse_start_time).seconds();
         if (elapsed >= m.params.stuck.reverse_duration) {
+            // 倒车结束，检查是否需要返回 FIXED
+            if (in.fixed_goal) {
+                RCLCPP_INFO(m.logger, "STUCK_REVERSE done (%.2f s) -> entering FIXED", elapsed);
+                m.output.clear_global_path = true;
+                return transit<StFixed>();
+            }
             RCLCPP_INFO(m.logger, "STUCK_REVERSE done (%.2f s) -> clearing path, entering IDLE", elapsed);
             m.output.clear_global_path = true;
             return transit<StIdle>();
@@ -492,6 +524,58 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
 };
 
 } // anonymous namespace
+
+// ─────────────── FIXED ───────────────
+namespace {
+
+struct StFixed final : sc::state<StFixed, Machine> {
+    using reactions = sc::custom_reaction<EvUpdate>;
+
+    explicit StFixed(my_context ctx) : sc::state<StFixed, Machine>(ctx) {
+        auto& m = context<Machine>();
+        m.active_state = FsmState::FIXED;
+        m.stuck_monitor.reset();
+        RCLCPP_INFO(m.logger, "FSM -> FIXED");
+    }
+
+    sc::result react(const EvUpdate& ev) {
+        auto& m = context<Machine>();
+        const auto& in = ev.input;
+
+        // DEAD（顶层优先级）
+        if (in.chassis_dead) {
+            m.dead_resume_state = FsmState::FIXED;
+            m.stuck_monitor.reset();
+            return transit<StDead>();
+        }
+
+        // 卡住检测（顶层优先级）
+        if (m.check_stuck(in)) {
+            return transit<StStuckReverse>();
+        }
+
+        // 响应高优先级 SPIN 指令
+        if (in.spin_requested && in.spin_high_priority) {
+            m.spin_resume_state = FsmState::FIXED;
+            return transit<StSpin>();
+        }
+
+        // fixed 目标被取消 → 根据当前输入决定去向
+        if (!in.fixed_goal) {
+            const auto desired = compute_desired(in);
+            switch (desired) {
+                case NormalDest::FOLLOW: return transit<StFollow>();
+                case NormalDest::SPIN: return transit<StSpin>();
+                case NormalDest::IDLE: return transit<StIdle>();
+            }
+        }
+
+        // 保持 FIXED
+        return discard_event();
+    }
+};
+
+} // anonymous namespace (StFixed)
 
 // ═══════════════════════ Impl 桥接 ═══════════════════════════
 

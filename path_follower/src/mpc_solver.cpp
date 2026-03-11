@@ -940,6 +940,170 @@ void RecoveryProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx
 }
 
 // ════════════════════════════════════════════════════════════════
+//  FixedProblem
+// ════════════════════════════════════════════════════════════════
+
+FixedProblem::FixedProblem(
+    const Eigen::Vector2d& goal_map,
+    const MPCParams& params,
+    const CostMapGridView& cost_grid,
+    const GridInfo& cost_info,
+    const DirectionMapGridView& dir_grid,
+    const GridInfo& dir_info,
+    double remaining_energy,
+    double rfr_pwr_limit
+):
+    goal_(goal_map),
+    p_(params),
+    cost_grid_(cost_grid),
+    cost_info_(cost_info),
+    dir_grid_(dir_grid),
+    dir_info_(dir_info),
+    remaining_energy_(remaining_energy),
+    rfr_pwr_limit_(rfr_pwr_limit) {}
+
+StateVec FixedProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
+    return mpc_dynamics(x, u);
+}
+
+void FixedProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
+    mpc_dynamics_jacobians(x, u, dfx, dfu);
+}
+
+ControlVec FixedProblem::u_lower() const {
+    return ControlVec(p_.fixed_limits.vel_min, p_.fixed_limits.omega_min);
+}
+
+ControlVec FixedProblem::u_upper() const {
+    return ControlVec(p_.fixed_limits.vel_max, p_.fixed_limits.omega_max);
+}
+
+namespace {
+
+constexpr int FIXED_RESIDUAL_DIM = 13;
+using FixedResidualVec = Eigen::Matrix<double, FIXED_RESIDUAL_DIM, 1>;
+
+FixedResidualVec fixed_residual_impl(
+    const StateVec& x,
+    const ControlVec& u,
+    const Eigen::Vector2d& goal,
+    const MPCParams& p,
+    const CostMapGridView& cg,
+    const GridInfo& ci,
+    const DirectionMapGridView& dg,
+    const GridInfo& di,
+    double rfr_pwr_limit
+) {
+    const auto& w = p.fixed_weights;
+    const auto& lim = p.fixed_limits;
+
+    FixedResidualVec r = FixedResidualVec::Zero();
+    const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
+    const double v_act = x(ix::V), w_act = x(ix::W);
+    const double v_cmd = u(0), w_cmd = u(1);
+    const double dv_cmd = v_cmd - x(ix::DV);
+    const double dw_cmd = w_cmd - x(ix::DW);
+
+    const double ddx = px - goal.x(), ddy = py - goal.y();
+    const double desired_theta = std::atan2(goal.y() - py, goal.x() - px);
+    const double heading_sin = std::sin(theta - desired_theta);
+
+    const auto cs = eval_cost_bicubic(cg, ci, px, py);
+    const auto ds = eval_dir_bicubic(dg, di, px, py);
+    const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
+    const double a_lat = std::abs(v_act * w_act);
+
+    const double dv_lim = lim.acc_max * MPC_DT;
+    const double dw_lim = lim.alpha_max * MPC_DT;
+    r(0) = w.q_goal_xy * ddx;
+    r(1) = w.q_goal_xy * ddy;
+    r(2) = w.q_goal_theta * std::abs(heading_sin);
+    r(3) = w.r_v * v_cmd;
+    r(4) = w.r_omega * w_cmd;
+    r(5) = w.r_dv * dv_cmd;
+    r(6) = w.r_domega * dw_cmd;
+    r(7) = w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
+    r(8) = w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
+    r(9) = w.lat_acc * relu(a_lat - lim.a_lat_max);
+    r(10) = w.obstacle * cs.value / 255.0;
+    r(11) = w.step * dir_norm;
+
+    if (p.energy.enable) {
+        const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+        const double thr = std::max(p.energy.threshold, 1.0);
+        const double beta = std::max(p.energy.softplus_beta, 1e-6);
+        const double excess = (pwr - rfr_pwr_limit) / thr;
+        const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
+        r(12) = p.energy.weight * std::max(0.0, sp);
+    }
+
+    return r;
+}
+
+constexpr int FIXED_TERMINAL_RESIDUAL_DIM = 4;
+using FixedTerminalResidualVec = Eigen::Matrix<double, FIXED_TERMINAL_RESIDUAL_DIM, 1>;
+
+FixedTerminalResidualVec fixed_terminal_residual_impl(
+    const StateVec& x,
+    const Eigen::Vector2d& goal,
+    const MPCParams& p,
+    const CostMapGridView& cost_grid,
+    const GridInfo& cost_info,
+    const DirectionMapGridView& dir_grid,
+    const GridInfo& dir_info
+) {
+    FixedTerminalResidualVec r = FixedTerminalResidualVec::Zero();
+    const auto& w = p.fixed_weights;
+    const double dxT = x(ix::X) - goal.x();
+    const double dyT = x(ix::Y) - goal.y();
+    const auto cs = eval_cost_bicubic(cost_grid, cost_info, x(ix::X), x(ix::Y));
+    const auto ds = eval_dir_bicubic(dir_grid, dir_info, x(ix::X), x(ix::Y));
+    const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
+    r(0) = w.q_goal_xy_terminal * dxT;
+    r(1) = w.q_goal_xy_terminal * dyT;
+    r(2) = w.obstacle_terminal * cs.value / 255.0;
+    r(3) = w.step_terminal * dir_norm;
+    return r;
+}
+
+} // anonymous namespace
+
+double FixedProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
+    (void)k;
+    return residual_cost(
+        fixed_residual_impl(x, u, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_, rfr_pwr_limit_)
+    );
+}
+
+void FixedProblem::running_cost_derivatives(
+    int k,
+    const StateVec& x,
+    const ControlVec& u,
+    StateVec& lx,
+    ControlVec& lu,
+    MatXX& lxx,
+    Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+    Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
+) const {
+    (void)k;
+    auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
+        return fixed_residual_impl(xv, uv, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_, rfr_pwr_limit_);
+    };
+    gauss_newton_running_derivatives<FIXED_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
+}
+
+double FixedProblem::terminal_cost(const StateVec& x) const {
+    return residual_cost(fixed_terminal_residual_impl(x, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_));
+}
+
+void FixedProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const {
+    auto residual_fn = [&](const StateVec& xv) {
+        return fixed_terminal_residual_impl(xv, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_);
+    };
+    gauss_newton_terminal_derivatives<FIXED_TERMINAL_RESIDUAL_DIM>(residual_fn, x, lfx, lfxx);
+}
+
+// ════════════════════════════════════════════════════════════════
 //  MPCSolver
 // ════════════════════════════════════════════════════════════════
 
@@ -1019,6 +1183,7 @@ void MPCSolver::reset_warm_start() {
     follow_warm_ = false;
     stop_warm_ = false;
     recovery_warm_ = false;
+    fixed_warm_ = false;
     last_u_ = 0.0;
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
@@ -1026,6 +1191,7 @@ void MPCSolver::reset_warm_start() {
         follow_solver_right_.us[k].setZero();
         stop_solver_.us[k].setZero();
         recovery_solver_.us[k].setZero();
+        fixed_solver_.us[k].setZero();
     }
 }
 
@@ -1387,6 +1553,51 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const Eigen::Vector2d cmd(recovery_solver_.us[0](0), recovery_solver_.us[0](1));
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, recovery_solver_, x0)};
+}
+
+std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::hold_at_point(
+    const Eigen::Vector2d& goal_map,
+    const Eigen::Vector3d& chassis_pose_map,
+    const Eigen::Vector2d& chassis_status,
+    const CostMap& merged_cost_map,
+    const DirectionMap& global_direction_map
+) {
+    const Eigen::Vector2d cmd0(
+        clamp_prev_cmd(
+            last_cmd_.x(),
+            chassis_status.x(),
+            params_.fixed_limits.start_vel_cmd_act_diff_max,
+            params_.fixed_limits.acc_max,
+            MPC_DT
+        ),
+        clamp_prev_cmd(
+            last_cmd_.y(),
+            chassis_status.y(),
+            params_.fixed_limits.start_omega_cmd_act_diff_max,
+            params_.fixed_limits.alpha_max,
+            MPC_DT
+        )
+    );
+
+    const CostMapGridView cg(merged_cost_map);
+    const GridInfo ci = make_grid_info(merged_cost_map);
+    const DirectionMapGridView dg(global_direction_map);
+    const GridInfo di = make_grid_info(global_direction_map);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, 0.0);
+
+    FixedProblem prob(goal_map, params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);
+    initialize_primal_trajectory(fixed_solver_, prob, x0, fixed_warm_);
+
+    fddp::SolverOptions opts;
+    opts.max_iters = 30;
+    opts.tol_grad = 1e-6;
+    opts.tol_cost = 1e-8;
+    fixed_solver_.solve(prob, opts);
+    fixed_warm_ = true;
+
+    const Eigen::Vector2d cmd(fixed_solver_.us[0](0), fixed_solver_.us[0](1));
+    last_cmd_ = cmd;
+    return std::tuple {cmd, rollout_prediction(prob, fixed_solver_, x0)};
 }
 
 } // namespace path_follower

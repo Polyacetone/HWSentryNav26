@@ -150,6 +150,8 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.global_direction_map = input.global_direction_map;
     fsm_input.recovery_goal_map = recovery_goal_map_;
     fsm_input.stamp = input.stamp;
+    fsm_input.fixed_goal = input.fixed_goal;
+    fsm_input.close_to_fixed_goal = input.fixed_goal && (input.chassis_pose_map.head<2>() - input.fixed_goal_pos).norm() < nav_params_.stop_threshold_dist;
 
     // 2. FSM 状态决策
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
@@ -167,6 +169,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         case FsmState::STOPPING: output = execute_stop(input); break;
         case FsmState::HAZARD_RECOVERY: output = execute_recovery(input); break;
         case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(input); break;
+        case FsmState::FIXED: output = execute_fixed(input); break;
     }
 
     output.fsm_state = state;
@@ -245,11 +248,28 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         RCLCPP_DEBUG(logger_, "MPCSolver(Follow) solve time: %.2f ms", solve_ms);
     }
 
-    // 到达目标点 → 标记清除路径
-    if ((input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist || u0 > nav_params_.stop_threshold_u) {
-        RCLCPP_INFO(logger_, "Reached goal, currently at (%.2f, %.2f)", input.chassis_pose_map.x(), input.chassis_pose_map.y());
-        out.path_cleared = true;
-        last_reference_u_ = 0.0;
+    // 到达目标点判定
+    const double dist_to_goal = (input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm();
+    const bool dist_reached = dist_to_goal < nav_params_.stop_threshold_dist;
+    const bool u_reached = u0 > nav_params_.stop_threshold_u;
+
+    if (dist_reached || u_reached) {
+        if (input.fixed_goal) {
+            if (dist_reached) {
+                // FSM 会通过 close_to_fixed_goal 检测到并转移到 FIXED
+                // 无需在此处做额外操作，下一周期 FSM 自动处理
+                RCLCPP_INFO(logger_, "Near fixed goal (dist=%.2f), FSM will transition to FIXED", dist_to_goal);
+            } else {
+                // u_reached 但 dist 未达到：异常情况，回退到 IDLE
+                RCLCPP_WARN(logger_, "Fixed goal: u reached (%.4f) but distance (%.2f) >= threshold, falling back to IDLE", u0, dist_to_goal);
+                out.path_cleared = true;
+                last_reference_u_ = 0.0;
+            }
+        } else {
+            RCLCPP_INFO(logger_, "Reached goal, currently at (%.2f, %.2f)", input.chassis_pose_map.x(), input.chassis_pose_map.y());
+            out.path_cleared = true;
+            last_reference_u_ = 0.0;
+        }
     }
 
     // 台阶检测（基于 MPC 预测轨迹）
@@ -334,6 +354,11 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         recovery_goal_map_ = std::nullopt;
         recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
     }
+
+    // 进入 FIXED 时重置 warm start（从其他 MPC 模式切换）
+    if (next == FsmState::FIXED && prev != FsmState::FIXED && prev != FsmState::DEAD) {
+        mpc_controller_->reset_warm_start();
+    }
 }
 
 void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
@@ -415,6 +440,39 @@ ControlOutput MainController::execute_stuck_reverse(const ControlInput& input) {
     ControlOutput out;
     out.velocity = -fsm_params_.stuck.reverse_speed;
     out.omega = 0.0;
+    out.valid = true;
+    return out;
+}
+
+// ═══════════════════ FIXED: 固定在目标点 ═════════════════════
+
+ControlOutput MainController::execute_fixed(const ControlInput& input) {
+    ControlOutput out;
+    if (!input.merged_cost_map || !input.global_direction_map) return out;
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    const auto result = mpc_controller_->hold_at_point(
+        input.fixed_goal_pos,
+        input.chassis_pose_map, input.chassis_status,
+        *input.merged_cost_map, *input.global_direction_map
+    );
+    if (!result) {
+        RCLCPP_ERROR(logger_, "MPCSolver(Fixed) solve failed: %s", result.error().c_str());
+        return out;
+    }
+
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    } else {
+        RCLCPP_DEBUG(logger_, "MPCSolver(Fixed) solve time: %.2f ms", solve_ms);
+    }
+
+    out.velocity = std::get<0>(*result).x();
+    out.omega = std::get<0>(*result).y();
+    out.predicted_path_map = std::get<1>(*result).path_map;
+    out.predicted_v = std::get<1>(*result).v_pred;
+    out.predicted_w = std::get<1>(*result).w_pred;
     out.valid = true;
     return out;
 }

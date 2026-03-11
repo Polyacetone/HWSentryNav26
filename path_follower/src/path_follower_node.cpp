@@ -14,6 +14,7 @@
 #include <interfaces/msg/spin_cmd.hpp>
 #include <interfaces/msg/chassis_cmd.hpp>
 #include <interfaces/msg/comp_stage.hpp>
+#include <interfaces/msg/global_path.hpp>
 
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
@@ -32,7 +33,7 @@ private:
     struct StepEraseKernelCell { int dx; int dy; uint8_t delta; };
 
     // ─── ROS 回调 ───
-    void control_points_callback(const nav_msgs::msg::Path::SharedPtr msg);
+    void control_points_callback(const interfaces::msg::GlobalPath::SharedPtr msg);
     void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
     void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
@@ -54,7 +55,7 @@ private:
     void erase_kernel_at(const Eigen::Vector2i& grid_coord, std::vector<uint8_t>& max_erase_delta) const;
 
     // ─── ROS 通信 ───
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr control_points_sub_;
+    rclcpp::Subscription<interfaces::msg::GlobalPath>::SharedPtr control_points_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
@@ -91,6 +92,8 @@ private:
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
+    bool fixed_goal_ = false;
+    Eigen::Vector2d fixed_goal_pos_ = Eigen::Vector2d::Zero();
     Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
     uint8_t chassis_leg_mode_ = 4;
     uint8_t comp_stage_ = 4;
@@ -208,6 +211,33 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .obstacle_terminal = declare_parameter<double>("mpc.recovery.weights.obstacle_terminal"),
             .step_terminal = declare_parameter<double>("mpc.recovery.weights.step_terminal")
         },
+        .fixed_limits = {
+            .vel_max = declare_parameter<double>("mpc.fixed.limits.vel_max"),
+            .vel_min = declare_parameter<double>("mpc.fixed.limits.vel_min"),
+            .omega_max = declare_parameter<double>("mpc.fixed.limits.omega_max"),
+            .omega_min = declare_parameter<double>("mpc.fixed.limits.omega_min"),
+            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.fixed.limits.start_vel_cmd_act_diff_max"),
+            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.fixed.limits.start_omega_cmd_act_diff_max"),
+            .acc_max = declare_parameter<double>("mpc.fixed.limits.acc_max"),
+            .alpha_max = declare_parameter<double>("mpc.fixed.limits.alpha_max"),
+            .a_lat_max = declare_parameter<double>("mpc.fixed.limits.a_lat_max")
+        },
+        .fixed_weights = {
+            .q_goal_xy = declare_parameter<double>("mpc.fixed.weights.q_goal_xy"),
+            .q_goal_theta = declare_parameter<double>("mpc.fixed.weights.q_goal_theta"),
+            .r_v = declare_parameter<double>("mpc.fixed.weights.r_v"),
+            .r_omega = declare_parameter<double>("mpc.fixed.weights.r_omega"),
+            .r_dv = declare_parameter<double>("mpc.fixed.weights.r_dv"),
+            .r_domega = declare_parameter<double>("mpc.fixed.weights.r_domega"),
+            .acc_limit = declare_parameter<double>("mpc.fixed.weights.acc_limit"),
+            .alpha_limit = declare_parameter<double>("mpc.fixed.weights.alpha_limit"),
+            .lat_acc = declare_parameter<double>("mpc.fixed.weights.lat_acc"),
+            .obstacle = declare_parameter<double>("mpc.fixed.weights.obstacle"),
+            .step = declare_parameter<double>("mpc.fixed.weights.step"),
+            .q_goal_xy_terminal = declare_parameter<double>("mpc.fixed.weights.q_goal_xy_terminal"),
+            .obstacle_terminal = declare_parameter<double>("mpc.fixed.weights.obstacle_terminal"),
+            .step_terminal = declare_parameter<double>("mpc.fixed.weights.step_terminal")
+        },
         .energy = {
             .enable = declare_parameter<bool>("mpc.energy.enable"),
             .threshold = declare_parameter<double>("mpc.energy.threshold"),
@@ -321,9 +351,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { local_cost_map_callback(msg); }
     );
 
-    control_points_sub_ = create_subscription<nav_msgs::msg::Path>(
+    control_points_sub_ = create_subscription<interfaces::msg::GlobalPath>(
         declare_parameter<std::string>("control_points_sub_topic"), 1,
-        [this](const nav_msgs::msg::Path::SharedPtr msg) { control_points_callback(msg); }
+        [this](const interfaces::msg::GlobalPath::SharedPtr msg) { control_points_callback(msg); }
     );
 
     chassis_status_sub_ = create_subscription<interfaces::msg::ChassisStatus>(
@@ -347,22 +377,38 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
 
 // ═══════════════════════ ROS 回调 ════════════════════════════
 
-void PathFollowerNode::control_points_callback(const nav_msgs::msg::Path::SharedPtr msg) {
-    if (msg->poses.size() < 3) {
-        if (!msg->poses.empty()) {
-            RCLCPP_WARN(get_logger(), "Received insufficient control points (%zu), need at least 3!", msg->poses.size());
+void PathFollowerNode::control_points_callback(const interfaces::msg::GlobalPath::SharedPtr msg) {
+    if (msg->x.size() < 3) {
+        if (!msg->x.empty()) {
+            RCLCPP_WARN(get_logger(), "Received insufficient control points (%zu), need at least 3!", msg->x.size());
         }
         global_path_ = std::nullopt;
+        // 空路径取消 fixed 目标（除非当前已在 FIXED 模式中且目标是 fixed 的空路径，保持 fixed_goal_）
+        if (!msg->fixed) {
+            fixed_goal_ = false;
+        }
         clear_steps_along_global_path();
         return;
     }
+    if (msg->x.size() != msg->y.size()) {
+        RCLCPP_ERROR(get_logger(), "GlobalPath x/y size mismatch (%zu vs %zu)!", msg->x.size(), msg->y.size());
+        return;
+    }
     std::vector<Eigen::Vector2d> cpts;
-    cpts.reserve(msg->poses.size());
-    for (const auto& ps : msg->poses) {
-        cpts.emplace_back(ps.pose.position.x, ps.pose.position.y);
+    cpts.reserve(msg->x.size());
+    for (size_t i = 0; i < msg->x.size(); ++i) {
+        cpts.emplace_back(static_cast<double>(msg->x[i]), static_cast<double>(msg->y[i]));
     }
     global_path_ = SplineD(cpts);
     global_path_->setExtrapolate(true);
+
+    // 更新 fixed 目标信息
+    fixed_goal_ = msg->fixed;
+    if (fixed_goal_) {
+        // fixed 目标位置为路径末端
+        fixed_goal_pos_ = global_path_->evaluate(1.0);
+        RCLCPP_INFO(get_logger(), "Received fixed goal path, target: (%.2f, %.2f)", fixed_goal_pos_.x(), fixed_goal_pos_.y());
+    }
 
     // 新路径到来，基于方向场擦除对应台阶
     clear_steps_along_global_path();
@@ -455,6 +501,8 @@ void PathFollowerNode::control_timer_callback() {
     // 组装控制输入
     ControlInput input;
     input.global_path = global_path_;
+    input.fixed_goal = fixed_goal_;
+    input.fixed_goal_pos = fixed_goal_pos_;
     input.chassis_pose_map = chassis_pose_map;
     input.chassis_status = chassis_status_;
     input.chassis_leg_mode = chassis_leg_mode_;
@@ -476,6 +524,10 @@ void PathFollowerNode::control_timer_callback() {
     if (output.path_cleared) {
         RCLCPP_INFO(get_logger(), "Path cleared by controller");
         global_path_ = std::nullopt;
+        // 非 fixed 模式才清除 fixed 标志
+        if (output.fsm_state != FsmState::FIXED) {
+            fixed_goal_ = false;
+        }
         clear_steps_along_global_path();
     }
 

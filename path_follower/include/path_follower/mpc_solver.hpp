@@ -186,6 +186,39 @@ struct MPCRecoveryWeights {
     double step_terminal;
 };
 
+struct MPCFixedLimits {
+    double vel_max;
+    double vel_min;
+    double omega_max;
+    double omega_min;
+
+    double start_vel_cmd_act_diff_max;
+    double start_omega_cmd_act_diff_max;
+    double acc_max;
+    double alpha_max;
+    double a_lat_max;
+};
+
+struct MPCFixedWeights {
+    double q_goal_xy;
+    double q_goal_theta;
+    double r_v;
+    double r_omega;
+    double r_dv;
+    double r_domega;
+
+    double acc_limit;
+    double alpha_limit;
+    double lat_acc;
+
+    double obstacle;
+    double step;
+
+    double q_goal_xy_terminal;
+    double obstacle_terminal;
+    double step_terminal;
+};
+
 struct EnergyParams {
     bool enable;
     double threshold;
@@ -217,6 +250,9 @@ struct MPCParams {
 
     MPCRecoveryLimits recovery_limits;
     MPCRecoveryWeights recovery_weights;
+
+    MPCFixedLimits fixed_limits;
+    MPCFixedWeights fixed_weights;
 
     EnergyParams energy;
     MultiHypothesisParams mh_params;
@@ -438,6 +474,55 @@ private:
     double rfr_pwr_limit_;
 };
 
+// ═══════════════════════════════════════════════════════════════
+//  FDDP Problem 类型 — Fixed（固定在目标点）
+// ═══════════════════════════════════════════════════════════════
+
+class FixedProblem {
+public:
+    FixedProblem(
+        const Eigen::Vector2d& goal_map,
+        const MPCParams& params,
+        const CostMapGridView& cost_grid,
+        const GridInfo& cost_info,
+        const DirectionMapGridView& dir_grid,
+        const GridInfo& dir_info,
+        double remaining_energy,
+        double rfr_pwr_limit
+    );
+
+    StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
+    void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
+
+    double running_cost(int k, const StateVec& x, const ControlVec& u) const;
+    void running_cost_derivatives(
+        int k,
+        const StateVec& x,
+        const ControlVec& u,
+        StateVec& lx,
+        ControlVec& lu,
+        MatXX& lxx,
+        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
+    ) const;
+
+    double terminal_cost(const StateVec& x) const;
+    void terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const;
+
+    ControlVec u_lower() const;
+    ControlVec u_upper() const;
+
+private:
+    Eigen::Vector2d goal_;
+    const MPCParams& p_;
+    const CostMapGridView& cost_grid_;
+    GridInfo cost_info_;
+    const DirectionMapGridView& dir_grid_;
+    GridInfo dir_info_;
+    double remaining_energy_;
+    double rfr_pwr_limit_;
+};
+
 } // namespace path_follower
 
 // ── FDDP Dims specializations ──
@@ -456,6 +541,12 @@ struct Dims<path_follower::StopProblem> {
 };
 template<>
 struct Dims<path_follower::RecoveryProblem> {
+    static constexpr int NX = path_follower::MPC_NX;
+    static constexpr int NU = path_follower::MPC_NU;
+    static constexpr int N = path_follower::MPC_HORIZON;
+};
+template<>
+struct Dims<path_follower::FixedProblem> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
     static constexpr int N = path_follower::MPC_HORIZON;
@@ -505,6 +596,14 @@ public:
         const DirectionMap& global_direction_map
     );
 
+    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> hold_at_point(
+        const Eigen::Vector2d& goal_map,
+        const Eigen::Vector3d& chassis_pose_map,
+        const Eigen::Vector2d& chassis_status,
+        const CostMap& merged_cost_map,
+        const DirectionMap& global_direction_map
+    );
+
     [[nodiscard]] const MPCParams& params() const {
         return params_;
     }
@@ -518,9 +617,11 @@ private:
     fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<RecoveryProblem> recovery_solver_;
+    fddp::Solver<FixedProblem> fixed_solver_;
     bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool recovery_warm_ = false;
+    bool fixed_warm_ = false;
 
     // 多假设 solver（左/右偏移，仅用于 follow_path）
     fddp::Solver<FollowProblem> follow_solver_left_;

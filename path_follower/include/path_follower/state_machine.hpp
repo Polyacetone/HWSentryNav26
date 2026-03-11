@@ -70,6 +70,7 @@ enum class FsmState {
     STOPPING,         // 正常模式间的平滑过渡减速
     HAZARD_RECOVERY,  // 危险恢复（向安全点移动）
     STUCK_REVERSE,    // 倒车脱困
+    FIXED,            // 固定在目标点位（持续 MPC 保持位置）
 };
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
@@ -83,6 +84,10 @@ struct FsmInput {
 
     // 底盘是否处于失效模式（Dead/Recovery/Abnormal）
     bool chassis_dead = false;
+
+    // fixed 目标相关
+    bool fixed_goal = false;            // 当前目标为 fixed 类型
+    bool close_to_fixed_goal = false;   // 距离 fixed 目标 < stop_threshold_dist
 
     // 底盘实际状态
     double velocity = 0.0;   // 线速度

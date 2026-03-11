@@ -20,6 +20,7 @@
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
 
+  <depend>interfaces</depend>
   <depend>common_libs</depend>
 
   <export>
