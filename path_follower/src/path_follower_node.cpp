@@ -132,7 +132,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
             .slow_down_deceleration = declare_parameter<double>("mpc.follow_path.limits.slow_down_deceleration"),
             .slow_down_target_vel = declare_parameter<double>("mpc.follow_path.limits.slow_down_target_vel"),
-            .slow_down_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples")),
+            .slow_down_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples"))
         },
         .follow_weights = {
             .q_y = declare_parameter<double>("mpc.follow_path.weights.q_y"),
@@ -148,7 +148,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .lat_acc = declare_parameter<double>("mpc.follow_path.weights.lat_acc"),
             .vel_on_step = declare_parameter<double>("mpc.follow_path.weights.vel_on_step"),
             .obstacle = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
-            .direction = declare_parameter<double>("mpc.follow_path.weights.direction"),
+            .direction = declare_parameter<double>("mpc.follow_path.weights.direction")
         },
         .follow_projection = {
             .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.projection.num_samples")),
@@ -165,7 +165,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .alpha_max = declare_parameter<double>("mpc.stop.limits.alpha_max"),
             .vel_step_up = declare_parameter<double>("mpc.stop.limits.vel_step_up"),
             .vel_step_down = declare_parameter<double>("mpc.stop.limits.vel_step_down"),
-            .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max"),
+            .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max")
         },
         .stop_weights = {
             .q_v = declare_parameter<double>("mpc.stop.weights.q_v"),
@@ -190,7 +190,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.recovery.limits.start_omega_cmd_act_diff_max"),
             .acc_max = declare_parameter<double>("mpc.recovery.limits.acc_max"),
             .alpha_max = declare_parameter<double>("mpc.recovery.limits.alpha_max"),
-            .a_lat_max = declare_parameter<double>("mpc.recovery.limits.a_lat_max"),
+            .a_lat_max = declare_parameter<double>("mpc.recovery.limits.a_lat_max")
         },
         .recovery_weights = {
             .q_goal_xy = declare_parameter<double>("mpc.recovery.weights.q_goal_xy"),
@@ -213,6 +213,11 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .threshold = declare_parameter<double>("mpc.energy.threshold"),
             .weight = declare_parameter<double>("mpc.energy.weight"),
             .softplus_beta = declare_parameter<double>("mpc.energy.softplus_beta")
+        },
+        .mh_params = {
+            .enable = declare_parameter<bool>("mpc.multi_hypothesis.enable"),
+            .keep_steps = static_cast<int>(declare_parameter<int>("mpc.multi_hypothesis.keep_steps")),
+            .lateral_offset = declare_parameter<double>("mpc.multi_hypothesis.lateral_offset")
         }
     };
 

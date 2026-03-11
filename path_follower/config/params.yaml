@@ -45,6 +45,10 @@
         threshold: 500.0 # 电容能量惩罚阈值(J)，低于此值开始惩罚
         weight: 5.0 # 能量软约束权重
         softplus_beta: 5.0 # softplus斜率(越大越接近硬折线惩罚)
+      multi_hypothesis: # 多假设热启动参数
+        enable: true # 是否启用多假设热启动
+        keep_steps: 3 # 前多少步保留原始 warm start
+        lateral_offset: 0.8 # 横向偏移量 (m)
       follow_path: # 路径跟随模式
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数

@@ -14,42 +14,50 @@ namespace path_follower {
 //  MPC 编译期常量
 // ═══════════════════════════════════════════════════════════════
 
-constexpr int    MPC_HORIZON         = 30;
-constexpr double MPC_DT              = 0.05;
-constexpr int    MPC_NX              = 9;   // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
-constexpr int    MPC_NU              = 2;   // [v_cmd, omega_cmd]
+constexpr int MPC_HORIZON = 20;
+constexpr double MPC_DT = 0.05;
+constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
+constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 
 // ── ZOH-discretized model constants (auto-generated) ──
-constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = 0.026829611608016123;
-constexpr double CF2       = -0.2010928891690858;
-constexpr double CF3       = -0.5171878055992227;
-constexpr double XH0       = -3.9704078719129248;
+constexpr double SGN_EPS = 0.05;
+constexpr double CF1 = 0.026829611608016123;
+constexpr double CF2 = -0.2010928891690858;
+constexpr double CF3 = -0.5171878055992227;
+constexpr double XH0 = -3.9704078719129248;
 // v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.9483617718409404;
-constexpr double A01       = -2.4476243257126464;
-constexpr double A03       = 2.798730623635046;
-constexpr double A10       = 0.0033272418652128084;
-constexpr double A11       = 0.9605359128145212;
-constexpr double A13       = 0.014581231780666865;
+constexpr double A00 = 0.9483617718409404;
+constexpr double A01 = -2.4476243257126464;
+constexpr double A03 = 2.798730623635046;
+constexpr double A10 = 0.0033272418652128084;
+constexpr double A11 = 0.9605359128145212;
+constexpr double A13 = 0.014581231780666865;
 // nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.06210638535453685;
-constexpr double GNL_V     = 0.04904295219367288;
+constexpr double GNL_XH = -0.06210638535453685;
+constexpr double GNL_V = 0.04904295219367288;
 // ω-channel (1st-order ZOH exact)
-constexpr double A22       = 0.42595701520417945;
-constexpr double A24       = 0.5740429847958206;
-constexpr double GAMMA_W   = 0.0336320398873947;
+constexpr double A22 = 0.42595701520417945;
+constexpr double A24 = 0.5740429847958206;
+constexpr double GAMMA_W = 0.0336320398873947;
 // hidden-state observer gain
-constexpr double OBS_L     = 104.69986431799704;
+constexpr double OBS_L = 104.69986431799704;
 
 // ── Power model coefficients (auto-generated from identification) ──
-constexpr int    PWR_N      = 12;
-constexpr double PWR_EPS2   = 0.05 * 0.05;
+constexpr int PWR_N = 12;
+constexpr double PWR_EPS2 = 0.05 * 0.05;
 constexpr double PWR_C[PWR_N] = {
-    3.1183599570e+00,  3.4172476463e+01,  1.0359111933e+00,
-    3.6371494354e+00,  2.3486803448e-02,  2.7300289323e+01,
-    2.6315570711e+00,  1.8359691253e+00,  1.1200532785e+00,
-    2.6043584920e-01,  5.2574769643e-02,  0.0000000000e+00,
+    3.1183599570e+00,
+    3.4172476463e+01,
+    1.0359111933e+00,
+    3.6371494354e+00,
+    2.3486803448e-02,
+    2.7300289323e+01,
+    2.6315570711e+00,
+    1.8359691253e+00,
+    1.1200532785e+00,
+    2.6043584920e-01,
+    5.2574769643e-02,
+    0.0000000000e+00,
 };
 
 // 弧长查找表类型
@@ -61,7 +69,9 @@ using ArclengthTable = std::array<double, ARCLENGTH_TABLE_SIZE + 1>;
 // ═══════════════════════════════════════════════════════════════
 
 // State indices: x=0, y=1, theta=2, x_h=3, v_act=4, w_act=5, dv=6, dw=7, path_u=8
-namespace ix { enum { X=0, Y, THETA, XH, V, W, DV, DW, PATH_U }; }
+namespace ix {
+    enum { X = 0, Y, THETA, XH, V, W, DV, DW, PATH_U };
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  Parameter structs (unchanged public interface)
@@ -177,10 +187,16 @@ struct MPCRecoveryWeights {
 };
 
 struct EnergyParams {
-    bool enable = false;
-    double threshold = 60.0;
-    double weight = 2.0;
-    double softplus_beta = 10.0;
+    bool enable;
+    double threshold;
+    double weight;
+    double softplus_beta;
+};
+
+struct MultiHypothesisParams {
+    bool enable;
+    int keep_steps;
+    double lateral_offset;
 };
 
 /// MPC 预测轨迹
@@ -203,6 +219,7 @@ struct MPCParams {
     MPCRecoveryWeights recovery_weights;
 
     EnergyParams energy;
+    MultiHypothesisParams mh_params;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -216,7 +233,7 @@ struct GridInfo {
 
 template<typename MapT>
 inline GridInfo make_grid_info(const MapT& map) {
-    return GridInfo{map.origin_x, map.origin_y, 1.0 / map.resolution, map.width, map.height};
+    return GridInfo {map.origin_x, map.origin_y, 1.0 / map.resolution, map.width, map.height};
 }
 
 struct CostMapGridView {
@@ -243,30 +260,30 @@ struct DirectionMapGridView {
     const DirectionMap& map_;
 };
 
-/// 双线性采样代价地图值 + 梯度（∂cost/∂x, ∂cost/∂y）
+/// Bicubic 采样代价地图值 + 梯度（∂cost/∂x, ∂cost/∂y），$C^1$ 连续
 struct CostSample {
     double value;
-    double dx, dy;  // ∂value/∂x_map, ∂value/∂y_map
+    double dx, dy; // ∂value/∂x_map, ∂value/∂y_map
 };
 
-CostSample eval_cost_bilinear(const CostMapGridView& grid, const GridInfo& info, double x_map, double y_map);
+CostSample eval_cost_bicubic(const CostMapGridView& grid, const GridInfo& info, double x_map, double y_map);
 
-/// 双线性采样方向场值 + 雅可比（2×2: ∂dir/∂(x,y)）
+/// Bicubic 采样方向场值 + 雅可比（2×2: ∂dir/∂(x,y)），$C^1$ 连续
 struct DirSample {
     Eigen::Vector2d value;
-    Eigen::Matrix2d J;  // ∂value/∂(x_map, y_map)
+    Eigen::Matrix2d J; // ∂value/∂(x_map, y_map)
 };
 
-DirSample eval_dir_bilinear(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map);
+DirSample eval_dir_bicubic(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map);
 
 // ═══════════════════════════════════════════════════════════════
 //  共享动力学模型（supply analytic Jacobians for FDDP）
 // ═══════════════════════════════════════════════════════════════
 
-using StateVec   = Eigen::Matrix<double, MPC_NX, 1>;
+using StateVec = Eigen::Matrix<double, MPC_NX, 1>;
 using ControlVec = Eigen::Matrix<double, MPC_NU, 1>;
-using MatXX      = Eigen::Matrix<double, MPC_NX, MPC_NX>;
-using MatXU      = Eigen::Matrix<double, MPC_NX, MPC_NU>;
+using MatXX = Eigen::Matrix<double, MPC_NX, MPC_NX>;
+using MatXU = Eigen::Matrix<double, MPC_NX, MPC_NU>;
 
 /// 通用离散动力学，车辆状态按模型推进，PATH_U 默认保持不变。
 StateVec mpc_dynamics(const StateVec& x, const ControlVec& u);
@@ -283,10 +300,13 @@ public:
     FollowProblem(
         const std::vector<Eigen::Vector2d>& ref_control_points,
         const MPCParams& params,
-        const CostMapGridView& cost_grid, const GridInfo& cost_info,
-        const DirectionMapGridView& dir_grid, const GridInfo& dir_info,
+        const CostMapGridView& cost_grid,
+        const GridInfo& cost_info,
+        const DirectionMapGridView& dir_grid,
+        const GridInfo& dir_info,
         const ArclengthTable& arclength_table,
-        double remaining_energy, double rfr_pwr_limit
+        double remaining_energy,
+        double rfr_pwr_limit
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -294,10 +314,14 @@ public:
 
     double running_cost(int k, const StateVec& x, const ControlVec& u) const;
     void running_cost_derivatives(
-        int k, const StateVec& x, const ControlVec& u,
-        StateVec& lx, ControlVec& lu,
-        MatXX& lxx, Eigen::Matrix<double,MPC_NU,MPC_NX>& lux,
-        Eigen::Matrix<double,MPC_NU,MPC_NU>& luu
+        int k,
+        const StateVec& x,
+        const ControlVec& u,
+        StateVec& lx,
+        ControlVec& lu,
+        MatXX& lxx,
+        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
     ) const;
 
     double terminal_cost(const StateVec& x) const;
@@ -326,9 +350,12 @@ class StopProblem {
 public:
     StopProblem(
         const MPCParams& params,
-        const CostMapGridView& cost_grid, const GridInfo& cost_info,
-        const DirectionMapGridView& dir_grid, const GridInfo& dir_info,
-        double remaining_energy, double rfr_pwr_limit
+        const CostMapGridView& cost_grid,
+        const GridInfo& cost_info,
+        const DirectionMapGridView& dir_grid,
+        const GridInfo& dir_info,
+        double remaining_energy,
+        double rfr_pwr_limit
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -336,10 +363,14 @@ public:
 
     double running_cost(int k, const StateVec& x, const ControlVec& u) const;
     void running_cost_derivatives(
-        int k, const StateVec& x, const ControlVec& u,
-        StateVec& lx, ControlVec& lu,
-        MatXX& lxx, Eigen::Matrix<double,MPC_NU,MPC_NX>& lux,
-        Eigen::Matrix<double,MPC_NU,MPC_NU>& luu
+        int k,
+        const StateVec& x,
+        const ControlVec& u,
+        StateVec& lx,
+        ControlVec& lu,
+        MatXX& lxx,
+        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
     ) const;
 
     double terminal_cost(const StateVec& x) const;
@@ -367,9 +398,12 @@ public:
     RecoveryProblem(
         const Eigen::Vector2d& goal_map,
         const MPCParams& params,
-        const CostMapGridView& cost_grid, const GridInfo& cost_info,
-        const DirectionMapGridView& dir_grid, const GridInfo& dir_info,
-        double remaining_energy, double rfr_pwr_limit
+        const CostMapGridView& cost_grid,
+        const GridInfo& cost_info,
+        const DirectionMapGridView& dir_grid,
+        const GridInfo& dir_info,
+        double remaining_energy,
+        double rfr_pwr_limit
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -377,10 +411,14 @@ public:
 
     double running_cost(int k, const StateVec& x, const ControlVec& u) const;
     void running_cost_derivatives(
-        int k, const StateVec& x, const ControlVec& u,
-        StateVec& lx, ControlVec& lu,
-        MatXX& lxx, Eigen::Matrix<double,MPC_NU,MPC_NX>& lux,
-        Eigen::Matrix<double,MPC_NU,MPC_NU>& luu
+        int k,
+        const StateVec& x,
+        const ControlVec& u,
+        StateVec& lx,
+        ControlVec& lu,
+        MatXX& lxx,
+        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
     ) const;
 
     double terminal_cost(const StateVec& x) const;
@@ -400,24 +438,27 @@ private:
     double rfr_pwr_limit_;
 };
 
-}  // namespace path_follower
+} // namespace path_follower
 
 // ── FDDP Dims specializations ──
 namespace fddp {
-template<> struct Dims<path_follower::FollowProblem> {
+template<>
+struct Dims<path_follower::FollowProblem> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
-    static constexpr int N  = path_follower::MPC_HORIZON;
+    static constexpr int N = path_follower::MPC_HORIZON;
 };
-template<> struct Dims<path_follower::StopProblem> {
+template<>
+struct Dims<path_follower::StopProblem> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
-    static constexpr int N  = path_follower::MPC_HORIZON;
+    static constexpr int N = path_follower::MPC_HORIZON;
 };
-template<> struct Dims<path_follower::RecoveryProblem> {
+template<>
+struct Dims<path_follower::RecoveryProblem> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
-    static constexpr int N  = path_follower::MPC_HORIZON;
+    static constexpr int N = path_follower::MPC_HORIZON;
 };
 }
 
@@ -437,7 +478,9 @@ public:
     void update_observer(double v_act, double w_act);
     void set_energy_state(double remaining_energy, double rfr_pwr_limit);
 
-    [[nodiscard]] double hidden_state_estimate() const { return x_h_hat_; }
+    [[nodiscard]] double hidden_state_estimate() const {
+        return x_h_hat_;
+    }
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> follow_path(
         const SplineD& global_path,
@@ -462,25 +505,31 @@ public:
         const DirectionMap& global_direction_map
     );
 
-    [[nodiscard]] const MPCParams& params() const { return params_; }
+    [[nodiscard]] const MPCParams& params() const {
+        return params_;
+    }
 
 private:
     MPCParams params_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 
-    // FDDP solver instances (one per mode to avoid template bloat)
-    fddp::Solver<FollowProblem>   follow_solver_;
-    fddp::Solver<StopProblem>     stop_solver_;
+    // 主 FDDP solver（中心假设）
+    fddp::Solver<FollowProblem> follow_solver_;
+    fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<RecoveryProblem> recovery_solver_;
     bool follow_warm_ = false;
-    bool stop_warm_   = false;
+    bool stop_warm_ = false;
     bool recovery_warm_ = false;
+
+    // 多假设 solver（左/右偏移，仅用于 follow_path）
+    fddp::Solver<FollowProblem> follow_solver_left_;
+    fddp::Solver<FollowProblem> follow_solver_right_;
 
     // 缓存的弧长查找表
     std::vector<Eigen::Vector2d> prev_ref_control_points_;
     int prev_arc_samples_ = -1;
-    ArclengthTable prev_arclength_table_{};
+    ArclengthTable prev_arclength_table_ {};
 
     // ── Hidden-state Luenberger observer ──
     double x_h_hat_ = 0.0;
@@ -494,10 +543,23 @@ private:
 
     // ── 辅助 ──
     StateVec make_initial_state(
-        const Eigen::Vector3d& pose, const Eigen::Vector2d& status,
-        const Eigen::Vector2d& cmd_clamped, double path_u
+        const Eigen::Vector3d& pose,
+        const Eigen::Vector2d& status,
+        const Eigen::Vector2d& cmd_clamped,
+        double path_u
     ) const;
     static MPCPrediction extract_prediction(const StateVec* xs, int n);
+
+    // 生成横向偏移的 warm start 控制序列
+    static void generate_lateral_hypothesis(
+        fddp::Solver<FollowProblem>& solver,
+        const fddp::Solver<FollowProblem>& base_solver,
+        const FollowProblem& prob,
+        const StateVec& x0,
+        const std::vector<Eigen::Vector2d>& ref_cps,
+        int keep_steps,
+        double lateral_offset
+    );
 };
 
 }
