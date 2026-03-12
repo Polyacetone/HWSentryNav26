@@ -140,6 +140,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     // 1. 组装 FSM 输入
     FsmInput fsm_input;
     fsm_input.has_path = input.global_path.has_value();
+    fsm_input.path_updated = input.path_updated;
     fsm_input.spin_requested = input.spin_requested;
     fsm_input.spin_high_priority = input.spin_high_priority;
     fsm_input.chassis_dead = is_chassis_dead(input.chassis_leg_mode, input.comp_stage);
@@ -173,7 +174,10 @@ ControlOutput MainController::update(const ControlInput& input) {
     }
 
     output.fsm_state = state;
-    output.path_cleared |= fsm_output.clear_global_path;
+    output.consume_global_path |= fsm_output.consume_global_path;
+    if (output.consume_global_path) {
+        last_reference_u_ = 0.0;
+    }
 
     // 4. 同步已发布指令到 FSM / MPC，并在非 MPC 状态时重置 MPC 的 warm start
     if (output.valid) {
@@ -252,25 +256,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     const double dist_to_goal = (input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm();
     const bool dist_reached = dist_to_goal < nav_params_.stop_threshold_dist;
     const bool u_reached = u0 > nav_params_.stop_threshold_u;
-
-    if (dist_reached || u_reached) {
-        if (input.fixed_goal) {
-            if (dist_reached) {
-                // FSM 会通过 close_to_fixed_goal 检测到并转移到 FIXED
-                // 无需在此处做额外操作，下一周期 FSM 自动处理
-                RCLCPP_INFO(logger_, "Near fixed goal (dist=%.2f), FSM will transition to FIXED", dist_to_goal);
-            } else {
-                // u_reached 但 dist 未达到：异常情况，回退到 IDLE
-                RCLCPP_WARN(logger_, "Fixed goal: u reached (%.4f) but distance (%.2f) >= threshold, falling back to IDLE", u0, dist_to_goal);
-                out.path_cleared = true;
-                last_reference_u_ = 0.0;
-            }
-        } else {
-            RCLCPP_INFO(logger_, "Reached goal, currently at (%.2f, %.2f)", input.chassis_pose_map.x(), input.chassis_pose_map.y());
-            out.path_cleared = true;
-            last_reference_u_ = 0.0;
-        }
-    }
+    out.consume_global_path = dist_reached || u_reached;
 
     // 台阶检测（基于 MPC 预测轨迹）
     const auto& [cmd, prediction] = *result;

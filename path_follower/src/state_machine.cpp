@@ -94,8 +94,7 @@ struct HazardLogic {
         const Eigen::Vector3d& chassis_pose_map,
         const CostMap& cost_map,
         const DirectionMap& dir_map,
-        const std::optional<Eigen::Vector2d>& recovery_goal_map,
-        rclcpp::Logger& logger
+        const std::optional<Eigen::Vector2d>& recovery_goal_map
     ) {
         if (!p.enable) return true;
         if (!recovery_goal_map) {
@@ -114,7 +113,6 @@ struct HazardLogic {
         if (safe) {
             if (!safe_since) safe_since = now;
             if ((now - *safe_since).seconds() >= p.safe_hold_time) {
-                RCLCPP_INFO(logger, "Exit HAZARD_RECOVERY (safe for %.2f s)", (now - *safe_since).seconds());
                 return true;
             }
         } else {
@@ -252,13 +250,15 @@ struct StFollow final : sc::state<StFollow, Machine> {
             return transit<StStuckReverse>();
         }
 
-        // FOLLOW → FIXED：fixed 目标且距离足够近
         if (in.fixed_goal && in.close_to_fixed_goal) {
+            m.output.consume_global_path = true;
             return transit<StFixed>();
         }
 
         const auto desired = compute_desired(in);
-        if (desired == NormalDest::FOLLOW) return discard_event();
+        if (desired == NormalDest::FOLLOW) {
+            return discard_event();
+        }
 
         m.stop_dest = desired;
         return transit<StStopping>();
@@ -462,8 +462,7 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
             in.chassis_pose_map,
             *in.merged_cost_map,
             *in.global_direction_map,
-            in.recovery_goal_map,
-            m.logger
+            in.recovery_goal_map
         );
 
         if (finished) {
@@ -502,7 +501,7 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
         }
 
         if (!m.params.stuck.enable) {
-            m.output.clear_global_path = true;
+            m.output.consume_global_path = true;
             return transit<StIdle>();
         }
 
@@ -510,12 +509,10 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
         if (elapsed >= m.params.stuck.reverse_duration) {
             // 倒车结束，检查是否需要返回 FIXED
             if (in.fixed_goal) {
-                RCLCPP_INFO(m.logger, "STUCK_REVERSE done (%.2f s) -> entering FIXED", elapsed);
-                m.output.clear_global_path = true;
+                m.output.consume_global_path = true;
                 return transit<StFixed>();
             }
-            RCLCPP_INFO(m.logger, "STUCK_REVERSE done (%.2f s) -> clearing path, entering IDLE", elapsed);
-            m.output.clear_global_path = true;
+            m.output.consume_global_path = true;
             return transit<StIdle>();
         }
 
@@ -558,6 +555,12 @@ struct StFixed final : sc::state<StFixed, Machine> {
         if (in.spin_requested && in.spin_high_priority) {
             m.spin_resume_state = FsmState::FIXED;
             return transit<StSpin>();
+        }
+
+        // 新的 fixed 路径到来后，若当前位置尚未进入 fixed 近目标区，
+        // 必须先回到 FOLLOW 走新路径，而不是继续在 FIXED 中直接向目标拉动。
+        if (in.fixed_goal && in.path_updated && in.has_path && !in.close_to_fixed_goal) {
+            return transit<StFollow>();
         }
 
         // fixed 目标被取消 → 根据当前输入决定去向

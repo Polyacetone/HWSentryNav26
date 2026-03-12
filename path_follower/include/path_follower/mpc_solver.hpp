@@ -202,6 +202,7 @@ struct MPCFixedLimits {
 struct MPCFixedWeights {
     double q_goal_xy;
     double q_goal_theta;
+    double goal_deadzone;
     double r_v;
     double r_omega;
     double r_dv;

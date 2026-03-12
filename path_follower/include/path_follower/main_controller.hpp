@@ -22,6 +22,7 @@ namespace path_follower {
 struct ControlInput {
     // ─── 路径 ───
     std::optional<SplineD> global_path;
+    bool path_updated = false;
 
     // ─── fixed 目标 ───
     bool fixed_goal = false;                                     // 当前目标为 fixed 类型
@@ -67,7 +68,7 @@ struct ControlOutput {
 
     // ─── 状态信息 ───
     FsmState fsm_state = FsmState::IDLE;
-    bool path_cleared = false;          // 通知 Node 清除全局路径
+    bool consume_global_path = false;   // 通知 Node 消费当前全局路径，并据此重建台阶擦除地图
 
     // ─── 调试 ───
     std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;

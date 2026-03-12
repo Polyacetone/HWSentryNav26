@@ -79,6 +79,7 @@ enum class FsmState {
 struct FsmInput {
     // 外部请求
     bool has_path = false;
+    bool path_updated = false;
     bool spin_requested = false;
     bool spin_high_priority = false;
 
@@ -109,8 +110,8 @@ struct FsmInput {
 struct FsmOutput {
     FsmState state = FsmState::IDLE;
 
-    // STUCK_REVERSE 完成后要求清除全局路径
-    bool clear_global_path = false;
+    // FOLLOW/STUCK_REVERSE 完成后要求清除全局路径
+    bool consume_global_path = false;
 
     // HAZARD_RECOVERY 完成标记
     bool recovery_finished = false;

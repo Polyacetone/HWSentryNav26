@@ -19,6 +19,40 @@
 #include <common_utils/convert.hpp>
 
 namespace path_planner {
+
+namespace {
+
+std::vector<Eigen::Vector2d> make_direct_init_path(
+    const Eigen::Vector2d& start_grid,
+    const Eigen::Vector2d& goal_grid,
+    int width,
+    int height
+) {
+    const Eigen::Vector2d delta = goal_grid - start_grid;
+    const double dist = delta.norm();
+
+    if (dist <= 1e-6) {
+        Eigen::Vector2d axis = Eigen::Vector2d::UnitX();
+        if (width <= 1 && height > 1) axis = Eigen::Vector2d::UnitY();
+
+        Eigen::Vector2d mid = start_grid + 0.5 * axis;
+        mid.x() = std::clamp(mid.x(), 0.0, static_cast<double>(std::max(0, width - 1)));
+        mid.y() = std::clamp(mid.y(), 0.0, static_cast<double>(std::max(0, height - 1)));
+        return {start_grid, mid, goal_grid};
+    }
+
+    const int point_count = std::max(3, static_cast<int>(std::ceil(dist)) + 1);
+    std::vector<Eigen::Vector2d> path;
+    path.reserve(static_cast<size_t>(point_count));
+    for (int i = 0; i < point_count; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(point_count - 1);
+        path.push_back((1.0 - t) * start_grid + t * goal_grid);
+    }
+    return path;
+}
+
+} // namespace
+
 class PathPlannerNode: public rclcpp::Node {
 public:
     explicit PathPlannerNode(const rclcpp::NodeOptions& options);
@@ -39,7 +73,7 @@ private:
     nav_msgs::msg::Odometry::SharedPtr last_odom_msg_;
     AStarPlanner::ConstPtr path_planner_;
     BSplineOptimizer::ConstPtr path_optimizer_;
-    double lazy_distance_;
+    double skip_distance_;
     bool enable_debug_;
     int occupied_threshold_;
     double on_step_threshold_;
@@ -67,7 +101,6 @@ private:
 PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
-    lazy_distance_ = declare_parameter<double>("lazy_distance");
     enable_debug_ = declare_parameter<bool>("debug.enable");
     occupied_threshold_ = (int)declare_parameter<int>("occupied_threshold");
     on_step_threshold_ = declare_parameter<double>("on_step_threshold");
@@ -85,6 +118,8 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
+
+    skip_distance_ = declare_parameter<double>("path_planner.skip_distance");
     path_planner_ = std::make_shared<AStarPlanner>(
         declare_parameter<double>("path_planner.direction_weight"),
         declare_parameter<double>("path_planner.obstacle_weight"),
@@ -104,71 +139,92 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         declare_parameter<double>("path_optimizer.num_samples_per_length"),
         declare_parameter<int>("path_optimizer.max_iterations")
     );
-    std::string global_cost_map_sub_topic = declare_parameter<std::string>("global_cost_map_sub_topic");
+
+    const std::string global_cost_map_sub_topic = declare_parameter<std::string>("global_cost_map_sub_topic");
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         global_cost_map_sub_topic, 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
             global_cost_map_ = std::make_shared<CostMap>(*msg);
-            RCLCPP_INFO(get_logger(), "Received global cost map: size=(%d, %d), resolution=%.2f", global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution);
-            global_cost_map_sub_.reset();  // 全局代价地图只需要接收一次
+            RCLCPP_INFO(
+                get_logger(), "Received global cost map: size=(%d, %d), resolution=%.2f",
+                global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution
+            );
+            global_cost_map_sub_.reset();
         }
     );
-    std::string global_direction_map_sub_topic = declare_parameter<std::string>("global_direction_map_sub_topic");
+
+    const std::string global_direction_map_sub_topic = declare_parameter<std::string>("global_direction_map_sub_topic");
     global_direction_map_sub_ = create_subscription<sensor_msgs::msg::Image>(
         global_direction_map_sub_topic, 1,
         [this](const sensor_msgs::msg::Image::SharedPtr msg) {
-            cv::Mat img = cv_bridge::toCvShare(msg, "8UC2")->image;
             if (!global_cost_map_) {
-                RCLCPP_WARN(get_logger(), "Received direction map but cost map is not ready yet!");
+                RCLCPP_WARN(get_logger(), "Received global direction map before cost map, waiting for cost map first");
                 return;
             }
-            global_direction_map_ = std::make_shared<DirectionMap>(img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y);
+
+            const auto cv_ptr = cv_bridge::toCvShare(msg, msg->encoding);
+            global_direction_map_ = std::make_shared<DirectionMap>(
+                cv_ptr->image,
+                global_cost_map_->resolution,
+                global_cost_map_->origin_x,
+                global_cost_map_->origin_y
+            );
+
             if (global_direction_map_->width != global_cost_map_->width || global_direction_map_->height != global_cost_map_->height) {
-                RCLCPP_FATAL(get_logger(), "Direction map size (%d, %d) does not match cost map size (%d, %d)!", global_direction_map_->width, global_direction_map_->height, global_cost_map_->width, global_cost_map_->height);
+                RCLCPP_FATAL(
+                    get_logger(),
+                    "Direction map size (%d, %d) does not match cost map size (%d, %d)!",
+                    global_direction_map_->width, global_direction_map_->height,
+                    global_cost_map_->width, global_cost_map_->height
+                );
                 throw std::runtime_error("Direction map size does not match cost map size");
             }
+
             RCLCPP_INFO(get_logger(), "Received global direction map");
-            global_direction_map_sub_.reset();  // 全局方向地图只需要接收一次
+            global_direction_map_sub_.reset();
         }
     );
-    std::string goal_sub_topic = declare_parameter<std::string>("goal_sub_topic");
-    goal_sub_ = create_subscription<interfaces::msg::NavGoal>(
-        goal_sub_topic, 1,
-        [this](const interfaces::msg::NavGoal::SharedPtr msg) { goal_callback(msg); }
-    );
-    std::string odom_sub_topic = declare_parameter<std::string>("odom_sub_topic");
+
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-        odom_sub_topic, 1,
+        declare_parameter<std::string>("odom_sub_topic"), 1,
         [this](const nav_msgs::msg::Odometry::SharedPtr msg) { last_odom_msg_ = msg; }
     );
-    std::string control_points_pub_topic = declare_parameter<std::string>("control_points_pub_topic");
-    control_points_pub_ = create_publisher<interfaces::msg::GlobalPath>(control_points_pub_topic, 1);
+
+    goal_sub_ = create_subscription<interfaces::msg::NavGoal>(
+        declare_parameter<std::string>("goal_sub_topic"), 1,
+        [this](const interfaces::msg::NavGoal::SharedPtr msg) { goal_callback(msg); }
+    );
+
+    control_points_pub_ = create_publisher<interfaces::msg::GlobalPath>(
+        declare_parameter<std::string>("control_points_pub_topic"), 1
+    );
 }
 
 bool PathPlannerNode::is_map_point_feasible(const Eigen::Vector2d& map_pt) const {
     if (!global_cost_map_ || !global_direction_map_) return false;
-    const Eigen::Vector2d grid = global_cost_map_->map_coord_to_grid(map_pt);
-    if (!global_cost_map_->is_valid_coord(grid) || !global_direction_map_->is_valid_coord(grid)) return false;
-    if (global_cost_map_->interpolate(grid) > occupied_threshold_) return false;
-    if (global_direction_map_->interpolate(grid).norm() > on_step_threshold_) return false;
-    return true;
+
+    const Eigen::Vector2d cost_grid = global_cost_map_->map_coord_to_grid(map_pt);
+    const Eigen::Vector2d dir_grid = global_direction_map_->map_coord_to_grid(map_pt);
+    if (!global_cost_map_->is_valid_coord(cost_grid) || !global_direction_map_->is_valid_coord(dir_grid)) return false;
+
+    return global_cost_map_->interpolate(cost_grid) < occupied_threshold_ &&
+        global_direction_map_->interpolate(dir_grid).norm() < on_step_threshold_;
 }
 
 Eigen::Vector2d PathPlannerNode::adjust_reachable_start_on_segment(const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const {
     const Eigen::Vector2d delta = to_map - from_map;
     const double length = delta.norm();
     if (length <= 1e-6) return from_map;
+
     const double step = std::max(1e-3, start_prediction_collision_check_step_);
     const int n = std::max(1, static_cast<int>(std::ceil(length / step)));
     const Eigen::Vector2d dir = delta / length;
 
     Eigen::Vector2d last_feasible = from_map;
-    for (int i = 0; i <= n; i++) {
+    for (int i = 0; i <= n; ++i) {
         const double d = length * (static_cast<double>(i) / static_cast<double>(n));
         const Eigen::Vector2d pt = from_map + dir * d;
-        if (!is_map_point_feasible(pt)) {
-            break;
-        }
+        if (!is_map_point_feasible(pt)) break;
         last_feasible = pt;
     }
     return last_feasible;
@@ -225,13 +281,6 @@ void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr ms
     const Eigen::Vector2d current_map(chassis_to_map.getOrigin().x(), chassis_to_map.getOrigin().y());
     const bool fixed = msg->fixed;
 
-    // fixed 目标不受 lazy_distance 限制
-    if (!fixed && (goal_map - current_map).norm() < lazy_distance_) {
-        RCLCPP_INFO(get_logger(), "New goal is within lazy distance (%.2f m)", lazy_distance_);
-        publish_path({}, {}, {});
-        return;
-    }
-
     const Eigen::Vector2d start_map = predict_start_map(current_map);
     const Eigen::Vector2d start_grid = global_cost_map_->map_coord_to_grid(start_map);
     const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_map);
@@ -260,15 +309,7 @@ void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr ms
         return;
     }
 
-    // fixed 目标距离起点很近时，直接发布以目标点为中心的最小路径
     const double dist = (goal_map - start_map).norm();
-    if (fixed && dist < global_cost_map_->resolution * 2.0) {
-        RCLCPP_INFO(get_logger(), "Fixed goal very close to start (%.4f m), publishing minimal path", dist);
-        const Eigen::Vector2d goal_g = goal_grid;
-        const std::vector<Eigen::Vector2d> cps = {goal_g, goal_g, goal_g};
-        publish_path(cps, {}, {}, true);
-        return;
-    }
 
     RCLCPP_INFO(
         get_logger(), "New valid goal: Src(%.2f, %.2f) -> Dst(%.2f, %.2f)%s",
@@ -277,8 +318,44 @@ void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr ms
     );
 
     auto start_time = std::chrono::high_resolution_clock::now();
-    
-    // A*搜索得到初始路径，输入输出均为格点坐标系
+    std::vector<Eigen::Vector2d> rough_path;
+
+    const auto optimize_and_publish = [&](const std::vector<Eigen::Vector2d>& init_path) {
+        std::vector<Eigen::Vector2d> control_points, optimized_path;
+        const auto optimize_result = path_optimizer_->optimize(
+            *global_cost_map_,
+            *global_direction_map_,
+            init_path,
+            start_grid,
+            goal_grid
+        );
+        if (!optimize_result) {
+            RCLCPP_ERROR(get_logger(), "Path optimization failed: %s", optimize_result.error().c_str());
+            publish_path({}, {}, {}, fixed);
+            return;
+        }
+
+        std::tie(control_points, optimized_path) = *optimize_result;
+        RCLCPP_DEBUG(
+            get_logger(), "Path optimization took %.2f ms, control points: %d, optimized path length: %d",
+            std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count(),
+            static_cast<int>(control_points.size()),
+            static_cast<int>(optimized_path.size())
+        );
+        publish_path(control_points, init_path, optimized_path, fixed);
+    };
+
+    if (dist < skip_distance_) {
+        rough_path = make_direct_init_path(start_grid, goal_grid, global_cost_map_->width, global_cost_map_->height);
+        RCLCPP_INFO(
+            get_logger(),
+            "Planning start is within lazy distance (%.2f m), skipping A* and optimizing direct spline init with %zu points",
+            skip_distance_, rough_path.size()
+        );
+        optimize_and_publish(rough_path);
+        return;
+    }
+
     const auto plan_result = path_planner_->search_path(
         *global_cost_map_,
         *global_direction_map_,
@@ -286,11 +363,21 @@ void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr ms
         goal_grid.cast<int>()
     );
     if (!plan_result) {
+        if (plan_result.error() == "Start and goal too close") {
+            rough_path = make_direct_init_path(start_grid, goal_grid, global_cost_map_->width, global_cost_map_->height);
+            RCLCPP_WARN(
+                get_logger(),
+                "A* rejected short path beyond lazy distance; falling back to direct spline init with %zu points",
+                rough_path.size()
+            );
+            optimize_and_publish(rough_path);
+            return;
+        }
         RCLCPP_ERROR(get_logger(), "Path planning failed: %s", plan_result.error().c_str());
         publish_path({}, {}, {}, fixed);
         return;
     }
-    std::vector<Eigen::Vector2d> rough_path;
+
     std::for_each(plan_result->begin(), plan_result->end(), [&](const Eigen::Vector2i& pt) {
         rough_path.push_back(pt.cast<double>());
     });
@@ -302,30 +389,7 @@ void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr ms
     );
     start_time = std::chrono::high_resolution_clock::now();
 
-    // 优化路径，输入输出均为格点坐标系
-    std::vector<Eigen::Vector2d> control_points, optimized_path;
-    const auto optimize_result = path_optimizer_->optimize(
-        *global_cost_map_,
-        *global_direction_map_,
-        rough_path,
-        start_grid,
-        goal_grid
-    );
-    if (!optimize_result) {
-        RCLCPP_ERROR(get_logger(), "Path optimization failed: %s", optimize_result.error().c_str());
-        publish_path({}, {}, {}, fixed);
-        return;
-    }
-    std::tie(control_points, optimized_path) = *optimize_result;
-
-    RCLCPP_DEBUG(
-        get_logger(), "Path optimization took %.2f ms, control points: %d, optimized path length: %d",
-        std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count(),
-        static_cast<int>(control_points.size()),
-        static_cast<int>(optimized_path.size())
-    );
-
-    publish_path(control_points, rough_path, optimized_path, fixed);
+    optimize_and_publish(rough_path);
 }
 
 void PathPlannerNode::publish_path(

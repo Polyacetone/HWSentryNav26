@@ -5,7 +5,6 @@
     goal_sub_topic: "/decision/nav_goal" # 目标点订阅话题
     odom_sub_topic: "/small_glim/odometry" # 里程计，用于获取当前速度
     control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
-    lazy_distance: 1.0 # 如果目标点距离当前点小于该值，则不进行路径规划（单位：米）
     occupied_threshold: 50 # 如果起点/目标点所在格子的代价值大于该阈值，则认为起点/目标点不可达
     on_step_threshold: 0.1 # 如果起点/目标点所在格子的方向场模长大于该阈值，则认为起点/目标点在台阶上不可达
 
@@ -22,6 +21,7 @@
       collision_check_step: 0.05 # 预测起点直线可达性采样间隔（单位：m）
 
     path_planner:
+      skip_distance: 0.5 # 如果目标点距离当前点小于该值，则跳过A*并直接构造近距离B样条初值进行优化（单位：米）
       direction_weight: 6.0 # 方向代价权重
       obstacle_weight: 4.0 # 障碍物代价权重
       step_weight: 0.6 # 经过台阶惩罚（基于方向场模长）

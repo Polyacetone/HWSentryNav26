@@ -92,6 +92,7 @@ private:
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
+    bool path_updated_ = false;
     bool fixed_goal_ = false;
     Eigen::Vector2d fixed_goal_pos_ = Eigen::Vector2d::Zero();
     Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
@@ -225,6 +226,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .fixed_weights = {
             .q_goal_xy = declare_parameter<double>("mpc.fixed.weights.q_goal_xy"),
             .q_goal_theta = declare_parameter<double>("mpc.fixed.weights.q_goal_theta"),
+            .goal_deadzone = declare_parameter<double>("mpc.fixed.weights.goal_deadzone"),
             .r_v = declare_parameter<double>("mpc.fixed.weights.r_v"),
             .r_omega = declare_parameter<double>("mpc.fixed.weights.r_omega"),
             .r_dv = declare_parameter<double>("mpc.fixed.weights.r_dv"),
@@ -401,6 +403,7 @@ void PathFollowerNode::control_points_callback(const interfaces::msg::GlobalPath
     }
     global_path_ = SplineD(cpts);
     global_path_->setExtrapolate(true);
+    path_updated_ = true;
 
     // 更新 fixed 目标信息
     fixed_goal_ = msg->fixed;
@@ -501,6 +504,7 @@ void PathFollowerNode::control_timer_callback() {
     // 组装控制输入
     ControlInput input;
     input.global_path = global_path_;
+    input.path_updated = path_updated_;
     input.fixed_goal = fixed_goal_;
     input.fixed_goal_pos = fixed_goal_pos_;
     input.chassis_pose_map = chassis_pose_map;
@@ -519,10 +523,11 @@ void PathFollowerNode::control_timer_callback() {
 
     // 调用控制逻辑层
     const ControlOutput output = nav_controller_->update(input);
+    path_updated_ = false;
 
-    // 处理路径清除请求
-    if (output.path_cleared) {
-        RCLCPP_INFO(get_logger(), "Path cleared by controller");
+    // 处理路径消费请求：清空 spline 路径，并据此重建台阶擦除地图。
+    // 若当前已进入 FIXED，只消费路径，不取消 fixed 目标标记。
+    if (output.consume_global_path) {
         global_path_ = std::nullopt;
         // 非 fixed 模式才清除 fixed 标志
         if (output.fsm_state != FsmState::FIXED) {

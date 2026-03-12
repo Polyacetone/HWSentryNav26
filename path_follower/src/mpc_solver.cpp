@@ -14,6 +14,26 @@ namespace {
 inline double sq(double x) {
     return x * x;
 }
+
+inline double softplus(double x) {
+    if (x > 20.0) return x;
+    if (x < -20.0) return std::exp(x);
+    return std::log(1.0 + std::exp(x));
+}
+
+Eigen::Vector2d apply_goal_deadzone(const Eigen::Vector2d& delta, double deadzone) {
+    if (deadzone <= 0.0) return delta;
+
+    const double dist = delta.norm();
+    if (dist <= 0.0) return Eigen::Vector2d::Zero();
+
+    const double mag = softplus(dist - deadzone) - softplus(0.0);
+    if (mag <= 0.0) {
+        return Eigen::Vector2d::Zero();
+    }
+    return delta * (mag / dist);
+}
+
 inline double sabs(double x) {
     return std::sqrt(x * x + PWR_EPS2);
 }
@@ -27,18 +47,15 @@ inline double smooth_sgn_deriv(double x, double eps) {
     return (1.0 - s * s) / std::max(eps, 1e-6);
 }
 
-inline double softplus(double x) {
-    if (x > 20.0) return x;
-    if (x < -20.0) return std::exp(x);
-    return std::log(1.0 + std::exp(x));
-}
-
 inline double wrap_pi(double a) {
     return std::atan2(std::sin(a), std::cos(a));
 }
 
 inline double relu(double x) {
-    return std::max(0.0, x);
+    // replace hard ReLU with a softplus-based deadzone so costs grow
+    // smoothly. subtract the baseline softplus(0) so relu(0) == 0.
+    double y = softplus(x) - softplus(0.0);
+    return (y > 0.0) ? y : 0.0;
 }
 
 inline double predict_power(double v, double w, double a, double alpha) {
@@ -840,7 +857,8 @@ RecoveryResidualVec recovery_residual_impl(
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
 
-    const double ddx = px - goal.x(), ddy = py - goal.y();
+    const Eigen::Vector2d goal_delta(px - goal.x(), py - goal.y());
+    const double ddx = goal_delta.x(), ddy = goal_delta.y();
     const double desired_theta = std::atan2(goal.y() - py, goal.x() - px);
     const double heading_sin = std::sin(theta - desired_theta);
 
@@ -1004,7 +1022,11 @@ FixedResidualVec fixed_residual_impl(
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
 
-    const double ddx = px - goal.x(), ddy = py - goal.y();
+    const Eigen::Vector2d goal_delta = apply_goal_deadzone(
+        Eigen::Vector2d(px - goal.x(), py - goal.y()),
+        w.goal_deadzone
+    );
+    const double ddx = goal_delta.x(), ddy = goal_delta.y();
     const double desired_theta = std::atan2(goal.y() - py, goal.x() - px);
     const double heading_sin = std::sin(theta - desired_theta);
 
@@ -1054,13 +1076,15 @@ FixedTerminalResidualVec fixed_terminal_residual_impl(
 ) {
     FixedTerminalResidualVec r = FixedTerminalResidualVec::Zero();
     const auto& w = p.fixed_weights;
-    const double dxT = x(ix::X) - goal.x();
-    const double dyT = x(ix::Y) - goal.y();
+    const Eigen::Vector2d terminal_delta = apply_goal_deadzone(
+        Eigen::Vector2d(x(ix::X) - goal.x(), x(ix::Y) - goal.y()),
+        w.goal_deadzone
+    );
     const auto cs = eval_cost_bicubic(cost_grid, cost_info, x(ix::X), x(ix::Y));
     const auto ds = eval_dir_bicubic(dir_grid, dir_info, x(ix::X), x(ix::Y));
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
-    r(0) = w.q_goal_xy_terminal * dxT;
-    r(1) = w.q_goal_xy_terminal * dyT;
+    r(0) = w.q_goal_xy_terminal * terminal_delta.x();
+    r(1) = w.q_goal_xy_terminal * terminal_delta.y();
     r(2) = w.obstacle_terminal * cs.value / 255.0;
     r(3) = w.step_terminal * dir_norm;
     return r;

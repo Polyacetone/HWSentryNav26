@@ -137,30 +137,31 @@
           step_terminal: 12.0 # 终端台阶惩罚
       fixed: # 固定点位保持模式
         limits:
-          vel_max: 0.3 # 最大线速度硬约束 (m/s)
-          vel_min: -0.3 # 最小线速度硬约束 (m/s)
-          omega_max: 0.5 # 最大角速度硬约束 (rad/s)
-          omega_min: -0.5 # 最小角速度硬约束 (rad/s)
+          vel_max: 0.5 # 最大线速度硬约束 (m/s)
+          vel_min: -0.5 # 最小线速度硬约束 (m/s)
+          omega_max: 1.0 # 最大角速度硬约束 (rad/s)
+          omega_min: -1.0 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)
           acc_max: 2.4 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           a_lat_max: 3.0 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights:
-          q_goal_xy: 0.05 # 每步目标点吸引（x/y误差）
-          q_goal_theta: 0.2 # 朝向目标点
-          r_v: 0.8 # 线速度正则
-          r_omega: 0.2 # 角速度正则
+          q_goal_xy: 0.2 # 每步目标点吸引（x/y误差）
+          q_goal_theta: 0.1 # 朝向目标点
+          goal_deadzone: 0.2 # 目标吸引死区半径，进入后不再因目标位置误差来回抽动 (m)
+          r_v: 0.02 # 线速度正则
+          r_omega: 0.08 # 角速度正则
           r_dv: 0.8 # 线速度平滑
           r_domega: 0.2 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          obstacle: 6.0 # 全程避障惩罚
-          step: 6.0 # 全程台阶惩罚（视为不可通行）
-          q_goal_xy_terminal: 8.0 # 终端目标点吸引（x/y误差）
-          obstacle_terminal: 12.0 # 终端避障惩罚
-          step_terminal: 12.0 # 终端台阶惩罚
+          obstacle: 1.0 # 全程避障惩罚
+          step: 1.0 # 全程台阶惩罚（视为不可通行）
+          q_goal_xy_terminal: 3.0 # 终端目标点吸引（x/y误差）
+          obstacle_terminal: 2.0 # 终端避障惩罚
+          step_terminal: 2.0 # 终端台阶惩罚
 
     recovery:
       enable: true # 是否启用恢复功能
