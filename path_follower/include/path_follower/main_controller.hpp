@@ -116,7 +116,6 @@ public:
 
 private:
     // ─── 各状态的执行函数 ───
-    ControlOutput execute_dead(const ControlInput& input);
     ControlOutput execute_idle(const ControlInput& input);
     ControlOutput execute_follow(const ControlInput& input);
     ControlOutput execute_spin(const ControlInput& input);
@@ -127,6 +126,9 @@ private:
 
     void on_state_transition(FsmState prev, FsmState next);
     void update_recovery_goal_if_needed(const ControlInput& input);
+    bool check_stuck(const ControlInput& input);
+    bool compute_is_hazard(const ControlInput& input) const;
+    bool update_recovery_safe_flag(const ControlInput& input);
 
     // ─── 工具函数 ───
     std::tuple<bool, bool> detect_steps_on_prediction(
@@ -151,8 +153,14 @@ private:
     double last_reference_u_ = 0.0;
     std::optional<Eigen::Vector2d> recovery_goal_map_;
     rclcpp::Time recovery_goal_set_time_{0, 0, RCL_ROS_TIME};
+    std::optional<rclcpp::Time> recovery_safe_since_;
     FsmState last_fsm_state_ = FsmState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
+
+    // ─── 外部安全观测状态 ───
+    bool stuck_active_ = false;
+    rclcpp::Time stuck_start_time_{0, 0, RCL_ROS_TIME};
+    Eigen::Vector2d stuck_start_pos_ = Eigen::Vector2d::Zero();
 
     // ─── 台阶检测防抖状态 ───
     int step_up_on_count_ = 0;

@@ -1,13 +1,9 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 
-#include <Eigen/Core>
 #include <rclcpp/logger.hpp>
 #include <rclcpp/time.hpp>
-
-#include <path_follower/nav_map.hpp>
 
 namespace path_follower {
 
@@ -63,7 +59,7 @@ struct FsmParams {
 // ═══════════════════════════ 状态枚举 ═══════════════════════
 
 enum class FsmState {
-    DEAD,             // 底盘失效（Dead/Recovery/Abnormal）：保持 v=w=0，等待恢复
+    DEAD,             // 底盘失效（Dead/Recovery/Abnormal）：由 MainController 外部拦截
     IDLE,             // 无路径且不旋转
     FOLLOW,           // 跟随全局路径
     SPIN,             // 小陀螺模式
@@ -77,30 +73,25 @@ enum class FsmState {
 
 // 每个控制周期由 MainController 填写、传入 FSM
 struct FsmInput {
+    // 任务输入
+    bool has_path = false;      // 当前是否仍有未完成路径
+    bool has_new_path = false;  // 本周期是否收到新路径
+    bool fixed_goal_flag = false;
+    bool reach_goal = false;
+    bool reach_goal_by_dist = false;
+
     // 外部请求
-    bool has_path = false;
-    bool path_updated = false;
     bool spin_requested = false;
     bool spin_high_priority = false;
 
-    // 底盘是否处于失效模式（Dead/Recovery/Abnormal）
-    bool chassis_dead = false;
-
-    // fixed 目标相关
-    bool fixed_goal = false;            // 当前目标为 fixed 类型
-    bool close_to_fixed_goal = false;   // 距离 fixed 目标 < stop_threshold_dist
+    // 安全布尔（全部在 FSM 外计算）
+    bool is_hazard = false;
+    bool is_stuck = false;
+    bool is_recovery_safe = false;
 
     // 底盘实际状态
     double velocity = 0.0;   // 线速度
     double omega = 0.0;      // 角速度
-
-    // 位姿 / 地图（恢复模式的危险检测和目标搜索需要）
-    Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();
-    const CostMap* merged_cost_map = nullptr;
-    const DirectionMap* global_direction_map = nullptr;
-
-    // 恢复目标点（由 MainController 维护/选择，FSM 仅用于退出判定）
-    std::optional<Eigen::Vector2d> recovery_goal_map;
 
     // 时间戳
     rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
@@ -110,7 +101,7 @@ struct FsmInput {
 struct FsmOutput {
     FsmState state = FsmState::IDLE;
 
-    // FOLLOW/STUCK_REVERSE 完成后要求清除全局路径
+    // 状态机要求上层消费当前路径（例如到达终点或脱困链重置任务）
     bool consume_global_path = false;
 
     // HAZARD_RECOVERY 完成标记
@@ -135,9 +126,6 @@ public:
 
     // 查询当前状态
     [[nodiscard]] FsmState state() const;
-
-    // 外部发布底盘指令后回调（用于卡住检测）
-    void on_chassis_cmd_published(double velocity, double omega, const rclcpp::Time& stamp);
 
 private:
     struct Impl;

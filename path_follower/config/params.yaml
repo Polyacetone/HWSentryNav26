@@ -34,10 +34,10 @@
       off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
 
     state_machine: # 控制状态机参数
-      follow_to_spin_vel_max: 0.2 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
+      follow_to_spin_vel_max: 0.5 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
       spin_to_follow_omega_max: 1.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
-      to_idle_vel_max: 0.2 # 切到空闲前，线速度需小于该阈值 (m/s)
-      to_idle_omega_max: 0.2 # 切到空闲前，角速度需小于该阈值 (rad/s)
+      to_idle_vel_max: 0.5 # 切到空闲前，线速度需小于该阈值 (m/s)
+      to_idle_omega_max: 1.0 # 切到空闲前，角速度需小于该阈值 (rad/s)
 
     mpc: # MPC控制器参数
       energy: # 能量感知参数
@@ -177,7 +177,7 @@
         circ_radius_samples: 20 # 圆搜索法每条半径上用于计算代价和的采样数
         goal_timeout: 5.0 # 目标点未更新超时 (s)
       exit:
-        safe_hold_time: 0.5 # 安全区域保持时间 (s)
+        safe_hold_time: 1.0 # 安全区域保持时间 (s)
       stuck:
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.09 # 指令速度超过该值才开始检测 (m/s)

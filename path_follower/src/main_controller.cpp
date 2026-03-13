@@ -1,6 +1,7 @@
 #include <path_follower/main_controller.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <algorithm>
 #include <limits>
 #include <numbers>
@@ -128,6 +129,24 @@ MainController::MainController(
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
 ControlOutput MainController::update(const ControlInput& input) {
+    const bool chassis_dead = is_chassis_dead(input.chassis_leg_mode, input.comp_stage);
+
+    // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM。
+    if (chassis_dead) {
+        ControlOutput out;
+        out.velocity = 0.0;
+        out.omega = 0.0;
+        out.fsm_state = FsmState::DEAD;
+        out.valid = true;
+
+        last_cmd_ = Eigen::Vector2d::Zero();
+        mpc_controller_->set_last_cmd(last_cmd_);
+        mpc_controller_->reset_warm_start();
+        stuck_active_ = false;
+        recovery_safe_since_ = std::nullopt;
+        return out;
+    }
+
     const FsmState prev_state = last_fsm_state_;
     mpc_controller_->set_last_cmd(last_cmd_);
 
@@ -137,22 +156,31 @@ ControlOutput MainController::update(const ControlInput& input) {
     // 0.5 更新能量状态
     mpc_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
 
-    // 1. 组装 FSM 输入
+    if (prev_state == FsmState::HAZARD_RECOVERY) {
+        update_recovery_goal_if_needed(input);
+    }
+
+    const bool has_path = input.global_path.has_value();
+    const bool has_new_path = has_path && input.path_updated;
+    const bool dist_reached = has_path &&
+        ((input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
+    const bool u_reached = has_path && (last_reference_u_ > nav_params_.stop_threshold_u);
+
+    // 1. 组装 FSM 输入（仅布尔 + 基础运动量）
     FsmInput fsm_input;
-    fsm_input.has_path = input.global_path.has_value();
-    fsm_input.path_updated = input.path_updated;
+    fsm_input.has_path = has_path;
+    fsm_input.has_new_path = has_new_path;
+    fsm_input.fixed_goal_flag = input.fixed_goal;
+    fsm_input.reach_goal = dist_reached || u_reached;
+    fsm_input.reach_goal_by_dist = dist_reached;
     fsm_input.spin_requested = input.spin_requested;
     fsm_input.spin_high_priority = input.spin_high_priority;
-    fsm_input.chassis_dead = is_chassis_dead(input.chassis_leg_mode, input.comp_stage);
+    fsm_input.is_hazard = compute_is_hazard(input);
+    fsm_input.is_stuck = check_stuck(input);
+    fsm_input.is_recovery_safe = update_recovery_safe_flag(input);
     fsm_input.velocity = input.chassis_status.x();
     fsm_input.omega = input.chassis_status.y();
-    fsm_input.chassis_pose_map = input.chassis_pose_map;
-    fsm_input.merged_cost_map = input.merged_cost_map;
-    fsm_input.global_direction_map = input.global_direction_map;
-    fsm_input.recovery_goal_map = recovery_goal_map_;
     fsm_input.stamp = input.stamp;
-    fsm_input.fixed_goal = input.fixed_goal;
-    fsm_input.close_to_fixed_goal = input.fixed_goal && (input.chassis_pose_map.head<2>() - input.fixed_goal_pos).norm() < nav_params_.stop_threshold_dist;
 
     // 2. FSM 状态决策
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
@@ -163,7 +191,6 @@ ControlOutput MainController::update(const ControlInput& input) {
     // 3. 根据 FSM 状态，执行对应的控制逻辑
     ControlOutput output;
     switch (state) {
-        case FsmState::DEAD: output = execute_dead(input); break;
         case FsmState::IDLE: output = execute_idle(input); break;
         case FsmState::FOLLOW: output = execute_follow(input); break;
         case FsmState::SPIN: output = execute_spin(input); break;
@@ -171,6 +198,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         case FsmState::HAZARD_RECOVERY: output = execute_recovery(input); break;
         case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(input); break;
         case FsmState::FIXED: output = execute_fixed(input); break;
+        case FsmState::DEAD: output = execute_idle(input); break;
     }
 
     output.fsm_state = state;
@@ -182,26 +210,14 @@ ControlOutput MainController::update(const ControlInput& input) {
     // 4. 同步已发布指令到 FSM / MPC，并在非 MPC 状态时重置 MPC 的 warm start
     if (output.valid) {
         last_cmd_ = Eigen::Vector2d(output.velocity, output.omega);
-        control_fsm_->on_chassis_cmd_published(last_cmd_.x(), last_cmd_.y(), input.stamp);
         mpc_controller_->set_last_cmd(last_cmd_);
-        const bool non_mpc_state = (state == FsmState::DEAD) || (state == FsmState::IDLE) || (state == FsmState::SPIN) || (state == FsmState::STUCK_REVERSE);
+        const bool non_mpc_state = (state == FsmState::IDLE) || (state == FsmState::SPIN) || (state == FsmState::STUCK_REVERSE);
         if (non_mpc_state) {
             mpc_controller_->reset_warm_start();
         }
     }
 
     return output;
-}
-
-// ═══════════════════ DEAD: 失效保持静止 ═════════════════════
-
-ControlOutput MainController::execute_dead(const ControlInput& input) {
-    (void)input;
-    ControlOutput out;
-    out.velocity = 0.0;
-    out.omega = 0.0;
-    out.valid = true;
-    return out;
 }
 
 FsmState MainController::fsm_state() const {
@@ -251,12 +267,6 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     } else {
         RCLCPP_DEBUG(logger_, "MPCSolver(Follow) solve time: %.2f ms", solve_ms);
     }
-
-    // 到达目标点判定
-    const double dist_to_goal = (input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm();
-    const bool dist_reached = dist_to_goal < nav_params_.stop_threshold_dist;
-    const bool u_reached = u0 > nav_params_.stop_threshold_u;
-    out.consume_global_path = dist_reached || u_reached;
 
     // 台阶检测（基于 MPC 预测轨迹）
     const auto& [cmd, prediction] = *result;
@@ -318,6 +328,11 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
 void MainController::on_state_transition(const FsmState prev, const FsmState next) {
     if (prev == next) return;
 
+    // 离开 STUCK_REVERSE 或 HAZARD_RECOVERY 时，必须重置卡死检测
+    if (prev == FsmState::STUCK_REVERSE || prev == FsmState::HAZARD_RECOVERY) {
+        stuck_active_ = false;
+    }
+
     // 离开 FOLLOW 时重置台阶检测防抖状态
     if (prev == FsmState::FOLLOW && next != FsmState::FOLLOW) {
         step_up_on_count_ = step_up_off_count_ = 0;
@@ -331,18 +346,19 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         last_reference_u_ = 0.0;
     }
 
-    // DEAD 只是临时冻结；不要让它打断 HAZARD_RECOVERY 的恢复目标/计时
-    if (next == FsmState::HAZARD_RECOVERY && prev != FsmState::DEAD) {
+    if (next == FsmState::HAZARD_RECOVERY) {
         recovery_goal_map_ = std::nullopt;
         recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
+        recovery_safe_since_ = std::nullopt;
     }
-    if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY && next != FsmState::DEAD) {
+    if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY) {
         recovery_goal_map_ = std::nullopt;
         recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
+        recovery_safe_since_ = std::nullopt;
     }
 
     // 进入 FIXED 时重置 warm start（从其他 MPC 模式切换）
-    if (next == FsmState::FIXED && prev != FsmState::FIXED && prev != FsmState::DEAD) {
+    if (next == FsmState::FIXED && prev != FsmState::FIXED) {
         mpc_controller_->reset_warm_start();
     }
 }
@@ -381,6 +397,78 @@ void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
     } else {
         RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (UNSAFE cost=%.1f step=%.3f)", recovery_goal_map_->x(), recovery_goal_map_->y(), s->cost, s->step_norm);
     }
+}
+
+bool MainController::check_stuck(const ControlInput& input) {
+    const auto& p = fsm_params_.stuck;
+    if (!p.enable) return false;
+
+    if (std::abs(last_cmd_.x()) < p.cmd_vel_threshold) {
+        stuck_active_ = false;
+        return false;
+    }
+
+    const Eigen::Vector2d pos = input.chassis_pose_map.head<2>();
+    if (!stuck_active_) {
+        stuck_active_ = true;
+        stuck_start_time_ = input.stamp;
+        stuck_start_pos_ = pos;
+        return false;
+    }
+
+    const double dt = (input.stamp - stuck_start_time_).seconds();
+    const double disp = (pos - stuck_start_pos_).norm();
+    if (disp > p.max_displacement) {
+        stuck_start_time_ = input.stamp;
+        stuck_start_pos_ = pos;
+        return false;
+    }
+
+    return dt >= p.timeout;
+}
+
+bool MainController::compute_is_hazard(const ControlInput& input) const {
+    const auto& p = fsm_params_.recovery;
+    if (!p.enable || !input.merged_cost_map || !input.global_direction_map) return false;
+
+    const auto sample = RecoveryGoalPlanner::sample_fields(
+        *input.merged_cost_map,
+        *input.global_direction_map,
+        input.chassis_pose_map.head<2>()
+    );
+    if (!sample) return false;
+
+    return (sample->cost >= p.hazard_cost_threshold) ||
+        (sample->step_norm >= p.hazard_step_norm_threshold);
+}
+
+bool MainController::update_recovery_safe_flag(const ControlInput& input) {
+    const auto& p = fsm_params_.recovery;
+    if (!p.enable || !input.merged_cost_map || !input.global_direction_map || !recovery_goal_map_) {
+        recovery_safe_since_ = std::nullopt;
+        return false;
+    }
+
+    const auto sample = RecoveryGoalPlanner::sample_fields(
+        *input.merged_cost_map,
+        *input.global_direction_map,
+        input.chassis_pose_map.head<2>()
+    );
+    if (!sample) {
+        recovery_safe_since_ = std::nullopt;
+        return false;
+    }
+
+    const bool safe_now = RecoveryGoalPlanner::is_safe_goal(p, *sample);
+    if (!safe_now) {
+        recovery_safe_since_ = std::nullopt;
+        return false;
+    }
+
+    if (!recovery_safe_since_) {
+        recovery_safe_since_ = input.stamp;
+    }
+    return (input.stamp - *recovery_safe_since_).seconds() >= p.safe_hold_time;
 }
 
 // ═══════════════════ HAZARD_RECOVERY: MPC 驱动恢复 ═══════════

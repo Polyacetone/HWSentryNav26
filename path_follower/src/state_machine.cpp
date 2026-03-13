@@ -1,129 +1,18 @@
 #include <path_follower/state_machine.hpp>
-#include <rclcpp/logging.hpp>
 
 #include <boost/statechart/custom_reaction.hpp>
 #include <boost/statechart/event.hpp>
 #include <boost/statechart/state.hpp>
 #include <boost/statechart/state_machine.hpp>
+#include <rclcpp/logging.hpp>
 
 namespace path_follower {
 namespace {
 
 namespace sc = boost::statechart;
 
-// ═══════════════════════════ 辅助类型 ════════════════════════
-
-// 正常模式目的态（Idle / Follow / Spin）
-enum class NormalDest { IDLE, FOLLOW, SPIN };
-
-// 根据外部输入计算"应当处于的正常模式"
-inline NormalDest compute_desired(const FsmInput& in) {
-    const bool can_spin = in.spin_high_priority || (!in.has_path);
-    const bool should_spin = in.spin_requested && can_spin;
-    if (should_spin) return NormalDest::SPIN;
-    if (in.has_path) return NormalDest::FOLLOW;
-    return NormalDest::IDLE;
-}
-
-inline FsmState desired_to_state(const NormalDest d) {
-    switch (d) {
-        case NormalDest::IDLE: return FsmState::IDLE;
-        case NormalDest::FOLLOW: return FsmState::FOLLOW;
-        case NormalDest::SPIN: return FsmState::SPIN;
-    }
-    return FsmState::IDLE;
-}
-
-// ═════════════════════ 卡住检测器 ═════════════════════
-
-struct StuckMonitor {
-    bool active = false;
-    rclcpp::Time start_time{0, 0, RCL_ROS_TIME};
-    Eigen::Vector2d start_pos = Eigen::Vector2d::Zero();
-
-    void reset() {
-        active = false;
-    }
-
-    bool update(const StuckParams& p, double last_cmd_vel, const rclcpp::Time& now, const Eigen::Vector2d& pos) {
-        if (!p.enable) return false;
-        if (std::abs(last_cmd_vel) < p.cmd_vel_threshold) {
-            reset();
-            return false;
-        }
-        if (!active) {
-            active = true;
-            start_time = now;
-            start_pos = pos;
-            return false;
-        }
-        const double dt = (now - start_time).seconds();
-        const double disp = (pos - start_pos).norm();
-        if (disp > p.max_displacement) {
-            start_time = now;
-            start_pos = pos;
-            return false;
-        }
-        return dt >= p.timeout;
-    }
-};
-
-// ═════════════════════ 危险恢复逻辑（FSM 仅负责进入/退出） ═════════════════════
-
-struct HazardLogic {
-    std::optional<rclcpp::Time> safe_since;
-
-    void reset() { safe_since = std::nullopt; }
-
-    static bool is_pose_hazard(
-        const RecoveryParams& p,
-        const CostMap& cost_map,
-        const DirectionMap& dir_map,
-        const Eigen::Vector2d& pos
-    ) {
-        const Eigen::Vector2d gc = cost_map.map_coord_to_grid(pos);
-        const double cost = cost_map.interpolate(gc);
-        const Eigen::Vector2d gd = dir_map.map_coord_to_grid(pos);
-        const double step_norm = dir_map.interpolate(gd).norm();
-        return (cost >= p.hazard_cost_threshold) || (step_norm >= p.hazard_step_norm_threshold);
-    }
-
-    bool should_exit(
-        const RecoveryParams& p,
-        const rclcpp::Time& now,
-        const Eigen::Vector3d& chassis_pose_map,
-        const CostMap& cost_map,
-        const DirectionMap& dir_map,
-        const std::optional<Eigen::Vector2d>& recovery_goal_map
-    ) {
-        if (!p.enable) return true;
-        if (!recovery_goal_map) {
-            safe_since = std::nullopt;
-            return false;
-        }
-
-        const Eigen::Vector2d pos = chassis_pose_map.head<2>();
-
-        const Eigen::Vector2d gc = cost_map.map_coord_to_grid(pos);
-        const double cost_now = cost_map.interpolate(gc);
-        const Eigen::Vector2d gd = dir_map.map_coord_to_grid(pos);
-        const double step_now = dir_map.interpolate(gd).norm();
-        const bool safe = (cost_now < p.safe_cost_threshold) && (step_now < p.safe_step_norm_threshold);
-
-        if (safe) {
-            if (!safe_since) safe_since = now;
-            if ((now - *safe_since).seconds() >= p.safe_hold_time) {
-                return true;
-            }
-        } else {
-            safe_since = std::nullopt;
-        }
-
-        return false;
-    }
-};
-
-// ═══════════════════ boost::statechart 状态声明 ══════════════
+// Stopping 的目标态（Hub 路由出口）
+enum class DestState { IDLE, FIXED, SPIN, FOLLOW };
 
 struct EvUpdate final : sc::event<EvUpdate> {
     explicit EvUpdate(const FsmInput& in) : input(in) {}
@@ -131,51 +20,24 @@ struct EvUpdate final : sc::event<EvUpdate> {
 };
 
 struct StIdle;
+struct StFixed;
 struct StFollow;
 struct StSpin;
 struct StStopping;
-struct StDead;
-struct StHazardRecovery;
 struct StStuckReverse;
-struct StFixed;
-
-// ═══════════════════════ 状态机本体 ═════════════════════════
+struct StHazardRecovery;
 
 struct Machine final : sc::state_machine<Machine, StIdle> {
     Machine(const FsmParams& p, rclcpp::Logger lg) : params(p), logger(lg) {}
 
-    // ──── 参数 ────
     FsmParams params;
     rclcpp::Logger logger;
 
-    // ──── 当前状态 ────
     FsmState active_state = FsmState::IDLE;
-
-    // ──── 输出缓冲 ────
     FsmOutput output;
 
-    // ──── Stopping 目的态 ────
-    NormalDest stop_dest = NormalDest::IDLE;
-
-    // ──── DEAD 恢复后目标态（尽量恢复到进入前的状态） ────
-    FsmState dead_resume_state = FsmState::IDLE;
-
-    // ──── Hazard Recovery 恢复后目标态 ────
-    FsmState hazard_resume_state = FsmState::IDLE;
-
-    // ──── Spin 恢复后目标态（用于 FIXED → SPIN → FIXED） ────
-    FsmState spin_resume_state = FsmState::IDLE;
-
-    // ──── 恢复目标搜索逻辑 ────
-    HazardLogic hazard_logic;
-
-    // ──── 卡住检测 ────
-    StuckMonitor stuck_monitor;
-    double last_cmd_velocity = 0.0;
-    double last_cmd_omega = 0.0;
-    rclcpp::Time last_cmd_time{0, 0, RCL_ROS_TIME};
-
-    // ──── 倒车 ────
+    DestState stopping_dest = DestState::IDLE;
+    rclcpp::Time stopping_start_time{0, 0, RCL_ROS_TIME};
     rclcpp::Time reverse_start_time{0, 0, RCL_ROS_TIME};
 
     void clear_output() {
@@ -183,183 +45,175 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
         output.state = active_state;
     }
 
-    bool check_stuck(const FsmInput& in) {
-        if (!params.stuck.enable) return false;
-        if (last_cmd_time.nanoseconds() == 0) return false;
-        return stuck_monitor.update(params.stuck, last_cmd_velocity, in.stamp, in.chassis_pose_map.head<2>());
+    bool stopping_ready(const FsmInput& in) const {
+        return std::abs(in.velocity) < params.transition.to_idle_vel_max &&
+            std::abs(in.omega) < params.transition.to_idle_omega_max;
     }
 };
 
-// ═══════════════════════ 各状态实现 ═════════════════════════
-
-// ─────────────── IDLE ───────────────
 struct StIdle final : sc::state<StIdle, Machine> {
     using reactions = sc::custom_reaction<EvUpdate>;
 
     explicit StIdle(my_context ctx) : sc::state<StIdle, Machine>(ctx) {
-        context<Machine>().active_state = FsmState::IDLE;
-        context<Machine>().stuck_monitor.reset();
-        RCLCPP_INFO(context<Machine>().logger, "FSM -> IDLE");
+        auto& m = context<Machine>();
+        m.active_state = FsmState::IDLE;
+        RCLCPP_INFO(m.logger, "FSM -> IDLE");
+    }
+
+    sc::result react(const EvUpdate& ev) {
+        const auto& in = ev.input;
+
+        if (in.is_hazard) {
+            return transit<StHazardRecovery>();
+        }
+        if (in.has_new_path) {
+            return transit<StFollow>();
+        }
+        if (in.spin_requested) {
+            return transit<StSpin>();
+        }
+
+        return discard_event();
+    }
+};
+
+struct StFixed final : sc::state<StFixed, Machine> {
+    using reactions = sc::custom_reaction<EvUpdate>;
+
+    explicit StFixed(my_context ctx) : sc::state<StFixed, Machine>(ctx) {
+        auto& m = context<Machine>();
+        m.active_state = FsmState::FIXED;
+        RCLCPP_INFO(m.logger, "FSM -> FIXED");
     }
 
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (in.chassis_dead) {
-            m.dead_resume_state = FsmState::IDLE;
-            m.stuck_monitor.reset();
-            return transit<StDead>();
+        if (in.is_stuck) {
+            m.reverse_start_time = in.stamp;
+            return transit<StStuckReverse>();
+        }
+        if (in.spin_requested && in.spin_high_priority) {
+            m.stopping_dest = DestState::SPIN;
+            m.stopping_start_time = in.stamp;
+            return transit<StStopping>();
+        }
+        if (in.has_new_path) {
+            return transit<StFollow>();
         }
 
-        if (m.params.recovery.enable && in.merged_cost_map && in.global_direction_map) {
-            if (HazardLogic::is_pose_hazard(m.params.recovery, *in.merged_cost_map, *in.global_direction_map, in.chassis_pose_map.head<2>())) {
-                m.hazard_resume_state = FsmState::IDLE;
-                return transit<StHazardRecovery>();
-            }
-        }
-
-        const auto desired = compute_desired(in);
-        if (desired == NormalDest::FOLLOW) return transit<StFollow>();
-        if (desired == NormalDest::SPIN) return transit<StSpin>();
         return discard_event();
     }
 };
 
-// ─────────────── FOLLOW ───────────────
 struct StFollow final : sc::state<StFollow, Machine> {
     using reactions = sc::custom_reaction<EvUpdate>;
 
     explicit StFollow(my_context ctx) : sc::state<StFollow, Machine>(ctx) {
-        context<Machine>().active_state = FsmState::FOLLOW;
-        context<Machine>().stuck_monitor.reset();
-        RCLCPP_INFO(context<Machine>().logger, "FSM -> FOLLOW");
+        auto& m = context<Machine>();
+        m.active_state = FsmState::FOLLOW;
+        RCLCPP_INFO(m.logger, "FSM -> FOLLOW");
     }
 
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (in.chassis_dead) {
-            m.dead_resume_state = FsmState::FOLLOW;
-            m.stuck_monitor.reset();
-            return transit<StDead>();
-        }
-
-        if (m.check_stuck(in)) {
+        if (in.is_stuck) {
+            m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
-
-        if (in.fixed_goal && in.close_to_fixed_goal) {
-            m.output.consume_global_path = true;
-            return transit<StFixed>();
+        if (in.spin_requested && in.spin_high_priority) {
+            m.stopping_dest = DestState::SPIN;
+            m.stopping_start_time = in.stamp;
+            return transit<StStopping>();
+        }
+        if (in.reach_goal) {
+            if (in.reach_goal_by_dist && in.fixed_goal_flag) {
+                m.stopping_dest = DestState::FIXED;
+            } else {
+                m.stopping_dest = DestState::IDLE;
+            }
+            m.stopping_start_time = in.stamp;
+            return transit<StStopping>();
         }
 
-        const auto desired = compute_desired(in);
-        if (desired == NormalDest::FOLLOW) {
-            return discard_event();
-        }
-
-        m.stop_dest = desired;
-        return transit<StStopping>();
+        return discard_event();
     }
 };
 
-// ─────────────── SPIN ───────────────
 struct StSpin final : sc::state<StSpin, Machine> {
     using reactions = sc::custom_reaction<EvUpdate>;
 
     explicit StSpin(my_context ctx) : sc::state<StSpin, Machine>(ctx) {
-        context<Machine>().active_state = FsmState::SPIN;
-        context<Machine>().stuck_monitor.reset();
-        RCLCPP_INFO(context<Machine>().logger, "FSM -> SPIN");
+        auto& m = context<Machine>();
+        m.active_state = FsmState::SPIN;
+        RCLCPP_INFO(m.logger, "FSM -> SPIN");
     }
 
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (in.chassis_dead) {
-            m.dead_resume_state = FsmState::SPIN;
-            m.stuck_monitor.reset();
-            return transit<StDead>();
-        }
+        const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
 
-        if (m.params.recovery.enable && in.merged_cost_map && in.global_direction_map) {
-            // FIXED 不响应 hazard recovery，从 FIXED 进入的 SPIN 也不响应
-            if (m.spin_resume_state != FsmState::FIXED) {
-                if (HazardLogic::is_pose_hazard(m.params.recovery, *in.merged_cost_map, *in.global_direction_map, in.chassis_pose_map.head<2>())) {
-                    m.hazard_resume_state = FsmState::SPIN;
-                    m.spin_resume_state = FsmState::IDLE;
-                    return transit<StHazardRecovery>();
-                }
+        if (in.is_hazard) {
+            return transit<StHazardRecovery>();
+        }
+        if (in.is_stuck) {
+            m.reverse_start_time = in.stamp;
+            return transit<StStuckReverse>();
+        }
+        if (!keep_spinning) {
+            if (in.has_path) {
+                m.stopping_dest = DestState::FOLLOW;
+            } else if (in.fixed_goal_flag) {
+                m.stopping_dest = DestState::FIXED;
+            } else {
+                m.stopping_dest = DestState::IDLE;
             }
+            m.stopping_start_time = in.stamp;
+            return transit<StStopping>();
         }
 
-        const auto desired = compute_desired(in);
-        if (desired == NormalDest::SPIN) return discard_event();
-
-        // SPIN 结束，检查是否需要返回 FIXED
-        if (m.spin_resume_state == FsmState::FIXED) {
-            m.spin_resume_state = FsmState::IDLE;
-            if (in.fixed_goal) {
-                return transit<StFixed>();
-            }
-            // fixed 目标已取消，走正常流程
-        }
-
-        m.stop_dest = desired;
-        return transit<StStopping>();
+        return discard_event();
     }
 };
 
-// ─────────────── STOPPING ───────────────
 struct StStopping final : sc::state<StStopping, Machine> {
     using reactions = sc::custom_reaction<EvUpdate>;
 
     explicit StStopping(my_context ctx) : sc::state<StStopping, Machine>(ctx) {
-        context<Machine>().active_state = FsmState::STOPPING;
-        RCLCPP_INFO(
-            context<Machine>().logger, "FSM -> STOPPING (dest=%s)",
-            context<Machine>().stop_dest == NormalDest::IDLE ? "IDLE" :
-            context<Machine>().stop_dest == NormalDest::FOLLOW ? "FOLLOW" : "SPIN"
-        );
+        auto& m = context<Machine>();
+        m.active_state = FsmState::STOPPING;
+        RCLCPP_INFO(m.logger, "FSM -> STOPPING");
     }
 
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (in.chassis_dead) {
-            // STOPPING 属于过渡态：失效恢复后直接回到当下 desired 的正常态即可
-            m.dead_resume_state = desired_to_state(compute_desired(in));
-            m.stuck_monitor.reset();
-            return transit<StDead>();
-        }
-
-        if (m.check_stuck(in)) {
+        if (in.is_stuck) {
+            m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
 
-        m.stop_dest = compute_desired(in);
+        if (m.stopping_dest != DestState::FOLLOW && in.has_new_path) {
+            return transit<StFollow>();
+        }
 
-        // 使用上一周期的指令速度（而非实际速度）判断过渡条件，以保证指令信号的连续性
-        const double v = m.last_cmd_velocity;
-        const double w = m.last_cmd_omega;
-        const auto& tp = m.params.transition;
-
-        switch (m.stop_dest) {
-            case NormalDest::SPIN: {
-                if (std::abs(v) < tp.follow_to_spin_vel_max) return transit<StSpin>();
-                break;
-            }
-            case NormalDest::FOLLOW: {
-                if (std::abs(w) < tp.spin_to_follow_omega_max) return transit<StFollow>();
-                break;
-            }
-            case NormalDest::IDLE: {
-                if (std::abs(v) < tp.to_idle_vel_max && std::abs(w) < tp.to_idle_omega_max) return transit<StIdle>();
-                break;
+        const bool timeout = (in.stamp - m.stopping_start_time).seconds() > 2.0;
+        if (m.stopping_ready(in) || timeout) {
+            switch (m.stopping_dest) {
+                case DestState::IDLE:
+                    m.output.consume_global_path = true;
+                    return transit<StIdle>();
+                case DestState::FIXED:
+                    m.output.consume_global_path = true;
+                    return transit<StFixed>();
+                case DestState::SPIN: return transit<StSpin>();
+                case DestState::FOLLOW: return transit<StFollow>();
             }
         }
 
@@ -367,125 +221,12 @@ struct StStopping final : sc::state<StStopping, Machine> {
     }
 };
 
-// ─────────────── DEAD ───────────────
-struct StDead final : sc::state<StDead, Machine> {
-    using reactions = sc::custom_reaction<EvUpdate>;
-
-    explicit StDead(my_context ctx) : sc::state<StDead, Machine>(ctx) {
-        auto& m = context<Machine>();
-        m.active_state = FsmState::DEAD;
-        m.stuck_monitor.reset();
-        RCLCPP_WARN(m.logger, "FSM -> DEAD");
-    }
-
-    sc::result react(const EvUpdate& ev) {
-        auto& m = context<Machine>();
-        const auto& in = ev.input;
-
-        if (in.chassis_dead) {
-            // 底盘仍处于失效模式：保持 DEAD
-            return discard_event();
-        }
-
-        // 底盘恢复：优先恢复到进入 DEAD 前的可恢复态；否则回到当下 desired 正常态
-        const auto desired = compute_desired(in);
-        const FsmState desired_state = desired_to_state(desired);
-
-        auto resume = m.dead_resume_state;
-
-        // 不恢复这些“动作型/过渡型”状态，避免恢复瞬间发生倒车/过渡指令
-        if (resume == FsmState::STOPPING || resume == FsmState::STUCK_REVERSE || resume == FsmState::DEAD) {
-            resume = desired_state;
-        }
-
-        // 若恢复态与当前输入不兼容，则退化为 desired
-        if (resume == FsmState::FOLLOW && !in.has_path) {
-            resume = desired_state;
-        }
-        if (resume == FsmState::SPIN) {
-            const bool can_spin = in.spin_high_priority || (!in.has_path);
-            const bool should_spin = in.spin_requested && can_spin;
-            if (!should_spin) resume = desired_state;
-        }
-        if (resume == FsmState::HAZARD_RECOVERY && !m.params.recovery.enable) {
-            resume = desired_state;
-        }
-        if (resume == FsmState::FIXED && !in.fixed_goal) {
-            resume = desired_state;
-        }
-
-        switch (resume) {
-            case FsmState::HAZARD_RECOVERY: return transit<StHazardRecovery>();
-            case FsmState::FIXED: return transit<StFixed>();
-            case FsmState::FOLLOW: return transit<StFollow>();
-            case FsmState::SPIN: return transit<StSpin>();
-            case FsmState::IDLE: return transit<StIdle>();
-            default: return transit<StIdle>();
-        }
-    }
-};
-
-// ─────────────── HAZARD_RECOVERY ───────────────
-struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
-    using reactions = sc::custom_reaction<EvUpdate>;
-
-    explicit StHazardRecovery(my_context ctx) : sc::state<StHazardRecovery, Machine>(ctx) {
-        auto& m = context<Machine>();
-        m.active_state = FsmState::HAZARD_RECOVERY;
-        m.hazard_logic.reset();
-        m.stuck_monitor.reset();
-        RCLCPP_WARN(m.logger, "FSM -> HAZARD_RECOVERY (resume=%s)", m.hazard_resume_state == FsmState::SPIN ? "SPIN" : "IDLE");
-    }
-
-    sc::result react(const EvUpdate& ev) {
-        auto& m = context<Machine>();
-        const auto& in = ev.input;
-
-        if (in.chassis_dead) {
-            m.dead_resume_state = FsmState::HAZARD_RECOVERY;
-            m.stuck_monitor.reset();
-            return transit<StDead>();
-        }
-
-        if (m.check_stuck(in)) {
-            return transit<StStuckReverse>();
-        }
-
-        if (!in.merged_cost_map || !in.global_direction_map) {
-            return discard_event();
-        }
-
-        // FSM 只负责退出判定；恢复目标点由 MainController 维护
-        const bool finished = m.hazard_logic.should_exit(
-            m.params.recovery,
-            in.stamp,
-            in.chassis_pose_map,
-            *in.merged_cost_map,
-            *in.global_direction_map,
-            in.recovery_goal_map
-        );
-
-        if (finished) {
-            m.output.recovery_finished = true;
-            if (m.hazard_resume_state == FsmState::SPIN) {
-                return transit<StSpin>();
-            }
-            return transit<StIdle>();
-        }
-
-        return discard_event();
-    }
-};
-
-// ─────────────── STUCK_REVERSE ───────────────
 struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
     using reactions = sc::custom_reaction<EvUpdate>;
 
     explicit StStuckReverse(my_context ctx) : sc::state<StStuckReverse, Machine>(ctx) {
         auto& m = context<Machine>();
         m.active_state = FsmState::STUCK_REVERSE;
-        m.reverse_start_time = m.last_cmd_time;
-        m.stuck_monitor.reset();
         RCLCPP_WARN(m.logger, "FSM -> STUCK_REVERSE");
     }
 
@@ -493,25 +234,51 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (in.chassis_dead) {
-            // 避免恢复瞬间继续倒车：恢复后回到当下 desired 正常态
-            m.dead_resume_state = desired_to_state(compute_desired(in));
-            m.stuck_monitor.reset();
-            return transit<StDead>();
-        }
-
-        if (!m.params.stuck.enable) {
-            m.output.consume_global_path = true;
-            return transit<StIdle>();
-        }
-
         const double elapsed = (in.stamp - m.reverse_start_time).seconds();
-        if (elapsed >= m.params.stuck.reverse_duration) {
-            // 倒车结束，检查是否需要返回 FIXED
-            if (in.fixed_goal) {
-                m.output.consume_global_path = true;
+        if (elapsed > m.params.stuck.reverse_duration) {
+            // 脱困链条固定为：倒车 -> HazardRecovery
+            m.output.consume_global_path = true;
+            return transit<StHazardRecovery>();
+        }
+
+        return discard_event();
+    }
+};
+
+struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
+    using reactions = sc::custom_reaction<EvUpdate>;
+
+    explicit StHazardRecovery(my_context ctx) : sc::state<StHazardRecovery, Machine>(ctx) {
+        auto& m = context<Machine>();
+        m.active_state = FsmState::HAZARD_RECOVERY;
+        RCLCPP_WARN(m.logger, "FSM -> HAZARD_RECOVERY");
+    }
+
+    sc::result react(const EvUpdate& ev) {
+        auto& m = context<Machine>();
+        const auto& in = ev.input;
+
+        if (in.is_stuck) {
+            m.reverse_start_time = in.stamp;
+            return transit<StStuckReverse>();
+        }
+        if (in.is_recovery_safe) {
+            m.output.recovery_finished = true;
+
+            const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
+
+            if (should_spin) {
+                return transit<StSpin>();
+            }
+
+            if (in.has_path) {
+                return transit<StFollow>();
+            }
+
+            if (in.fixed_goal_flag) {
                 return transit<StFixed>();
             }
+
             m.output.consume_global_path = true;
             return transit<StIdle>();
         }
@@ -522,66 +289,6 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
 
 } // anonymous namespace
 
-// ─────────────── FIXED ───────────────
-namespace {
-
-struct StFixed final : sc::state<StFixed, Machine> {
-    using reactions = sc::custom_reaction<EvUpdate>;
-
-    explicit StFixed(my_context ctx) : sc::state<StFixed, Machine>(ctx) {
-        auto& m = context<Machine>();
-        m.active_state = FsmState::FIXED;
-        m.stuck_monitor.reset();
-        RCLCPP_INFO(m.logger, "FSM -> FIXED");
-    }
-
-    sc::result react(const EvUpdate& ev) {
-        auto& m = context<Machine>();
-        const auto& in = ev.input;
-
-        // DEAD（顶层优先级）
-        if (in.chassis_dead) {
-            m.dead_resume_state = FsmState::FIXED;
-            m.stuck_monitor.reset();
-            return transit<StDead>();
-        }
-
-        // 卡住检测（顶层优先级）
-        if (m.check_stuck(in)) {
-            return transit<StStuckReverse>();
-        }
-
-        // 响应高优先级 SPIN 指令
-        if (in.spin_requested && in.spin_high_priority) {
-            m.spin_resume_state = FsmState::FIXED;
-            return transit<StSpin>();
-        }
-
-        // 新的 fixed 路径到来后，若当前位置尚未进入 fixed 近目标区，
-        // 必须先回到 FOLLOW 走新路径，而不是继续在 FIXED 中直接向目标拉动。
-        if (in.fixed_goal && in.path_updated && in.has_path && !in.close_to_fixed_goal) {
-            return transit<StFollow>();
-        }
-
-        // fixed 目标被取消 → 根据当前输入决定去向
-        if (!in.fixed_goal) {
-            const auto desired = compute_desired(in);
-            switch (desired) {
-                case NormalDest::FOLLOW: return transit<StFollow>();
-                case NormalDest::SPIN: return transit<StSpin>();
-                case NormalDest::IDLE: return transit<StIdle>();
-            }
-        }
-
-        // 保持 FIXED
-        return discard_event();
-    }
-};
-
-} // anonymous namespace (StFixed)
-
-// ═══════════════════════ Impl 桥接 ═══════════════════════════
-
 struct StateMachine::Impl {
     Impl(const FsmParams& params, rclcpp::Logger logger) : machine(params, logger) {
         machine.initiate();
@@ -589,8 +296,6 @@ struct StateMachine::Impl {
 
     Machine machine;
 };
-
-// ═══════════════════════ 公开接口 ════════════════════════════
 
 StateMachine::StateMachine(const FsmParams& params, rclcpp::Logger logger) : impl_(std::make_unique<Impl>(params, logger)) {}
 
@@ -609,10 +314,4 @@ FsmState StateMachine::state() const {
     return impl_->machine.active_state;
 }
 
-void StateMachine::on_chassis_cmd_published(double velocity, double omega, const rclcpp::Time& stamp) {
-    impl_->machine.last_cmd_velocity = velocity;
-    impl_->machine.last_cmd_omega = omega;
-    impl_->machine.last_cmd_time = stamp;
-}
-
-}
+} // namespace path_follower
