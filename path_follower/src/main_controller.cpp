@@ -162,8 +162,7 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     const bool has_path = input.global_path.has_value();
     const bool has_new_path = has_path && input.path_updated;
-    const bool dist_reached = has_path &&
-        ((input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
+    const bool dist_reached = has_path && ((input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
     const bool u_reached = has_path && (last_reference_u_ > nav_params_.stop_threshold_u);
 
     // 1. 组装 FSM 输入（仅布尔 + 基础运动量）
@@ -172,14 +171,14 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.has_new_path = has_new_path;
     fsm_input.fixed_goal_flag = input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
-    fsm_input.reach_goal_by_dist = dist_reached;
     fsm_input.spin_requested = input.spin_requested;
     fsm_input.spin_high_priority = input.spin_high_priority;
     fsm_input.is_hazard = compute_is_hazard(input);
     fsm_input.is_stuck = check_stuck(input);
     fsm_input.is_recovery_safe = update_recovery_safe_flag(input);
-    fsm_input.velocity = input.chassis_status.x();
-    fsm_input.omega = input.chassis_status.y();
+    // STOPPING 退出判定按“控制指令是否收敛到零”进行，而不是底盘实速。
+    fsm_input.velocity = last_cmd_.x();
+    fsm_input.omega = last_cmd_.y();
     fsm_input.stamp = input.stamp;
 
     // 2. FSM 状态决策

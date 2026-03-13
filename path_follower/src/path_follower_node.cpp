@@ -262,6 +262,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .spin_to_follow_omega_max = declare_parameter<double>("state_machine.spin_to_follow_omega_max"),
         .to_idle_vel_max = declare_parameter<double>("state_machine.to_idle_vel_max"),
         .to_idle_omega_max = declare_parameter<double>("state_machine.to_idle_omega_max"),
+        .stopping_timeout = declare_parameter<double>("state_machine.stopping_timeout")
     };
     fsm_params.recovery = {
         .enable = declare_parameter<bool>("recovery.enable"),
@@ -273,7 +274,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .circ_angle_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_angle_samples")),
         .circ_radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_radius_samples")),
         .safe_hold_time = declare_parameter<double>("recovery.exit.safe_hold_time"),
-        .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout"),
+        .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout")
     };
     fsm_params.stuck = {
         .enable = declare_parameter<bool>("recovery.stuck.enable"),
@@ -281,7 +282,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .timeout = declare_parameter<double>("recovery.stuck.timeout"),
         .max_displacement = declare_parameter<double>("recovery.stuck.max_displacement"),
         .reverse_speed = declare_parameter<double>("recovery.stuck.reverse_speed"),
-        .reverse_duration = declare_parameter<double>("recovery.stuck.reverse_duration"),
+        .reverse_duration = declare_parameter<double>("recovery.stuck.reverse_duration")
     };
 
     // ─── MainController 参数 ───

@@ -713,8 +713,8 @@ StopResidualVec stop_residual_impl(
 
     const double dv_lim = lim.acc_max * MPC_DT;
     const double dw_lim = lim.alpha_max * MPC_DT;
-    r(0) = w.q_v * v_act;
-    r(1) = w.q_omega * w_act;
+    r(0) = w.q_v * v_cmd;
+    r(1) = w.q_omega * w_cmd;
     r(2) = w.r_dv * dv_cmd;
     r(3) = w.r_domega * dw_cmd;
     r(4) = w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
@@ -1417,9 +1417,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     FollowProblem prob(ref_cps, params_, cg, ci, dg, di, arc, remaining_energy_, rfr_pwr_limit_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 30;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
+    opts.max_iters = 25;
+    opts.tol_grad = 1e-4;
+    opts.tol_cost = 1e-6;
 
     // ── 初始化中心假设 ──
     initialize_primal_trajectory(follow_solver_, prob, x0, follow_warm_);
@@ -1523,9 +1523,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 30;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
+    opts.max_iters = 25;
+    opts.tol_grad = 1e-4;
+    opts.tol_cost = 1e-6;
     stop_solver_.solve(prob, opts);
     stop_warm_ = true;
 
@@ -1568,9 +1568,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(recovery_solver_, prob, x0, recovery_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 30;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
+    opts.max_iters = 25;
+    opts.tol_grad = 1e-4;
+    opts.tol_cost = 1e-6;
     recovery_solver_.solve(prob, opts);
     recovery_warm_ = true;
 
@@ -1613,9 +1613,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(fixed_solver_, prob, x0, fixed_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 30;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
+    opts.max_iters = 25;
+    opts.tol_grad = 1e-4;
+    opts.tol_cost = 1e-6;
     fixed_solver_.solve(prob, opts);
     fixed_warm_ = true;
 

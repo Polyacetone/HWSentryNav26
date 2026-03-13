@@ -130,7 +130,7 @@ struct StFollow final : sc::state<StFollow, Machine> {
             return transit<StStopping>();
         }
         if (in.reach_goal) {
-            if (in.reach_goal_by_dist && in.fixed_goal_flag) {
+            if (in.fixed_goal_flag) {
                 m.stopping_dest = DestState::FIXED;
             } else {
                 m.stopping_dest = DestState::IDLE;
@@ -203,7 +203,7 @@ struct StStopping final : sc::state<StStopping, Machine> {
             return transit<StFollow>();
         }
 
-        const bool timeout = (in.stamp - m.stopping_start_time).seconds() > 2.0;
+        const bool timeout = (in.stamp - m.stopping_start_time).seconds() > m.params.transition.stopping_timeout;
         if (m.stopping_ready(in) || timeout) {
             switch (m.stopping_dest) {
                 case DestState::IDLE:

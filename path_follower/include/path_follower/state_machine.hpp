@@ -15,6 +15,7 @@ struct TransitionParams {
     double spin_to_follow_omega_max; // Spin→Stopping→Follow: |ω| 须低于
     double to_idle_vel_max;          // →Idle: |v| 须低于
     double to_idle_omega_max;        // →Idle: |ω| 须低于
+    double stopping_timeout;         // Stopping 状态超时 (s)，超过该时间仍未切出停止则强制切出
 };
 
 // 危险恢复参数
@@ -78,7 +79,6 @@ struct FsmInput {
     bool has_new_path = false;  // 本周期是否收到新路径
     bool fixed_goal_flag = false;
     bool reach_goal = false;
-    bool reach_goal_by_dist = false;
 
     // 外部请求
     bool spin_requested = false;
@@ -89,7 +89,7 @@ struct FsmInput {
     bool is_stuck = false;
     bool is_recovery_safe = false;
 
-    // 底盘实际状态
+    // 速度判定量（用于 STOPPING 退出判断，当前由 MainController 传入指令速度）
     double velocity = 0.0;   // 线速度
     double omega = 0.0;      // 角速度
 

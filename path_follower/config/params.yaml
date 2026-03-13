@@ -38,6 +38,7 @@
       spin_to_follow_omega_max: 1.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
       to_idle_vel_max: 0.5 # 切到空闲前，线速度需小于该阈值 (m/s)
       to_idle_omega_max: 1.0 # 切到空闲前，角速度需小于该阈值 (rad/s)
+      stopping_timeout: 1.0 # 停止状态超时 (s)，超过该时间仍未切出停止则强制切出
 
     mpc: # MPC控制器参数
       energy: # 能量感知参数
