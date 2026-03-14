@@ -123,20 +123,24 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
 
     // 加载全局点云
     std::string global_cloud_filename = declare_parameter<std::string>("global_map.cloud_filename");
-    std::string global_cloud_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + global_cloud_filename;
-    auto global_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-    if (pcl::io::loadPCDFile(global_cloud_path, *global_cloud) == -1) {
-        RCLCPP_FATAL(get_logger(), "Failed to load global point cloud from %s", global_cloud_path.c_str());
-        throw std::runtime_error("Failed to load global point cloud");
+    if (!global_cloud_filename.empty()) {
+        std::string global_cloud_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + global_cloud_filename;
+        auto global_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        if (pcl::io::loadPCDFile(global_cloud_path, *global_cloud) == -1) {
+            RCLCPP_FATAL(get_logger(), "Failed to load global point cloud from %s", global_cloud_path.c_str());
+            throw std::runtime_error("Failed to load global point cloud");
+        }
+        global_point_cloud_ = convert_pcl_to_small_gicp(global_cloud);
+        RCLCPP_INFO(get_logger(), "Loaded global point cloud with %zu points", global_point_cloud_->size());
+        double global_downsample_voxel_size = declare_parameter<double>("global_map.downsample_voxel_size");
+        if (global_downsample_voxel_size > 0.0) {
+            global_point_cloud_ = small_gicp::voxelgrid_sampling_omp(*global_point_cloud_, global_downsample_voxel_size, num_threads_);
+        }
+        global_kdtree_ = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(global_point_cloud_, small_gicp::KdTreeBuilderOMP(num_threads_));
+        RCLCPP_INFO(get_logger(), "Downsampled global point cloud to %zu points", global_point_cloud_->size());
+    } else {
+        RCLCPP_WARN(get_logger(), "No global point cloud specified, disabling dynamic obstacle detection");
     }
-    global_point_cloud_ = convert_pcl_to_small_gicp(global_cloud);
-    RCLCPP_INFO(get_logger(), "Loaded global point cloud with %zu points", global_point_cloud_->size());
-    double global_downsample_voxel_size = declare_parameter<double>("global_map.downsample_voxel_size");
-    if (global_downsample_voxel_size > 0.0) {
-        global_point_cloud_ = small_gicp::voxelgrid_sampling_omp(*global_point_cloud_, global_downsample_voxel_size, num_threads_);
-    }
-    global_kdtree_ = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(global_point_cloud_, small_gicp::KdTreeBuilderOMP(num_threads_));
-    RCLCPP_INFO(get_logger(), "Downsampled global point cloud to %zu points", global_point_cloud_->size());
 
     // ROS相关
     std::string global_direction_map_pub_topic = declare_parameter<std::string>("global_map.direction_map_pub_topic");
@@ -158,7 +162,9 @@ void MapServerNode::timer_callback() {
     pub_cost_map(global_cost_map_, now(), global_cost_map_pub_);
     pub_direction_map(global_direction_map_, now(), global_direction_map_pub_);
     if (enable_debug_) {
-        pub_cloud(*global_point_cloud_, now(), debug_global_cloud_pub_);
+        if (global_point_cloud_) {
+            pub_cloud(*global_point_cloud_, now(), debug_global_cloud_pub_);
+        }
     }
 }
 
@@ -185,12 +191,14 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
 
     // 局部点云减去全局点云，剩余的点认为是动态障碍物
     small_gicp::PointCloud dynamic_points;
-    for (const auto & point : accumulated.points) {
-        size_t index;
-        double dist;
-        global_kdtree_->knn_search(point, 1, &index, &dist);
-        if (dist > local_map_params_.distance_threshold * local_map_params_.distance_threshold) {
-            dynamic_points.points.push_back(point);
+    if (global_kdtree_) {
+        for (const auto & point : accumulated.points) {
+            size_t index;
+            double dist;
+            global_kdtree_->knn_search(point, 1, &index, &dist);
+            if (dist > local_map_params_.distance_threshold * local_map_params_.distance_threshold) {
+                dynamic_points.points.push_back(point);
+            }
         }
     }
     RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", dynamic_points.points.size());

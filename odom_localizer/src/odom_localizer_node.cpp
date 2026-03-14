@@ -30,17 +30,17 @@ public:
     explicit OdomLocalizerNode(const rclcpp::NodeOptions& options);
 
 private:
-    size_t min_points_lidar_;
+    size_t min_points_lidar_, cloud_accumulate_frames_;
     int num_threads_, cov_num_neighbors_map_, cov_num_neighbors_lidar_, gicp_max_iterations_;
     double downsample_resolution_map_, downsample_resolution_lidar_, gicp_max_correspondence_distance_;
     double odom_to_map_no_filter_distance_, odom_to_map_no_filter_angle_;
     double normalized_error_threshold_, overlap_threshold_;
     double robot_color_wait_timeout_;
-    bool enable_debug_, enable_gicp_registration_, perform_gicp_only_once_;
+    bool enable_debug_, perform_gicp_only_once_;
 
-    PointCloud::Ptr map_cloud_ = std::make_shared<PointCloud>();
+    PointCloud::Ptr map_cloud_;
     KdTree<PointCloud>::Ptr map_kd_tree_;
-    PointCloud::Ptr source_cloud_;
+    std::deque<PointCloud::Ptr> cloud_accumulate_queue_;
     std::unique_ptr<utils::EMAFilter<Eigen::Isometry3d>> odom_to_map_;
     std::optional<Eigen::Isometry3d> last_imu_world_to_map_;
     bool gicp_performed_ = false, initial_transform_initialized_ = false;
@@ -57,7 +57,7 @@ private:
     void publish_timer_callback();
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg);
-    bool perform_gicp_registration();
+    bool perform_gicp_registration(const PointCloud& source_cloud);
     void publish() const;
     void set_initial_transform(const std::vector<double>& initial_transform_vec);
     void update(const Eigen::Isometry3d& transform) const;
@@ -74,11 +74,11 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
     num_threads_ = (int)declare_parameter<int>("num_threads");
     enable_debug_ = declare_parameter<bool>("enable_debug");
     robot_color_wait_timeout_ = declare_parameter<double>("robot_color_wait_timeout");
-    enable_gicp_registration_ = declare_parameter<bool>("enable_gicp_registration");
     perform_gicp_only_once_ = declare_parameter<bool>("perform_gicp_only_once");
     cov_num_neighbors_map_ = (int)declare_parameter<int>("cov_num_neighbors_map");
     cov_num_neighbors_lidar_ = (int)declare_parameter<int>("cov_num_neighbors_lidar");
     min_points_lidar_ = (size_t)declare_parameter<int>("min_points_lidar");
+    cloud_accumulate_frames_ = (size_t)declare_parameter<int>("cloud_accumulate_frames");
     gicp_max_iterations_ = (int)declare_parameter<int>("gicp_max_iterations");
     gicp_max_correspondence_distance_ = declare_parameter<double>("gicp_max_correspondence_distance");
     downsample_resolution_map_ = declare_parameter<double>("downsample_resolution_map");
@@ -103,7 +103,9 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
         [this](interfaces::msg::RobotStatus::SharedPtr msg) { robot_status_callback(msg); }
     );
 
-    if (enable_gicp_registration_) {
+    if (map_cloud_filename.empty()) {
+        RCLCPP_WARN(get_logger(), "No map cloud file specified, will only publish initial transform");
+    } else {
         auto map_cloud_pcl = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         if (pcl::io::loadPCDFile(map_cloud_path, *map_cloud_pcl) == -1) {
             throw std::runtime_error("Failed to load map PCD: " + map_cloud_path);
@@ -111,10 +113,9 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
         map_cloud_ = convert_pcl_to_small_gicp(map_cloud_pcl);
         RCLCPP_INFO(get_logger(), "Loaded map point cloud with %zu points", map_cloud_->size());
 
-        if (downsample_resolution_map_ > 0) {
-            map_cloud_ = voxelgrid_sampling_omp(*map_cloud_, downsample_resolution_map_, num_threads_);
-            RCLCPP_INFO(get_logger(), "Downsampled map point cloud to %zu points", map_cloud_->size());
-        }
+        map_cloud_ = voxelgrid_sampling_omp(*map_cloud_, downsample_resolution_map_, num_threads_);
+        RCLCPP_INFO(get_logger(), "Downsampled map point cloud to %zu points", map_cloud_->size());
+
         map_kd_tree_ = std::make_shared<KdTree<PointCloud>>(map_cloud_, KdTreeBuilderOMP(num_threads_));
         estimate_covariances_omp(*map_cloud_, *map_kd_tree_, cov_num_neighbors_map_, num_threads_);
 
@@ -135,7 +136,11 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
 }
 
 void OdomLocalizerNode::cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-    source_cloud_ = convert_pointcloud2_to_small_gicp(msg);
+    PointCloud::Ptr source_cloud = convert_pointcloud2_to_small_gicp(msg);
+    cloud_accumulate_queue_.push_back(source_cloud);
+    while (cloud_accumulate_queue_.size() > cloud_accumulate_frames_) {
+        cloud_accumulate_queue_.pop_front();
+    }
 }
 
 void OdomLocalizerNode::publish_timer_callback() {
@@ -151,22 +156,28 @@ void OdomLocalizerNode::publish_timer_callback() {
         return;
     }
 
-    if (!enable_gicp_registration_ || (gicp_performed_ && perform_gicp_only_once_)) {
+    if (!map_cloud_ || !map_kd_tree_ || (gicp_performed_ && perform_gicp_only_once_)) {
         // 如果没有启用GICP配准，或者已经完成过一次配准且只进行一次配准，则直接发布当前的odom_to_map
         publish();
         return;
     }
 
-    if (!source_cloud_) {
+    if (cloud_accumulate_queue_.size() < cloud_accumulate_frames_) {
+        // 如果积累的点云帧数不足，暂不进行配准
         return;
     }
 
-    if (source_cloud_->points.size() < min_points_lidar_) {
-        RCLCPP_WARN(get_logger(), "Received point cloud has too few points (%zu), skipping frame", source_cloud_->points.size());
+    PointCloud accumulated;
+    for (const auto& cloud : cloud_accumulate_queue_) {
+        accumulated.points.insert(accumulated.points.end(), cloud->points.begin(), cloud->points.end());
+    }
+
+    if (accumulated.points.size() < min_points_lidar_) {
+        RCLCPP_WARN(get_logger(), "Accumulated point cloud has too few points (%zu), skipping frame", accumulated.points.size());
         return;
     }
 
-    if (perform_gicp_registration()) {
+    if (perform_gicp_registration(accumulated)) {
         gicp_performed_ = true;
     }
     publish();
@@ -190,13 +201,10 @@ void OdomLocalizerNode::robot_status_callback(const interfaces::msg::RobotStatus
     }
 }
 
-bool OdomLocalizerNode::perform_gicp_registration() {
-    KdTree<PointCloud>::Ptr source_kd_tree;
-    if (downsample_resolution_lidar_ > 0) {
-        source_cloud_ = voxelgrid_sampling_omp(*source_cloud_, downsample_resolution_lidar_, num_threads_);
-    }
-    source_kd_tree = std::make_shared<KdTree<PointCloud>>(source_cloud_, KdTreeBuilderOMP(num_threads_));
-    estimate_covariances_omp(*source_cloud_, *source_kd_tree, cov_num_neighbors_lidar_, num_threads_);
+bool OdomLocalizerNode::perform_gicp_registration(const PointCloud& source_cloud) {
+    const PointCloud::Ptr downsampled = voxelgrid_sampling_omp(source_cloud, downsample_resolution_lidar_, num_threads_);
+    const KdTree<PointCloud>::Ptr source_kd_tree = std::make_shared<KdTree<PointCloud>>(downsampled, KdTreeBuilderOMP(num_threads_));
+    estimate_covariances_omp(*downsampled, *source_kd_tree, cov_num_neighbors_lidar_, num_threads_);
 
     Registration<GICPFactor, ParallelReductionOMP> reg;
     reg.reduction.num_threads = num_threads_;
@@ -206,14 +214,14 @@ bool OdomLocalizerNode::perform_gicp_registration() {
     double min_normalized_error = std::numeric_limits<double>::infinity();
     double max_overlap = 0.0;
     const auto align = [&](const Eigen::Isometry3d& init) {
-        const auto result = reg.align(*map_cloud_, *source_cloud_, *map_kd_tree_, init);
+        const auto result = reg.align(*map_cloud_, *downsampled, *map_kd_tree_, init);
         double normalized_error, overlap;
         if (result.num_inliers == 0) {
             normalized_error = std::numeric_limits<double>::infinity();
             overlap = 0.0;
         } else {
             normalized_error = result.error / static_cast<double>(result.num_inliers);
-            overlap = static_cast<double>(result.num_inliers) / static_cast<double>(source_cloud_->size());
+            overlap = static_cast<double>(result.num_inliers) / static_cast<double>(downsampled->size());
         }
         min_normalized_error = std::min(min_normalized_error, normalized_error);
         max_overlap = std::max(max_overlap, overlap);

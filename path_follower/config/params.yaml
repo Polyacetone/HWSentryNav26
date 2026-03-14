@@ -77,8 +77,8 @@
           q_v_final: 0.4 # 终点减速权重
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
-          r_dv: 0.1 # 线速度平滑
-          r_domega: 0.1 # 角速度平滑
+          r_dv: 0.8 # 线速度平滑
+          r_domega: 0.2 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
@@ -181,8 +181,8 @@
         safe_hold_time: 1.0 # 安全区域保持时间 (s)
       stuck:
         enable: true # 是否启用卡住检测
-        cmd_vel_threshold: 0.09 # 指令速度超过该值才开始检测 (m/s)
-        timeout: 2.0 # 持续时间阈值 (s)
-        max_displacement: 0.1 # 位移小于该值则判定卡住 (m)
+        cmd_vel_threshold: 0.8 # 指令速度超过该值才开始检测 (m/s)
+        timeout: 1.0 # 持续时间阈值 (s)
+        max_displacement: 0.3 # 位移小于该值则判定卡住 (m)
         reverse_speed: 0.5 # 倒车速度 (m/s)
         reverse_duration: 2.0 # 倒车时间 (s)
