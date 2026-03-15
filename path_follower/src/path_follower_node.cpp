@@ -15,6 +15,7 @@
 #include <interfaces/msg/chassis_cmd.hpp>
 #include <interfaces/msg/comp_stage.hpp>
 #include <interfaces/msg/global_path.hpp>
+#include <interfaces/msg/follower_state.hpp>
 
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
@@ -63,6 +64,7 @@ private:
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
     rclcpp::Subscription<interfaces::msg::CompStage>::SharedPtr comp_stage_sub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
+    rclcpp::Publisher<interfaces::msg::FollowerState>::SharedPtr follower_state_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_predicted_path_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
@@ -375,6 +377,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     );
 
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("chassis_cmd_pub_topic"), 1);
+    follower_state_pub_ = create_publisher<interfaces::msg::FollowerState>(declare_parameter<std::string>("follower_state_pub_topic"), 1);
     control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_DT), [this]() { control_timer_callback(); });
 }
 
@@ -481,7 +484,7 @@ void PathFollowerNode::update_merged_cost_map() {
 // ═══════════════════ 控制主循环 ══════════════════════════════
 
 void PathFollowerNode::control_timer_callback() {
-    if (!merged_cost_map_ || !global_direction_map_) return;
+    if (!global_cost_map_ || !merged_cost_map_ || !global_direction_map_) return;
 
     if (enable_debug_) {
         nav_msgs::msg::OccupancyGrid grid_msg;
@@ -503,28 +506,34 @@ void PathFollowerNode::control_timer_callback() {
     if (!get_chassis_pose(chassis_pose_map)) return;
 
     // 组装控制输入
-    ControlInput input;
-    input.global_path = global_path_;
-    input.path_updated = path_updated_;
-    input.fixed_goal = fixed_goal_;
-    input.fixed_goal_pos = fixed_goal_pos_;
-    input.chassis_pose_map = chassis_pose_map;
-    input.chassis_status = chassis_status_;
-    input.chassis_leg_mode = chassis_leg_mode_;
-    input.comp_stage = comp_stage_;
-    input.spin_requested = (spin_state_ != SpinState::STOP);
-    input.spin_high_priority = spin_high_priority_;
-    input.spin_slow = (spin_state_ == SpinState::SPIN_SLOW);
-    input.spin_fast = (spin_state_ == SpinState::SPIN_FAST);
-    input.merged_cost_map = merged_cost_map_.get();
-    input.global_direction_map = global_direction_map_.get();
-    input.stamp = now();
-    input.remaining_energy = remaining_energy_filtered_;
-    input.rfr_pwr_limit = rfr_pwr_limit_;
+    const ControlInput input = {
+        .global_path = global_path_,
+        .path_updated = path_updated_,
+        .fixed_goal = fixed_goal_,
+        .fixed_goal_pos = fixed_goal_pos_,
+        .chassis_pose_map = chassis_pose_map,
+        .chassis_status = chassis_status_,
+        .remaining_energy = remaining_energy_filtered_,
+        .rfr_pwr_limit = rfr_pwr_limit_,
+        .chassis_leg_mode = chassis_leg_mode_,
+        .comp_stage = comp_stage_,
+        .spin_requested = (spin_state_ != SpinState::STOP),
+        .spin_high_priority = spin_high_priority_,
+        .spin_slow = (spin_state_ == SpinState::SPIN_SLOW),
+        .spin_fast = (spin_state_ == SpinState::SPIN_FAST),
+        .merged_cost_map = merged_cost_map_.get(),
+        .global_cost_map = global_cost_map_.get(),
+        .global_direction_map = global_direction_map_.get(),
+        .stamp = now()
+    };
 
     // 调用控制逻辑层
     const ControlOutput output = nav_controller_->update(input);
     path_updated_ = false;
+
+    interfaces::msg::FollowerState state_msg;
+    state_msg.state = static_cast<uint8_t>(output.fsm_state);
+    follower_state_pub_->publish(state_msg);
 
     // 处理路径消费请求：清空 spline 路径，并据此重建台阶擦除地图。
     // 若当前已进入 FIXED，只消费路径，不取消 fixed 目标标记。

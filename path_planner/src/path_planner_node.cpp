@@ -286,7 +286,7 @@ void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr ms
     const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_map);
 
     if (!global_cost_map_->is_valid_coord(start_grid)) {
-        RCLCPP_WARN(get_logger(), "Start (%.2f, %.2f) is out of bound!", start_map.x(), start_map.y());
+        RCLCPP_ERROR(get_logger(), "Start (%.2f, %.2f) is out of bound!", start_map.x(), start_map.y());
         publish_path({}, {}, {}, fixed);
         return;
     }
@@ -298,7 +298,7 @@ void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr ms
     }
 
     if (!global_cost_map_->is_valid_coord(goal_grid)) {
-        RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is out of bound!", goal_map.x(), goal_map.y());
+        RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is out of bound!", goal_map.x(), goal_map.y());
         publish_path({}, {}, {}, fixed);
         return;
     }

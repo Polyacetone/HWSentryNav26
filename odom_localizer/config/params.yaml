@@ -4,9 +4,9 @@
     publish_rate: 1.0 # odom->map发布频率，单位Hz
     robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，包含机器人颜色
     robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-    initial_transform_blue: [13.5, 6.0, 0.6, 0.0, 0.0, 0.0, 1.0] # 在蓝方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_red: [13.5, 6.0, 0.6, 0.0, 0.0, 0.0, 1.0] # 在红方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_default: [13.5, 6.0, 0.6, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_blue: [4.0, 6.0, 0.6, 0.0, 0.0, 0.0, 1.0] # 在蓝方启动时的初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_red: [4.0, 6.0, 0.6, 0.0, 0.0, 0.0, 1.0] # 在红方启动时的初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_default: [4.0, 6.0, 0.6, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
 
     perform_gicp_only_once: true # 是否只进行一次gicp配准（若为true，则在配准成功之后不再更新）
     map_cloud_filename: "1897test.pcd" # 先验地图点云文件路径（为空就只发布初始位姿）
@@ -23,7 +23,7 @@
 
     gicp_max_correspondence_distance: 2.0 # gicp最大匹配距离
     gicp_max_iterations: 32 # gicp最大迭代次数
-    normalized_error_threshold: 0.08 # 认为gicp结果合理的normalized error阈值
+    normalized_error_threshold: 0.2 # 认为gicp结果合理的normalized error阈值
     overlap_threshold: 0.99 # 认为gicp结果合理的重叠率阈值
 
     odom_to_map_filter_ratio: 0.9 # odom->map的惯性滤波系数（0~1），越大越稳定

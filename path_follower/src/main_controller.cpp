@@ -428,10 +428,11 @@ bool MainController::check_stuck(const ControlInput& input) {
 
 bool MainController::compute_is_hazard(const ControlInput& input) const {
     const auto& p = fsm_params_.recovery;
-    if (!p.enable || !input.merged_cost_map || !input.global_direction_map) return false;
+    if (!p.enable || !input.global_cost_map || !input.global_direction_map) return false;
 
+    // 注意：危险判断的 cost_map 使用的是 global 而非 merged
     const auto sample = RecoveryGoalPlanner::sample_fields(
-        *input.merged_cost_map,
+        *input.global_cost_map,
         *input.global_direction_map,
         input.chassis_pose_map.head<2>()
     );

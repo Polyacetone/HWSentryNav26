@@ -8,6 +8,7 @@
     chassis_status_sub_topic: "/serial_bridge/chassis_status"
     spin_cmd_sub_topic: "/decision/spin_cmd"
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
+    follower_state_pub_topic: "/path_follower/state"
 
     debug:
       enable: true
@@ -182,7 +183,7 @@
       stuck:
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.8 # 指令速度超过该值才开始检测 (m/s)
-        timeout: 1.0 # 持续时间阈值 (s)
-        max_displacement: 0.3 # 位移小于该值则判定卡住 (m)
+        timeout: 1.5 # 持续时间阈值 (s)
+        max_displacement: 0.2 # 位移小于该值则判定卡住 (m)
         reverse_speed: 0.5 # 倒车速度 (m/s)
         reverse_duration: 2.0 # 倒车时间 (s)

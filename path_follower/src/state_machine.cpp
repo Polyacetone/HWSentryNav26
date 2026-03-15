@@ -120,6 +120,21 @@ struct StFollow final : sc::state<StFollow, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
+        // 路径被取消/清空：FOLLOW 不应“卡死”在无路径状态。
+        // 走 STOPPING 做平滑减速，并根据外部请求选择落点。
+        if (!in.has_path) {
+            const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.fixed_goal_flag));
+            if (should_spin) {
+                m.stopping_dest = DestState::SPIN;
+            } else if (in.fixed_goal_flag) {
+                m.stopping_dest = DestState::FIXED;
+            } else {
+                m.stopping_dest = DestState::IDLE;
+            }
+            m.stopping_start_time = in.stamp;
+            return transit<StStopping>();
+        }
+
         if (in.is_stuck) {
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();

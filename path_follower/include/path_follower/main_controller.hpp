@@ -22,36 +22,37 @@ namespace path_follower {
 struct ControlInput {
     // ─── 路径 ───
     std::optional<SplineD> global_path;
-    bool path_updated = false;
+    bool path_updated;
 
     // ─── fixed 目标 ───
-    bool fixed_goal = false;                                     // 当前目标为 fixed 类型
-    Eigen::Vector2d fixed_goal_pos = Eigen::Vector2d::Zero();    // fixed 目标位置 (map)
+    bool fixed_goal;                   // 当前目标为 fixed 类型
+    Eigen::Vector2d fixed_goal_pos;    // fixed 目标位置 (map)
 
     // ─── 底盘状态 ───
-    Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();  // (x, y, theta) in map
-    Eigen::Vector2d chassis_status = Eigen::Vector2d::Zero();    // (v_act, ω_act)
+    Eigen::Vector3d chassis_pose_map;  // (x, y, theta) in map
+    Eigen::Vector2d chassis_status;    // (v_act, ω_act)
 
     // ─── 能量状态 ───
-    double remaining_energy = 0.0;                               // 电容剩余可用电量 (J)
-    double rfr_pwr_limit = 0.0;                                  // 裁判系统最大取电功率 (W)
+    double remaining_energy;     // 电容剩余可用电量 (J)
+    double rfr_pwr_limit;        // 裁判系统最大取电功率 (W)
 
     // ─── 底盘模式/比赛状态 ───
-    uint8_t chassis_leg_mode = 0;                                // 参考 interfaces/msg/ChassisStatus.msg
-    uint8_t comp_stage = 0;                                      // 参考 interfaces/msg/CompStage.msg
+    uint8_t chassis_leg_mode;    // 参考 interfaces/msg/ChassisStatus.msg
+    uint8_t comp_stage;          // 参考 interfaces/msg/CompStage.msg
 
     // ─── 小陀螺请求 ───
-    bool spin_requested = false;
-    bool spin_high_priority = false;
-    bool spin_slow = false;
-    bool spin_fast = false;
+    bool spin_requested;
+    bool spin_high_priority;
+    bool spin_slow;
+    bool spin_fast;
 
     // ─── 地图 ───
-    const CostMap* merged_cost_map = nullptr;
-    const DirectionMap* global_direction_map = nullptr;
+    const CostMap* const merged_cost_map;
+    const CostMap* const global_cost_map;
+    const DirectionMap* const global_direction_map;
 
     // ─── 时间 ───
-    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+    rclcpp::Time stamp;
 };
 
 // ═══════════════════════ 控制器输出 ═══════════════════════════

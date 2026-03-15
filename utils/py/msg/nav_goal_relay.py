@@ -23,7 +23,7 @@ class NavGoalRelay(Node):
         # ROS parameters (can be overridden via launch files or command line)
         self.declare_parameter('input_topic', '/nav_goal')
         self.declare_parameter('output_topic', '/decision/nav_goal')
-        self.declare_parameter('fixed', True)
+        self.declare_parameter('fixed', False)
 
         self.input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
         self.output_topic = self.get_parameter('output_topic').get_parameter_value().string_value

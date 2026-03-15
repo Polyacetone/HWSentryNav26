@@ -437,6 +437,7 @@ void AsyncMapping::save_keyframe_raw_cloud(const pcl::PointCloud<pcl::PointXYZ>&
 
 void AsyncMapping::append_pose(const Eigen::Isometry3d& T_world_imu) {
     poses_ofs_ << convert_to_string(T_world_imu) << "\n";
+    poses_ofs_.flush();
 }
 
 void AsyncMapping::integrate_cloud_into_map(const pcl::PointCloud<pcl::PointXYZ>& cloud_imu, const Eigen::Isometry3d& T_world_imu) {

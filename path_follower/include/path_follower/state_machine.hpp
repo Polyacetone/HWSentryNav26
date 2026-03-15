@@ -59,15 +59,15 @@ struct FsmParams {
 
 // ═══════════════════════════ 状态枚举 ═══════════════════════
 
-enum class FsmState {
-    DEAD,             // 底盘失效（Dead/Recovery/Abnormal）：由 MainController 外部拦截
-    IDLE,             // 无路径且不旋转
-    FOLLOW,           // 跟随全局路径
-    SPIN,             // 小陀螺模式
-    STOPPING,         // 正常模式间的平滑过渡减速
-    HAZARD_RECOVERY,  // 危险恢复（向安全点移动）
-    STUCK_REVERSE,    // 倒车脱困
-    FIXED,            // 固定在目标点位（持续 MPC 保持位置）
+enum class FsmState : uint8_t {
+    DEAD = 0,             // 底盘失效（Dead/Recovery/Abnormal）：由 MainController 外部拦截
+    IDLE = 1,             // 无路径且不旋转
+    FOLLOW = 2,           // 跟随全局路径
+    SPIN = 3,             // 小陀螺模式
+    STOPPING = 4,         // 正常模式间的平滑过渡减速
+    HAZARD_RECOVERY = 5,  // 危险恢复（向安全点移动）
+    STUCK_REVERSE = 6,    // 倒车脱困
+    FIXED = 7             // 固定在目标点位（持续 MPC 保持位置）
 };
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
