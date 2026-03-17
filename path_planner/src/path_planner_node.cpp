@@ -12,6 +12,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <interfaces/msg/nav_goal.hpp>
 #include <interfaces/msg/global_path.hpp>
+#include <interfaces/msg/chassis_status.hpp>
 
 #include <path_planner/nav_map.hpp>
 #include <path_planner/a_star_planner.hpp>
@@ -59,11 +60,11 @@ public:
 
 private:
     enum class ReplanReason { GOAL_UPDATE, OBSTACLE };
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<interfaces::msg::NavGoal>::SharedPtr goal_sub_;
+    rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
     rclcpp::Publisher<interfaces::msg::GlobalPath>::SharedPtr control_points_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_optimized_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
@@ -75,7 +76,7 @@ private:
     CostMap::ConstPtr local_cost_map_;
     CostMap::ConstPtr merged_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
-    nav_msgs::msg::Odometry::SharedPtr last_odom_msg_;
+    interfaces::msg::ChassisStatus::SharedPtr chassis_status_;
     AStarPlanner::ConstPtr path_planner_;
     BSplineOptimizer::ConstPtr path_optimizer_;
     double skip_distance_;
@@ -208,9 +209,9 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         }
     );
 
-    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-        declare_parameter<std::string>("odom_sub_topic"), 1,
-        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { last_odom_msg_ = msg; }
+    chassis_status_sub_ = create_subscription<interfaces::msg::ChassisStatus>(
+        declare_parameter<std::string>("chassis_status_sub_topic"), 1,
+        [this](const interfaces::msg::ChassisStatus::SharedPtr msg) { chassis_status_ = msg; }
     );
 
     goal_sub_ = create_subscription<interfaces::msg::NavGoal>(
@@ -313,24 +314,21 @@ Eigen::Vector2d PathPlannerNode::adjust_reachable_start_on_segment(const Eigen::
 
 Eigen::Vector2d PathPlannerNode::predict_start_map(const Eigen::Vector2d& current_map) const {
     if (!start_prediction_enable_) return current_map;
-    nav_msgs::msg::Odometry::SharedPtr odom;
-    odom = last_odom_msg_;
-    if (!odom) return current_map;
+    if (!chassis_status_) return current_map;
 
-    Eigen::Vector2d v_map(0.0, 0.0);
-    const Eigen::Vector2d v_raw(odom->twist.twist.linear.x, odom->twist.twist.linear.y);
+    const double speed = chassis_status_->velocity;
+    if (speed < std::max(0.0, start_prediction_min_speed_)) return current_map;
+
+    Eigen::Vector2d v_map;
     try {
-        const auto imu_link_to_map = tf_buffer_->lookupTransform("map", "imu_link", tf2::TimePointZero);
-        const tf2::Matrix3x3 R(utils::convert_to<tf2::Transform>(imu_link_to_map.transform).getRotation());
-        const tf2::Vector3 v = R * tf2::Vector3(v_raw.x(), v_raw.y(), 0.0);
-        v_map = {v.x(), v.y()};
+        const auto chassis_to_map = tf_buffer_->lookupTransform("map", "chassis_link", tf2::TimePointZero);
+        const tf2::Matrix3x3 R(utils::convert_to<tf2::Transform>(chassis_to_map.transform).getRotation());
+        const tf2::Vector3 v = R * tf2::Vector3(speed, 0.0, 0.0);
+        v_map = Eigen::Vector2d(v.x(), v.y());
     } catch (const std::exception& ex) {
-        RCLCPP_WARN(get_logger(), "Failed to transform velocity to map frame: %s", ex.what());
+        RCLCPP_WARN(get_logger(), "Failed to transform chassis_link to map: %s", ex.what());
         return current_map;
     }
-
-    const double speed = v_map.norm();
-    if (speed < std::max(0.0, start_prediction_min_speed_)) return current_map;
 
     const double brake_distance = speed * speed / (2.0 * start_prediction_max_accel_);
     const double delay_distance = speed * std::max(0.0, start_prediction_planning_delay_);
@@ -453,10 +451,10 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     if (dist < skip_distance_) {
         if (fixed) {
             rough_path = make_direct_init_path(start_grid, goal_grid, merged_cost_map_->width, merged_cost_map_->height);
-            RCLCPP_INFO(get_logger(), "Planning start is within lazy distance (%.2f m) but goal is fixed, skipping A* and using direct spline init with %zu points", skip_distance_, rough_path.size());
+            RCLCPP_INFO(get_logger(), "Goal is within lazy distance (%.2f m) but in fixed mode, skipping A* and using direct spline init with %zu points", skip_distance_, rough_path.size());
             optimize_and_publish(rough_path);
         } else {
-            RCLCPP_INFO(get_logger(), "Planning start is within lazy distance (%.2f m)", skip_distance_);
+            RCLCPP_INFO(get_logger(), "Goal is within lazy distance (%.2f m)", skip_distance_);
             publish_path({}, {}, {}, fixed);
         }
         return;
