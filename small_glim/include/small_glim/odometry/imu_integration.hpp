@@ -31,6 +31,21 @@ struct IMUSaturationStatus {
     std::array<bool, 3> acc_axes {false, false, false};
     std::array<bool, 3> gyro_axes {false, false, false};
 
+    // Aggregated statistics over the integration interval.
+    // imu_count: number of IMU frames integrated in the main loop (excludes the tail extrapolation step).
+    size_t imu_count {0};
+    size_t saturated_imu_count {0};
+
+    std::array<double, 3> acc_abs_max {0.0, 0.0, 0.0};
+    std::array<double, 3> gyro_abs_max {0.0, 0.0, 0.0};
+    std::array<double, 3> acc_abs_sum {0.0, 0.0, 0.0};
+    std::array<double, 3> gyro_abs_sum {0.0, 0.0, 0.0};
+
+    double acc_norm_max {0.0};
+    double gyro_norm_max {0.0};
+    double acc_norm_sum {0.0};
+    double gyro_norm_sum {0.0};
+
     bool any_acc() const { return acc_axes[0] || acc_axes[1] || acc_axes[2]; }
     bool any_gyro() const { return gyro_axes[0] || gyro_axes[1] || gyro_axes[2]; }
     bool any() const { return any_acc() || any_gyro(); }

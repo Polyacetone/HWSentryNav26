@@ -22,6 +22,49 @@ inline void update_saturation_axes(
     }
 }
 
+inline void update_saturation_stats(
+    const Eigen::Vector3d& a,
+    const Eigen::Vector3d& w,
+    const bool saturated,
+    const bool count_as_imu_frame,
+    IMUSaturationStatus* status
+) {
+    if (!status) return;
+
+    if (count_as_imu_frame) {
+        status->imu_count++;
+        if (saturated) {
+            status->saturated_imu_count++;
+        }
+    }
+
+    if (!saturated) {
+        return;
+    }
+
+    if (!count_as_imu_frame) {
+        return;
+    }
+
+    const Eigen::Array3d abs_a = a.cwiseAbs().array();
+    const Eigen::Array3d abs_w = w.cwiseAbs().array();
+
+    for (int i = 0; i < 3; i++) {
+        const auto idx = static_cast<size_t>(i);
+        status->acc_abs_max[idx] = std::max(status->acc_abs_max[idx], abs_a[i]);
+        status->gyro_abs_max[idx] = std::max(status->gyro_abs_max[idx], abs_w[i]);
+        status->acc_abs_sum[idx] += abs_a[i];
+        status->gyro_abs_sum[idx] += abs_w[i];
+    }
+
+    const double acc_norm = a.norm();
+    const double gyro_norm = w.norm();
+    status->acc_norm_max = std::max(status->acc_norm_max, acc_norm);
+    status->gyro_norm_max = std::max(status->gyro_norm_max, gyro_norm);
+    status->acc_norm_sum += acc_norm;
+    status->gyro_norm_sum += gyro_norm;
+}
+
 inline Eigen::Matrix3d axis_scaled_cov(
     const Eigen::Matrix3d& cov,
     const std::array<bool, 3>& sat_axes,
@@ -44,6 +87,7 @@ inline void integrate_with_optional_saturation(
     const Eigen::Vector3d& w,
     const double dt,
     const IMUIntegrationParams& params,
+    const bool count_as_imu_frame,
     IMUSaturationStatus* status
 ) {
     IMUSaturationStatus local;
@@ -51,23 +95,11 @@ inline void integrate_with_optional_saturation(
     update_saturation_axes(a, w, params.acc_saturation_thresh, params.gyro_saturation_thresh, status);
 
     const bool saturated = local.any();
+    update_saturation_stats(a, w, saturated, count_as_imu_frame, status);
     if (!saturated) {
         pim.integrateMeasurement(a, w, dt);
         return;
     }
-
-    logger::info(
-        "imu_integration",
-        "IMU saturation detected: acc=[{}{}{}] gyro=[{}{}{}] |acc|={:.2f} |gyro|={:.2f}",
-        local.acc_axes[0] ? "x" : "-",
-        local.acc_axes[1] ? "y" : "-",
-        local.acc_axes[2] ? "z" : "-",
-        local.gyro_axes[0] ? "x" : "-",
-        local.gyro_axes[1] ? "y" : "-",
-        local.gyro_axes[2] ? "z" : "-",
-        a.norm(),
-        w.norm()
-    );
 
     const auto cov_acc_orig = pim.p().accelerometerCovariance;
     const auto cov_gyro_orig = pim.p().gyroscopeCovariance;
@@ -79,6 +111,81 @@ inline void integrate_with_optional_saturation(
 
     pim.p().accelerometerCovariance = cov_acc_orig;
     pim.p().gyroscopeCovariance = cov_gyro_orig;
+}
+
+inline void log_saturation_summary_once(
+    const double start_time,
+    const double end_time,
+    const IMUIntegrationParams& params,
+    const IMUSaturationStatus& st
+) {
+    if (!st.any()) {
+        return;
+    }
+    if (st.saturated_imu_count == 0 || st.imu_count == 0) {
+        logger::info(
+            "imu_integration",
+            "IMU saturation summary: t=[{:.6f},{:.6f}] imu={}/{} acc=[{}{}{}] gyro=[{}{}{}] (thresh acc>{:.3f} gyro>{:.3f})",
+            start_time,
+            end_time,
+            st.saturated_imu_count,
+            st.imu_count,
+            st.acc_axes[0] ? "x" : "-",
+            st.acc_axes[1] ? "y" : "-",
+            st.acc_axes[2] ? "z" : "-",
+            st.gyro_axes[0] ? "x" : "-",
+            st.gyro_axes[1] ? "y" : "-",
+            st.gyro_axes[2] ? "z" : "-",
+            params.acc_saturation_thresh,
+            params.gyro_saturation_thresh
+        );
+        return;
+    }
+
+    const double n = static_cast<double>(st.saturated_imu_count);
+    const std::array<double, 3> acc_abs_mean {
+        st.acc_abs_sum[0] / n,
+        st.acc_abs_sum[1] / n,
+        st.acc_abs_sum[2] / n,
+    };
+    const std::array<double, 3> gyro_abs_mean {
+        st.gyro_abs_sum[0] / n,
+        st.gyro_abs_sum[1] / n,
+        st.gyro_abs_sum[2] / n,
+    };
+
+    logger::info(
+        "imu_integration",
+        "IMU saturation summary: t=[{:.6f},{:.6f}] imu={}/{} acc=[{}{}{}] gyro=[{}{}{}] "
+        "|a|max=[{:.3f},{:.3f},{:.3f}] mean=[{:.3f},{:.3f},{:.3f}] "
+        "|w|max=[{:.3f},{:.3f},{:.3f}] mean=[{:.3f},{:.3f},{:.3f}] "
+        "|a|max={:.3f} |w|max={:.3f} (mult={:.1f})",
+        start_time,
+        end_time,
+        st.saturated_imu_count,
+        st.imu_count,
+        st.acc_axes[0] ? "x" : "-",
+        st.acc_axes[1] ? "y" : "-",
+        st.acc_axes[2] ? "z" : "-",
+        st.gyro_axes[0] ? "x" : "-",
+        st.gyro_axes[1] ? "y" : "-",
+        st.gyro_axes[2] ? "z" : "-",
+        st.acc_abs_max[0],
+        st.acc_abs_max[1],
+        st.acc_abs_max[2],
+        acc_abs_mean[0],
+        acc_abs_mean[1],
+        acc_abs_mean[2],
+        st.gyro_abs_max[0],
+        st.gyro_abs_max[1],
+        st.gyro_abs_max[2],
+        gyro_abs_mean[0],
+        gyro_abs_mean[1],
+        gyro_abs_mean[2],
+        st.acc_norm_max,
+        st.gyro_norm_max,
+        params.saturation_mult
+    );
 }
 
 IMUIntegrationParams::IMUIntegrationParams(const Config::Ptr config) {
@@ -158,6 +265,7 @@ size_t IMUIntegration::integrate_imu(
             w,
             dt,
             *params,
+            true,
             saturation_status
         );
 
@@ -177,8 +285,13 @@ size_t IMUIntegration::integrate_imu(
             w,
             dt,
             *params,
+            false,
             saturation_status
         );
+    }
+
+    if (saturation_status) {
+        log_saturation_summary_once(start_time, end_time, *params, *saturation_status);
     }
 
     return cursor;
@@ -233,6 +346,7 @@ size_t IMUIntegration::integrate_imu(
             w,
             dt,
             *params,
+            true,
             saturation_status
         );
 
@@ -254,12 +368,17 @@ size_t IMUIntegration::integrate_imu(
             w,
             dt,
             *params,
+            false,
             saturation_status
         );
 
         auto predicted = imu_measurements->predict(state, bias);
         pred_times.emplace_back(end_time);
         pred_poses.emplace_back(predicted.pose().matrix());
+    }
+
+    if (saturation_status) {
+        log_saturation_summary_once(start_time, end_time, *params, *saturation_status);
     }
 
     return cursor;

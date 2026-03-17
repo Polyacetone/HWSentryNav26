@@ -2,6 +2,7 @@
   ros__parameters:
     global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局方向地图订阅话题
     global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图订阅话题
+    local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图订阅话题（用于与全局融合规划/重规划）
     goal_sub_topic: "/decision/nav_goal" # 目标点订阅话题
     odom_sub_topic: "/small_glim/odometry" # 里程计，用于获取当前速度
     control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
@@ -12,6 +13,11 @@
       enable: true # 是否启用调试模式
       rough_path_pub_topic: "/path_planner/debug/rough_path" # A*原始路径发布话题
       optimized_path_pub_topic: "/path_planner/debug/optimized_path" # 优化后路径的采样点发布话题
+    
+    replan:
+      enable: true # 是否启用定时重规划
+      timer_period: 0.2 # 定时重规划的周期（单位：秒）
+      local_cost_threshold: 100 # 如果局部代价地图上全局路径经过的代价值大于该阈值，则触发重规划
 
     start_prediction:
       enable: true # 是否启用起点预测（刹车距离 + 规划延迟）
