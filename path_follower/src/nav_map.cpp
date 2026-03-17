@@ -106,6 +106,18 @@ DirectionMap::DirectionMap(const cv::Mat& direction_map, double resolution, doub
     origin_y(origin_y),
     data(convert_direction_map(direction_map)) {}
 
+DirectionMap::DirectionMap(int width, int height, double resolution, double origin_x, double origin_y, std::vector<Eigen::Vector2d> data):
+    width(width),
+    height(height),
+    resolution(resolution),
+    origin_x(origin_x),
+    origin_y(origin_y),
+    data(std::move(data)) {
+    if (static_cast<int>(this->data.size()) != width * height) {
+        throw std::runtime_error("DirectionMap data size does not match width*height");
+    }
+}
+
 Eigen::Vector2d DirectionMap::map_coord_to_grid(const Eigen::Vector2d& map_coord) const {
     return {(map_coord.x() - origin_x) / resolution, (map_coord.y() - origin_y) / resolution};
 }

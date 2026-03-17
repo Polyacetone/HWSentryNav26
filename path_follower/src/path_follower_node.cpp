@@ -22,6 +22,7 @@
 #include <path_follower/nav_map.hpp>
 #include <path_follower/main_controller.hpp>
 #include <path_follower/mpc_solver.hpp>
+#include <path_follower/step_routing_mask.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
@@ -31,8 +32,6 @@ public:
     explicit PathFollowerNode(const rclcpp::NodeOptions& options);
 
 private:
-    struct StepEraseKernelCell { int dx; int dy; uint8_t delta; };
-
     // ─── ROS 回调 ───
     void control_points_callback(const interfaces::msg::GlobalPath::SharedPtr msg);
     void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
@@ -47,13 +46,9 @@ private:
     void publish_chassis_cmd(const ControlOutput& output);
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
 
-    // ─── 台阶擦除辅助 ───
-    void build_step_maps();
-    void clear_steps_along_global_path();
-    void rebuild_eroded_step_map();
+    // ─── 台阶掩码层更新 ───
+    void update_step_layers();
     void update_merged_cost_map();
-    double approximate_path_length(const SplineD& spline) const;
-    void erase_kernel_at(const Eigen::Vector2i& grid_coord, std::vector<uint8_t>& max_erase_delta) const;
 
     // ─── ROS 通信 ───
     rclcpp::Subscription<interfaces::msg::GlobalPath>::SharedPtr control_points_sub_;
@@ -80,15 +75,10 @@ private:
     // ─── 核心组件 ───
     std::unique_ptr<MainController> nav_controller_;
 
-    // ─── 台阶障碍物相关 ───
-    CostMap::Ptr base_step_map_;            // 原始方向场模长生成的台阶地图（不可变）
-    CostMap::Ptr eroded_step_map_;          // 根据全局路径擦除后的台阶地图（每次重建）
-    std::vector<uint8_t> eroded_step_data_; // 用于构造 eroded_step_map_ 的可变数据
-    double step_erase_dot_threshold_;       // 点积阈值, 高于则认为路径经过台阶
-    double step_full_erase_radius_;         // 完全擦除半径 (米)
-    double step_cutoff_radius_;             // 擦除截止半径 (米)
-    int path_length_num_samples_;           // 路径长度估计采样数
-    std::vector<StepEraseKernelCell> step_erase_kernel_;
+    // ─── 台阶障碍物/方向场掩码模块 ───
+    std::unique_ptr<StepRoutingMask> step_routing_mask_;
+    CostMap::ConstPtr step_cost_layer_;
+    DirectionMap::ConstPtr masked_direction_map_;
 
     // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
@@ -299,11 +289,13 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     // ─── 创建 MainController ───
     nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
 
-    // ─── 读取台阶擦除相关参数 ───
-    step_erase_dot_threshold_ = declare_parameter<double>("step_erase.dot_threshold");
-    step_full_erase_radius_ = declare_parameter<double>("step_erase.full_erase_radius");
-    step_cutoff_radius_ = declare_parameter<double>("step_erase.cutoff_radius");
-    path_length_num_samples_ = static_cast<int>(declare_parameter<int>("step_erase.length_num_samples"));
+    // ─── 读取台阶路径掩码相关参数 ───
+    StepRoutingMaskParams step_params;
+    step_params.path_align_dot_threshold = declare_parameter<double>("step_mask.path_align_dot_threshold");
+    step_params.full_effect_radius = declare_parameter<double>("step_mask.full_effect_radius");
+    step_params.cutoff_radius = declare_parameter<double>("step_mask.cutoff_radius");
+    step_params.length_num_samples = static_cast<int>(declare_parameter<int>("step_mask.length_num_samples"));
+    step_routing_mask_ = std::make_unique<StepRoutingMask>(step_params);
 
     // ─── 功率限制滤波参数 ───
     remaining_energy_filter_alpha_ = declare_parameter<double>("misc.remaining_energy_filter_alpha");
@@ -317,11 +309,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 get_logger(), "Received global cost map: size=(%d,%d), resolution=%.2f",
                 global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution
             );
-            // 如果方向场已经到达，则可以构建台阶图
-            if (global_direction_map_) {
-                build_step_maps();
-                clear_steps_along_global_path();
-            }
+            // 如果方向场已到达，则初始化台阶掩码模块并生成输出层
+            update_step_layers();
             global_cost_map_sub_.reset();
         }
     );
@@ -344,9 +333,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 throw std::runtime_error("Direction map size does not match cost map size");
             }
             RCLCPP_INFO(get_logger(), "Received global direction map");
-            // 生成台阶障碍物基础图，并根据当前路径擦除
-            build_step_maps();
-            clear_steps_along_global_path();
+            // 初始化台阶掩码模块并生成输出层
+            update_step_layers();
             global_direction_map_sub_.reset();
         }
     );
@@ -393,7 +381,7 @@ void PathFollowerNode::control_points_callback(const interfaces::msg::GlobalPath
         if (!msg->fixed) {
             fixed_goal_ = false;
         }
-        clear_steps_along_global_path();
+        update_step_layers();
         return;
     }
     if (msg->x.size() != msg->y.size()) {
@@ -418,7 +406,7 @@ void PathFollowerNode::control_points_callback(const interfaces::msg::GlobalPath
     }
 
     // 新路径到来，基于方向场擦除对应台阶
-    clear_steps_along_global_path();
+    update_step_layers();
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
@@ -445,18 +433,24 @@ void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGri
     update_merged_cost_map();
 }
 
-// ═══════════════════ 台阶擦除辅助实现 ════════════════════════════════
+// ═══════════════════ 台阶掩码层更新 ════════════════════════════════
 
-void PathFollowerNode::rebuild_eroded_step_map() {
-    if (!base_step_map_) return;
-    eroded_step_map_ = std::make_shared<CostMap>(
-        base_step_map_->width,
-        base_step_map_->height,
-        base_step_map_->resolution,
-        base_step_map_->origin_x,
-        base_step_map_->origin_y,
-        eroded_step_data_
-    );
+void PathFollowerNode::update_step_layers() {
+    if (!global_cost_map_ || !global_direction_map_ || !step_routing_mask_) return;
+
+    if (!step_routing_mask_->ready()) {
+        try {
+            step_routing_mask_->initialize(*global_cost_map_, global_direction_map_);
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(get_logger(), "Failed to initialize StepRoutingMask: %s", e.what());
+            return;
+        }
+    }
+
+    step_routing_mask_->update(global_path_);
+    step_cost_layer_ = step_routing_mask_->step_cost_layer();
+    masked_direction_map_ = step_routing_mask_->masked_direction_map();
+    update_merged_cost_map();
 }
 
 void PathFollowerNode::update_merged_cost_map() {
@@ -464,14 +458,14 @@ void PathFollowerNode::update_merged_cost_map() {
 
     try {
         const CostMap merged = [&]() -> CostMap {
-            if (local_cost_map_ && eroded_step_map_) {
-                return global_cost_map_->merge(*local_cost_map_).merge(*eroded_step_map_);
+            if (local_cost_map_ && step_cost_layer_) {
+                return global_cost_map_->merge(*local_cost_map_).merge(*step_cost_layer_);
             }
             if (local_cost_map_) {
                 return global_cost_map_->merge(*local_cost_map_);
             }
-            if (eroded_step_map_) {
-                return global_cost_map_->merge(*eroded_step_map_);
+            if (step_cost_layer_) {
+                return global_cost_map_->merge(*step_cost_layer_);
             }
             return CostMap(*global_cost_map_);
         }();
@@ -484,7 +478,7 @@ void PathFollowerNode::update_merged_cost_map() {
 // ═══════════════════ 控制主循环 ══════════════════════════════
 
 void PathFollowerNode::control_timer_callback() {
-    if (!global_cost_map_ || !merged_cost_map_ || !global_direction_map_) return;
+    if (!global_cost_map_ || !merged_cost_map_ || !masked_direction_map_) return;
 
     if (enable_debug_) {
         nav_msgs::msg::OccupancyGrid grid_msg;
@@ -523,7 +517,7 @@ void PathFollowerNode::control_timer_callback() {
         .spin_fast = (spin_state_ == SpinState::SPIN_FAST),
         .merged_cost_map = merged_cost_map_.get(),
         .global_cost_map = global_cost_map_.get(),
-        .global_direction_map = global_direction_map_.get(),
+        .global_direction_map = masked_direction_map_.get(),
         .stamp = now()
     };
 
@@ -543,7 +537,7 @@ void PathFollowerNode::control_timer_callback() {
         if (output.fsm_state != FsmState::FIXED) {
             fixed_goal_ = false;
         }
-        clear_steps_along_global_path();
+        update_step_layers();
     }
 
     // 发布指令
@@ -609,122 +603,6 @@ nav_msgs::msg::Path PathFollowerNode::path_to_nav_msg(const std::vector<Eigen::V
         msg.poses.push_back(ps);
     }
     return msg;
-}
-
-void PathFollowerNode::build_step_maps() {
-    if (!global_direction_map_ || !global_cost_map_) return;
-
-    // 生成基于方向场模的台阶障碍物图
-    std::vector<uint8_t> data(static_cast<size_t>(global_direction_map_->width) * static_cast<size_t>(global_direction_map_->height));
-    for (size_t idx = 0; idx < global_direction_map_->data.size(); idx++) {
-        const double mag = global_direction_map_->data[idx].norm();
-        data[idx] = static_cast<uint8_t>(std::clamp(mag * 255.0, 0.0, 255.0));
-    }
-    base_step_map_ = std::make_shared<CostMap>(
-        global_direction_map_->width,
-        global_direction_map_->height,
-        global_direction_map_->resolution,
-        global_direction_map_->origin_x,
-        global_direction_map_->origin_y,
-        data
-    );
-
-    // 初始化可变数据并构建 eroded_step_map_
-    eroded_step_data_ = base_step_map_->data;
-    rebuild_eroded_step_map();
-
-    // 计算擦除半径对应的栅格数
-    const int full_erase_radius = static_cast<int>(std::ceil(step_full_erase_radius_ / global_direction_map_->resolution));
-    const int cutoff_radius = static_cast<int>(std::ceil(step_cutoff_radius_ / global_direction_map_->resolution));
-    step_erase_kernel_.clear();
-    if (cutoff_radius <= 0 || full_erase_radius <= 0) return;
-
-    step_erase_kernel_.reserve(static_cast<size_t>((2 * cutoff_radius + 1) * (2 * cutoff_radius + 1)));
-    for (int dy = -cutoff_radius; dy <= cutoff_radius; dy++) {
-        for (int dx = -cutoff_radius; dx <= cutoff_radius; dx++) {
-            const double dist = std::hypot(static_cast<double>(dx), static_cast<double>(dy));
-            if (dist > static_cast<double>(cutoff_radius)) continue;
-            const double factor = dist <= static_cast<double>(full_erase_radius) ? 1.0 : (1.0 - (dist - static_cast<double>(full_erase_radius)) / (static_cast<double>(cutoff_radius) - static_cast<double>(full_erase_radius)));
-            const auto delta = static_cast<uint8_t>(std::round(255.0 * factor));
-            step_erase_kernel_.push_back({dx, dy, delta});
-        }
-    }
-}
-
-void PathFollowerNode::clear_steps_along_global_path() {
-    if (!base_step_map_) return;
-    eroded_step_data_ = base_step_map_->data;
-
-    if (global_path_ && !step_erase_kernel_.empty()) {
-        const double length = approximate_path_length(*global_path_);
-        if (length > 0.0) {
-            const double sample_spacing = base_step_map_->resolution * 0.5;
-            const int samples = std::max(1, static_cast<int>(std::ceil(length / sample_spacing)));
-            std::vector<uint8_t> max_erase_delta(base_step_map_->data.size(), 0);
-            const auto& spline = *global_path_;
-            const auto& direction_map = *global_direction_map_;
-            const auto& step_map = *base_step_map_;
-
-            for (int i = 0; i <= samples; i++) {
-                const double u = static_cast<double>(i) / static_cast<double>(samples);
-                const Eigen::Vector2d pos = spline.evaluate(u);
-                Eigen::Vector2d tangent = spline.derivative(u, 1);
-                const double tangent_norm = tangent.norm();
-                if (tangent_norm < 1e-6) continue;
-                tangent /= tangent_norm;
-                const Eigen::Vector2d gc_dir = direction_map.map_coord_to_grid(pos);
-                if (!direction_map.is_valid_coord(gc_dir)) continue;
-
-                const Eigen::Vector2d dir = direction_map.interpolate(gc_dir);
-                const double dot = std::abs(tangent.dot(dir));
-                if (dot > step_erase_dot_threshold_) {
-                    const Eigen::Vector2d gc_erase = step_map.map_coord_to_grid(pos);
-                    const Eigen::Vector2i erase_center{
-                        static_cast<int>(std::round(gc_erase.x())),
-                        static_cast<int>(std::round(gc_erase.y()))
-                    };
-                    if (!step_map.is_valid_coord(erase_center)) continue;
-                    erase_kernel_at(erase_center, max_erase_delta);
-                }
-            }
-
-            for (size_t idx = 0; idx < eroded_step_data_.size(); idx++) {
-                const uint8_t delta = max_erase_delta[idx];
-                if (delta == 0) continue;
-                const uint8_t base = base_step_map_->data[idx];
-                eroded_step_data_[idx] = base > delta ? static_cast<uint8_t>(base - delta) : 0;
-            }
-        }
-    }
-
-    rebuild_eroded_step_map();
-    update_merged_cost_map();
-}
-
-double PathFollowerNode::approximate_path_length(const SplineD& spline) const {
-    const int samples = std::max(1, path_length_num_samples_);
-    double len = 0.0;
-    const double du = 1.0 / static_cast<double>(samples);
-    for (int i = 0; i < samples; i++) {
-        const double u = (static_cast<double>(i) + 0.5) * du;
-        len += spline.derivative(u, 1).norm() * du;
-    }
-    return len;
-}
-
-void PathFollowerNode::erase_kernel_at(const Eigen::Vector2i& grid_coord, std::vector<uint8_t>& max_erase_delta) const {
-    if (!base_step_map_ || step_erase_kernel_.empty()) return;
-    const int width = base_step_map_->width;
-    const int height = base_step_map_->height;
-    const int cx = grid_coord.x();
-    const int cy = grid_coord.y();
-    for (const auto& cell : step_erase_kernel_) {
-        const int x = cx + cell.dx;
-        const int y = cy + cell.dy;
-        if (x < 0 || x >= width || y < 0 || y >= height) continue;
-        const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
-        max_erase_delta[idx] = std::max(max_erase_delta[idx], cell.delta);
-    }
 }
 
 }

@@ -36,6 +36,7 @@ public:
     using ConstPtr = std::shared_ptr<const DirectionMap>;
 
     explicit DirectionMap(const cv::Mat& direction_map, double resolution, double origin_x, double origin_y);
+    explicit DirectionMap(int width, int height, double resolution, double origin_x, double origin_y, std::vector<Eigen::Vector2d> data);
 
     Eigen::Vector2d map_coord_to_grid(const Eigen::Vector2d& map_coord) const;
     Eigen::Vector2d grid_coord_to_map(const Eigen::Vector2d& grid_coord) const;
