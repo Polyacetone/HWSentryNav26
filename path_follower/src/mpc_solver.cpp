@@ -1362,8 +1362,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
-    const CostMap& merged_cost_map,
-    const DirectionMap& global_direction_map
+    const CostMap& cost_map,
+    const DirectionMap& direction_map
 ) {
     const auto& ref_cps = global_path.getControlPoints();
     const bool path_changed = !same_cps(prev_ref_control_points_, ref_cps);
@@ -1398,10 +1398,10 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         )
     );
 
-    const CostMapGridView cg(merged_cost_map);
-    const GridInfo ci = make_grid_info(merged_cost_map);
-    const DirectionMapGridView dg(global_direction_map);
-    const GridInfo di = make_grid_info(global_direction_map);
+    const CostMapGridView cg(cost_map);
+    const GridInfo ci = make_grid_info(cost_map);
+    const DirectionMapGridView dg(direction_map);
+    const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, u0);
 
     const auto& arc = [&]() -> const ArclengthTable& {
@@ -1493,8 +1493,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::stop(
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
-    const CostMap& merged_cost_map,
-    const DirectionMap& global_direction_map
+    const CostMap& cost_map,
+    const DirectionMap& direction_map
 ) {
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -1513,10 +1513,10 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         )
     );
 
-    const CostMapGridView cg(merged_cost_map);
-    const GridInfo ci = make_grid_info(merged_cost_map);
-    const DirectionMapGridView dg(global_direction_map);
-    const GridInfo di = make_grid_info(global_direction_map);
+    const CostMapGridView cg(cost_map);
+    const GridInfo ci = make_grid_info(cost_map);
+    const DirectionMapGridView dg(direction_map);
+    const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, 0.0);
 
     StopProblem prob(params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);
@@ -1538,8 +1538,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
-    const CostMap& merged_cost_map,
-    const DirectionMap& global_direction_map
+    const CostMap& cost_map,
+    const DirectionMap& direction_map
 ) {
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -1558,10 +1558,10 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         )
     );
 
-    const CostMapGridView cg(merged_cost_map);
-    const GridInfo ci = make_grid_info(merged_cost_map);
-    const DirectionMapGridView dg(global_direction_map);
-    const GridInfo di = make_grid_info(global_direction_map);
+    const CostMapGridView cg(cost_map);
+    const GridInfo ci = make_grid_info(cost_map);
+    const DirectionMapGridView dg(direction_map);
+    const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, 0.0);
 
     RecoveryProblem prob(goal_map, params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);
@@ -1583,8 +1583,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
-    const CostMap& merged_cost_map,
-    const DirectionMap& global_direction_map
+    const CostMap& cost_map,
+    const DirectionMap& direction_map
 ) {
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -1603,10 +1603,10 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         )
     );
 
-    const CostMapGridView cg(merged_cost_map);
-    const GridInfo ci = make_grid_info(merged_cost_map);
-    const DirectionMapGridView dg(global_direction_map);
-    const GridInfo di = make_grid_info(global_direction_map);
+    const CostMapGridView cg(cost_map);
+    const GridInfo ci = make_grid_info(cost_map);
+    const DirectionMapGridView dg(direction_map);
+    const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, 0.0);
 
     FixedProblem prob(goal_map, params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);

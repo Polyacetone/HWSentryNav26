@@ -15,6 +15,7 @@
 #include <small_gicp/ann/kdtree_omp.hpp>
 #include <small_gicp/points/point_cloud.hpp>
 #include <small_gicp/util/downsampling_omp.hpp>
+#include <small_gicp/util/normal_estimation_omp.hpp>
 
 namespace map_server {
 class MapServerNode: public rclcpp::Node {
@@ -35,6 +36,12 @@ private:
         double downsample_voxel_size;
         double distance_threshold;
         int cell_obstacle_point_threshold;
+        struct {
+            int sor_num_neighbors;
+            double sor_std_mul;
+            int normal_num_neighbors;
+            double vertical_normal_abs_z_max;
+        } no_global_cloud_fallback;
         struct {
             double inflation_radius;
             double inscribed_radius;
@@ -62,6 +69,10 @@ private:
     void timer_callback();
     void local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg);
     small_gicp::PointCloud::Ptr preprocess_cloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) const;
+    small_gicp::PointCloud extract_dynamic_points_with_global_map(const small_gicp::PointCloud& accumulated_cloud) const;
+    small_gicp::PointCloud extract_dynamic_points_without_global_map(const small_gicp::PointCloud& accumulated_cloud) const;
+    small_gicp::PointCloud remove_statistical_outliers(const small_gicp::PointCloud& cloud) const;
+    small_gicp::PointCloud filter_points_by_normal_orientation(const small_gicp::PointCloud& cloud) const;
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
     cv::Mat dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const;
     cv::Mat inflate_cost_map(const cv::Mat& cost_map) const;
@@ -85,6 +96,12 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .downsample_voxel_size = declare_parameter<double>("local_map.downsample_voxel_size"),
         .distance_threshold = declare_parameter<double>("local_map.distance_threshold"),
         .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
+        .no_global_cloud_fallback = {
+            .sor_num_neighbors = (int)declare_parameter<int>("local_map.no_global_cloud_fallback.sor_num_neighbors"),
+            .sor_std_mul = declare_parameter<double>("local_map.no_global_cloud_fallback.sor_std_mul"),
+            .normal_num_neighbors = (int)declare_parameter<int>("local_map.no_global_cloud_fallback.normal_num_neighbors"),
+            .vertical_normal_abs_z_max = declare_parameter<double>("local_map.no_global_cloud_fallback.vertical_normal_abs_z_max"),
+        },
         .cost_map_inflation_params = {
             .inflation_radius = declare_parameter<double>("local_map.cost_map_inflation.inflation_radius"),
             .inscribed_radius = declare_parameter<double>("local_map.cost_map_inflation.inscribed_radius"),
@@ -139,7 +156,7 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         global_kdtree_ = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(global_point_cloud_, small_gicp::KdTreeBuilderOMP(num_threads_));
         RCLCPP_INFO(get_logger(), "Downsampled global point cloud to %zu points", global_point_cloud_->size());
     } else {
-        RCLCPP_WARN(get_logger(), "No global point cloud specified, disabling dynamic obstacle detection");
+        RCLCPP_WARN(get_logger(), "No global point cloud specified, enabling fallback dynamic obstacle detection from local cloud only");
     }
 
     // ROS相关
@@ -189,17 +206,12 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         RCLCPP_DEBUG(get_logger(), "Downsampled local cloud has %zu points", accumulated.points.size());
     }
 
-    // 局部点云减去全局点云，剩余的点认为是动态障碍物
+    // 动态障碍物点提取：有全局点云时做先验减法，无全局点云时走退化方案。
     small_gicp::PointCloud dynamic_points;
     if (global_kdtree_) {
-        for (const auto & point : accumulated.points) {
-            size_t index;
-            double dist;
-            global_kdtree_->knn_search(point, 1, &index, &dist);
-            if (dist > local_map_params_.distance_threshold * local_map_params_.distance_threshold) {
-                dynamic_points.points.push_back(point);
-            }
-        }
+        dynamic_points = extract_dynamic_points_with_global_map(accumulated);
+    } else {
+        dynamic_points = extract_dynamic_points_without_global_map(accumulated);
     }
     RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", dynamic_points.points.size());
 
@@ -283,6 +295,145 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
         data_ptr += point_step;
     }
     return preprocessed;
+}
+
+small_gicp::PointCloud MapServerNode::extract_dynamic_points_with_global_map(const small_gicp::PointCloud& accumulated_cloud) const {
+    small_gicp::PointCloud dynamic_points;
+    const double distance_sq_threshold = local_map_params_.distance_threshold * local_map_params_.distance_threshold;
+    for (const auto& point : accumulated_cloud.points) {
+        size_t index = 0;
+        double sq_dist = 0.0;
+        global_kdtree_->knn_search(point, 1, &index, &sq_dist);
+        if (sq_dist > distance_sq_threshold) {
+            dynamic_points.points.push_back(point);
+        }
+    }
+    return dynamic_points;
+}
+
+small_gicp::PointCloud MapServerNode::remove_statistical_outliers(const small_gicp::PointCloud& cloud) const {
+    small_gicp::PointCloud filtered;
+    if (cloud.empty()) {
+        return filtered;
+    }
+
+    const int knn = std::max(1, local_map_params_.no_global_cloud_fallback.sor_num_neighbors);
+    const size_t knn_query_size = static_cast<size_t>(knn) + 1;
+    if (cloud.size() < knn_query_size) {
+        return cloud;
+    }
+
+    auto cloud_ptr = std::make_shared<small_gicp::PointCloud>(cloud);
+    small_gicp::KdTree<small_gicp::PointCloud> tree(cloud_ptr, small_gicp::KdTreeBuilderOMP(num_threads_));
+
+    std::vector<double> mean_knn_dist(cloud.size(), 0.0);
+    std::vector<size_t> knn_indices(knn_query_size);
+    std::vector<double> knn_sq_dists(knn_query_size);
+    for (size_t i = 0; i < cloud.size(); i++) {
+        const size_t found = tree.knn_search(cloud.points[i], knn_query_size, knn_indices.data(), knn_sq_dists.data());
+        if (found <= 1) {
+            mean_knn_dist[i] = std::numeric_limits<double>::infinity();
+            continue;
+        }
+
+        double sum = 0.0;
+        size_t count = 0;
+        for (size_t j = 0; j < found; j++) {
+            if (knn_indices[j] == i) {
+                continue;
+            }
+            sum += std::sqrt(std::max(knn_sq_dists[j], 0.0));
+            count++;
+        }
+        mean_knn_dist[i] = count == 0 ? std::numeric_limits<double>::infinity() : (sum / static_cast<double>(count));
+    }
+
+    double mean = 0.0;
+    size_t valid_count = 0;
+    for (const double d : mean_knn_dist) {
+        if (!std::isfinite(d)) {
+            continue;
+        }
+        mean += d;
+        valid_count++;
+    }
+    if (valid_count == 0) {
+        return filtered;
+    }
+    mean /= static_cast<double>(valid_count);
+
+    double var = 0.0;
+    for (const double d : mean_knn_dist) {
+        if (!std::isfinite(d)) {
+            continue;
+        }
+        const double diff = d - mean;
+        var += diff * diff;
+    }
+    var /= static_cast<double>(valid_count);
+    const double stddev = std::sqrt(var);
+    const double threshold = mean + local_map_params_.no_global_cloud_fallback.sor_std_mul * stddev;
+
+    filtered.points.reserve(cloud.size());
+    for (size_t i = 0; i < cloud.size(); i++) {
+        if (mean_knn_dist[i] <= threshold) {
+            filtered.points.push_back(cloud.points[i]);
+        }
+    }
+
+    RCLCPP_DEBUG(
+        get_logger(),
+        "Fallback SOR kept %zu / %zu points (mean=%.4f, std=%.4f, threshold=%.4f)",
+        filtered.points.size(),
+        cloud.size(),
+        mean,
+        stddev,
+        threshold
+    );
+    return filtered;
+}
+
+small_gicp::PointCloud MapServerNode::filter_points_by_normal_orientation(const small_gicp::PointCloud& cloud) const {
+    small_gicp::PointCloud dynamic_points;
+    if (cloud.empty()) {
+        return dynamic_points;
+    }
+
+    const int normal_knn = std::max(5, local_map_params_.no_global_cloud_fallback.normal_num_neighbors);
+    if (cloud.size() < static_cast<size_t>(normal_knn)) {
+        return dynamic_points;
+    }
+
+    auto cloud_with_normals_ptr = std::make_shared<small_gicp::PointCloud>(cloud);
+    auto local_tree = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(cloud_with_normals_ptr, small_gicp::KdTreeBuilderOMP(num_threads_));
+    small_gicp::estimate_normals_omp(*cloud_with_normals_ptr, *local_tree, normal_knn, num_threads_);
+
+    const double max_abs_nz = std::clamp(local_map_params_.no_global_cloud_fallback.vertical_normal_abs_z_max, 0.0, 1.0);
+    dynamic_points.points.reserve(cloud_with_normals_ptr->size());
+    for (size_t i = 0; i < cloud_with_normals_ptr->size(); i++) {
+        const Eigen::Vector3d normal = cloud_with_normals_ptr->normal(i).head<3>();
+        if (!normal.allFinite() || normal.norm() < 1e-6) {
+            continue;
+        }
+        if (std::abs(normal.z()) <= max_abs_nz) {
+            dynamic_points.points.push_back(cloud_with_normals_ptr->point(i));
+        }
+    }
+
+    RCLCPP_DEBUG(
+        get_logger(),
+        "Fallback normal filter kept %zu / %zu points (|nz| <= %.3f)",
+        dynamic_points.points.size(),
+        cloud_with_normals_ptr->size(),
+        max_abs_nz
+    );
+    return dynamic_points;
+}
+
+small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(const small_gicp::PointCloud& accumulated_cloud) const {
+    const small_gicp::PointCloud denoised_cloud = remove_statistical_outliers(accumulated_cloud);
+    const small_gicp::PointCloud dynamic_points = filter_points_by_normal_orientation(denoised_cloud);
+    return dynamic_points;
 }
 
 cv::Mat MapServerNode::dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const {

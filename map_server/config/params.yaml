@@ -13,7 +13,7 @@
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
       map_filename: "1897test.png" # 全局先验地图路径
-      cloud_filename: "1897test.pcd" # 全局点云路径（为空则不加载，关闭局部避障）
+      cloud_filename: "" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
       downsample_voxel_size: 0.05 # 全局点云下采样体素大小，单位m
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
 
@@ -26,8 +26,13 @@
       roi_z_max: 0.2 # 局部点云ROI的z轴最大值（imu_world系，z轴竖直），单位m
       roi_z_min: -0.4 # 局部点云ROI的z轴最小值（imu_world系，z轴竖直），单位m
       downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m
-      distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m
+      distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m。有全局点云时使用
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
+      no_global_cloud_fallback: # 无全局点云时的退化动态障碍物检测参数
+        sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
+        sor_std_mul: 2.0 # 保留阈值=均值+sor_std_mul*标准差
+        normal_num_neighbors: 20 # 法向量估计使用的K近邻数量
+        vertical_normal_abs_z_max: 0.25 # |normal.z|小于该值视为法向量垂直z轴（认为是动态障碍物）
       cost_map_inflation: # 局部代价地图膨胀参数
         inflation_radius: 0.8 # 代价地图膨胀半径，单位m
         inscribed_radius: 0.3 # 机器人内切圆半径，单位m

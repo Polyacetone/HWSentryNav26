@@ -47,9 +47,9 @@ struct ControlInput {
     bool spin_fast;
 
     // ─── 地图 ───
-    const CostMap* const merged_cost_map;
-    const CostMap* const global_cost_map;
-    const DirectionMap* const global_direction_map;
+    const CostMap* const final_cost_map; // 全局先验代价地图 + 台阶掩码 + 动态障碍物
+    const CostMap* const masked_global_cost_map; // 全局先验代价地图 + 台阶掩码（不含动态障碍物）
+    const DirectionMap* const masked_direction_map; // 全局先验方向场 - 台阶掩码
 
     // ─── 时间 ───
     rclcpp::Time stamp;

@@ -48,7 +48,7 @@ private:
 
     // ─── 台阶掩码层更新 ───
     void update_step_layers();
-    void update_merged_cost_map();
+    void update_masked_cost_maps();
 
     // ─── ROS 通信 ───
     rclcpp::Subscription<interfaces::msg::GlobalPath>::SharedPtr control_points_sub_;
@@ -63,7 +63,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_predicted_path_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
-    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_merged_cost_map_pub_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -81,7 +81,8 @@ private:
     DirectionMap::ConstPtr masked_direction_map_;
 
     // ─── 缓存数据 ───
-    CostMap::ConstPtr global_cost_map_, local_cost_map_, merged_cost_map_;
+    CostMap::ConstPtr global_cost_map_, local_cost_map_;
+    CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
     bool path_updated_ = false;
@@ -109,7 +110,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.predicted_path_pub_topic"), 1);
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.w_pred_pub_topic"), 1);
-        debug_merged_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("debug.merged_cost_map_pub_topic"), 1);
+        debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("debug.final_cost_map_pub_topic"), 1);
     }
 
     // ─── MPC 参数加载 ───
@@ -430,7 +431,7 @@ void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedP
 void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     if (!global_cost_map_) return;
     local_cost_map_ = std::make_shared<CostMap>(*msg);
-    update_merged_cost_map();
+    update_masked_cost_maps();
 }
 
 // ═══════════════════ 台阶掩码层更新 ════════════════════════════════
@@ -450,26 +451,21 @@ void PathFollowerNode::update_step_layers() {
     step_routing_mask_->update(global_path_);
     step_cost_layer_ = step_routing_mask_->step_cost_layer();
     masked_direction_map_ = step_routing_mask_->masked_direction_map();
-    update_merged_cost_map();
+    update_masked_cost_maps();
 }
 
-void PathFollowerNode::update_merged_cost_map() {
+void PathFollowerNode::update_masked_cost_maps() {
     if (!global_cost_map_) return;
 
     try {
-        const CostMap merged = [&]() -> CostMap {
-            if (local_cost_map_ && step_cost_layer_) {
-                return global_cost_map_->merge(*local_cost_map_).merge(*step_cost_layer_);
-            }
+        if (step_cost_layer_) {
+            masked_global_cost_map_ = std::make_shared<CostMap>(global_cost_map_->merge(*step_cost_layer_));
             if (local_cost_map_) {
-                return global_cost_map_->merge(*local_cost_map_);
+                final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*local_cost_map_));
+            } else {
+                final_cost_map_ = masked_global_cost_map_;
             }
-            if (step_cost_layer_) {
-                return global_cost_map_->merge(*step_cost_layer_);
-            }
-            return CostMap(*global_cost_map_);
-        }();
-        merged_cost_map_ = std::make_shared<CostMap>(std::move(merged));
+        }
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Failed to merge cost maps: %s", e.what());
     }
@@ -478,22 +474,22 @@ void PathFollowerNode::update_merged_cost_map() {
 // ═══════════════════ 控制主循环 ══════════════════════════════
 
 void PathFollowerNode::control_timer_callback() {
-    if (!global_cost_map_ || !merged_cost_map_ || !masked_direction_map_) return;
+    if (!global_cost_map_ || !final_cost_map_ || !masked_direction_map_) return;
 
     if (enable_debug_) {
         nav_msgs::msg::OccupancyGrid grid_msg;
         grid_msg.header.stamp = now();
         grid_msg.header.frame_id = "map";
-        grid_msg.info.width = static_cast<uint32_t>(merged_cost_map_->width);
-        grid_msg.info.height = static_cast<uint32_t>(merged_cost_map_->height);
-        grid_msg.info.resolution = static_cast<float>(merged_cost_map_->resolution);
-        grid_msg.info.origin.position.x = merged_cost_map_->origin_x;
-        grid_msg.info.origin.position.y = merged_cost_map_->origin_y;
-        grid_msg.data.resize(merged_cost_map_->data.size());
-        for (size_t idx = 0; idx < merged_cost_map_->data.size(); idx++) {
-            grid_msg.data[idx] = static_cast<int8_t>(merged_cost_map_->data[idx]);
+        grid_msg.info.width = static_cast<uint32_t>(final_cost_map_->width);
+        grid_msg.info.height = static_cast<uint32_t>(final_cost_map_->height);
+        grid_msg.info.resolution = static_cast<float>(final_cost_map_->resolution);
+        grid_msg.info.origin.position.x = final_cost_map_->origin_x;
+        grid_msg.info.origin.position.y = final_cost_map_->origin_y;
+        grid_msg.data.resize(final_cost_map_->data.size());
+        for (size_t idx = 0; idx < final_cost_map_->data.size(); idx++) {
+            grid_msg.data[idx] = static_cast<int8_t>(final_cost_map_->data[idx]);
         }
-        debug_merged_cost_map_pub_->publish(grid_msg);
+        debug_final_cost_map_pub_->publish(grid_msg);
     }
 
     Eigen::Vector3d chassis_pose_map;
@@ -515,9 +511,9 @@ void PathFollowerNode::control_timer_callback() {
         .spin_high_priority = spin_high_priority_,
         .spin_slow = (spin_state_ == SpinState::SPIN_SLOW),
         .spin_fast = (spin_state_ == SpinState::SPIN_FAST),
-        .merged_cost_map = merged_cost_map_.get(),
-        .global_cost_map = global_cost_map_.get(),
-        .global_direction_map = masked_direction_map_.get(),
+        .final_cost_map = final_cost_map_.get(),
+        .masked_global_cost_map = masked_global_cost_map_.get(),
+        .masked_direction_map = masked_direction_map_.get(),
         .stamp = now()
     };
 

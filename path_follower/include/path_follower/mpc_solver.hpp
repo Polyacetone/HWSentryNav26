@@ -578,31 +578,31 @@ public:
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
-        const CostMap& merged_cost_map,
-        const DirectionMap& global_direction_map
+        const CostMap& cost_map,
+        const DirectionMap& direction_map
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> stop(
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
-        const CostMap& merged_cost_map,
-        const DirectionMap& global_direction_map
+        const CostMap& cost_map,
+        const DirectionMap& direction_map
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> recover_to_point(
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
-        const CostMap& merged_cost_map,
-        const DirectionMap& global_direction_map
+        const CostMap& cost_map,
+        const DirectionMap& direction_map
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> hold_at_point(
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
-        const CostMap& merged_cost_map,
-        const DirectionMap& global_direction_map
+        const CostMap& cost_map,
+        const DirectionMap& direction_map
     );
 
     [[nodiscard]] const MPCParams& params() const {

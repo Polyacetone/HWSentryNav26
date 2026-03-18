@@ -165,7 +165,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     const bool dist_reached = has_path && ((input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
     const bool u_reached = has_path && (last_reference_u_ > nav_params_.stop_threshold_u);
 
-    // 1. 组装 FSM 输入（仅布尔 + 基础运动量）
+    // 1. 组装 FSM 输入
     FsmInput fsm_input;
     fsm_input.has_path = has_path;
     fsm_input.has_new_path = has_new_path;
@@ -176,7 +176,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.is_hazard = compute_is_hazard(input);
     fsm_input.is_stuck = check_stuck(input);
     fsm_input.is_recovery_safe = update_recovery_safe_flag(input);
-    // STOPPING 退出判定按“控制指令是否收敛到零”进行，而不是底盘实速。
+    // STOPPING 退出判定按“控制指令是否收敛到零”进行，而不是底盘实速
     fsm_input.velocity = last_cmd_.x();
     fsm_input.omega = last_cmd_.y();
     fsm_input.stamp = input.stamp;
@@ -238,7 +238,7 @@ ControlOutput MainController::execute_idle(const ControlInput& input) {
 
 ControlOutput MainController::execute_follow(const ControlInput& input) {
     ControlOutput out;
-    if (!input.global_path || !input.merged_cost_map || !input.global_direction_map) return out;
+    if (!input.global_path || !input.final_cost_map || !input.masked_direction_map) return out;
 
     // 投影当前位置到样条
     const double u0 = project_to_spline_u(
@@ -253,7 +253,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     auto start_time = std::chrono::high_resolution_clock::now();
     const auto result = mpc_controller_->follow_path(
         *input.global_path, input.chassis_pose_map, input.chassis_status,
-        *input.merged_cost_map, *input.global_direction_map
+        *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
@@ -269,7 +269,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
     // 台阶检测（基于 MPC 预测轨迹）
     const auto& [cmd, prediction] = *result;
-    const auto [step_up, step_down] = detect_steps_on_prediction(prediction, *input.global_direction_map);
+    const auto [step_up, step_down] = detect_steps_on_prediction(prediction, *input.masked_direction_map);
 
     out.velocity = cmd.x();
     out.omega = cmd.y();
@@ -296,12 +296,12 @@ ControlOutput MainController::execute_spin(const ControlInput& input) {
 
 ControlOutput MainController::execute_stop(const ControlInput& input) {
     ControlOutput out;
-    if (!input.merged_cost_map || !input.global_direction_map) return out;
+    if (!input.final_cost_map || !input.masked_direction_map) return out;
 
     auto start_time = std::chrono::high_resolution_clock::now();
     const auto result = mpc_controller_->stop(
         input.chassis_pose_map, input.chassis_status,
-        *input.merged_cost_map, *input.global_direction_map
+        *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Stop) solve failed: %s", result.error().c_str());
@@ -369,14 +369,14 @@ void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
         return;
     }
 
-    if (!input.merged_cost_map || !input.global_direction_map) return;
+    if (!input.final_cost_map || !input.masked_direction_map) return;
 
     const bool need_new = (!recovery_goal_map_) || (recovery_goal_set_time_.nanoseconds() == 0) || ((input.stamp - recovery_goal_set_time_).seconds() >= p.goal_timeout);
 
     if (!need_new) return;
 
     recovery_goal_map_ = RecoveryGoalPlanner::find_goal(
-        p, *input.merged_cost_map, *input.global_direction_map, input.chassis_pose_map
+        p, *input.final_cost_map, *input.masked_direction_map, input.chassis_pose_map
     );
     recovery_goal_set_time_ = input.stamp;
 
@@ -385,7 +385,7 @@ void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
         return;
     }
 
-    const auto s = RecoveryGoalPlanner::sample_fields(*input.merged_cost_map, *input.global_direction_map, *recovery_goal_map_);
+    const auto s = RecoveryGoalPlanner::sample_fields(*input.final_cost_map, *input.masked_direction_map, *recovery_goal_map_);
     if (!s) {
         RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (field sample invalid)", recovery_goal_map_->x(), recovery_goal_map_->y());
         return;
@@ -428,12 +428,12 @@ bool MainController::check_stuck(const ControlInput& input) {
 
 bool MainController::compute_is_hazard(const ControlInput& input) const {
     const auto& p = fsm_params_.recovery;
-    if (!p.enable || !input.global_cost_map || !input.global_direction_map) return false;
+    if (!p.enable || !input.masked_global_cost_map || !input.masked_direction_map) return false;
 
-    // 注意：危险判断的 cost_map 使用的是 global 而非 merged
+    // 注意：危险判断的 cost_map 使用的是 masked_global 而非 final，避免动态障碍物导致车进入危险恢复模式
     const auto sample = RecoveryGoalPlanner::sample_fields(
-        *input.global_cost_map,
-        *input.global_direction_map,
+        *input.masked_global_cost_map,
+        *input.masked_direction_map,
         input.chassis_pose_map.head<2>()
     );
     if (!sample) return false;
@@ -444,14 +444,14 @@ bool MainController::compute_is_hazard(const ControlInput& input) const {
 
 bool MainController::update_recovery_safe_flag(const ControlInput& input) {
     const auto& p = fsm_params_.recovery;
-    if (!p.enable || !input.merged_cost_map || !input.global_direction_map || !recovery_goal_map_) {
+    if (!p.enable || !input.final_cost_map || !input.masked_direction_map || !recovery_goal_map_) {
         recovery_safe_since_ = std::nullopt;
         return false;
     }
 
     const auto sample = RecoveryGoalPlanner::sample_fields(
-        *input.merged_cost_map,
-        *input.global_direction_map,
+        *input.final_cost_map,
+        *input.masked_direction_map,
         input.chassis_pose_map.head<2>()
     );
     if (!sample) {
@@ -475,7 +475,7 @@ bool MainController::update_recovery_safe_flag(const ControlInput& input) {
 
 ControlOutput MainController::execute_recovery(const ControlInput& input) {
     ControlOutput out;
-    if (!input.merged_cost_map || !input.global_direction_map) return out;
+    if (!input.final_cost_map || !input.masked_direction_map) return out;
 
     update_recovery_goal_if_needed(input);
     if (!recovery_goal_map_) return out;
@@ -484,7 +484,7 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     const auto result = mpc_controller_->recover_to_point(
         *recovery_goal_map_,
         input.chassis_pose_map, input.chassis_status,
-        *input.merged_cost_map, *input.global_direction_map
+        *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Recovery) solve failed: %s", result.error().c_str());
@@ -522,13 +522,13 @@ ControlOutput MainController::execute_stuck_reverse(const ControlInput& input) {
 
 ControlOutput MainController::execute_fixed(const ControlInput& input) {
     ControlOutput out;
-    if (!input.merged_cost_map || !input.global_direction_map) return out;
+    if (!input.final_cost_map || !input.masked_direction_map) return out;
 
     auto start_time = std::chrono::high_resolution_clock::now();
     const auto result = mpc_controller_->hold_at_point(
         input.fixed_goal_pos,
         input.chassis_pose_map, input.chassis_status,
-        *input.merged_cost_map, *input.global_direction_map
+        *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Fixed) solve failed: %s", result.error().c_str());

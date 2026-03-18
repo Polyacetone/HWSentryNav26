@@ -15,7 +15,7 @@
       predicted_path_pub_topic: "/path_follower/debug/predicted_path"
       v_pred_pub_topic: "/path_follower/debug/v_pred"
       w_pred_pub_topic: "/path_follower/debug/w_pred"
-      merged_cost_map_pub_topic: "/path_follower/debug/merged_cost_map"
+      final_cost_map_pub_topic: "/path_follower/debug/final_cost_map"
 
     misc:
       stop_threshold_dist: 0.5 # 停止距离 (m)
