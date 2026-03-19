@@ -287,6 +287,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     nav_params.step_on_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.on_count_threshold"));
     nav_params.step_off_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.off_count_threshold"));
 
+    nav_params.step_up_failsafe_enable = declare_parameter<bool>("step_up_failsafe.enable");
+    nav_params.step_up_failsafe_similar_attempts = static_cast<int>(declare_parameter<int>("step_up_failsafe.similar_attempts"));
+    nav_params.step_up_failsafe_similar_dist = declare_parameter<double>("step_up_failsafe.similar_dist");
+
     // ─── 创建 MainController ───
     nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
 

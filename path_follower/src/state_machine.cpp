@@ -63,6 +63,10 @@ struct StIdle final : sc::state<StIdle, Machine> {
     sc::result react(const EvUpdate& ev) {
         const auto& in = ev.input;
 
+        if (in.force_hazard_recovery) {
+            return transit<StHazardRecovery>();
+        }
+
         if (in.is_hazard) {
             return transit<StHazardRecovery>();
         }
@@ -89,6 +93,10 @@ struct StFixed final : sc::state<StFixed, Machine> {
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
+
+        if (in.force_hazard_recovery) {
+            return transit<StHazardRecovery>();
+        }
 
         if (in.is_stuck) {
             m.reverse_start_time = in.stamp;
@@ -119,6 +127,10 @@ struct StFollow final : sc::state<StFollow, Machine> {
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
+
+        if (in.force_hazard_recovery) {
+            return transit<StHazardRecovery>();
+        }
 
         // 路径被取消/清空：FOLLOW 不应“卡死”在无路径状态。
         // 走 STOPPING 做平滑减速，并根据外部请求选择落点。
@@ -173,6 +185,10 @@ struct StSpin final : sc::state<StSpin, Machine> {
 
         const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
 
+        if (in.force_hazard_recovery) {
+            return transit<StHazardRecovery>();
+        }
+
         if (in.is_hazard) {
             return transit<StHazardRecovery>();
         }
@@ -208,6 +224,10 @@ struct StStopping final : sc::state<StStopping, Machine> {
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
+
+        if (in.force_hazard_recovery) {
+            return transit<StHazardRecovery>();
+        }
 
         if (in.is_stuck) {
             m.reverse_start_time = in.stamp;
@@ -248,6 +268,10 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
     sc::result react(const EvUpdate& ev) {
         auto& m = context<Machine>();
         const auto& in = ev.input;
+
+        if (in.force_hazard_recovery) {
+            return transit<StHazardRecovery>();
+        }
 
         const double elapsed = (in.stamp - m.reverse_start_time).seconds();
         if (elapsed > m.params.stuck.reverse_duration) {

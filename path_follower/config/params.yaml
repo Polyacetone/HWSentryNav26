@@ -34,6 +34,11 @@
       on_count_threshold: 2 # 连续检测到台阶的次数才设置标志位
       off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
 
+    step_up_failsafe: # 上台阶失败兜底（避免恢复重试循环卡死）
+      enable: true # 若启用，在路径跟随模式下如果连续多次检测到相近的位置但未能成功上台阶，则取消本次路径跟随任务
+      similar_attempts: 3 # 连续相近位置出现次数阈值
+      similar_dist: 2.0 # 位置相近判定距离 (m)
+
     state_machine: # 控制状态机参数
       follow_to_spin_vel_max: 0.5 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
       spin_to_follow_omega_max: 1.0 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
@@ -48,7 +53,7 @@
         weight: 5.0 # 能量软约束权重
         softplus_beta: 5.0 # softplus斜率(越大越接近硬折线惩罚)
       multi_hypothesis: # 多假设热启动参数
-        enable: true # 是否启用多假设热启动
+        enable: false # 是否启用多假设热启动
         keep_steps: 3 # 前多少步保留原始 warm start
         lateral_offset: 0.8 # 横向偏移量 (m)
       follow_path: # 路径跟随模式
@@ -183,7 +188,7 @@
       stuck:
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.8 # 指令速度超过该值才开始检测 (m/s)
-        timeout: 1.5 # 持续时间阈值 (s)
+        timeout: 1.0 # 持续时间阈值 (s)
         max_displacement: 0.2 # 位移小于该值则判定卡住 (m)
         reverse_speed: 0.5 # 倒车速度 (m/s)
         reverse_duration: 2.0 # 倒车时间 (s)

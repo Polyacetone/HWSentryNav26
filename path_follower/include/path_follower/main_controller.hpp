@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include <deque>
 
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
@@ -91,6 +92,11 @@ struct NavigationParams {
     double step_detect_dot_threshold;     // 朝向与方向场点积阈值
     int step_on_count_threshold;          // 连续检测到台阶的次数才设置标志位
     int step_off_count_threshold;         // 连续未检测到台阶的次数才取消标志位
+
+    // 上台阶失败兜底（防止在 Dead↔Follow 恢复循环中卡死）
+    bool step_up_failsafe_enable;
+    int step_up_failsafe_similar_attempts;     // 连续相近位置出现次数阈值
+    double step_up_failsafe_similar_dist;    // 位置相近判定距离 (m)
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -132,10 +138,21 @@ private:
     bool update_recovery_safe_flag(const ControlInput& input);
 
     // ─── 工具函数 ───
-    std::tuple<bool, bool> detect_steps_on_prediction(
+    struct StepDetectResult {
+        bool step_up = false;
+        bool step_down = false;
+        bool step_up_rising = false;
+        bool step_down_rising = false;
+    };
+
+    StepDetectResult detect_steps_on_prediction_with_edges(
         const MPCPrediction& prediction,
         const DirectionMap& direction_map
     );
+
+    void clear_step_up_attempt_history();
+    void clear_step_up_attempt_history_if_needed(bool has_path, bool has_new_path);
+    bool register_step_up_attempt_and_should_cancel(const Eigen::Vector2d& pos_map);
 
     static double wrap_pi(double a) {
         return std::atan2(std::sin(a), std::cos(a));
@@ -170,6 +187,13 @@ private:
     int step_down_off_count_ = 0;
     bool step_up_flag_ = false;
     bool step_down_flag_ = false;
+
+    // ─── 复活检测（底盘 Dead -> Mature） ───
+    bool last_cycle_chassis_dead_ = false;
+
+    // ─── 上台阶失败兜底状态 ───
+    std::deque<Eigen::Vector2d> step_up_attempt_positions_;  // 仅保存最近 N 次
+    bool pending_cancel_follow_task_ = false;                 // 由 FOLLOW 内检测触发，下一周期执行取消
 };
 
 }

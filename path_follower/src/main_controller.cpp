@@ -133,6 +133,7 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM。
     if (chassis_dead) {
+        last_cycle_chassis_dead_ = true;
         ControlOutput out;
         out.velocity = 0.0;
         out.omega = 0.0;
@@ -146,6 +147,9 @@ ControlOutput MainController::update(const ControlInput& input) {
         recovery_safe_since_ = std::nullopt;
         return out;
     }
+
+    const bool just_revived = last_cycle_chassis_dead_;
+    last_cycle_chassis_dead_ = false;
 
     const FsmState prev_state = last_fsm_state_;
     mpc_controller_->set_last_cmd(last_cmd_);
@@ -162,18 +166,35 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     const bool has_path = input.global_path.has_value();
     const bool has_new_path = has_path && input.path_updated;
+
+    clear_step_up_attempt_history_if_needed(has_path, has_new_path);
+
+    bool cancel_follow_task_now = false;
+    if (pending_cancel_follow_task_) {
+        cancel_follow_task_now = true;
+        pending_cancel_follow_task_ = false;
+    }
+
+    // Dead->Mature 常发生在上台阶失败后的恢复循环中。
+    // 若复活时仍处于“上台阶标志位已拉高”状态，则按一次“拉高事件”计入兜底。
+    if (just_revived && !has_new_path && last_fsm_state_ == FsmState::FOLLOW && has_path && step_up_flag_) {
+        if (register_step_up_attempt_and_should_cancel(input.chassis_pose_map.head<2>())) {
+            cancel_follow_task_now = true;
+        }
+    }
     const bool dist_reached = has_path && ((input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
     const bool u_reached = has_path && (last_reference_u_ > nav_params_.stop_threshold_u);
 
     // 1. 组装 FSM 输入
     FsmInput fsm_input;
-    fsm_input.has_path = has_path;
-    fsm_input.has_new_path = has_new_path;
-    fsm_input.fixed_goal_flag = input.fixed_goal;
+    fsm_input.has_path = cancel_follow_task_now ? false : has_path;
+    fsm_input.has_new_path = cancel_follow_task_now ? false : has_new_path;
+    fsm_input.fixed_goal_flag = cancel_follow_task_now ? false : input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
     fsm_input.spin_requested = input.spin_requested;
     fsm_input.spin_high_priority = input.spin_high_priority;
     fsm_input.is_hazard = compute_is_hazard(input);
+    fsm_input.force_hazard_recovery = just_revived && fsm_input.is_hazard;
     fsm_input.is_stuck = check_stuck(input);
     fsm_input.is_recovery_safe = update_recovery_safe_flag(input);
     // STOPPING 退出判定按“控制指令是否收敛到零”进行，而不是底盘实速
@@ -202,8 +223,12 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     output.fsm_state = state;
     output.consume_global_path |= fsm_output.consume_global_path;
+    if (cancel_follow_task_now) {
+        output.consume_global_path = true;
+    }
     if (output.consume_global_path) {
         last_reference_u_ = 0.0;
+        clear_step_up_attempt_history();
     }
 
     // 4. 同步已发布指令到 FSM / MPC，并在非 MPC 状态时重置 MPC 的 warm start
@@ -269,12 +294,20 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
     // 台阶检测（基于 MPC 预测轨迹）
     const auto& [cmd, prediction] = *result;
-    const auto [step_up, step_down] = detect_steps_on_prediction(prediction, *input.masked_direction_map);
+    const auto step = detect_steps_on_prediction_with_edges(prediction, *input.masked_direction_map);
+
+    if (step.step_up_rising) {
+        const Eigen::Vector2d pos = input.chassis_pose_map.head<2>();
+        if (register_step_up_attempt_and_should_cancel(pos)) {
+            RCLCPP_ERROR(logger_, "StepUp failsafe: cancel current follow task");
+            pending_cancel_follow_task_ = true;
+        }
+    }
 
     out.velocity = cmd.x();
     out.omega = cmd.y();
-    out.step_up_ahead = step_up;
-    out.step_down_ahead = step_down;
+    out.step_up_ahead = step.step_up;
+    out.step_down_ahead = step.step_down;
     out.predicted_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
@@ -553,7 +586,7 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
 
 // ═══════════════════ 台阶检测（基于 MPC 预测轨迹 + 防抖） ════════════════════
 
-std::tuple<bool, bool> MainController::detect_steps_on_prediction(
+MainController::StepDetectResult MainController::detect_steps_on_prediction_with_edges(
     const MPCPrediction& prediction,
     const DirectionMap& direction_map
 ) {
@@ -580,6 +613,9 @@ std::tuple<bool, bool> MainController::detect_steps_on_prediction(
         if (dot < -nav_params_.step_detect_dot_threshold) raw_step_down = true;
     }
 
+    const bool prev_up = step_up_flag_;
+    const bool prev_down = step_down_flag_;
+
     // 防抖：连续多次检测到才设置标志位，连续多次未检测到才取消
     if (raw_step_up) {
         step_up_on_count_++;
@@ -601,7 +637,63 @@ std::tuple<bool, bool> MainController::detect_steps_on_prediction(
         if (step_down_off_count_ >= nav_params_.step_off_count_threshold) step_down_flag_ = false;
     }
 
-    return {step_up_flag_, step_down_flag_};
+    StepDetectResult out;
+    out.step_up = step_up_flag_;
+    out.step_down = step_down_flag_;
+    out.step_up_rising = (!prev_up) && step_up_flag_;
+    out.step_down_rising = (!prev_down) && step_down_flag_;
+    return out;
+}
+
+void MainController::clear_step_up_attempt_history() {
+    step_up_attempt_positions_.clear();
+}
+
+void MainController::clear_step_up_attempt_history_if_needed(const bool has_path, const bool has_new_path) {
+    if (!nav_params_.step_up_failsafe_enable) {
+        step_up_attempt_positions_.clear();
+        pending_cancel_follow_task_ = false;
+        return;
+    }
+
+    if (!has_path || has_new_path) {
+        step_up_attempt_positions_.clear();
+        pending_cancel_follow_task_ = false;
+    }
+}
+
+bool MainController::register_step_up_attempt_and_should_cancel(const Eigen::Vector2d& pos_map) {
+    if (!nav_params_.step_up_failsafe_enable) return false;
+
+    const size_t n = static_cast<size_t>(nav_params_.step_up_failsafe_similar_attempts);
+    step_up_attempt_positions_.push_back(pos_map);
+    while (step_up_attempt_positions_.size() > n) {
+        step_up_attempt_positions_.erase(step_up_attempt_positions_.begin());
+    }
+
+    if (step_up_attempt_positions_.size() < n) {
+        RCLCPP_INFO(logger_, "StepUp attempt recorded (%zu/%zu) at (%.2f, %.2f)", step_up_attempt_positions_.size(), n, pos_map.x(), pos_map.y());
+        return false;
+    }
+
+    const Eigen::Vector2d& ref = step_up_attempt_positions_.front();
+    double max_dist = 0.0;
+    for (size_t i = 1; i < step_up_attempt_positions_.size(); ++i) {
+        max_dist = std::max(max_dist, (step_up_attempt_positions_[i] - ref).norm());
+    }
+
+    const bool similar = max_dist <= nav_params_.step_up_failsafe_similar_dist;
+    if (similar) {
+        RCLCPP_WARN(
+            logger_,
+            "StepUp failsafe triggered: %zu attempts within %.2f m (ref=(%.2f, %.2f), max_dist=%.2f)",
+            step_up_attempt_positions_.size(),
+            nav_params_.step_up_failsafe_similar_dist,
+            ref.x(), ref.y(),
+            max_dist
+        );
+    }
+    return similar;
 }
 
 }
