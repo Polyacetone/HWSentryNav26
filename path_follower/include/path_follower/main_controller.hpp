@@ -87,6 +87,11 @@ struct NavigationParams {
     double stop_threshold_dist;
     double stop_threshold_u;
 
+    // Follow 任务取消：投影守卫
+    double follow_proj_dist_max;      // 当前位置到样条投影点距离过大则取消 (m)
+    double follow_proj_cost_max;      // 当前位置到投影点连线最大代价超过则取消 (0~255)
+    int follow_proj_cost_samples;     // 连线采样数（用于取最大代价）
+
     // 台阶检测（基于MPC预测轨迹）
     double step_detect_norm_threshold;    // 方向场模长阈值
     double step_detect_dot_threshold;     // 朝向与方向场点积阈值
@@ -95,7 +100,7 @@ struct NavigationParams {
 
     // 上台阶失败兜底（防止在 Dead↔Follow 恢复循环中卡死）
     bool step_up_failsafe_enable;
-    int step_up_failsafe_similar_attempts;     // 连续相近位置出现次数阈值
+    int step_up_failsafe_similar_attempts;   // 连续相近位置出现次数阈值
     double step_up_failsafe_similar_dist;    // 位置相近判定距离 (m)
 };
 
@@ -193,7 +198,7 @@ private:
 
     // ─── 上台阶失败兜底状态 ───
     std::deque<Eigen::Vector2d> step_up_attempt_positions_;  // 仅保存最近 N 次
-    bool pending_cancel_follow_task_ = false;                 // 由 FOLLOW 内检测触发，下一周期执行取消
+    bool pending_cancel_follow_task_ = false;                // 由 FOLLOW 内检测触发，下一周期执行取消
 };
 
 }

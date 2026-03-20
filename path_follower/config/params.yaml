@@ -21,12 +21,17 @@
       stop_threshold_dist: 0.5 # 停止距离 (m)
       stop_threshold_u: 0.99 # 停止样条参数u (0~1)
       remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
-    
+
     step_mask: # 台阶路径掩码参数（同时作用于台阶额外代价层与台阶方向场）
       path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积阈值，>= 认为路径经过台阶（触发掩码）
       full_effect_radius: 0.4 # 掩码满强度半径 (m)：<= 该距离 alpha=1（cost 全擦除，dir 全保留）
       cutoff_radius: 0.8 # 掩码截止半径 (m)：>= 该距离 alpha=0（cost 全保留，dir 全擦除）
       length_num_samples: 100 # 路径长度估计采样数
+
+    follow_proj_guard: # 路径跟随任务取消条件（投影守卫）
+      proj_dist_max: 2.0 # 当前位置到样条投影点距离过大则取消 (m)
+      proj_cost_max: 250.0 # 当前位置到投影点连线最大障碍物代价超过则取消 (0~255)
+      proj_cost_samples: 20 # 连线最大代价估计采样数
 
     step_ahead_flag: # 台阶标志位参数
       detect_norm_threshold: 0.9 # 方向场模长阈值，>=该值认为经过台阶
@@ -35,8 +40,8 @@
       off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
 
     step_up_failsafe: # 上台阶失败兜底（避免恢复重试循环卡死）
-      enable: true # 若启用，在路径跟随模式下如果连续多次检测到相近的位置但未能成功上台阶，则取消本次路径跟随任务
-      similar_attempts: 3 # 连续相近位置出现次数阈值
+      enable: false # 若启用，在路径跟随模式下如果连续多次检测到相近的位置但未能成功上台阶，则取消本次路径跟随任务
+      similar_attempts: 5 # 连续相近位置出现次数阈值
       similar_dist: 2.0 # 位置相近判定距离 (m)
 
     state_machine: # 控制状态机参数
@@ -179,16 +184,18 @@
         cost_threshold: 5.0 # < 认为可通行
         step_norm_threshold: 0.01 # < 认为可通行
       search:
-        circ_radius: 1.0 # 圆搜索法半径 (m)
-        circ_angle_samples: 36 # 圆搜索法半径环采样角度数
-        circ_radius_samples: 20 # 圆搜索法每条半径上用于计算代价和的采样数
-        goal_timeout: 5.0 # 目标点未更新超时 (s)
+        radius_min: 0.5 # 搜索半径范围下界 (m)
+        radius_max: 1.5 # 搜索半径范围上界 (m)
+        radius_samples: 5 # 半径采样数
+        angle_samples: 36 # 每个半径上的角度采样数
+        path_samples: 20 # 从当前位置到候选点的路径积分采样数（用于计算代价和）
+        goal_timeout: 4.0 # 目标点超时时长，超时后重新选择 (s)
       exit:
         safe_hold_time: 1.0 # 安全区域保持时间 (s)
       stuck:
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.8 # 指令速度超过该值才开始检测 (m/s)
-        timeout: 1.0 # 持续时间阈值 (s)
+        timeout: 2.0 # 持续时间阈值 (s)
         max_displacement: 0.2 # 位移小于该值则判定卡住 (m)
         reverse_speed: 0.5 # 倒车速度 (m/s)
         reverse_duration: 2.0 # 倒车时间 (s)

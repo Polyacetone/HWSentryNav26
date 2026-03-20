@@ -21,6 +21,28 @@ inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_status) {
 
 namespace {
 
+std::optional<double> max_cost_along_segment(
+    const CostMap& cost_map,
+    const Eigen::Vector2d& a_map,
+    const Eigen::Vector2d& b_map,
+    const int samples
+) {
+    const int n = std::max(1, samples);
+    double max_cost = 0.0;
+    for (int i = 0; i <= n; i++) {
+        const double t = static_cast<double>(i) / static_cast<double>(n);
+        const Eigen::Vector2d pos = a_map + (b_map - a_map) * t;
+        const Eigen::Vector2d g = cost_map.map_coord_to_grid(pos);
+        if (!cost_map.is_valid_coord(g)) return std::nullopt;
+        max_cost = std::max(max_cost, cost_map.interpolate(g));
+    }
+    return max_cost;
+}
+
+}
+
+namespace {
+
 struct RecoveryGoalPlanner {
     struct FieldSample {
         double cost = 0.0;
@@ -67,13 +89,14 @@ struct RecoveryGoalPlanner {
     ) {
         double acc = 0.0;
         std::optional<FieldSample> end_s;
-        for (int i = 0; i <= p.circ_radius_samples; i++) {
-            const double t = static_cast<double>(i) / static_cast<double>(p.circ_radius_samples);
+        const int n = std::max(1, p.path_samples);
+        for (int i = 0; i <= n; i++) {
+            const double t = static_cast<double>(i) / static_cast<double>(n);
             const Eigen::Vector2d pos = origin + (goal - origin) * t;
             const auto s = sample_fields(cost_map, dir_map, pos);
             if (!s) return std::nullopt;
             acc += potential_cost(*s);
-            if (i == p.circ_radius_samples) end_s = s;
+            if (i == n) end_s = s;
         }
 
         PathScore out;
@@ -91,17 +114,27 @@ struct RecoveryGoalPlanner {
     ) {
         const Eigen::Vector2d origin = chassis_pose.head<2>();
 
+        const double r_min = std::min(p.radius_min, p.radius_max);
+        const double r_max = std::max(p.radius_min, p.radius_max);
+        const int r_n = std::max(1, p.radius_samples);
+        const int a_n = std::max(1, p.angle_samples);
+
         std::optional<Eigen::Vector2d> best_pt;
         std::optional<PathScore> best_sc;
 
-        for (int i = 0; i < p.circ_angle_samples; i++) {
-            const double a = 2.0 * std::numbers::pi * static_cast<double>(i) / static_cast<double>(p.circ_angle_samples);
-            const Eigen::Vector2d pt = origin + Eigen::Vector2d(std::cos(a), std::sin(a)) * p.circ_radius;
-            const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt);
-            if (!sc) continue;
-            if (!best_sc || sc->score < best_sc->score) {
-                best_sc = *sc;
-                best_pt = pt;
+        for (int ri = 0; ri < r_n; ri++) {
+            const double rt = (r_n == 1) ? 0.0 : (static_cast<double>(ri) / static_cast<double>(r_n - 1));
+            const double r = r_min + (r_max - r_min) * rt;
+
+            for (int ai = 0; ai < a_n; ai++) {
+                const double a = 2.0 * std::numbers::pi * static_cast<double>(ai) / static_cast<double>(a_n);
+                const Eigen::Vector2d pt = origin + Eigen::Vector2d(std::cos(a), std::sin(a)) * r;
+                const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt);
+                if (!sc) continue;
+                if (!best_sc || sc->score < best_sc->score) {
+                    best_sc = *sc;
+                    best_pt = pt;
+                }
             }
         }
 
@@ -273,6 +306,60 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         mpc_controller_->params().follow_projection.max_correspondence_distance
     );
     last_reference_u_ = u0;
+
+    // Follow 任务取消：投影守卫
+    // 1) 投影距离过大：说明路径与当前位置严重不一致
+    // 2) 当前位置到投影点的连线最大障碍物代价过高：说明“接回路径”的直线路径可能不可通行
+    const Eigen::Vector2d pos_map = input.chassis_pose_map.head<2>();
+    const Eigen::Vector2d proj_map = input.global_path->evaluate(u0);
+    const double proj_dist = (proj_map - pos_map).norm();
+    if (nav_params_.follow_proj_dist_max > 0.0 && proj_dist > nav_params_.follow_proj_dist_max) {
+        RCLCPP_WARN(
+            logger_,
+            "Follow cancel: projection too far (dist=%.2f m > %.2f m)",
+            proj_dist, nav_params_.follow_proj_dist_max
+        );
+        out.velocity = 0.0;
+        out.omega = 0.0;
+        out.consume_global_path = true;
+        out.valid = true;
+        mpc_controller_->reset_warm_start();
+        return out;
+    }
+
+    if (input.masked_global_cost_map && nav_params_.follow_proj_cost_max >= 0.0 && nav_params_.follow_proj_cost_max < 255.0) {
+        const auto max_cost = max_cost_along_segment(
+            *input.masked_global_cost_map,
+            pos_map,
+            proj_map,
+            nav_params_.follow_proj_cost_samples
+        );
+
+        const double c = max_cost.value_or(255.0);
+        if (!max_cost) {
+            RCLCPP_ERROR(logger_, "Follow cancel: projection segment out of cost map bounds");
+            out.velocity = 0.0;
+            out.omega = 0.0;
+            out.consume_global_path = true;
+            out.valid = true;
+            mpc_controller_->reset_warm_start();
+            return out;
+        }
+
+        if (c > nav_params_.follow_proj_cost_max) {
+            RCLCPP_WARN(
+                logger_,
+                "Follow cancel: projection segment cost too high (max_cost=%.1f > %.1f) using masked_global_cost_map",
+                c, nav_params_.follow_proj_cost_max
+            );
+            out.velocity = 0.0;
+            out.omega = 0.0;
+            out.consume_global_path = true;
+            out.valid = true;
+            mpc_controller_->reset_warm_start();
+            return out;
+        }
+    }
 
     // 调用 MPC
     auto start_time = std::chrono::high_resolution_clock::now();

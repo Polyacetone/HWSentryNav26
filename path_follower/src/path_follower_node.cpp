@@ -263,9 +263,11 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .hazard_step_norm_threshold = declare_parameter<double>("recovery.hazard.step_norm_threshold"),
         .safe_cost_threshold = declare_parameter<double>("recovery.safe.cost_threshold"),
         .safe_step_norm_threshold = declare_parameter<double>("recovery.safe.step_norm_threshold"),
-        .circ_radius = declare_parameter<double>("recovery.search.circ_radius"),
-        .circ_angle_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_angle_samples")),
-        .circ_radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.circ_radius_samples")),
+        .radius_min = declare_parameter<double>("recovery.search.radius_min"),
+        .radius_max = declare_parameter<double>("recovery.search.radius_max"),
+        .radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.radius_samples")),
+        .angle_samples = static_cast<int>(declare_parameter<int>("recovery.search.angle_samples")),
+        .path_samples = static_cast<int>(declare_parameter<int>("recovery.search.path_samples")),
         .safe_hold_time = declare_parameter<double>("recovery.exit.safe_hold_time"),
         .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout")
     };
@@ -282,6 +284,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     NavigationParams nav_params;
     nav_params.stop_threshold_dist = declare_parameter<double>("misc.stop_threshold_dist");
     nav_params.stop_threshold_u = declare_parameter<double>("misc.stop_threshold_u");
+
+    nav_params.follow_proj_dist_max = declare_parameter<double>("follow_proj_guard.proj_dist_max");
+    nav_params.follow_proj_cost_max = declare_parameter<double>("follow_proj_guard.proj_cost_max");
+    nav_params.follow_proj_cost_samples = static_cast<int>(declare_parameter<int>("follow_proj_guard.proj_cost_samples"));
     nav_params.step_detect_norm_threshold = declare_parameter<double>("step_ahead_flag.detect_norm_threshold");
     nav_params.step_detect_dot_threshold = declare_parameter<double>("step_ahead_flag.detect_dot_threshold");
     nav_params.step_on_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.on_count_threshold"));

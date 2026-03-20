@@ -31,9 +31,11 @@ struct RecoveryParams {
     double safe_step_norm_threshold;
 
     // 搜索可通行点
-    double circ_radius;
-    int circ_angle_samples;
-    int circ_radius_samples;
+    double radius_min;
+    double radius_max;
+    int radius_samples;
+    int angle_samples;
+    int path_samples;
 
     // 退出条件
     double safe_hold_time;
