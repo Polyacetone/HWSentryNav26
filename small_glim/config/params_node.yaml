@@ -9,6 +9,7 @@
       acc_scale: 9.80665
       imu_sub_topic: "/mid360_driver/imu"
       lidar_sub_topic: "/mid360_driver/lidar"
+      comp_stage_sub_topic: "/serial_bridge/comp_stage"
       odometry_pub_topic: "/small_glim/odometry"
       registered_cloud_pub_topic: "/small_glim/registered_cloud"
       ivox_cloud_pub_topic: "/small_glim/ivox_cloud"

@@ -8,6 +8,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <interfaces/msg/comp_stage.hpp>
 
 #include <small_glim/common/config.hpp>
 #include <small_glim/common/logger.hpp>
@@ -26,6 +27,7 @@ public:
     void timer_callback();
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
     size_t lidar_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
+    void comp_stage_callback(const interfaces::msg::CompStage::SharedPtr msg);
 
     void pub_odometry(const EstimationFrame::ConstPtr frame);
     void pub_cloud(const EstimationFrame::ConstPtr frame, const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher);
@@ -37,6 +39,7 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_static_broadcaster;
 
+    std::shared_ptr<Config> config;
     std::unique_ptr<CloudPreprocessor> preprocessor;
     std::unique_ptr<TimeKeeper> time_keeper;
     std::unique_ptr<AsyncOdometryEstimation> odometry_estimation;
@@ -51,10 +54,12 @@ private:
     std::string intensity_field, ring_field;
     std::string imu_frame_id, lidar_frame_id, odometry_frame_id;
 
-    // ROS-related
+    uint8_t prev_game_progress = 0;
+
     rclcpp::TimerBase::SharedPtr timer;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub;
+    rclcpp::Subscription<interfaces::msg::CompStage>::SharedPtr comp_stage_sub;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_cloud_pub;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr ivox_cloud_pub;
@@ -70,8 +75,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(this);
     tf_static_broadcaster = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
 
-    auto config = std::make_shared<Config>(this);
-
+    config = std::make_shared<Config>(this);
     bool debug = config->param<bool>("node.debug");
     if (debug) {
         get_logger().set_level(rclcpp::Logger::Level::Debug);
@@ -80,9 +84,6 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 
     enable_tf_publish = config->param<bool>("node.enable_tf_publish");
     enable_mapping = config->param<bool>("node.enable_mapping");
-    if (enable_mapping) {
-        mapping = std::make_unique<AsyncMapping>(config);
-    }
 
     imu_time_offset = config->param<double>("node.imu_time_offset");
     lidar_time_offset = config->param<double>("node.lidar_time_offset");
@@ -107,6 +108,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
     const std::string odometry_pub_topic = config->param<std::string>("node.odometry_pub_topic");
     const std::string registered_cloud_pub_topic = config->param<std::string>("node.registered_cloud_pub_topic");
     const std::string ivox_cloud_pub_topic = config->param<std::string>("node.ivox_cloud_pub_topic");
+    const std::string comp_stage_sub_topic = config->param<std::string>("node.comp_stage_sub_topic");
 
     // Subscribers
     imu_sub = create_subscription<sensor_msgs::msg::Imu>(
@@ -119,6 +121,11 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
         rclcpp::QoS(1),
         [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { lidar_callback(msg); }
     );
+    comp_stage_sub = create_subscription<interfaces::msg::CompStage>(
+        comp_stage_sub_topic,
+        rclcpp::QoS(1),
+        [this](const interfaces::msg::CompStage::SharedPtr msg) { comp_stage_callback(msg); }
+    );
     odometry_pub = create_publisher<nav_msgs::msg::Odometry>(odometry_pub_topic, rclcpp::QoS(1));
     registered_cloud_pub = create_publisher<sensor_msgs::msg::PointCloud2>(registered_cloud_pub_topic, rclcpp::QoS(1));
     ivox_cloud_pub = create_publisher<sensor_msgs::msg::PointCloud2>(ivox_cloud_pub_topic, rclcpp::QoS(1));
@@ -130,7 +137,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 SmallGlimNode::~SmallGlimNode() {
     logger::info("node", "waiting for odometry estimation");
     odometry_estimation->join();
-    if (enable_mapping) {
+    if (mapping) {
         std::vector<EstimationFrame::ConstPtr> estimation_results;
         std::vector<EstimationFrame::ConstPtr> target_ivox_frames;
         std::vector<EstimationFrame::ConstPtr> marginalized_frames;
@@ -182,11 +189,26 @@ void SmallGlimNode::timer_callback() {
     if (!target_ivox_frames.empty()) {
         pub_cloud(target_ivox_frames.back(), ivox_cloud_pub);
     }
-    if (enable_mapping) {
+    if (mapping) {
         for (const auto& marginalized_frame: marginalized_frames) {
             mapping->insert_frame(marginalized_frame);
         }
     }
+}
+
+void SmallGlimNode::comp_stage_callback(const interfaces::msg::CompStage::SharedPtr msg) {
+    const uint8_t game_progress = msg->game_progress;
+    if (enable_mapping) {
+        if (prev_game_progress != 4 && game_progress == 4) {
+            logger::info("node", "receive start mapping signal");
+            mapping = std::make_unique<AsyncMapping>(config);
+        }
+        if (prev_game_progress == 4 && game_progress != 4) {
+            logger::info("node", "receive stop mapping signal");
+            mapping.reset();
+        }
+    }
+    prev_game_progress = game_progress;
 }
 
 void SmallGlimNode::pub_odometry(const EstimationFrame::ConstPtr frame) {

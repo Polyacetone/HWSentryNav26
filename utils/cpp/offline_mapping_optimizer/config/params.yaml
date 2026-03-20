@@ -42,9 +42,9 @@
 
     # Loop closures between submaps
     global_enable_loop_closures: true
-    global_max_loop_distance: 12.0
-    global_min_loop_overlap: 0.3 # <=0 disables overlap gating
-    global_max_loop_edges_per_submap: 0 # 0 = unlimited
+    global_max_loop_distance: 6.0
+    global_min_loop_overlap: 0.6 # <=0 disables overlap gating
+    global_max_loop_edges_per_submap: 10 # 0 = unlimited
 
     # Submap voxelmap pyramid used in global VGICP
     global_voxel_resolution: 0.1

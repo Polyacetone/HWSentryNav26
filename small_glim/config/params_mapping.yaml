@@ -16,7 +16,7 @@
 
       # Keyframe selection (relative to last keyframe)
       keyframe_trans_thresh: 1.0
-      keyframe_rot_thresh: 1.0
+      keyframe_rot_thresh: 2.0
 
       # Incremental map integration
       downsample_every_n_keyframes: 1000
