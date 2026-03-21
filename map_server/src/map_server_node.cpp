@@ -11,6 +11,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <interfaces/msg/robot_status.hpp>
 #include <common_utils/convert.hpp>
 #include <small_gicp/ann/kdtree_omp.hpp>
 #include <small_gicp/points/point_cloud.hpp>
@@ -24,6 +25,7 @@ public:
 
 private:
     double map_resolution_;
+    double robot_color_wait_timeout_;
     int num_threads_;
     int map_size_x_, map_size_y_;
     bool enable_debug_;
@@ -51,11 +53,14 @@ private:
     } local_map_params_;
 
     cv::Mat global_direction_map_, global_cost_map_;
+    bool global_nav_map_initialized_ = false;
+    std::chrono::steady_clock::time_point initialize_time_;
     small_gicp::PointCloud::Ptr global_point_cloud_;
     small_gicp::KdTree<small_gicp::PointCloud>::Ptr global_kdtree_;
     std::deque<small_gicp::PointCloud::Ptr> local_map_cloud_queue_;
 
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr local_cloud_sub_;
+    rclcpp::Subscription<interfaces::msg::RobotStatus>::SharedPtr robot_status_sub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr global_direction_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_pub_;
@@ -68,6 +73,7 @@ private:
 
     void timer_callback();
     void local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg);
+    void robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg);
     small_gicp::PointCloud::Ptr preprocess_cloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) const;
     small_gicp::PointCloud extract_dynamic_points_with_global_map(const small_gicp::PointCloud& accumulated_cloud) const;
     small_gicp::PointCloud extract_dynamic_points_without_global_map(const small_gicp::PointCloud& accumulated_cloud) const;
@@ -87,6 +93,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     map_resolution_ = declare_parameter<double>("map_resolution");
     num_threads_ = static_cast<int>(declare_parameter<int>("num_threads"));
+    robot_color_wait_timeout_ = declare_parameter<double>("global_map.robot_color_wait_timeout");
+
     local_map_params_ = {
         .cloud_accumulate_frames = (size_t)declare_parameter<int>("local_map.cloud_accumulate_frames"),
         .roi_xy_radius_min = declare_parameter<double>("local_map.roi_xy_radius_min"),
@@ -121,22 +129,6 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
-
-    // 加载全局地图
-    std::string global_map_filename = declare_parameter<std::string>("global_map.map_filename");
-    std::string global_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + global_map_filename;
-    cv::Mat global_map = cv::imread(global_map_path, cv::IMREAD_COLOR);
-    if (global_map.empty()) {
-        RCLCPP_FATAL(get_logger(), "Failed to load global navmap from %s", global_map_path.c_str());
-        throw std::runtime_error("Failed to load global navmap");
-    }
-    map_size_x_ = global_map.cols;
-    map_size_y_ = global_map.rows;
-    RCLCPP_INFO(get_logger(), "Loaded global navmap: size_x=%d, size_y=%d", map_size_x_, map_size_y_);
-    std::vector<cv::Mat> channels;
-    cv::split(global_map, channels);
-    cv::merge(std::array{channels[0], channels[1]}, global_direction_map_); // 前两个通道表示台阶方向
-    global_cost_map_ = channels[2]; // 第三个通道表示代价地图
 
     // 加载全局点云
     std::string global_cloud_filename = declare_parameter<std::string>("global_map.cloud_filename");
@@ -173,9 +165,67 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         local_cloud_sub_topic, 1,
         [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { local_cloud_callback(msg); }
     );
+    std::string robot_status_sub_topic = declare_parameter<std::string>("global_map.robot_status_sub_topic");
+    robot_status_sub_ = create_subscription<interfaces::msg::RobotStatus>(
+        robot_status_sub_topic, 1,
+        [this](interfaces::msg::RobotStatus::SharedPtr msg) { robot_status_callback(msg); }
+    );
+
+    initialize_time_ = std::chrono::steady_clock::now();
+}
+
+void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg) {
+    if (global_nav_map_initialized_) {
+        // 已经根据机器人状态初始化过全局导航地图了，就不再接收
+        robot_status_sub_.reset();
+        return;
+    }
+    global_nav_map_initialized_ = true;
+    std::string nav_map_filename;
+    if (msg->robot_color) { // true为红色
+        RCLCPP_DEBUG(get_logger(), "Robot color: RED");
+        nav_map_filename = declare_parameter<std::string>("global_map.red_nav_map_filename");
+    } else { // false为蓝色
+        RCLCPP_DEBUG(get_logger(), "Robot color: BLUE");
+        nav_map_filename = declare_parameter<std::string>("global_map.blue_nav_map_filename");
+    }
+    std::string nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + nav_map_filename;
+    cv::Mat nav_map = cv::imread(nav_map_path, cv::IMREAD_COLOR);
+    if (nav_map.empty()) {
+        RCLCPP_FATAL(get_logger(), "Failed to load global navmap from %s", nav_map_path.c_str());
+        std::exit(EXIT_FAILURE);
+    }
+    map_size_x_ = nav_map.cols, map_size_y_ = nav_map.rows;
+    std::vector<cv::Mat> channels;
+    cv::split(nav_map, channels);
+    cv::merge(std::array{channels[0], channels[1]}, global_direction_map_); // 前两个通道表示台阶方向
+    global_cost_map_ = channels[2]; // 第三个通道表示代价地图
+    RCLCPP_INFO(get_logger(), "Loaded global navmap (%s) with size_x=%d, size_y=%d", msg->robot_color ? "RED" : "BLUE", nav_map.cols, nav_map.rows);
 }
 
 void MapServerNode::timer_callback() {
+    if (!global_nav_map_initialized_) {
+        const auto now_time = std::chrono::steady_clock::now();
+        // 超时未收到机器人颜色，使用默认全局导航地图
+        if (std::chrono::duration<double>(now_time - initialize_time_).count() > robot_color_wait_timeout_) {
+            RCLCPP_ERROR(get_logger(), "Robot color not initialized within timeout %.2f seconds, loading default global navmap", robot_color_wait_timeout_);
+            global_nav_map_initialized_ = true;
+            std::string default_nav_map_filename = declare_parameter<std::string>("global_map.default_nav_map_filename");
+            std::string default_nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + default_nav_map_filename;
+            cv::Mat nav_map = cv::imread(default_nav_map_path, cv::IMREAD_COLOR);
+            if (nav_map.empty()) {
+                RCLCPP_FATAL(get_logger(), "Failed to load default global navmap from %s", default_nav_map_path.c_str());
+                std::exit(EXIT_FAILURE);
+            }
+            map_size_x_ = nav_map.cols, map_size_y_ = nav_map.rows;
+            std::vector<cv::Mat> channels;
+            cv::split(nav_map, channels);
+            cv::merge(std::array{channels[0], channels[1]}, global_direction_map_); // 前两个通道表示台阶方向
+            global_cost_map_ = channels[2]; // 第三个通道表示代价地图
+            RCLCPP_INFO(get_logger(), "Loaded global navmap (default) with size_x=%d, size_y=%d", nav_map.cols, nav_map.rows);
+        }
+        return;
+    }
     pub_cost_map(global_cost_map_, now(), global_cost_map_pub_);
     pub_direction_map(global_direction_map_, now(), global_direction_map_pub_);
     if (enable_debug_) {
@@ -186,6 +236,8 @@ void MapServerNode::timer_callback() {
 }
 
 void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+    if (!global_nav_map_initialized_) return;
+
     // 预处理点云，累积并下采样
     local_map_cloud_queue_.push_front(preprocess_cloud(msg));
     RCLCPP_DEBUG(get_logger(), "Inserted local cloud into queue with %zu points", local_map_cloud_queue_.front()->points.size());

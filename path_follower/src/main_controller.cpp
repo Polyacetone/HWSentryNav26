@@ -12,9 +12,9 @@ namespace path_follower {
 namespace {
 
 inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_status) {
-    // leg_mode: 4:Mature
+    // leg_mode: 2:Flight, 4:Mature
     // comp_status: 4:比赛中
-    return leg_mode != 4u || comp_status != 4u;
+    return (leg_mode != 2u && leg_mode != 4u) || comp_status != 4u;
 }
 
 }

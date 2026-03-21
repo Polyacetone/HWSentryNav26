@@ -34,7 +34,7 @@
       proj_cost_samples: 20 # 连线最大代价估计采样数
 
     step_ahead_flag: # 台阶标志位参数
-      detect_norm_threshold: 0.9 # 方向场模长阈值，>=该值认为经过台阶
+      detect_norm_threshold: 0.6 # 方向场模长阈值，>=该值认为经过台阶
       detect_dot_threshold: 0.5 # 朝向与方向场点积阈值，用于区分上/下台阶
       on_count_threshold: 2 # 连续检测到台阶的次数才设置标志位
       off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
@@ -194,7 +194,7 @@
         safe_hold_time: 1.0 # 安全区域保持时间 (s)
       stuck:
         enable: true # 是否启用卡住检测
-        cmd_vel_threshold: 0.8 # 指令速度超过该值才开始检测 (m/s)
+        cmd_vel_threshold: 0.4 # 指令速度超过该值才开始检测 (m/s)
         timeout: 2.0 # 持续时间阈值 (s)
         max_displacement: 0.2 # 位移小于该值则判定卡住 (m)
         reverse_speed: 0.5 # 倒车速度 (m/s)

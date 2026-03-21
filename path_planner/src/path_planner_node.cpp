@@ -356,10 +356,8 @@ void PathPlannerNode::replan_timer_callback() {
 }
 
 void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, bool fixed, const ReplanReason reason) {
-    const char* reason_str = (reason == ReplanReason::GOAL_UPDATE) ? "goal update" : "obstacle";
     if (!merged_cost_map_ || !global_direction_map_) {
-        RCLCPP_WARN(get_logger(), "Map not ready yet! (%s)", reason_str);
-        publish_path({}, {}, {}, fixed);
+        RCLCPP_WARN(get_logger(), "Map not ready yet! (%s)", reason == ReplanReason::GOAL_UPDATE ? "goal update" : "obstacle");
         return;
     }
 
@@ -370,7 +368,6 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
         );
     } catch (const std::exception& ex) {
         RCLCPP_WARN(get_logger(), "Failed to lookup chassis_link to map: %s", ex.what());
-        publish_path({}, {}, {}, fixed);
         return;
     }
 
@@ -381,43 +378,52 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_map);
 
     if (!global_cost_map_->is_valid_coord(start_grid)) {
-        RCLCPP_ERROR(get_logger(), "Start (%.2f, %.2f) is out of bound! (%s)", start_map.x(), start_map.y(), reason_str);
         if (reason == ReplanReason::GOAL_UPDATE) { // 如果是目标更新导致的规划失败，才发布空路径；如果是避障重规划失败，保持原路径不变，等待下一次重规划机会
-            publish_path({}, {}, {}, fixed);
-            return;
+            RCLCPP_ERROR(get_logger(), "Start (%.2f, %.2f) is out of bound! (goal update)", start_map.x(), start_map.y());
+            publish_path({}, {}, {}, false);
+        } else {
+            RCLCPP_WARN(get_logger(), "Start (%.2f, %.2f) is out of bound! (obstacle)", start_map.x(), start_map.y());
         }
+        return;
     }
 
     if (!is_map_point_feasible(*global_cost_map_, *global_direction_map_, start_map)) {
-        RCLCPP_ERROR(get_logger(), "Start (%.2f, %.2f) is not feasible! (%s)", start_map.x(), start_map.y(), reason_str);
         if (reason == ReplanReason::GOAL_UPDATE) { // 如果是目标更新导致的规划失败，才发布空路径；如果是避障重规划失败，保持原路径不变，等待下一次重规划机会
-            publish_path({}, {}, {}, fixed);
-            return;
+            RCLCPP_ERROR(get_logger(), "Start (%.2f, %.2f) is not feasible! (goal update)", start_map.x(), start_map.y());
+            publish_path({}, {}, {}, false);
+        } else {
+            RCLCPP_WARN(get_logger(), "Start (%.2f, %.2f) is not feasible! (obstacle)", start_map.x(), start_map.y());
         }
+        return;
     }
 
     if (!global_cost_map_->is_valid_coord(goal_grid)) {
-        RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is out of bound! (%s)", goal_map.x(), goal_map.y(), reason_str);
         if (reason == ReplanReason::GOAL_UPDATE) { // 如果是目标更新导致的规划失败，才发布空路径；如果是避障重规划失败，保持原路径不变，等待下一次重规划机会
-            publish_path({}, {}, {}, fixed);
-            return;
+            RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is out of bound! (goal update)", goal_map.x(), goal_map.y());
+            publish_path({}, {}, {}, false);
+        } else {
+            RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is out of bound! (obstacle)", goal_map.x(), goal_map.y());
         }
+        return;
     }
 
     if (!is_map_point_feasible(*global_cost_map_, *global_direction_map_, goal_map)) {
-        RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is not feasible! (%s)", goal_map.x(), goal_map.y(), reason_str);
         if (reason == ReplanReason::GOAL_UPDATE) { // 如果是目标更新导致的规划失败，才发布空路径；如果是避障重规划失败，保持原路径不变，等待下一次重规划机会
-            publish_path({}, {}, {}, fixed);
-            return;
+            RCLCPP_ERROR(get_logger(), "Goal (%.2f, %.2f) is not feasible! (goal update)", goal_map.x(), goal_map.y());
+            publish_path({}, {}, {}, false);
+        } else {
+            RCLCPP_WARN(get_logger(), "Goal (%.2f, %.2f) is not feasible! (obstacle)", goal_map.x(), goal_map.y());
         }
+        return;
     }
 
     const double dist = (goal_map - start_map).norm();
 
     RCLCPP_INFO(
-        get_logger(), "Planning (%s): Src(%.2f, %.2f) -> Dst(%.2f, %.2f)%s",
-        reason_str, start_map.x(), start_map.y(), goal_map.x(), goal_map.y(),
-        fixed ? " [FIXED]" : ""
+        get_logger(), "Planning (%s): Src(%.2f, %.2f) -> Dst(%.2f, %.2f) %s",
+        reason == ReplanReason::GOAL_UPDATE ? "goal update" : "obstacle",
+        start_map.x(), start_map.y(), goal_map.x(), goal_map.y(),
+        fixed ? "[FIXED]" : ""
     );
 
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -434,7 +440,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
         );
         if (!optimize_result) {
             RCLCPP_ERROR(get_logger(), "Path optimization failed: %s", optimize_result.error().c_str());
-            publish_path({}, {}, {}, fixed);
+            publish_path({}, {}, {}, false);
             return;
         }
 
@@ -468,7 +474,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     );
     if (!plan_result) {
         RCLCPP_ERROR(get_logger(), "Path planning failed: %s", plan_result.error().c_str());
-        publish_path({}, {}, {}, fixed);
+        publish_path({}, {}, {}, false);
         return;
     }
 
