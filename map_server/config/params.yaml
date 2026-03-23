@@ -25,10 +25,10 @@
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       cost_map_pub_topic: "/map_server/local_cost_map" # 局部代价地图发布话题名称
       cloud_accumulate_frames: 10 # 局部点云累积帧数
-      roi_xy_radius_min: 0.4 # 局部点云ROI的xy平面半径最小值（imu_world系，以lidar_link平移为中心），单位m
-      roi_xy_radius_max: 4.0 # 局部点云ROI的xy平面半径最大值（imu_world系，以lidar_link平移为中心），单位m
-      roi_z_max: 0.2 # 局部点云ROI的z轴最大值（imu_world系，z轴竖直），单位m
-      roi_z_min: -0.55 # 局部点云ROI的z轴最小值（imu_world系，z轴竖直），单位m
+      roi_xy_radius_min: 0.4 # 局部点云ROI的xy平面半径最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
+      roi_xy_radius_max: 4.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
+      roi_z_max: 0.2 # 局部点云ROI的z轴最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
+      roi_z_min: -0.55 # 局部点云ROI的z轴最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m
       distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m。有全局点云时使用
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据

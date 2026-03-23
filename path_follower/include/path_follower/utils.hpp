@@ -15,6 +15,6 @@ double project_to_spline_u(
     double u_hint,
     int num_samples,
     double search_window,
-    double max_correspondence_distance
+    double local_search_lazy_distance
 );
 }

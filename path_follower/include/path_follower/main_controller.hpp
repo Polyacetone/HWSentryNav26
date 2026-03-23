@@ -8,7 +8,6 @@
 
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
-#include <rclcpp/time.hpp>
 
 #include <path_follower/state_machine.hpp>
 #include <path_follower/mpc_solver.hpp>
@@ -53,7 +52,7 @@ struct ControlInput {
     const DirectionMap* const masked_direction_map; // 全局先验方向场 - 台阶掩码
 
     // ─── 时间 ───
-    rclcpp::Time stamp;
+    std::chrono::steady_clock::time_point stamp;
 };
 
 // ═══════════════════════ 控制器输出 ═══════════════════════════
@@ -175,14 +174,14 @@ private:
     // ─── 内部状态 ───
     double last_reference_u_ = 0.0;
     std::optional<Eigen::Vector2d> recovery_goal_map_;
-    rclcpp::Time recovery_goal_set_time_{0, 0, RCL_ROS_TIME};
-    std::optional<rclcpp::Time> recovery_safe_since_;
+    std::optional<std::chrono::steady_clock::time_point> recovery_goal_set_time_;
+    std::optional<std::chrono::steady_clock::time_point> recovery_safe_since_;
     FsmState last_fsm_state_ = FsmState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
 
     // ─── 外部安全观测状态 ───
     bool stuck_active_ = false;
-    rclcpp::Time stuck_start_time_{0, 0, RCL_ROS_TIME};
+    std::chrono::steady_clock::time_point stuck_start_time_;
     Eigen::Vector2d stuck_start_pos_ = Eigen::Vector2d::Zero();
 
     // ─── 台阶检测防抖状态 ───

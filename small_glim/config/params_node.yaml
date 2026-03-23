@@ -1,18 +1,19 @@
 /**:
   ros__parameters:
     node:
-      debug: false
-      enable_mapping: false
-      enable_tf_publish: false
-      imu_time_offset: 0.0
-      lidar_time_offset: 0.0
-      acc_scale: 9.80665
-      imu_sub_topic: "/mid360_driver/imu"
+      debug: false # if true, the node will print debug information
+      enable_mapping: false # if true, the node will perform mapping
+      use_mapping_trigger: false # if true, mapping will only be performed when comp_stage is 4
+      enable_tf_publish: false # if true, the node will publish tf transforms (odom <- imu <- lidar)
+      imu_time_offset: 0.0 # time offset to be added to the imu timestamps (in seconds)
+      lidar_time_offset: 0.0 # time offset to be added to the lidar timestamps (in seconds)
+      acc_scale: 1.0 # scale factor for the accelerometer measurements
+      imu_sub_topic: "/serial_bridge/imu_raw"
       lidar_sub_topic: "/mid360_driver/lidar"
       comp_stage_sub_topic: "/serial_bridge/comp_stage"
       odometry_pub_topic: "/small_glim/odometry"
       registered_cloud_pub_topic: "/small_glim/registered_cloud"
       ivox_cloud_pub_topic: "/small_glim/ivox_cloud"
-      imu_frame_id: "livox_imu_link"
+      imu_frame_id: "imu_link"
       lidar_frame_id: "lidar_link"
       odometry_frame_id: "odom"

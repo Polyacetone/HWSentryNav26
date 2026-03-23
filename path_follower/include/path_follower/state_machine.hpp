@@ -1,9 +1,9 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 
 #include <rclcpp/logger.hpp>
-#include <rclcpp/time.hpp>
 
 namespace path_follower {
 
@@ -99,7 +99,7 @@ struct FsmInput {
     double omega = 0.0;      // 角速度
 
     // 时间戳
-    rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
+    std::chrono::steady_clock::time_point stamp;
 };
 
 // FSM 每次 update() 的输出

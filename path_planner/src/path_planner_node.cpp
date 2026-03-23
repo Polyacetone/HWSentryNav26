@@ -426,7 +426,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
         fixed ? "[FIXED]" : ""
     );
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    const auto start_time = std::chrono::steady_clock::now();
     std::vector<Eigen::Vector2d> rough_path;
 
     const auto optimize_and_publish = [&](const std::vector<Eigen::Vector2d>& init_path) {
@@ -447,7 +447,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
         std::tie(control_points, optimized_path) = *optimize_result;
         RCLCPP_DEBUG(
             get_logger(), "Path optimization took %.2f ms, control points: %d, optimized path length: %d",
-            std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count(),
             static_cast<int>(control_points.size()),
             static_cast<int>(optimized_path.size())
         );
@@ -485,7 +485,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
 
     RCLCPP_DEBUG(
         get_logger(), "A* planning took %.2f ms, path length: %d",
-        std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count(),
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count(),
         static_cast<int>(rough_path.size())
     );
 

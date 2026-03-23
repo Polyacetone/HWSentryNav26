@@ -76,3 +76,7 @@ CUDA可以使用apt安装：`sudo apt install nvidia-cuda-toolkit`。若需要�
 项目在Debug和Release模式下使用不同的编译选项。Debug模式下启用了`-fsanitize=address,undefined`以帮助检测内存错误和未定义行为，但是非常影响性能。正常开发和测试时建议使用Release模式，遇到问题时再切换到Debug模式进行排查。构建模式可以在`compile.sh`中修改。
 
 在Debug模式下使用LSAN时，可能会误报`rcl_node_init`函数的内存泄漏。这是由于ROS2的节点初始化过程中分配了一些全局资源，LSAN无法正确识别这些资源的生命周期。建议将`leak:rcl_node_init`加入LSAN的忽略文件（默认存放在工作空间下的`lsan.supp`），以避免误报。
+
+## 部署提示
+
+Ubuntu系统下建议关闭NTP服务以避免系统时间跳变导致的里程计和TF异常：`sudo timedatectl set-ntp false`。

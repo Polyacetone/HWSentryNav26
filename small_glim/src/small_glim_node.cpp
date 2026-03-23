@@ -49,6 +49,7 @@ private:
     double lidar_time_offset;
     double acc_scale;
     bool enable_mapping;
+    bool use_mapping_trigger;
     bool enable_tf_publish;
 
     std::string intensity_field, ring_field;
@@ -84,6 +85,7 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 
     enable_tf_publish = config->param<bool>("node.enable_tf_publish");
     enable_mapping = config->param<bool>("node.enable_mapping");
+    use_mapping_trigger = config->param<bool>("node.use_mapping_trigger");
 
     imu_time_offset = config->param<double>("node.imu_time_offset");
     lidar_time_offset = config->param<double>("node.lidar_time_offset");
@@ -101,6 +103,11 @@ SmallGlimNode::SmallGlimNode(const rclcpp::NodeOptions& options): Node("small_gl
 
     // Odometry estimation
     odometry_estimation = std::make_unique<AsyncOdometryEstimation>(config);
+
+    // Mapping
+    if (enable_mapping && !use_mapping_trigger) {
+        mapping = std::make_unique<AsyncMapping>(config);
+    }
 
     // ROS-related
     const std::string imu_sub_topic = config->param<std::string>("node.imu_sub_topic");
@@ -198,7 +205,7 @@ void SmallGlimNode::timer_callback() {
 
 void SmallGlimNode::comp_stage_callback(const interfaces::msg::CompStage::SharedPtr msg) {
     const uint8_t game_progress = msg->game_progress;
-    if (enable_mapping) {
+    if (enable_mapping && use_mapping_trigger) {
         if (prev_game_progress != 4 && game_progress == 4) {
             logger::info("node", "receive start mapping signal");
             mapping = std::make_unique<AsyncMapping>(config);

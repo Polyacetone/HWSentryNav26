@@ -37,8 +37,8 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
     FsmOutput output;
 
     DestState stopping_dest = DestState::IDLE;
-    rclcpp::Time stopping_start_time{0, 0, RCL_ROS_TIME};
-    rclcpp::Time reverse_start_time{0, 0, RCL_ROS_TIME};
+    std::chrono::steady_clock::time_point stopping_start_time;
+    std::chrono::steady_clock::time_point reverse_start_time;
 
     void clear_output() {
         output = {};
@@ -238,7 +238,7 @@ struct StStopping final : sc::state<StStopping, Machine> {
             return transit<StFollow>();
         }
 
-        const bool timeout = (in.stamp - m.stopping_start_time).seconds() > m.params.transition.stopping_timeout;
+        const bool timeout = std::chrono::duration<double>(in.stamp - m.stopping_start_time).count() > m.params.transition.stopping_timeout;
         if (m.stopping_ready(in) || timeout) {
             switch (m.stopping_dest) {
                 case DestState::IDLE:
@@ -273,7 +273,7 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
             return transit<StHazardRecovery>();
         }
 
-        const double elapsed = (in.stamp - m.reverse_start_time).seconds();
+        const double elapsed = std::chrono::duration<double>(in.stamp - m.reverse_start_time).count();
         if (elapsed > m.params.stuck.reverse_duration) {
             // 脱困链条固定为：倒车 -> HazardRecovery
             m.output.consume_global_path = true;

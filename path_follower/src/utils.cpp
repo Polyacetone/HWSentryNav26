@@ -7,7 +7,7 @@ double project_to_spline_u(
     double u_hint,
     int num_samples,
     double search_window,
-    double max_correspondence_distance
+    double local_search_lazy_distance
 ) {
     const auto search = [&](double a, double b, int n) {
         double best_u = a;
@@ -31,7 +31,7 @@ double project_to_spline_u(
         num_samples
     );
 
-    if ((spline.evaluate(u_best) - pos).norm() <= max_correspondence_distance) {
+    if ((spline.evaluate(u_best) - pos).norm() <= local_search_lazy_distance) {
         return std::clamp(u_best, 0.0, 1.0);
     }
 

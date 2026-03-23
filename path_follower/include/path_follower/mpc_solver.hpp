@@ -21,43 +21,43 @@ constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 
 // ── ZOH-discretized model constants (auto-generated) ──
 constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = 0.012949153850884835;
-constexpr double CF2       = -0.04708082832966196;
-constexpr double CF3       = 0.25849390922754145;
-constexpr double XH0       = -0.2485951678817845;
+constexpr double CF1       = -0.14593582371897484;
+constexpr double CF2       = -0.22782875166397337;
+constexpr double CF3       = -0.4424715062660911;
+constexpr double XH0       = 1.734935370074822;
 // v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.3063473309666146;
-constexpr double A01       = -1.2830043344627504;
-constexpr double A03       = 0.06372694889484476;
-constexpr double A10       = 0.3307952226015392;
-constexpr double A11       = 1.5877193075774372;
-constexpr double A13       = -0.005645963218741241;
+constexpr double A00       = 0.9309021213993733;
+constexpr double A01       = 1.2411394698940106;
+constexpr double A03       = -1.329332441819279;
+constexpr double A10       = -0.009287084039351084;
+constexpr double A11       = 0.9658897094993053;
+constexpr double A13       = 0.03243254366106261;
 // nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.03262251069186037;
-constexpr double GNL_V     = 0.0650170150298067;
-// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.477395 (positive!)
-constexpr double A22       = 0.4773947005720963;
-constexpr double A24       = 0.5226052994279037;
-constexpr double GAMMA_W   = 0.035339265232136194;
+constexpr double GNL_XH    = 0.031550821719579486;
+constexpr double GNL_V     = 0.04919363710585506;
+// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.568788 (positive!)
+constexpr double A22       = 0.5687877172532165;
+constexpr double A24       = 0.43121228274678347;
+constexpr double GAMMA_W   = 0.03821123749399003;
 // hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = -0.8877173821434113;
+constexpr double OBS_L     = -35.63035717102162;
 
 // ── Power model coefficients (auto-generated from identification) ──
 constexpr int PWR_N = 12;
 constexpr double PWR_EPS2 = 0.05 * 0.05;
 constexpr double PWR_C[PWR_N] = {
-    4.3640179207e+00,  // c0: 1 (bias)
-    3.4329266734e+01,  // c1: v·a
-    8.8334476230e-01,  // c2: ω·α
-    5.8291727995e+00,  // c3: a²
-    3.6017495815e-02,  // c4: α²
-    1.2280416029e+01,  // c5: |v|
-    3.3666512352e+00,  // c6: |ω|
-    7.8907556125e+00,  // c7: v²
-    4.7990810892e-01,  // c8: ω²
+    2.3641218974e+00,  // c0: 1 (bias)
+    3.8754331898e+01,  // c1: v·a
+    9.2304384253e-01,  // c2: ω·α
+    6.3173525964e+00,  // c3: a²
+    0.0000000000e+00,  // c4: α²
+    1.8300839024e+01,  // c5: |v|
+    5.8633803430e+00,  // c6: |ω|
+    5.6483810119e+00,  // c7: v²
+    2.2714416500e-01,  // c8: ω²
     0.0000000000e+00,  // c9: |a|
-    0.0000000000e+00, // c10: |α|
-    0.0000000000e+00  // c11: |v·ω|
+    0.0000000000e+00,  // c10: |α|
+    8.7995655045e-01  // c11: |v·ω|
 };
 
 // 弧长查找表类型
@@ -118,7 +118,7 @@ struct MPCFollowWeights {
 struct MPCFollowProjection {
     int proj_num_samples;
     double proj_search_window;
-    double max_correspondence_distance;
+    double local_search_lazy_distance;
 };
 
 struct MPCStopLimits {

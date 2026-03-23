@@ -1,3 +1,4 @@
+#include <chrono>
 #include <Eigen/Dense>
 #include <rclcpp/rclcpp.hpp>
 #include <cv_bridge/cv_bridge.hpp>
@@ -150,7 +151,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .follow_projection = {
             .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.projection.num_samples")),
             .proj_search_window = declare_parameter<double>("mpc.follow_path.projection.search_window"),
-            .max_correspondence_distance = declare_parameter<double>("mpc.follow_path.projection.max_correspondence_distance")
+            .local_search_lazy_distance = declare_parameter<double>("mpc.follow_path.projection.local_search_lazy_distance")
         },
         .stop_limits = {
             .vel_max = declare_parameter<double>("mpc.stop.limits.vel_max"),
@@ -524,7 +525,7 @@ void PathFollowerNode::control_timer_callback() {
         .final_cost_map = final_cost_map_.get(),
         .masked_global_cost_map = masked_global_cost_map_.get(),
         .masked_direction_map = masked_direction_map_.get(),
-        .stamp = now()
+        .stamp = std::chrono::steady_clock::now()
     };
 
     // 调用控制逻辑层

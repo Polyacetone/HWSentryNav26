@@ -1374,7 +1374,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         projection_hint,
         params_.follow_projection.proj_num_samples,
         params_.follow_projection.proj_search_window,
-        params_.follow_projection.max_correspondence_distance
+        params_.follow_projection.local_search_lazy_distance
     );
     if (path_changed) {
         follow_warm_ = false;

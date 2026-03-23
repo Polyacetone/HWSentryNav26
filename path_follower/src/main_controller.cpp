@@ -303,11 +303,11 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         *input.global_path, input.chassis_pose_map.head<2>(), last_reference_u_,
         mpc_controller_->params().follow_projection.proj_num_samples,
         mpc_controller_->params().follow_projection.proj_search_window,
-        mpc_controller_->params().follow_projection.max_correspondence_distance
+        mpc_controller_->params().follow_projection.local_search_lazy_distance
     );
     last_reference_u_ = u0;
 
-    // Follow 任务取消：投影守卫
+    // 路径跟随任务取消条件（投影守卫）
     // 1) 投影距离过大：说明路径与当前位置严重不一致
     // 2) 当前位置到投影点的连线最大障碍物代价过高：说明“接回路径”的直线路径可能不可通行
     const Eigen::Vector2d pos_map = input.chassis_pose_map.head<2>();
@@ -362,7 +362,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     }
 
     // 调用 MPC
-    auto start_time = std::chrono::high_resolution_clock::now();
+    auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->follow_path(
         *input.global_path, input.chassis_pose_map, input.chassis_status,
         *input.final_cost_map, *input.masked_direction_map
@@ -372,7 +372,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         return out;
     }
 
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
     if (solve_ms > MPC_DT * 500.0) {
         RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     } else {
@@ -418,7 +418,7 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     ControlOutput out;
     if (!input.final_cost_map || !input.masked_direction_map) return out;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->stop(
         input.chassis_pose_map, input.chassis_status,
         *input.final_cost_map, *input.masked_direction_map
@@ -428,7 +428,7 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
         return out;
     }
 
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
     if (solve_ms > MPC_DT * 500.0) {
         RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     } else {
@@ -467,12 +467,12 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
 
     if (next == FsmState::HAZARD_RECOVERY) {
         recovery_goal_map_ = std::nullopt;
-        recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
+        recovery_goal_set_time_ = std::nullopt;
         recovery_safe_since_ = std::nullopt;
     }
     if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY) {
         recovery_goal_map_ = std::nullopt;
-        recovery_goal_set_time_ = rclcpp::Time{0, 0, RCL_ROS_TIME};
+        recovery_goal_set_time_ = std::nullopt;
         recovery_safe_since_ = std::nullopt;
     }
 
@@ -491,7 +491,7 @@ void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
 
     if (!input.final_cost_map || !input.masked_direction_map) return;
 
-    const bool need_new = (!recovery_goal_map_) || (recovery_goal_set_time_.nanoseconds() == 0) || ((input.stamp - recovery_goal_set_time_).seconds() >= p.goal_timeout);
+    const bool need_new = (!recovery_goal_map_) || (!recovery_goal_set_time_) || (std::chrono::duration<double>(input.stamp - *recovery_goal_set_time_).count() >= p.goal_timeout);
 
     if (!need_new) return;
 
@@ -535,7 +535,7 @@ bool MainController::check_stuck(const ControlInput& input) {
         return false;
     }
 
-    const double dt = (input.stamp - stuck_start_time_).seconds();
+    const double dt = std::chrono::duration<double>(input.stamp - stuck_start_time_).count();
     const double disp = (pos - stuck_start_pos_).norm();
     if (disp > p.max_displacement) {
         stuck_start_time_ = input.stamp;
@@ -588,7 +588,7 @@ bool MainController::update_recovery_safe_flag(const ControlInput& input) {
     if (!recovery_safe_since_) {
         recovery_safe_since_ = input.stamp;
     }
-    return (input.stamp - *recovery_safe_since_).seconds() >= p.safe_hold_time;
+    return std::chrono::duration<double>(input.stamp - *recovery_safe_since_).count() >= p.safe_hold_time;
 }
 
 // ═══════════════════ HAZARD_RECOVERY: MPC 驱动恢复 ═══════════
@@ -600,7 +600,7 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     update_recovery_goal_if_needed(input);
     if (!recovery_goal_map_) return out;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->recover_to_point(
         *recovery_goal_map_,
         input.chassis_pose_map, input.chassis_status,
@@ -611,7 +611,7 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
         return out;
     }
 
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
     if (solve_ms > MPC_DT * 500.0) {
         RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     } else {
@@ -644,7 +644,7 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     ControlOutput out;
     if (!input.final_cost_map || !input.masked_direction_map) return out;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->hold_at_point(
         input.fixed_goal_pos,
         input.chassis_pose_map, input.chassis_status,
@@ -655,7 +655,7 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
         return out;
     }
 
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
     if (solve_ms > MPC_DT * 500.0) {
         RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     } else {

@@ -30,7 +30,7 @@
 
     follow_proj_guard: # 路径跟随任务取消条件（投影守卫）
       proj_dist_max: 2.0 # 当前位置到样条投影点距离过大则取消 (m)
-      proj_cost_max: 250.0 # 当前位置到投影点连线最大障碍物代价超过则取消 (0~255)
+      proj_cost_max: 240.0 # 当前位置到投影点连线最大障碍物代价超过则取消 (0~255)
       proj_cost_samples: 20 # 连线最大代价估计采样数
 
     step_ahead_flag: # 台阶标志位参数
@@ -65,7 +65,7 @@
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
-          max_correspondence_distance: 1.0 # 最大对应点距离 (m)
+          local_search_lazy_distance: 0.1 # 如果局部搜索到的点与当前位置距离小于该值，则认为找到了合适的投影点 (m)
         limits: # 运动限制
           vel_max: 1.5 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
