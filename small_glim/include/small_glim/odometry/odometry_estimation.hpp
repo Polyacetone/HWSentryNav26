@@ -55,8 +55,6 @@ public:
 
     // Registration params
     enum class RegistrationType { GICP, VGICP } registration_type; ///< Registration type (GICP or VGICP)
-    int keyframe_window_size; ///< Local window size for pairwise registration
-    int keyframe_delta; ///< Keyframe delta
     int lru_thresh; ///< LRU cache threshold
     double target_downsampling_rate; ///< Downsampling rate for points to be inserted into the target
     double ivox_resolution; ///< iVox resolution (for GICP)
@@ -64,6 +62,10 @@ public:
     double vgicp_resolution; ///< Voxelmap resolution (for VGICP)
     int vgicp_voxelmap_levels; ///< Multi-resolution voxelmap levesl (for VGICP)
     double vgicp_voxelmap_scaling_factor; ///< Multi-resolution voxelmap scaling factor (for VGICP)
+
+    // iVox delayed update & impact pause
+    double ivox_update_delay; ///< Time delay before inserting frames into target map [sec]
+    double ivox_impact_pause_duration; ///< Duration to pause target map updates after impact [sec]
 };
 
 /**
@@ -81,7 +83,7 @@ public:
 private:
     gtsam::NonlinearFactorGraph create_factors(const size_t current);
     void update_target(const size_t current, const Eigen::Isometry3d& T_target_imu);
-    size_t select_target_update_frame(const size_t preferred) const;
+    void process_pending_target_updates(double current_stamp);
     void update_frames(const size_t current);
     void update_smoother(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, const std::map<std::uint64_t, double>& new_stamp, size_t update_count = 0);
 
@@ -106,12 +108,15 @@ private:
     using FixedLagSmootherExt = gtsam_points::IncrementalFixedLagSmootherExtWithFallback;
     std::unique_ptr<FixedLagSmootherExt> smoother;
 
-    // Registration params
+    // Registration target
     std::mt19937 mt; ///< RNG
     Eigen::Isometry3d last_T_target_imu; ///< Last IMU pose w.r.t. target model
     std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapCPU>> target_voxelmaps; ///< VGICP target voxelmap
     std::shared_ptr<gtsam_points::iVox> target_ivox; ///< GICP target iVox
-    std::deque<size_t> active_keyframes; ///< Active keyframes for pairwise registration
+
+    // Delayed target map update
+    std::deque<size_t> pending_target_frames; ///< Frames waiting to be inserted into target map
+    double target_pause_until; ///< Timestamp until which target map updates are paused (impact)
 };
 
 }

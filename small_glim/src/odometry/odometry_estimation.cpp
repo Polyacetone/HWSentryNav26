@@ -62,8 +62,6 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
         logger::fatal("odometry_estimation", "unknown registration type for odometry_estimation: {}", reg_type);
         std::exit(EXIT_FAILURE);
     }
-    keyframe_window_size = config->param<int>("odometry_estimation.keyframe_window_size");
-    keyframe_delta = config->param<int>("odometry_estimation.keyframe_delta");
     lru_thresh = config->param<int>("odometry_estimation.lru_thresh");
     target_downsampling_rate = config->param<double>("odometry_estimation.target_downsampling_rate");
     ivox_resolution = config->param<double>("odometry_estimation.ivox_resolution");
@@ -71,6 +69,8 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams(const Config::Ptr confi
     vgicp_resolution = config->param<double>("odometry_estimation.vgicp_resolution");
     vgicp_voxelmap_levels = config->param<int>("odometry_estimation.vgicp_voxelmap_levels");
     vgicp_voxelmap_scaling_factor = config->param<double>("odometry_estimation.vgicp_voxelmap_scaling_factor");
+    ivox_update_delay = config->param<double>("odometry_estimation.ivox_update_delay");
+    ivox_impact_pause_duration = config->param<double>("odometry_estimation.ivox_impact_pause_duration");
 }
 
 OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
@@ -97,6 +97,7 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
     smoother = std::make_unique<FixedLagSmootherExt>(params->smoother_lag, isam2_params);
 
     last_T_target_imu.setIdentity();
+    target_pause_until = 0.0;
     switch (params->registration_type) {
         case OdometryEstimationCPUParams::RegistrationType::GICP: {
             target_ivox = std::make_shared<gtsam_points::iVox>(params->ivox_resolution);
@@ -120,7 +121,6 @@ OdometryEstimationCPU::OdometryEstimationCPU(const Config::Ptr config) {
 gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(const size_t current) {
     if (current == 0) {
         last_T_target_imu = frames[current]->T_world_imu;
-        // update_target(current, frames[current]->T_world_imu);
         return gtsam::NonlinearFactorGraph();
     }
 
@@ -164,65 +164,43 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(const size_t c
         }
     }
 
-    // Create pairwise matching factors
-    for (const size_t target : active_keyframes) {
-        if (target < marginalized_cursor) continue;
-        if (frames[target]->frame->size() < 20) continue;
-        switch (params->registration_type) {
-            case OdometryEstimationCPUParams::RegistrationType::GICP: {
-                auto gicp_factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(
-                    X(target),
-                    X(current),
-                    frames[target]->frame,
-                    frames[current]->frame
-                );
-                gicp_factor->set_max_correspondence_distance(params->ivox_resolution * 2.0);
-                gicp_factor->set_num_threads(params->num_threads);
-                factors.add(gicp_factor);
-                break;
-            }
-            case OdometryEstimationCPUParams::RegistrationType::VGICP: {
-                if (frames[target]->voxelmaps.empty()) continue;
-                for (const auto& voxelmap : frames[target]->voxelmaps) {
-                    auto vgicp_factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(
-                        X(target),
-                        X(current),
-                        voxelmap,
-                        frames[current]->frame
-                    );
-                    vgicp_factor->set_num_threads(params->num_threads);
-                    factors.add(vgicp_factor);
-                }
-                break;
-            }
-        }
-    }
-
     return factors;
 }
 
-size_t OdometryEstimationCPU::select_target_update_frame(const size_t preferred) const {
-    if (preferred >= frames.size()) return static_cast<size_t>(-1);
+void OdometryEstimationCPU::process_pending_target_updates(double current_stamp) {
+    while (!pending_target_frames.empty()) {
+        const size_t idx = pending_target_frames.front();
+        if (!frames[idx] || !frames[idx]->frame) {
+            pending_target_frames.pop_front();
+            continue;
+        }
 
-    auto is_valid = [&](size_t idx) -> bool {
-        if (idx >= frames.size()) return false;
-        if (!frames[idx]) return false;
-        if (!frames[idx]->frame) return false;
-        return !frames[idx]->deskew_imu_saturated;
-    };
+        // Not ready yet: delay not elapsed
+        if (current_stamp - frames[idx]->stamp < params->ivox_update_delay) {
+            break;
+        }
 
-    if (is_valid(preferred)) return preferred;
+        // Currently paused due to impact
+        if (current_stamp < target_pause_until) {
+            break;
+        }
 
-    // Search nearby frames (prefer closest in time/index).
-    constexpr size_t search_radius = 5;
-    for (size_t d = 1; d <= search_radius; d++) {
-        const size_t left = preferred - d;
-        const size_t right = preferred + d;
-        if (is_valid(left)) return left;
-        if (is_valid(right)) return right;
+        pending_target_frames.pop_front();
+
+        // Skip frames with saturated IMU (deskew or inter-scan)
+        if (frames[idx]->deskew_imu_saturated || frames[idx]->interscan_imu_saturated) {
+            logger::info(
+                "odom_estimation",
+                "skip target map insertion for saturated frame {} (t={:.6f})",
+                idx,
+                frames[idx]->stamp
+            );
+            continue;
+        }
+
+        update_target(idx, frames[idx]->T_world_imu);
+        last_T_target_imu = frames[idx]->T_world_imu;
     }
-
-    return static_cast<size_t>(-1);
 }
 
 void OdometryEstimationCPU::update_target(
@@ -366,9 +344,9 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         update_smoother(new_factors, new_values, new_stamps);
         update_frames(current);
 
-        if (current % static_cast<size_t>(params->keyframe_delta) == 0) {
-            active_keyframes.push_back(current);
-        }
+        // Insert first frame immediately into target map to bootstrap matching
+        update_target(current, frames[current]->T_world_imu);
+        last_T_target_imu = frames[current]->T_world_imu;
 
         return frames.back();
     }
@@ -386,7 +364,8 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
     // IMU integration between LiDAR scans (inter-scan)
     size_t num_imu_integrated = 0;
-    const size_t imu_read_cursor = imu_integration->integrate_imu(last_stamp, raw_frame->stamp, last_imu_bias, &num_imu_integrated);
+    IMUSaturationStatus interscan_sat;
+    const size_t imu_read_cursor = imu_integration->integrate_imu(last_stamp, raw_frame->stamp, last_imu_bias, &num_imu_integrated, &interscan_sat);
     imu_integration->erase_imu_data(imu_read_cursor);
     logger::debug("odom_estimation", "num_imu_integrated={}", num_imu_integrated);
 
@@ -489,6 +468,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     new_frame->deskew_imu_saturated = deskew_sat.any();
     new_frame->deskew_acc_saturated_axes = deskew_sat.acc_axes;
     new_frame->deskew_gyro_saturated_axes = deskew_sat.gyro_axes;
+    new_frame->interscan_imu_saturated = interscan_sat.any();
 
     // Store IMU-rate trajectory used for deskewing
     new_frame->imu_rate_trajectory.resize(8, static_cast<int64_t>(pred_imu_times.size()));
@@ -540,16 +520,37 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
     // Update smoother
     update_smoother(new_factors, new_values, new_stamps);
 
+    // Update frames with latest optimized states
+    update_frames(current);
+
+    // Queue frame for delayed target map insertion
+    pending_target_frames.push_back(current);
+
+    // Detect impact and pause target map updates if needed
+    if (new_frame->deskew_imu_saturated || new_frame->interscan_imu_saturated) {
+        const double pause_until = raw_frame->stamp + params->ivox_impact_pause_duration;
+        target_pause_until = std::max(target_pause_until, pause_until);
+        logger::info(
+            "odom_estimation",
+            "impact detected at frame {} (t={:.6f}), pausing target map update until {:.6f}",
+            current,
+            raw_frame->stamp,
+            target_pause_until
+        );
+    }
+
+    // Process pending target map updates (delayed, with impact pause)
+    process_pending_target_updates(raw_frame->stamp);
+
     // Find out marginalized frames
     while (marginalized_cursor < current) {
-        bool is_active_keyframe = false;
-        for (size_t k : active_keyframes) {
-            if (k == marginalized_cursor) {
-                is_active_keyframe = true;
-                break;
-            }
+        // Don't marginalize frames still pending target map insertion
+        bool is_pending = false;
+        for (size_t p : pending_target_frames) {
+            if (p == marginalized_cursor) { is_pending = true; break; }
         }
-        if (is_active_keyframe) {
+        if (is_pending) {
+            logger::warn("odom_estimation", "blocking marginalization: frame {} still pending target map insertion", marginalized_cursor);
             break;
         }
 
@@ -561,42 +562,6 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
         marginalized_frames.push_back(frames[marginalized_cursor]);
         frames[marginalized_cursor].reset();
         marginalized_cursor++;
-    }
-
-    // Update frames
-    update_frames(current);
-
-    if (current % static_cast<size_t>(params->keyframe_delta) == 0) {
-        active_keyframes.push_back(current);
-        while (active_keyframes.size() > static_cast<size_t>(params->keyframe_window_size)) {
-            size_t old_keyframe = active_keyframes.front();
-            active_keyframes.pop_front();
-
-            if (frames[old_keyframe]) {
-                const size_t chosen = select_target_update_frame(old_keyframe);
-                if (chosen == static_cast<size_t>(-1)) {
-                    logger::warn(
-                        "odom_estimation",
-                        "skip iVox target update: no valid neighbor found (preferred={}, time={})",
-                        old_keyframe,
-                        frames[old_keyframe]->stamp
-                    );
-                } else {
-                    if (chosen != old_keyframe) {
-                        logger::warn(
-                            "odom_estimation",
-                            "replace saturated target frame: preferred={} -> chosen={} (preferred_time={}, chosen_time={})",
-                            old_keyframe,
-                            chosen,
-                            frames[old_keyframe]->stamp,
-                            frames[chosen]->stamp
-                        );
-                    }
-                    update_target(chosen, frames[chosen]->T_world_imu);
-                    last_T_target_imu = frames[chosen]->T_world_imu;
-                }
-            }
-        }
     }
 
     if (smoother->fallbackHappened()) {

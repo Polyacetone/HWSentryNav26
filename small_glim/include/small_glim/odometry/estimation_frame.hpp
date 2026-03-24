@@ -64,6 +64,9 @@ public:
     std::array<bool, 3> deskew_acc_saturated_axes {false, false, false};
     std::array<bool, 3> deskew_gyro_saturated_axes {false, false, false};
 
+    // If true, inter-scan IMU integration (between previous and this frame) detected saturation.
+    bool interscan_imu_saturated {false};
+
     FrameType frame_type; ///< Coordinate center type of $frame
     gtsam_points::PointCloud::ConstPtr frame; ///< Deskewed points for state estimation
     std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelmaps; ///< Multi-resolution voxelmaps
