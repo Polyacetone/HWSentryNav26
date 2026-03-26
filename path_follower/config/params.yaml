@@ -67,7 +67,7 @@
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
           local_search_lazy_distance: 0.1 # 如果局部搜索到的点与当前位置距离小于该值，则认为找到了合适的投影点 (m)
         limits: # 运动限制
-          vel_max: 1.5 # 最大速度 (m/s)
+          vel_max: 2.0 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
@@ -98,7 +98,7 @@
           direction: 3.0 # 台阶方向对齐权重
       stop: # 停止模式
         limits: # 运动限制
-          vel_max: 1.5 # 最大线速度硬约束 (m/s)
+          vel_max: 2.0 # 最大线速度硬约束 (m/s)
           omega_max: 12.5 # 最大角速度硬约束 (rad/s)
           omega_min: -12.5 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
@@ -123,10 +123,10 @@
           step_terminal: 10.0 # 终端台阶惩罚（防止停在台阶上）
       recovery: # 恢复模式（向安全点移动）
         limits:
-          vel_max: 0.5 # 最大线速度硬约束 (m/s)
-          vel_min: -0.5 # 最小线速度硬约束 (m/s)
-          omega_max: 1.0 # 最大角速度硬约束 (rad/s)
-          omega_min: -1.0 # 最小角速度硬约束 (rad/s)
+          vel_max: 0.8 # 最大线速度硬约束 (m/s)
+          vel_min: -0.8 # 最小线速度硬约束 (m/s)
+          omega_max: 1.5 # 最大角速度硬约束 (rad/s)
+          omega_min: -1.5 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 2.4 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
@@ -184,7 +184,7 @@
         cost_threshold: 5.0 # < 认为可通行
         step_norm_threshold: 0.01 # < 认为可通行
       search:
-        radius_min: 0.5 # 搜索半径范围下界 (m)
+        radius_min: 0.3 # 搜索半径范围下界 (m)
         radius_max: 1.5 # 搜索半径范围上界 (m)
         radius_samples: 5 # 半径采样数
         angle_samples: 36 # 每个半径上的角度采样数

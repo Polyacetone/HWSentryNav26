@@ -21,26 +21,26 @@ constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 
 // ── ZOH-discretized model constants (auto-generated) ──
 constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = -0.14593582371897484;
-constexpr double CF2       = -0.22782875166397337;
-constexpr double CF3       = -0.4424715062660911;
-constexpr double XH0       = 1.734935370074822;
+constexpr double CF1       = -0.16144653406281573;
+constexpr double CF2       = -0.03552635804700063;
+constexpr double CF3       = -0.1474969992646354;
+constexpr double XH0       = -0.12251346769406887;
 // v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.9309021213993733;
-constexpr double A01       = 1.2411394698940106;
-constexpr double A03       = -1.329332441819279;
-constexpr double A10       = -0.009287084039351084;
-constexpr double A11       = 0.9658897094993053;
-constexpr double A13       = 0.03243254366106261;
+constexpr double A00       = 0.6751450876344229;
+constexpr double A01       = -0.4662327256952996;
+constexpr double A03       = 0.11236857477381046;
+constexpr double A10       = 0.17492594574707648;
+constexpr double A11       = 1.1987651843728784;
+constexpr double A13       = -0.0022177515781075918;
 // nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = 0.031550821719579486;
-constexpr double GNL_V     = 0.04919363710585506;
-// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.568788 (positive!)
-constexpr double A22       = 0.5687877172532165;
-constexpr double A24       = 0.43121228274678347;
-constexpr double GAMMA_W   = 0.03821123749399003;
+constexpr double GNL_XH    = -0.011898191720217534;
+constexpr double GNL_V     = 0.05514763348423621;
+// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.548182 (positive!)
+constexpr double A22       = 0.5481817107838179;
+constexpr double A24       = 0.45181828921618206;
+constexpr double GAMMA_W   = 0.037579593128906096;
 // hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = -35.63035717102162;
+constexpr double OBS_L     = 0.4295822858838472;
 
 // ── Power model coefficients (auto-generated from identification) ──
 constexpr int PWR_N = 12;

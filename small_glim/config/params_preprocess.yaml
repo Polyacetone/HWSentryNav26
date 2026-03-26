@@ -2,9 +2,9 @@
   ros__parameters:
     preprocess:
       distance_near_thresh: 0.3 # Points out of this range will be filtered out (lidar frame)
-      distance_far_thresh: 20.0 # Points out of this range will be filtered out (lidar frame)
-      use_random_grid_downsampling: true # If false, use the conventional voxelgrid downsampling
-      downsample_resolution: 0.1 # Voxel grid resolution for downsampling
+      distance_far_thresh: 30.0 # Points out of this range will be filtered out (lidar frame)
+      use_random_grid_downsampling: false # If false, use the conventional voxelgrid downsampling
+      downsample_resolution: 0.05 # Voxel grid resolution for downsampling
       random_downsample_target: 10000 # Target number of points for voxel-based random sampling (Enabled when > 0)
       random_downsample_rate: 0.1 # Sampling rate for voxel-based random sampling (Enabled when target <= 0)
       enable_outlier_removal: false # If true, enable statistical outlier removal

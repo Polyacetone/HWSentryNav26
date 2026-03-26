@@ -12,21 +12,21 @@
       smoother_lag: 3.0 # Fixed-lag smoothing window size [sec]
       use_isam2_dogleg: false # Use the dogleg optimizer as the backend of ISAM2 that is slow but more robust
       isam2_relinearize_skip: 1 # Relinearization is performed every $isam2_relinearize_skip optimization calls
-      isam2_relinearize_thresh: 0.1 # Relinearization is performed only when linear delta gets larger than this
+      isam2_relinearize_thresh: 0.01 # Relinearization is performed only when linear delta gets larger than this
       fix_imu_bias: false # If true, disable IMU bias estimation and use the initial IMU bias
 
       # Registration
       registration_type: "GICP" # Registration type (GICP or VGICP)
       lru_thresh: 100 # LRU cache threshold
-      target_downsampling_rate: 0.05 # Downsampling rate for points to be inserted into the target
+      target_downsampling_rate: 0.1 # Downsampling rate for points to be inserted into the target
 
       # GICP + iVox
-      ivox_resolution: 0.25 # iVox resolution
-      ivox_min_dist: 0.05 # Minimum distance between points in an iVox cell
+      ivox_resolution: 0.5 # iVox resolution
+      ivox_min_dist: 0.1 # Minimum distance between points in an iVox cell
 
       # Delayed target map update & impact pause
-      ivox_update_delay: 2.0 # Time delay before inserting frames into target map [sec]
-      ivox_impact_pause_duration: 1.0 # Duration to pause target map updates after impact [sec]
+      ivox_update_delay: 0.5 # Time delay before inserting frames into target map [sec]
+      ivox_impact_pause_duration: 0.5 # Duration to pause target map updates after impact [sec]
 
       # VGICP
       vgicp_resolution: 0.25 # Voxelmap resolution (for VGICP)
