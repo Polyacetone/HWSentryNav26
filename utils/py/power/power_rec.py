@@ -92,7 +92,7 @@ def main() -> int:
             st_v.append(float(msg.velocity))
             st_w.append(float(msg.omega))
             st_leg_mode.append(int(msg.leg_mode))
-            st_remaining_energy.append(int(msg.remaining_energy))
+            st_remaining_energy.append(int(msg.remaining_energy_supercap))
             st_curr_chassis_pwr.append(int(msg.curr_chassis_pwr))
             st_rfr_pwr_limit.append(int(msg.rfr_pwr_limit))
 

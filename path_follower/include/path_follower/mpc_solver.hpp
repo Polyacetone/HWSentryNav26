@@ -21,43 +21,43 @@ constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 
 // ── ZOH-discretized model constants (auto-generated) ──
 constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = -0.16144653406281573;
-constexpr double CF2       = -0.03552635804700063;
-constexpr double CF3       = -0.1474969992646354;
-constexpr double XH0       = -0.12251346769406887;
+constexpr double CF1       = 0.117776965182103;
+constexpr double CF2       = -0.07934663936437283;
+constexpr double CF3       = -0.035922362597109334;
+constexpr double XH0       = -0.1741781626557545;
 // v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.6751450876344229;
-constexpr double A01       = -0.4662327256952996;
-constexpr double A03       = 0.11236857477381046;
-constexpr double A10       = 0.17492594574707648;
-constexpr double A11       = 1.1987651843728784;
-constexpr double A13       = -0.0022177515781075918;
+constexpr double A00       = 0.7843676355861557;
+constexpr double A01       = -0.09648336780318062;
+constexpr double A03       = 0.0037319689718094814;
+constexpr double A10       = 0.3987787787629378;
+constexpr double A11       = 1.1336902129030175;
+constexpr double A13       = 0.0351881685023933;
 // nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.011898191720217534;
-constexpr double GNL_V     = 0.05514763348423621;
-// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.548182 (positive!)
-constexpr double A22       = 0.5481817107838179;
-constexpr double A24       = 0.45181828921618206;
-constexpr double GAMMA_W   = 0.037579593128906096;
+constexpr double GNL_XH    = -0.002444300627739186;
+constexpr double GNL_V     = 0.05342869358100494;
+// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.553737 (positive!)
+constexpr double A22       = 0.5537368531002395;
+constexpr double A24       = 0.44626314689976054;
+constexpr double GAMMA_W   = 0.03775072274445112;
 // hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = 0.4295822858838472;
+constexpr double OBS_L     = 0.46233060886060057;
 
 // ── Power model coefficients (auto-generated from identification) ──
 constexpr int PWR_N = 12;
 constexpr double PWR_EPS2 = 0.05 * 0.05;
 constexpr double PWR_C[PWR_N] = {
-    2.3641218974e+00,  // c0: 1 (bias)
-    3.8754331898e+01,  // c1: v·a
-    9.2304384253e-01,  // c2: ω·α
-    6.3173525964e+00,  // c3: a²
-    0.0000000000e+00,  // c4: α²
-    1.8300839024e+01,  // c5: |v|
-    5.8633803430e+00,  // c6: |ω|
-    5.6483810119e+00,  // c7: v²
-    2.2714416500e-01,  // c8: ω²
-    0.0000000000e+00,  // c9: |a|
+    2.1819886751e-00,  // c0: 1 (bias)
+    3.7554288560e+01,  // c1: v·a
+    9.0037590352e-01,  // c2: ω·α
+    3.7473397433e+00,  // c3: a²
+    5.3351521229e-02,  // c4: α²
+    1.3085009538e+01,  // c5: |v|
+    3.7559074150e+00,  // c6: |ω|
+    7.7240176266e+00,  // c7: v²
+    2.8778608500e-01,  // c8: ω²
+    1.0022176768e+01,  // c9: |a|
     0.0000000000e+00,  // c10: |α|
-    8.7995655045e-01  // c11: |v·ω|
+    4.7233251821e+00  // c11: |v·ω|
 };
 
 // 弧长查找表类型

@@ -113,9 +113,9 @@ void InitialStateEstimation::insert_imu(double stamp, const Eigen::Vector3d& lin
             init_stamp = stamp;
             sum_acc.setZero();
         }
-        // accumulate normalized acceleration direction
-        if (linear_acc.norm() > 1e-6) {
-            sum_acc += linear_acc.normalized();
+        const Eigen::Vector3d corrected_acc = linear_acc - imu_bias.head<3>();
+        if (corrected_acc.norm() > 1e-6) {
+            sum_acc += corrected_acc.normalized();
         }
         this->stamp = stamp;
         if (stamp - init_stamp >= window_size) {

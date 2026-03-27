@@ -19,7 +19,7 @@ class ChassisCmdPublisher(Node):
         msg.step_up_ahead = False
         msg.step_down_ahead = False
         msg.slow_spin = False
-        msg.fast_spin = False
+        msg.fast_spin = True
         self.chassis_cmd_publisher_.publish(msg)
         self.get_logger().info('Published ChassisCmd message')
 

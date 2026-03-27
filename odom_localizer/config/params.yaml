@@ -4,27 +4,27 @@
     publish_rate: 1.0 # odom->map发布频率，单位Hz
     robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，包含机器人颜色
     robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-    initial_transform_blue: [2.5, 3.5, 0.4, 0.0, 0.0, 0.0, 1.0] # 在蓝方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_red: [2.5, 3.5, 0.4, 0.0, 0.0, 0.0, 1.0] # 在红方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_default: [2.5, 3.5, 0.4, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_blue: [10.5, 2.0, 0.4, 0.0, 0.0, 1.0, 0.0] # 在蓝方启动时的初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_red: [1.5, 6.0, 0.4, 0.0, 0.0, 0.0, 1.0] # 在红方启动时的初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_default: [1.5, 6.0, 0.4, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
 
     perform_gicp_only_once: true # 是否只进行一次gicp配准（若为true，则在配准成功之后不再更新）
-    map_cloud_filename: "mambatest.pcd" # 先验地图点云文件路径（为空就只发布初始位姿）
-    source_cloud_sub_topic: "/small_glim/registered_cloud" # 输入点云订阅话题
+    map_cloud_filename: "RMUL2026.pcd" # 先验地图点云文件路径（为空就只发布初始位姿）
+    source_cloud_sub_topic: "/small_glim/ivox_cloud" # 输入点云订阅话题
     num_threads: 2 # 用于gicp对齐和点云处理的线程数
 
     downsample_resolution_map: 0.1 # 给先验地图降采样的voxel大小
     cov_num_neighbors_map: 20 # 给先验地图计算点的协方差矩阵时采用多少个点作为邻居
 
-    cloud_accumulate_frames: 5 # 输入点云累积的帧数
+    cloud_accumulate_frames: 1 # 输入点云累积的帧数
     downsample_resolution_lidar: 0.1 # 给输入点云降采样的voxel大小
     cov_num_neighbors_lidar: 20 # 给输入点云计算点的协方差矩阵时采用多少个点作为邻居
     min_points_lidar: 1000 # 输入点云中至少要有这么多点，否则不进行配准
 
-    gicp_max_correspondence_distance: 2.0 # gicp最大匹配距离
+    gicp_max_correspondence_distance: 0.5 # gicp最大匹配距离
     gicp_max_iterations: 32 # gicp最大迭代次数
-    normalized_error_threshold: 0.2 # 认为gicp结果合理的normalized error阈值
-    overlap_threshold: 0.99 # 认为gicp结果合理的重叠率阈值
+    normalized_error_threshold: 1.0 # 认为gicp结果合理的normalized error阈值
+    overlap_threshold: 0.0 # 认为gicp结果合理的重叠率阈值
 
     odom_to_map_filter_ratio: 0.9 # odom->map的惯性滤波系数（0~1），越大越稳定
     odom_to_map_no_filter_distance: 1.0 # 若odom->map的变化距离超过这个值，就直接更新，不进行滤波

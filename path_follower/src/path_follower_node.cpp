@@ -426,7 +426,7 @@ void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisSta
     chassis_status_.y() = msg->omega;
     chassis_leg_mode_ = msg->leg_mode;
     rfr_pwr_limit_ = static_cast<double>(msg->rfr_pwr_limit);
-    remaining_energy_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy) + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_filtered_;
+    remaining_energy_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_supercap) + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_filtered_;
 }
 
 void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
