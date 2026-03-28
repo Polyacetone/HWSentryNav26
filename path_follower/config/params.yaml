@@ -53,7 +53,7 @@
 
     mpc: # MPC控制器参数
       energy: # 能量感知参数
-        enable: true # 是否启用能量约束
+        enable: false # 是否启用能量约束
         threshold: 500.0 # 电容能量惩罚阈值(J)，低于此值开始惩罚
         weight: 5.0 # 能量软约束权重
         softplus_beta: 5.0 # softplus斜率(越大越接近硬折线惩罚)
@@ -67,7 +67,7 @@
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
           local_search_lazy_distance: 0.1 # 如果局部搜索到的点与当前位置距离小于该值，则认为找到了合适的投影点 (m)
         limits: # 运动限制
-          vel_max: 1.5 # 最大速度 (m/s)
+          vel_max: 1.8 # 最大速度 (m/s)
           vel_min: 0.1 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
@@ -123,8 +123,8 @@
           step_terminal: 10.0 # 终端台阶惩罚（防止停在台阶上）
       recovery: # 恢复模式（向安全点移动）
         limits:
-          vel_max: 0.5 # 最大线速度硬约束 (m/s)
-          vel_min: -0.5 # 最小线速度硬约束 (m/s)
+          vel_max: 0.6 # 最大线速度硬约束 (m/s)
+          vel_min: -0.6 # 最小线速度硬约束 (m/s)
           omega_max: 1.2 # 最大角速度硬约束 (rad/s)
           omega_min: -1.2 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
@@ -179,19 +179,19 @@
       enable: true # 是否启用恢复功能
       hazard:
         cost_threshold: 30.0 # >= 认为在危险区域 (0~255)
-        step_norm_threshold: 0.06 # >= 认为在危险台阶区域
+        step_norm_threshold: 0.06 # >= 认为在危险台阶区域 (0~1)
       safe:
         cost_threshold: 5.0 # < 认为可通行
         step_norm_threshold: 0.01 # < 认为可通行
       search:
-        radius_min: 0.3 # 搜索半径范围下界 (m)
+        radius_min: 0.5 # 搜索半径范围下界 (m)
         radius_max: 1.5 # 搜索半径范围上界 (m)
-        radius_samples: 5 # 半径采样数
-        angle_samples: 36 # 每个半径上的角度采样数
-        path_samples: 20 # 从当前位置到候选点的路径积分采样数（用于计算代价和）
+        radius_samples: 5 # 搜索半径采样数
+        angle_samples: 36 # 每个半径上的搜索角度采样数
+        path_integral_resolution: 0.05 # 从当前位置到候选点的路径积分（用于计算代价和）采样精度 (m)
         goal_timeout: 4.0 # 目标点超时时长，超时后重新选择 (s)
       exit:
-        safe_hold_time: 1.0 # 安全区域保持时间 (s)
+        safe_hold_time: 0.5 # 安全区域保持时间 (s)
       stuck:
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.4 # 指令速度超过该值才开始检测 (m/s)

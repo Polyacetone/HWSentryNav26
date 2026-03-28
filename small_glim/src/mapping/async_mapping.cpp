@@ -208,6 +208,12 @@ namespace small_glim {
 AsyncMappingParams::AsyncMappingParams(const Config::Ptr& config) {
     save_raw_mapping_frames = config->param<bool>("mapping.save_raw_mapping_frames");
     output_root = config->param<std::string>("mapping.output_root");
+    if (!output_root.empty() && output_root[0] == '~') {
+        const char* home = std::getenv("HOME");
+        if (home) {
+            output_root.replace(0, 1, home);
+        }
+    }
 
     cloud_range_min = config->param<double>("mapping.cloud_range_min");
     cloud_range_max = config->param<double>("mapping.cloud_range_max");
@@ -580,7 +586,7 @@ std::string AsyncMapping::make_timestamp_string() {
     std::tm tm{};
     localtime_r(&tt, &tm);
     std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S");
+    oss << std::put_time(&tm, "%Y-%m-%dT%H-%M-%S");
     return oss.str();
 }
 

@@ -213,6 +213,7 @@ void SmallGlimNode::comp_stage_callback(const interfaces::msg::CompStage::Shared
         if (prev_game_progress == 4 && game_progress != 4) {
             logger::info("node", "receive stop mapping signal");
             mapping.reset();
+            sync();
         }
     }
     prev_game_progress = game_progress;

@@ -268,7 +268,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .radius_max = declare_parameter<double>("recovery.search.radius_max"),
         .radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.radius_samples")),
         .angle_samples = static_cast<int>(declare_parameter<int>("recovery.search.angle_samples")),
-        .path_samples = static_cast<int>(declare_parameter<int>("recovery.search.path_samples")),
+        .path_integral_resolution = declare_parameter<double>("recovery.search.path_integral_resolution"),
         .safe_hold_time = declare_parameter<double>("recovery.exit.safe_hold_time"),
         .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout")
     };

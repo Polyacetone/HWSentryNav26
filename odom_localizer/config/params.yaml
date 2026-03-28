@@ -10,20 +10,20 @@
 
     perform_gicp_only_once: true # 是否只进行一次gicp配准（若为true，则在配准成功之后不再更新）
     map_cloud_filename: "RMUL2026.pcd" # 先验地图点云文件路径（为空就只发布初始位姿）
-    source_cloud_sub_topic: "/small_glim/ivox_cloud" # 输入点云订阅话题
+    source_cloud_sub_topic: "/small_glim/registered_cloud" # 输入点云订阅话题
     num_threads: 2 # 用于gicp对齐和点云处理的线程数
 
     downsample_resolution_map: 0.1 # 给先验地图降采样的voxel大小
     cov_num_neighbors_map: 20 # 给先验地图计算点的协方差矩阵时采用多少个点作为邻居
 
-    cloud_accumulate_frames: 1 # 输入点云累积的帧数
+    cloud_accumulate_frames: 6 # 输入点云累积的帧数
     downsample_resolution_lidar: 0.1 # 给输入点云降采样的voxel大小
     cov_num_neighbors_lidar: 20 # 给输入点云计算点的协方差矩阵时采用多少个点作为邻居
     min_points_lidar: 1000 # 输入点云中至少要有这么多点，否则不进行配准
 
     gicp_max_correspondence_distance: 0.5 # gicp最大匹配距离
     gicp_max_iterations: 32 # gicp最大迭代次数
-    normalized_error_threshold: 1.0 # 认为gicp结果合理的normalized error阈值
+    normalized_error_threshold: 0.2 # 认为gicp结果合理的normalized error阈值
     overlap_threshold: 0.0 # 认为gicp结果合理的重叠率阈值
 
     odom_to_map_filter_ratio: 0.9 # odom->map的惯性滤波系数（0~1），越大越稳定

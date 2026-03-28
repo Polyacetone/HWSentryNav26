@@ -35,7 +35,7 @@ struct RecoveryParams {
     double radius_max;
     int radius_samples;
     int angle_samples;
-    int path_samples;
+    double path_integral_resolution;
 
     // 退出条件
     double safe_hold_time;

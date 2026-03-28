@@ -85,11 +85,12 @@ struct RecoveryGoalPlanner {
         const CostMap& cost_map,
         const DirectionMap& dir_map,
         const Eigen::Vector2d& origin,
-        const Eigen::Vector2d& goal
+        const Eigen::Vector2d& goal,
+        const double radius
     ) {
         double acc = 0.0;
         std::optional<FieldSample> end_s;
-        const int n = std::max(1, p.path_samples);
+        const int n = std::max(1, static_cast<int>(radius / p.path_integral_resolution));
         for (int i = 0; i <= n; i++) {
             const double t = static_cast<double>(i) / static_cast<double>(n);
             const Eigen::Vector2d pos = origin + (goal - origin) * t;
@@ -129,7 +130,7 @@ struct RecoveryGoalPlanner {
             for (int ai = 0; ai < a_n; ai++) {
                 const double a = 2.0 * std::numbers::pi * static_cast<double>(ai) / static_cast<double>(a_n);
                 const Eigen::Vector2d pt = origin + Eigen::Vector2d(std::cos(a), std::sin(a)) * r;
-                const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt);
+                const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt, r);
                 if (!sc) continue;
                 if (!best_sc || sc->score < best_sc->score) {
                     best_sc = *sc;

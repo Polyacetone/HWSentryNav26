@@ -30,6 +30,17 @@ from typing import List
 
 import numpy as np
 
+# ─── IMU 饱和阈值 ─────────────────────────────────────────────
+_GRAVITY = 9.80665  # m/s²
+# MID360 内部 IMU（话题单位: g, rad/s）
+MID360_ACC_SAT_G = 39.5 / _GRAVITY   # ≈ 4.028 g
+MID360_GYRO_SAT  = 34.5              # rad/s
+# 外部下位机 IMU（话题单位: m/s², rad/s）
+EXT_ACC_SAT      = 235.0             # m/s²
+EXT_GYRO_SAT     = 34.5             # rad/s
+# 检测阈值 = 饱和值 × 此比例（留 2% 裕量）
+_SAT_RATIO = 0.99
+
 
 def ensure_unique_path(path: Path) -> Path:
     if not path.exists():
@@ -123,6 +134,10 @@ def main() -> int:
             self._ext_count = 0
             self._mid_count = 0
             self._lidar_count = 0
+            self._ext_sat_count = 0
+            self._mid_sat_count = 0
+            self._ext_last_sat_warn = -999.0
+            self._mid_last_sat_warn = -999.0
             self._timer = self.create_timer(2.0, self._status_cb)
             self.get_logger().info(
                 f"标定数据录制节点启动 (预热 {warmup}s)")
@@ -143,34 +158,59 @@ def main() -> int:
             if not self._check_warmup():
                 return
             t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            acc  = [msg.linear_acceleration.x,
+                    msg.linear_acceleration.y,
+                    msg.linear_acceleration.z]
+            gyro = [msg.angular_velocity.x,
+                    msg.angular_velocity.y,
+                    msg.angular_velocity.z]
+            # 饱和检测（外部IMU 单位: m/s², rad/s）
+            acc_max  = max(abs(v) for v in acc)
+            gyro_max = max(abs(v) for v in gyro)
+            if (acc_max  >= EXT_ACC_SAT  * _SAT_RATIO or
+                    gyro_max >= EXT_GYRO_SAT * _SAT_RATIO):
+                self._ext_sat_count += 1
+                wall = self._wall_t()
+                if wall - self._ext_last_sat_warn >= 1.0:
+                    self.get_logger().warn(
+                        f"[外部IMU饱和] acc={acc_max:.1f}m/s²(限{EXT_ACC_SAT}), "
+                        f"gyro={gyro_max:.3f}rad/s(限{EXT_GYRO_SAT}) "
+                        f"| 累计饱和 {self._ext_sat_count} 帧"
+                    )
+                    self._ext_last_sat_warn = wall
             ext_imu_t.append(t)
-            ext_imu_acc.append([
-                msg.linear_acceleration.x,
-                msg.linear_acceleration.y,
-                msg.linear_acceleration.z,
-            ])
-            ext_imu_gyro.append([
-                msg.angular_velocity.x,
-                msg.angular_velocity.y,
-                msg.angular_velocity.z,
-            ])
+            ext_imu_acc.append(acc)
+            ext_imu_gyro.append(gyro)
             self._ext_count += 1
 
         def _mid_imu_cb(self, msg: Imu) -> None:
             if not self._check_warmup():
                 return
             t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            acc  = [msg.linear_acceleration.x,
+                    msg.linear_acceleration.y,
+                    msg.linear_acceleration.z]
+            gyro = [msg.angular_velocity.x,
+                    msg.angular_velocity.y,
+                    msg.angular_velocity.z]
+            # 饱和检测（MID360 acc 单位: g; gyro 单位: rad/s）
+            acc_max  = max(abs(v) for v in acc)
+            gyro_max = max(abs(v) for v in gyro)
+            if (acc_max  >= MID360_ACC_SAT_G * _SAT_RATIO or
+                    gyro_max >= MID360_GYRO_SAT  * _SAT_RATIO):
+                self._mid_sat_count += 1
+                wall = self._wall_t()
+                if wall - self._mid_last_sat_warn >= 1.0:
+                    acc_ms2 = acc_max * _GRAVITY
+                    self.get_logger().warn(
+                        f"[MID360 IMU饱和] acc={acc_ms2:.1f}m/s²(限39.5), "
+                        f"gyro={gyro_max:.3f}rad/s(限{MID360_GYRO_SAT}) "
+                        f"| 累计饱和 {self._mid_sat_count} 帧"
+                    )
+                    self._mid_last_sat_warn = wall
             mid_imu_t.append(t)
-            mid_imu_acc.append([
-                msg.linear_acceleration.x,
-                msg.linear_acceleration.y,
-                msg.linear_acceleration.z,
-            ])
-            mid_imu_gyro.append([
-                msg.angular_velocity.x,
-                msg.angular_velocity.y,
-                msg.angular_velocity.z,
-            ])
+            mid_imu_acc.append(acc)
+            mid_imu_gyro.append(gyro)
             self._mid_count += 1
 
         def _lidar_cb(self, msg: PointCloud2) -> None:
@@ -188,8 +228,11 @@ def main() -> int:
         def _status_cb(self) -> None:
             t = self._wall_t()
             self.get_logger().info(
-                f"[{t:.1f}s] 外部IMU: {self._ext_count}, "
-                f"MID360 IMU: {self._mid_count}, LiDAR: {self._lidar_count} 帧")
+                f"[{t:.1f}s] 外部IMU: {self._ext_count}"  
+                f"(饱和{self._ext_sat_count}次), "
+                f"MID360 IMU: {self._mid_count}"
+                f"(饱和{self._mid_sat_count}次), "
+                f"LiDAR: {self._lidar_count} 帧")
 
     rclpy.init()
     node = RecordNode(warmup=args.warmup, max_scans=args.max_scans)
@@ -238,10 +281,20 @@ def main() -> int:
 
     np.savez_compressed(str(out_path), **save_dict)
 
+    ext_sat = node._ext_sat_count
+    mid_sat = node._mid_sat_count
+    ext_total = max(len(ext_imu_t), 1)
+    mid_total = max(len(mid_imu_t), 1)
     print(f"\n{'='*60}")
     print(f"录制完成:")
     print(f"  外部 IMU 样本数: {len(ext_imu_t)}")
+    print(f"  外部 IMU 饱和帧: {ext_sat} ({100.0*ext_sat/ext_total:.2f}%)")
+    if ext_sat > 0:
+        print(f"  ⚠ 外部IMU出现饱和，建议减小运动幅度或检查标定是否有效")
     print(f"  MID360 IMU 样本数: {len(mid_imu_t)}")
+    print(f"  MID360 IMU 饱和帧: {mid_sat} ({100.0*mid_sat/mid_total:.2f}%)")
+    if mid_sat > 0:
+        print(f"  ⚠ MID360 IMU出现饱和，建议减小运动幅度")
     print(f"  LiDAR 点云帧数: {len(lidar_scans)}")
     if lidar_scans:
         total_pts = sum(s.shape[0] for s in lidar_scans)

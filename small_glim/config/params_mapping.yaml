@@ -3,7 +3,7 @@
     mapping:
       # Output
       save_raw_mapping_frames: true
-      output_root: "."
+      output_root: "~/mapping"
 
       # Point range filter (imu_link frame). Set <= 0 to disable.
       cloud_range_min: 0.8 # Points out of this range will be filtered out (imu_link frame)

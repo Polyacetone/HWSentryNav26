@@ -38,6 +38,12 @@ from scipy.spatial.transform import Rotation
 GRAVITY = 9.80665  # m/s²
 G_UNIT_TO_MS2 = GRAVITY  # MID360 加速度 g → m/s²
 
+# ── IMU 饱和阈值 (单位: m/s² / rad/s, load_data 转换后的量纲) ───────────
+MID360_ACC_SAT  = 39.5    # m/s²
+MID360_GYRO_SAT = 34.5    # rad/s
+EXT_ACC_SAT     = 235.0   # m/s²
+EXT_GYRO_SAT    = 34.5    # rad/s
+
 
 # ──────────────────────────────────────────────────────────────
 #  Numba 加速核心计算
@@ -352,6 +358,11 @@ def mat_to_rotvec(R: np.ndarray) -> np.ndarray:
     return Rotation.from_matrix(R).as_rotvec()
 
 
+def rotation_distance_deg(R_a: np.ndarray, R_b: np.ndarray) -> float:
+    """返回两个旋转之间的最小相对角度差（度）。"""
+    return np.degrees(np.linalg.norm(mat_to_rotvec(R_a @ R_b.T)))
+
+
 def mat_to_quat(R: np.ndarray) -> np.ndarray:
     """返回 [qx, qy, qz, qw]"""
     return Rotation.from_matrix(R).as_quat()
@@ -414,6 +425,60 @@ def load_data(path: str) -> CalibData:
         lidar_stamps=d["lidar_stamps"].astype(np.float64),
         scans=scans,
     )
+
+
+# ──────────────────────────────────────────────────────────────
+#  IMU 饱和过滤
+# ──────────────────────────────────────────────────────────────
+
+def filter_saturated_imu(
+    t: np.ndarray,
+    acc: np.ndarray,     # (N, 3) m/s²
+    gyro: np.ndarray,    # (N, 3) rad/s
+    acc_sat: float,      # 饱和阈值 (m/s²)
+    gyro_sat: float,     # 饱和阈值 (rad/s)
+    sat_ratio: float = 0.98,
+    margin_sec: float = 0.05,
+    label: str = "IMU",
+) -> np.ndarray:
+    """返回有效样本的布尔掩码 (True = 有效).
+
+    检测各轴绝对值 >= sat_ratio * 饱和值 的样本，
+    并向前后各扩展 margin_sec 秒的时间窗口。
+    """
+    acc_thresh  = acc_sat  * sat_ratio
+    gyro_thresh = gyro_sat * sat_ratio
+
+    raw_sat = (
+        (np.abs(acc)  >= acc_thresh ).any(axis=1) |
+        (np.abs(gyro) >= gyro_thresh).any(axis=1)
+    )
+    n_raw = int(np.sum(raw_sat))
+
+    if n_raw > 0 and margin_sec > 0.0:
+        sat_idx = np.where(raw_sat)[0]
+        invalid = raw_sat.copy()
+        for idx in sat_idx:
+            t_c = t[idx]
+            lo = int(np.searchsorted(t, t_c - margin_sec, side="left"))
+            hi = int(np.searchsorted(t, t_c + margin_sec, side="right"))
+            invalid[lo:hi] = True
+    else:
+        invalid = raw_sat
+
+    n_invalid = int(np.sum(invalid))
+    total = len(t)
+    print(f"  [{label}] 饱和检测: 原始 {n_raw}/{total} 帧饱和，"
+          f"扩展边界后共剔除 {n_invalid}/{total} 帧 "
+          f"({100.0 * n_invalid / max(total, 1):.2f}%)")
+    if n_raw > 0:
+        for ax_i, ax_name in enumerate(["x", "y", "z"]):
+            n_a = int(np.sum(np.abs(acc [:, ax_i]) >= acc_thresh))
+            n_g = int(np.sum(np.abs(gyro[:, ax_i]) >= gyro_thresh))
+            if n_a > 0 or n_g > 0:
+                print(f"    轴 {ax_name}: 加速度饱和 {n_a} 帧, 角速度饱和 {n_g} 帧")
+
+    return ~invalid
 
 
 # ──────────────────────────────────────────────────────────────
@@ -590,14 +655,15 @@ def estimate_translation_lever_arm(
     """
     利用杠杆臂原理估计平移。
 
-    在 ext_imu 坐标系下:
-      a_E = R_E_I * a_I + alpha_E × r + omega_E × (omega_E × r)
+        在 ext_imu 坐标系下:
+            a_I_in_E = R_E_I * a_I
+            a_I_in_E = a_E + alpha_E × r + omega_E × (omega_E × r)
 
     其中 r = t_E_to_I_in_E = 从 E 到 I 在 E 系中的向量
 
     重排为线性方程: A * r = b
       A_i = [alpha_E_i]× + [omega_E_i]× @ [omega_E_i]×
-      b_i = a_E_i - R_E_I * a_I_i
+            b_i = a_I_in_E_i - a_E_i
     """
     n = len(sync_t)
     if n < 20:
@@ -633,19 +699,17 @@ def estimate_translation_lever_arm(
         W = skew(omega_m[i])
         Al = skew(alpha_m[i])
         A[3*i:3*i+3, :] = Al + W @ W
-        b[3*i:3*i+3] = a_ext_m[i] - R_E_I @ a_mid_m[i]
+        b[3*i:3*i+3] = R_E_I @ a_mid_m[i] - a_ext_m[i]
 
     # 正则化最小二乘
     r, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
 
-    # r 是 t_E_to_I_in_E: 从 ext_imu 到 livox_imu 在 ext_imu 系中的向量
-    # 我们需要 t_L_E (lidar 系中 ext_imu 原点的位置)
+    # r 是 t_E_to_I_in_E: 从 ext_imu 到 livox_imu 在 ext_imu 系中的向量。
+    # 对于 T_L_E = [R_L_E, t_L_E] 与 T_L_I = [R_L_I, t_L_I]，有
+    #   r = R_E_L @ (t_L_I - t_L_E) = R_L_E^T @ (t_L_I - t_L_E)
+    # 因此 t_L_E = t_L_I - R_L_E @ r。
     R_L_I, t_L_I = T_lidar_livox_imu
     R_L_E_approx = R_L_I @ R_E_I.T  # 暂不精确，但近似可用
-    # t_L_E = t_L_I - R_L_E @ r  (因为 r = R_E_L @ (t_L_I - t_L_E) ≈ R_L_E^T @ (t_L_I - t_L_E))
-    # 所以 t_L_E = t_L_I - R_L_E @ r
-    # 更准确: t_E_to_I_in_E = R_L_E^T @ (t_L_I - t_L_E)
-    # => t_L_E = t_L_I - R_L_E @ r
     t_L_E = t_L_I - R_L_E_approx @ r
 
     return t_L_E
@@ -949,7 +1013,7 @@ def build_residuals(
             i = idx_lever[k]
             w_vec = omega_mid_pts[i]
             a_vec = alpha[i]
-            predicted = R_E_I @ a_mid_mid[i] + np.cross(a_vec, r_E_to_I) + np.cross(w_vec, np.cross(w_vec, r_E_to_I))
+            predicted = R_E_I @ a_mid_mid[i] - np.cross(a_vec, r_E_to_I) - np.cross(w_vec, np.cross(w_vec, r_E_to_I))
             r_lever = w_lever * (predicted - a_ext_mid[i])
             residuals.append(r_lever)
 
@@ -1121,6 +1185,16 @@ def print_confidence(conf: dict, R: np.ndarray, t: np.ndarray) -> None:
     print(f"  最小可观测性: {min_obs:.6f}")
 
 
+def print_confidence_scope(has_lidar_constraints: bool) -> None:
+    """说明当前置信度覆盖的约束范围，避免把模型内一致性误当成真值精度。"""
+    print("\n  [说明] 置信度来自当前残差模型的局部线性化结果。")
+    if has_lidar_constraints:
+        print("  [说明] 当前结果同时包含 IMU 与 LiDAR 配准约束。")
+    else:
+        print("  [说明] 当前结果未使用 LiDAR 配准约束，仅反映 IMU 重力/角速度/杠杆臂模型的一致性。")
+        print("  [说明] 因此即使数值较高，也不代表外参已被外部几何观测充分验证。")
+
+
 # ──────────────────────────────────────────────────────────────
 #  主流程
 # ──────────────────────────────────────────────────────────────
@@ -1144,18 +1218,18 @@ def main() -> int:
     parser.add_argument(
         "--T-init",
         type=str,
-        default="-0.09873 -0.02404 0.11875 -1.0 0.0 0.0 0.0",
+        default="-0.09873 -0.02404 0.11875 1.0 0.0 0.0 0.0",
         help="T_lidar_imu 初始值 (tx ty tz qx qy qz qw)",
     )
     parser.add_argument(
         "--T-livox-imu-lidar",
         type=str,
-        default="0.006 -0.012 0.008 0.0 0.0 0.0 1.0",
+        default="0.011 0.02329 -0.04412 0.0 0.0 0.0 1.0",
         help="MID360 内部 T_lidar_livox_imu (tx ty tz qx qy qz qw)",
     )
     parser.add_argument("--voxel-size", type=float, default=0.1, help="点云下采样体素大小 (m)")
     parser.add_argument("--icp-dist", type=float, default=0.5, help="ICP 最大对应距离 (m)")
-    parser.add_argument("--max-scan-pairs", type=int, default=200, help="最大扫描对数")
+    parser.add_argument("--max-scan-pairs", type=int, default=300, help="最大扫描对数")
     parser.add_argument("--skip-icp", action="store_true", help="跳过点云配准 (仅用 IMU 约束)")
     parser.add_argument("--output", type=str, default="", help="输出结果文件路径 (.npz)")
     args = parser.parse_args()
@@ -1170,6 +1244,29 @@ def main() -> int:
 
     if len(data.ext_imu_t) < 100 or len(data.mid_imu_t) < 100:
         print("[ERROR] IMU 数据太少，无法标定")
+        return 1
+
+    # ─── 饱和过滤 ───
+    print("\n[饱和检测] 过滤饱和 IMU 样本...")
+    ext_valid = filter_saturated_imu(
+        data.ext_imu_t, data.ext_imu_acc, data.ext_imu_gyro,
+        EXT_ACC_SAT, EXT_GYRO_SAT, label="外部IMU(BMI088)",
+    )
+    mid_valid = filter_saturated_imu(
+        data.mid_imu_t, data.mid_imu_acc, data.mid_imu_gyro,
+        MID360_ACC_SAT, MID360_GYRO_SAT, label="MID360 IMU",
+    )
+    data.ext_imu_t    = data.ext_imu_t[ext_valid]
+    data.ext_imu_acc  = data.ext_imu_acc[ext_valid]
+    data.ext_imu_gyro = data.ext_imu_gyro[ext_valid]
+    data.mid_imu_t    = data.mid_imu_t[mid_valid]
+    data.mid_imu_acc  = data.mid_imu_acc[mid_valid]
+    data.mid_imu_gyro = data.mid_imu_gyro[mid_valid]
+    print(f"  过滤后 外部IMU: {len(data.ext_imu_t)} 样本, "
+          f"MID360 IMU: {len(data.mid_imu_t)} 样本")
+
+    if len(data.ext_imu_t) < 100 or len(data.mid_imu_t) < 100:
+        print("[ERROR] 过滤后 IMU 数据不足 100 帧，请减小运动幅度重新采集")
         return 1
 
     # ─── 解析已知变换 ───
@@ -1205,7 +1302,7 @@ def main() -> int:
 
     # 与初始值比较，选择更可靠的
     rv_init = mat_to_rotvec(R_init)
-    angle_diff = np.degrees(np.linalg.norm(rv_grav - rv_init))
+    angle_diff = rotation_distance_deg(R_L_E_grav, R_init)
     print(f"  与初始值角度差: {angle_diff:.2f}°")
     if angle_diff > 20:
         print("  ⚠ 旋转差异较大，使用初始值作为基准并融合数据估计")
@@ -1277,7 +1374,7 @@ def main() -> int:
                 print(f"  Hand-eye 估计 t: [{t_he[0]:.5f}, {t_he[1]:.5f}, {t_he[2]:.5f}] m")
 
                 # 融合
-                angle_diff_he = np.degrees(np.linalg.norm(mat_to_rotvec(R_he) - mat_to_rotvec(R_phase1)))
+                angle_diff_he = rotation_distance_deg(R_he, R_phase1)
                 if angle_diff_he < 10:
                     R_phase1 = R_he
                     t_phase2 = t_he
@@ -1303,6 +1400,7 @@ def main() -> int:
     if opt_info["jacobian"] is not None and opt_info["residuals"] is not None:
         conf = compute_confidence(opt_info["jacobian"], opt_info["residuals"])
         print_confidence(conf, R_opt, t_opt)
+        print_confidence_scope(len(lidar_rel_poses) > 0)
 
     # ─── 输出结果 ───
     q_opt = mat_to_quat(R_opt)
@@ -1322,8 +1420,7 @@ def main() -> int:
 
     # 与初始值比较
     q_init_orig = mat_to_quat(R_init)
-    angle_final = np.degrees(np.linalg.norm(
-        mat_to_rotvec(R_opt) - mat_to_rotvec(R_init)))
+    angle_final = rotation_distance_deg(R_opt, R_init)
     trans_final = np.linalg.norm(t_opt - t_init) * 1000
     print(f"\n  与初始值比较:")
     print(f"    旋转差: {angle_final:.3f}°")
