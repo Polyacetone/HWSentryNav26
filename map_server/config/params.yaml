@@ -26,7 +26,7 @@
       cost_map_pub_topic: "/map_server/local_cost_map" # 局部代价地图发布话题名称
       cloud_accumulate_frames: 10 # 局部点云累积帧数
       roi_xy_radius_min: 0.4 # 局部点云ROI的xy平面半径最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
-      roi_xy_radius_max: 5.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
+      roi_xy_radius_max: 4.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_max: 0.2 # 局部点云ROI的z轴最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_min: -0.55 # 局部点云ROI的z轴最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m

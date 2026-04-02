@@ -1,0 +1,57 @@
+/**:
+  ros__parameters:
+    # ─── Topic 配置 ───
+    global_path_sub_topic: "/global_planner/control_points"
+    global_direction_map_sub_topic: "/map_server/global_direction_map"
+    global_cost_map_sub_topic: "/map_server/global_cost_map"
+    local_cost_map_sub_topic: "/map_server/local_cost_map"
+    comp_stage_sub_topic: "/serial_bridge/comp_stage"
+    chassis_status_sub_topic: "/serial_bridge/chassis_status"
+    spin_cmd_sub_topic: "/decision/spin_cmd"
+    local_plan_pub_topic: "/local_planner/local_plan"
+    planner_state_pub_topic: "/local_planner/state"
+
+    misc:
+      stop_threshold_dist: 0.5
+      stop_threshold_u: 0.99
+      control_dt: 0.05
+
+    # ─── 局部路径裁剪参数 ───
+    local_path:
+      lookahead_distance: 3.0
+      num_points: 30
+      proj_num_samples: 50
+      proj_search_window: 0.1
+      proj_lazy_dist: 0.1
+
+    # ─── 台阶路径掩码参数 ───
+    step_mask:
+      path_align_dot_threshold: 0.6
+      full_effect_radius: 0.4
+      cutoff_radius: 0.8
+      length_num_samples: 100
+
+    # ─── 台阶前瞻标志位 ───
+    step_ahead_flag:
+      detect_norm_threshold: 0.6
+      detect_dot_threshold: 0.5
+      on_count_threshold: 2
+      off_count_threshold: 2
+
+    # ─── 状态机参数 ───
+    state_machine:
+      follow_to_spin_vel_max: 0.2
+      spin_to_follow_omega_max: 0.6
+      to_idle_vel_max: 0.2
+      to_idle_omega_max: 0.6
+      stopping_timeout: 1.0
+
+    # ─── 恢复/脱困参数 ───
+    recovery:
+      stuck:
+        enable: true
+        cmd_vel_threshold: 0.3
+        timeout: 2.0
+        max_displacement: 0.3
+        reverse_speed: 0.5
+        reverse_duration: 1.0

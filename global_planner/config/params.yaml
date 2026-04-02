@@ -1,0 +1,41 @@
+/**:
+  ros__parameters:
+    global_direction_map_sub_topic: "/map_server/global_direction_map"
+    global_cost_map_sub_topic: "/map_server/global_cost_map"
+    goal_sub_topic: "/decision/nav_goal"
+    chassis_status_sub_topic: "/serial_bridge/chassis_status"
+    control_points_pub_topic: "/global_planner/control_points"
+    occupied_threshold: 50
+    on_step_threshold: 0.1
+
+    debug:
+      enable: true
+      rough_path_pub_topic: "/global_planner/debug/rough_path"
+      optimized_path_pub_topic: "/global_planner/debug/optimized_path"
+
+    start_prediction:
+      enable: true
+      max_accel: 2.0
+      planning_delay: 0.2
+      min_speed: 0.3
+      collision_check_step: 0.05
+
+    path_planner:
+      skip_distance: 0.5
+      direction_weight: 6.0
+      obstacle_weight: 4.0
+      step_weight: 0.6
+      downsampled_waypoint_max_interval: 5
+      feasible_threshold: 100
+
+    path_optimizer:
+      smoothness_weight: 0.4
+      uniform_speed_weight: 0.2
+      obstacle_weight: 6.0
+      direction_weight: 6.0
+      step_weight: 0.3
+      step_norm_threshold: 0.01
+      step_norm_transition: 0.05
+      start_end_weight: 100.0
+      num_samples_per_length: 1.5
+      max_iterations: 100

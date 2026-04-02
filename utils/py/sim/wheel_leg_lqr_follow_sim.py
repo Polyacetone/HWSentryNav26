@@ -118,7 +118,7 @@ class SimConfig:
     TORQUE_NOISE_STD_NM: tuple[float, float, float, float] = (0.04, 0.04, 0.04, 0.04)
 
     # --- 话题名 ---
-    TOPIC_CMD: str = "/path_follower/chassis_cmd"
+    TOPIC_CMD: str = "/mpc_controller/chassis_cmd"
     TOPIC_JOINT: str = "/serial_bridge/joint_state"
     TOPIC_ODOM: str = "/small_glim/odometry"
     TOPIC_IMU: str = "/serial_bridge/imu_pose"
@@ -1164,7 +1164,7 @@ class WheelLegLqrFollowSimNode(Node):
         msg.velocity = float(self.dyn.v)
         msg.omega = float(self.dyn.omega)
         msg.leg_mode = 4
-        msg.remaining_energy = int(np.clip(self._energy, -32768, 32767))
+        msg.remaining_energy_supercap = int(np.clip(self._energy, -32768, 32767))
         msg.curr_chassis_pwr = int(np.clip(self._current_power, -32768, 32767))
         msg.rfr_pwr_limit = int(np.clip(self.cfg.RFR_PWR_LIMIT, -32768, 32767))
         self.status_pub.publish(msg)
