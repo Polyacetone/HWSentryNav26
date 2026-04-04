@@ -22,6 +22,7 @@
 
     path_planner:
       skip_distance: 0.5
+      min_fixed_plan_dist: 0.05  # 小于此距离的 fixed 目标不走 B-spline 优化
       direction_weight: 6.0
       obstacle_weight: 4.0
       step_weight: 0.6

@@ -1,4 +1,4 @@
-#include <local_planner/local_planner_state_machine.hpp>
+#include <local_planner/state_machine.hpp>
 
 #include <cmath>
 #include <rclcpp/logging.hpp>
@@ -12,12 +12,13 @@ void LocalPlannerStateMachine::enter_state(PlannerState new_state) {
     if (state_ == new_state) return;
     state_ = new_state;
     switch (new_state) {
-        case PlannerState::IDLE:  RCLCPP_INFO(logger_, "FSM -> IDLE"); break;
+        case PlannerState::IDLE: RCLCPP_INFO(logger_, "FSM -> IDLE"); break;
         case PlannerState::TRACK: RCLCPP_INFO(logger_, "FSM -> TRACK"); break;
-        case PlannerState::SPIN:  RCLCPP_INFO(logger_, "FSM -> SPIN"); break;
+        case PlannerState::SPIN: RCLCPP_INFO(logger_, "FSM -> SPIN"); break;
         case PlannerState::STOP_TRANSITION: RCLCPP_INFO(logger_, "FSM -> STOP_TRANSITION"); break;
         case PlannerState::HOLD_FIXED: RCLCPP_INFO(logger_, "FSM -> HOLD_FIXED"); break;
         case PlannerState::REVERSE: RCLCPP_WARN(logger_, "FSM -> REVERSE"); break;
+        case PlannerState::HAZARD_RECOVERY: RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY"); break;
     }
 }
 
@@ -30,7 +31,7 @@ bool LocalPlannerStateMachine::stopping_ready(const LocalPlannerFsmInput& in) co
             return std::abs(in.omega) < params_.transition.spin_to_follow_omega_max;
         default: // IDLE, FIXED
             return std::abs(in.velocity) < params_.transition.to_idle_vel_max &&
-                   std::abs(in.omega) < params_.transition.to_idle_omega_max;
+                std::abs(in.omega) < params_.transition.to_idle_omega_max;
     }
 }
 
@@ -42,6 +43,12 @@ LocalPlannerFsmOutput LocalPlannerStateMachine::update(const LocalPlannerFsmInpu
 
     // ═══════════════════ IDLE ═══════════════════════════════
     case PlannerState::IDLE: {
+        // 障碍物中直接进入 hazard recovery
+        if (input.is_in_hazard && params_.stuck.enable) {
+            output.consume_global_path = true;
+            enter_state(PlannerState::HAZARD_RECOVERY);
+            break;
+        }
         if (input.has_new_path) {
             enter_state(PlannerState::TRACK);
             break;
@@ -105,6 +112,13 @@ LocalPlannerFsmOutput LocalPlannerStateMachine::update(const LocalPlannerFsmInpu
         const bool keep_spinning = input.spin_requested &&
             (input.spin_high_priority || (!input.has_path && !input.fixed_goal_flag));
 
+        // 障碍物中直接进入 hazard recovery
+        if (input.is_in_hazard && params_.stuck.enable) {
+            output.consume_global_path = true;
+            enter_state(PlannerState::HAZARD_RECOVERY);
+            break;
+        }
+
         if (input.is_stuck && params_.stuck.enable) {
             reverse_start_time_ = input.stamp;
             enter_state(PlannerState::REVERSE);
@@ -140,8 +154,7 @@ LocalPlannerFsmOutput LocalPlannerStateMachine::update(const LocalPlannerFsmInpu
             break;
         }
 
-        const bool timeout = std::chrono::duration<double>(input.stamp - stopping_start_time_).count()
-                             > params_.transition.stopping_timeout;
+        const bool timeout = std::chrono::duration<double>(input.stamp - stopping_start_time_).count() > params_.transition.stopping_timeout;
         if (stopping_ready(input) || timeout) {
             switch (stop_dest_) {
                 case StopDest::IDLE:
@@ -192,8 +205,21 @@ LocalPlannerFsmOutput LocalPlannerStateMachine::update(const LocalPlannerFsmInpu
     case PlannerState::REVERSE: {
         const double elapsed = std::chrono::duration<double>(input.stamp - reverse_start_time_).count();
         if (elapsed > params_.stuck.reverse_duration) {
-            // V1: 倒车结束，消费路径并回 IDLE（V2 再补 HazardRecovery 链条）
             output.consume_global_path = true;
+            enter_state(PlannerState::HAZARD_RECOVERY);
+        }
+        break;
+    }
+
+    // ═══════════════════ HAZARD_RECOVERY ════════════════════
+    case PlannerState::HAZARD_RECOVERY: {
+        // 收到新路径任务 → 退出 recovery
+        if (input.has_new_path) {
+            enter_state(PlannerState::TRACK);
+            break;
+        }
+        // 已经连续回到安全区域 → 退出 recovery
+        if (input.is_recovery_safe) {
             enter_state(PlannerState::IDLE);
             break;
         }

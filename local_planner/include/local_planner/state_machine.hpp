@@ -15,6 +15,7 @@ enum class PlannerState : uint8_t {
     STOP_TRANSITION = 3,
     HOLD_FIXED = 4,
     REVERSE = 5,
+    HAZARD_RECOVERY = 6,
 };
 
 // ═══════════════════════ 参数 ═══════════════════════════════
@@ -53,6 +54,10 @@ struct LocalPlannerFsmInput {
     bool spin_high_priority = false;
 
     bool is_stuck = false;
+    bool is_in_hazard = false;  // 当前位置处于障碍物中（任何状态均可触发 recovery）
+
+    // HAZARD_RECOVERY 相关
+    bool is_recovery_safe = false;            // 当前位置是否安全可退出 recovery
 
     // 速度判定量（用于 STOP_TRANSITION 退出判断）
     double velocity = 0.0;
@@ -70,8 +75,7 @@ struct LocalPlannerFsmOutput {
 
 // ═══════════════════════ 状态机 ═══════════════════════════
 
-/// V1 的 local_planner 状态机：用显式 switch 实现。
-/// 不含 HAZARD_RECOVERY（V2 再补）。
+/// local_planner 状态机：用显式 switch 实现。
 class LocalPlannerStateMachine {
 public:
     explicit LocalPlannerStateMachine(const LocalPlannerFsmParams& params, rclcpp::Logger logger);

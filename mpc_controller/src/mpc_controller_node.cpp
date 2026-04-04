@@ -1,7 +1,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <memory>
+#include <stdexcept>
 
 #include <Eigen/Dense>
 #include <rclcpp/rclcpp.hpp>
@@ -100,6 +102,36 @@ MpcControllerNode::MpcControllerNode(const rclcpp::NodeOptions& options) : Node(
     }
 
     // ─── MPC 参数 ───
+    GreyBoxModelParams model_params {
+        .dynamics = {
+            .sgn_eps = declare_parameter<double>("model.dynamics.sgn_eps"),
+            .cf1 = declare_parameter<double>("model.dynamics.cf1"),
+            .cf2 = declare_parameter<double>("model.dynamics.cf2"),
+            .cf3 = declare_parameter<double>("model.dynamics.cf3"),
+            .xh0 = declare_parameter<double>("model.dynamics.xh0"),
+            .a00 = declare_parameter<double>("model.dynamics.a00"),
+            .a01 = declare_parameter<double>("model.dynamics.a01"),
+            .a03 = declare_parameter<double>("model.dynamics.a03"),
+            .a10 = declare_parameter<double>("model.dynamics.a10"),
+            .a11 = declare_parameter<double>("model.dynamics.a11"),
+            .a13 = declare_parameter<double>("model.dynamics.a13"),
+            .gnl_xh = declare_parameter<double>("model.dynamics.gnl_xh"),
+            .gnl_v = declare_parameter<double>("model.dynamics.gnl_v"),
+            .a22 = declare_parameter<double>("model.dynamics.a22"),
+            .a24 = declare_parameter<double>("model.dynamics.a24"),
+            .gamma_w = declare_parameter<double>("model.dynamics.gamma_w"),
+            .obs_l = declare_parameter<double>("model.dynamics.obs_l"),
+        },
+        .power = {
+            .coeffs = {},
+        }
+    };
+    const auto power_coeffs = declare_parameter<std::vector<double>>("model.power.coeffs");
+    if (power_coeffs.size() != static_cast<size_t>(PWR_N)) {
+        throw std::runtime_error("model.power.coeffs size mismatch");
+    }
+    std::copy(power_coeffs.begin(), power_coeffs.end(), model_params.power.coeffs.begin());
+
     MPCParams mpc_params = {
         .follow_limits = {
             .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
@@ -230,6 +262,7 @@ MpcControllerNode::MpcControllerNode(const rclcpp::NodeOptions& options) : Node(
             .keep_steps = static_cast<int>(declare_parameter<int>("mpc.multi_hypothesis.keep_steps")),
             .lateral_offset = declare_parameter<double>("mpc.multi_hypothesis.lateral_offset"),
         },
+        .model = model_params,
     };
     mpc_solver_ = std::make_shared<MPCSolver>(mpc_params);
 

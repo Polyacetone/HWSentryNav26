@@ -75,6 +75,7 @@ private:
     AStarPlanner::ConstPtr path_planner_;
     BSplineOptimizer::ConstPtr path_optimizer_;
     double skip_distance_;
+    double min_fixed_plan_dist_;
     bool enable_debug_;
     int occupied_threshold_;
     double on_step_threshold_;
@@ -121,6 +122,7 @@ GlobalPlannerNode::GlobalPlannerNode(const rclcpp::NodeOptions& options): Node("
     }
 
     skip_distance_ = declare_parameter<double>("path_planner.skip_distance");
+    min_fixed_plan_dist_ = declare_parameter<double>("path_planner.min_fixed_plan_dist");
     path_planner_ = std::make_shared<AStarPlanner>(
         declare_parameter<double>("path_planner.direction_weight"),
         declare_parameter<double>("path_planner.obstacle_weight"),
@@ -343,13 +345,18 @@ void GlobalPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map
     };
 
     if (dist < skip_distance_) {
-        if (fixed) {
+        if (fixed && dist >= min_fixed_plan_dist_) {
             rough_path = make_direct_init_path(start_grid, goal_grid, global_cost_map_->width, global_cost_map_->height);
             RCLCPP_INFO(get_logger(), "Goal is within lazy distance (%.2f m) but in fixed mode, skipping A* and using direct spline init with %zu points", skip_distance_, rough_path.size());
             optimize_and_publish(rough_path);
+        } else if (fixed) {
+            // 极近 fixed 目标：直接发布 fixed=true 的空控制点路径
+            // local_planner 会进入 HOLD_FIXED 模式在当前位置原地保持
+            RCLCPP_INFO(get_logger(), "Goal is within min_fixed_plan_dist (%.3f m), publishing empty fixed path", min_fixed_plan_dist_);
+            publish_path({}, {}, {}, true);
         } else {
             RCLCPP_INFO(get_logger(), "Goal is within lazy distance (%.2f m)", skip_distance_);
-            publish_path({}, {}, {}, fixed);
+            publish_path({}, {}, {}, false);
         }
         return;
     }
@@ -357,8 +364,8 @@ void GlobalPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map
     const auto plan_result = path_planner_->search_path(
         *global_cost_map_,
         *global_direction_map_,
-        start_grid.cast<int>(),
-        goal_grid.cast<int>()
+        start_grid.array().round().cast<int>().matrix(),
+        goal_grid.array().round().cast<int>().matrix()
     );
     if (!plan_result) {
         RCLCPP_ERROR(get_logger(), "Path planning failed: %s", plan_result.error().c_str());

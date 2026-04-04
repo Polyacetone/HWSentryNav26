@@ -1,13 +1,10 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <vector>
-
 #include <Eigen/Core>
 
 #include <local_planner/nav_map.hpp>
-#include <local_planner/utils.hpp>
 
 namespace local_planner {
 
@@ -36,8 +33,9 @@ public:
     /// direction_map 与 cost_map 需同尺寸/分辨率/原点。
     void initialize(const CostMap& cost_map, DirectionMap::ConstPtr direction_map);
 
-    /// 基于当前全局路径更新输出层。
-    void update(const std::optional<SplineD>& global_path);
+    /// 基于局部轨迹更新输出层。
+    /// 如果 trajectory 为空，则全局保留台阶代价、抹去方向场。
+    void update(const std::vector<Eigen::Vector2d>& local_trajectory);
 
     [[nodiscard]] bool ready() const { return static_cast<bool>(base_direction_map_); }
 
@@ -51,7 +49,7 @@ private:
         double alpha;
     };
 
-    [[nodiscard]] double approximate_path_length(const SplineD& spline) const;
+    [[nodiscard]] double approximate_trajectory_length(const std::vector<Eigen::Vector2d>& trajectory) const;
     void build_kernel(double resolution);
     void apply_kernel_at(const Eigen::Vector2i& grid_coord, std::vector<double>& max_alpha) const;
 

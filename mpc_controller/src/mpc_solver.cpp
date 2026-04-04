@@ -58,10 +58,11 @@ inline double relu(double x) {
     return (y > 0.0) ? y : 0.0;
 }
 
-inline double predict_power(double v, double w, double a, double alpha) {
-    return PWR_C[0] + PWR_C[1] * v * a + PWR_C[2] * w * alpha + PWR_C[3] * a * a + PWR_C[4] * alpha * alpha
-        + PWR_C[5] * sabs(v) + PWR_C[6] * sabs(w) + PWR_C[7] * v * v + PWR_C[8] * w * w + PWR_C[9] * sabs(a)
-        + PWR_C[10] * sabs(alpha) + PWR_C[11] * sabs(v * w);
+inline double predict_power(double v, double w, double a, double alpha, const PowerModelParams& power_model) {
+    const auto& c = power_model.coeffs;
+    return c[0] + c[1] * v * a + c[2] * w * alpha + c[3] * a * a + c[4] * alpha * alpha
+        + c[5] * sabs(v) + c[6] * sabs(w) + c[7] * v * v + c[8] * w * w + c[9] * sabs(a)
+        + c[10] * sabs(alpha) + c[11] * sabs(v * w);
 }
 
 inline double clamp_prev_cmd(double cmd_prev, double status, double cmd_act_diff_max, double rate_max, double dt) {
@@ -321,18 +322,18 @@ DirSample eval_dir_bicubic(const DirectionMapGridView& grid, const GridInfo& inf
 //  共享动力学模型
 // ════════════════════════════════════════════════════════════════
 
-StateVec mpc_dynamics(const StateVec& x, const ControlVec& u) {
+StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const GreyBoxDynamicsParams& model) {
     const double theta = x(ix::THETA);
     const double xh = x(ix::XH), v = x(ix::V), w = x(ix::W);
     const double dv = x(ix::DV), dw = x(ix::DW);
 
-    const double sv = smooth_sgn(v, SGN_EPS);
-    const double sw = smooth_sgn(w, SGN_EPS);
-    const double nl = CF1 * sv + CF2 * v * std::abs(w);
+    const double sv = smooth_sgn(v, model.sgn_eps);
+    const double sw = smooth_sgn(w, model.sgn_eps);
+    const double nl = model.cf1 * sv + model.cf2 * v * std::abs(w);
 
-    const double xh1 = A00 * xh + A01 * v + A03 * dv + GNL_XH * nl;
-    const double v1 = A10 * xh + A11 * v + A13 * dv + GNL_V * nl;
-    const double w1 = A22 * w + A24 * dw - GAMMA_W * CF3 * sw;
+    const double xh1 = model.a00 * xh + model.a01 * v + model.a03 * dv + model.gnl_xh * nl;
+    const double v1 = model.a10 * xh + model.a11 * v + model.a13 * dv + model.gnl_v * nl;
+    const double w1 = model.a22 * w + model.a24 * dw - model.gamma_w * model.cf3 * sw;
 
     const double dt = MPC_DT;
     const double theta1 = theta + (w + w1) * (dt * 0.5);
@@ -352,36 +353,36 @@ StateVec mpc_dynamics(const StateVec& x, const ControlVec& u) {
     return xn;
 }
 
-void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, MatXX& fx, MatXU& fu) {
+void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const GreyBoxDynamicsParams& model, MatXX& fx, MatXU& fu) {
     const double theta = x(ix::THETA);
     const double xh = x(ix::XH), v = x(ix::V), w = x(ix::W);
     const double dv = x(ix::DV), dw = x(ix::DW);
     const double dt = MPC_DT, h = dt * 0.5;
 
-    const double sv = smooth_sgn(v, SGN_EPS);
-    const double dsv = smooth_sgn_deriv(v, SGN_EPS);
-    const double sw = smooth_sgn(w, SGN_EPS);
-    const double dsw = smooth_sgn_deriv(w, SGN_EPS);
+    const double sv = smooth_sgn(v, model.sgn_eps);
+    const double dsv = smooth_sgn_deriv(v, model.sgn_eps);
+    const double sw = smooth_sgn(w, model.sgn_eps);
+    const double dsw = smooth_sgn_deriv(w, model.sgn_eps);
     const double absw = std::abs(w);
     const double dabsw = (w >= 0) ? 1.0 : -1.0;
 
-    const double nl = CF1 * sv + CF2 * v * absw;
-    const double dnl_dv = CF1 * dsv + CF2 * absw;
-    const double dnl_dw = CF2 * v * dabsw;
+    const double nl = model.cf1 * sv + model.cf2 * v * absw;
+    const double dnl_dv = model.cf1 * dsv + model.cf2 * absw;
+    const double dnl_dw = model.cf2 * v * dabsw;
 
     // Greybox next states
-    const double v1 = A10 * xh + A11 * v + A13 * dv + GNL_V * nl;
-    const double w1 = A22 * w + A24 * dw - GAMMA_W * CF3 * sw;
+    const double v1 = model.a10 * xh + model.a11 * v + model.a13 * dv + model.gnl_v * nl;
+    const double w1 = model.a22 * w + model.a24 * dw - model.gamma_w * model.cf3 * sw;
     const double theta1 = theta + (w + w1) * h;
 
     // Derivatives of greybox model
-    const double dvn_dxh = A10;
-    const double dvn_dv = A11 + GNL_V * dnl_dv;
-    const double dvn_dw = GNL_V * dnl_dw;
-    const double dvn_ddv = A13;
+    const double dvn_dxh = model.a10;
+    const double dvn_dv = model.a11 + model.gnl_v * dnl_dv;
+    const double dvn_dw = model.gnl_v * dnl_dw;
+    const double dvn_ddv = model.a13;
 
-    const double dwn_dw = A22 - GAMMA_W * CF3 * dsw;
-    const double dwn_ddw = A24;
+    const double dwn_dw = model.a22 - model.gamma_w * model.cf3 * dsw;
+    const double dwn_ddw = model.a24;
 
     const double dth1_dth = 1.0;
     const double dth1_dw = (1.0 + dwn_dw) * h;
@@ -414,10 +415,10 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, MatXX& f
     fx(ix::THETA, ix::W) = dth1_dw;
     fx(ix::THETA, ix::DW) = dth1_ddw;
 
-    fx(ix::XH, ix::XH) = A00;
-    fx(ix::XH, ix::V) = A01 + GNL_XH * dnl_dv;
-    fx(ix::XH, ix::W) = GNL_XH * dnl_dw;
-    fx(ix::XH, ix::DV) = A03;
+    fx(ix::XH, ix::XH) = model.a00;
+    fx(ix::XH, ix::V) = model.a01 + model.gnl_xh * dnl_dv;
+    fx(ix::XH, ix::W) = model.gnl_xh * dnl_dw;
+    fx(ix::XH, ix::DV) = model.a03;
 
     fx(ix::V, ix::XH) = dvn_dxh;
     fx(ix::V, ix::V) = dvn_dv;
@@ -460,13 +461,13 @@ FollowProblem::FollowProblem(
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec FollowProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    StateVec xn = mpc_dynamics(x, u);
+    StateVec xn = mpc_dynamics(x, u, p_.model.dynamics);
     xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, ref_cps_);
     return xn;
 }
 
 void FollowProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, dfx, dfu);
+    mpc_dynamics_jacobians(x, u, p_.model.dynamics, dfx, dfu);
 
     constexpr double eps = 1e-5;
     for (int i = 0; i < MPC_NX; ++i) {
@@ -556,7 +557,7 @@ namespace {
         r(13) = w.q_v_final * relu(v_act - v_dec);
 
         if (p.energy.enable) {
-            const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+            const double pwr = predict_power(v_act, w_act, 0.0, 0.0, p.model.power);
             const double thr = std::max(p.energy.threshold, 1.0);
             const double beta = std::max(p.energy.softplus_beta, 1e-6);
             const double excess = (pwr - rfr_pwr_limit) / thr;
@@ -660,11 +661,11 @@ StopProblem::StopProblem(
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec StopProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    return mpc_dynamics(x, u);
+    return mpc_dynamics(x, u, p_.model.dynamics);
 }
 
 void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, dfx, dfu);
+    mpc_dynamics_jacobians(x, u, p_.model.dynamics, dfx, dfu);
 }
 
 ControlVec StopProblem::u_lower() const {
@@ -725,7 +726,7 @@ StopResidualVec stop_residual_impl(
     r(9) = w.vel_on_step * dir_norm * dir_norm * std::abs(v_act - target_vel);
 
     if (p.energy.enable) {
-        const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+        const double pwr = predict_power(v_act, w_act, 0.0, 0.0, p.model.power);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
@@ -816,11 +817,11 @@ RecoveryProblem::RecoveryProblem(
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec RecoveryProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    return mpc_dynamics(x, u);
+    return mpc_dynamics(x, u, p_.model.dynamics);
 }
 
 void RecoveryProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, dfx, dfu);
+    mpc_dynamics_jacobians(x, u, p_.model.dynamics, dfx, dfu);
 }
 
 ControlVec RecoveryProblem::u_lower() const {
@@ -883,7 +884,7 @@ RecoveryResidualVec recovery_residual_impl(
     r(11) = w.step * dir_norm;
 
     if (p.energy.enable) {
-        const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+        const double pwr = predict_power(v_act, w_act, 0.0, 0.0, p.model.power);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
@@ -981,11 +982,11 @@ FixedProblem::FixedProblem(
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec FixedProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    return mpc_dynamics(x, u);
+    return mpc_dynamics(x, u, p_.model.dynamics);
 }
 
 void FixedProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, dfx, dfu);
+    mpc_dynamics_jacobians(x, u, p_.model.dynamics, dfx, dfu);
 }
 
 ControlVec FixedProblem::u_lower() const {
@@ -1051,7 +1052,7 @@ FixedResidualVec fixed_residual_impl(
     r(11) = w.step * dir_norm;
 
     if (p.energy.enable) {
-        const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+        const double pwr = predict_power(v_act, w_act, 0.0, 0.0, p.model.power);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
@@ -1226,17 +1227,18 @@ void MPCSolver::set_energy_state(double remaining_energy, double rfr_pwr_limit) 
 
 void MPCSolver::update_observer(double v_act, double w_act) {
     if (!observer_initialized_) {
-        x_h_hat_ = XH0;
+        x_h_hat_ = params_.model.dynamics.xh0;
         prev_v_act_ = v_act;
         prev_w_act_ = w_act;
         observer_initialized_ = true;
         return;
     }
-    const double sv_prev = std::tanh(prev_v_act_ / SGN_EPS);
-    const double nl_prev = CF1 * sv_prev + CF2 * prev_v_act_ * std::abs(prev_w_act_);
-    const double xh_pred = A00 * x_h_hat_ + A01 * prev_v_act_ + A03 * last_cmd_.x() + GNL_XH * nl_prev;
-    const double v_pred = A10 * x_h_hat_ + A11 * prev_v_act_ + A13 * last_cmd_.x() + GNL_V * nl_prev;
-    x_h_hat_ = xh_pred + OBS_L * (v_act - v_pred);
+    const auto& model = params_.model.dynamics;
+    const double sv_prev = std::tanh(prev_v_act_ / model.sgn_eps);
+    const double nl_prev = model.cf1 * sv_prev + model.cf2 * prev_v_act_ * std::abs(prev_w_act_);
+    const double xh_pred = model.a00 * x_h_hat_ + model.a01 * prev_v_act_ + model.a03 * last_cmd_.x() + model.gnl_xh * nl_prev;
+    const double v_pred = model.a10 * x_h_hat_ + model.a11 * prev_v_act_ + model.a13 * last_cmd_.x() + model.gnl_v * nl_prev;
+    x_h_hat_ = xh_pred + model.obs_l * (v_act - v_pred);
     prev_v_act_ = v_act;
     prev_w_act_ = w_act;
 }

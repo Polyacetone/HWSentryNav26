@@ -19,50 +19,41 @@ constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 
-// ── ZOH-discretized model constants (auto-generated) ──
-constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = 0.117776965182103;
-constexpr double CF2       = -0.07934663936437283;
-constexpr double CF3       = -0.035922362597109334;
-constexpr double XH0       = -0.1741781626557545;
-// v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.7843676355861557;
-constexpr double A01       = -0.09648336780318062;
-constexpr double A03       = 0.0037319689718094814;
-constexpr double A10       = 0.3987787787629378;
-constexpr double A11       = 1.1336902129030175;
-constexpr double A13       = 0.0351881685023933;
-// nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.002444300627739186;
-constexpr double GNL_V     = 0.05342869358100494;
-// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.553737 (positive!)
-constexpr double A22       = 0.5537368531002395;
-constexpr double A24       = 0.44626314689976054;
-constexpr double GAMMA_W   = 0.03775072274445112;
-// hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = 0.46233060886060057;
-
-// ── Power model coefficients (auto-generated from identification) ──
 constexpr int PWR_N = 12;
 constexpr double PWR_EPS2 = 0.05 * 0.05;
-constexpr double PWR_C[PWR_N] = {
-    2.1819886751e-00,  // c0: 1 (bias)
-    3.7554288560e+01,  // c1: v·a
-    9.0037590352e-01,  // c2: ω·α
-    3.7473397433e+00,  // c3: a²
-    5.3351521229e-02,  // c4: α²
-    1.3085009538e+01,  // c5: |v|
-    3.7559074150e+00,  // c6: |ω|
-    7.7240176266e+00,  // c7: v²
-    2.8778608500e-01,  // c8: ω²
-    1.0022176768e+01,  // c9: |a|
-    0.0000000000e+00,  // c10: |α|
-    4.7233251821e+00  // c11: |v·ω|
-};
 
 // 弧长查找表类型
 constexpr int ARCLENGTH_TABLE_SIZE = 128;
 using ArclengthTable = std::array<double, ARCLENGTH_TABLE_SIZE + 1>;
+
+struct GreyBoxDynamicsParams {
+    double sgn_eps;
+    double cf1;
+    double cf2;
+    double cf3;
+    double xh0;
+    double a00;
+    double a01;
+    double a03;
+    double a10;
+    double a11;
+    double a13;
+    double gnl_xh;
+    double gnl_v;
+    double a22;
+    double a24;
+    double gamma_w;
+    double obs_l;
+};
+
+struct PowerModelParams {
+    std::array<double, PWR_N> coeffs;
+};
+
+struct GreyBoxModelParams {
+    GreyBoxDynamicsParams dynamics;
+    PowerModelParams power;
+};
 
 // ═══════════════════════════════════════════════════════════════
 //  State / control vector indexing
@@ -257,6 +248,7 @@ struct MPCParams {
 
     EnergyParams energy;
     MultiHypothesisParams mh_params;
+    GreyBoxModelParams model;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -323,10 +315,10 @@ using MatXX = Eigen::Matrix<double, MPC_NX, MPC_NX>;
 using MatXU = Eigen::Matrix<double, MPC_NX, MPC_NU>;
 
 /// 通用离散动力学，车辆状态按模型推进，PATH_U 默认保持不变。
-StateVec mpc_dynamics(const StateVec& x, const ControlVec& u);
+StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const GreyBoxDynamicsParams& model);
 
 /// 动力学雅可比: fx = ∂f/∂x, fu = ∂f/∂u
-void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu);
+void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& u, const GreyBoxDynamicsParams& model, MatXX& fx, MatXU& fu);
 
 // ═══════════════════════════════════════════════════════════════
 //  FDDP Problem 类型 — Follow

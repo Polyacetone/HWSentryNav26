@@ -24,13 +24,14 @@ def debug_prefix():
 
 def generate_launch_description():
     config_yaml = os.path.join(get_package_share_directory('mpc_controller'), 'config', 'params.yaml')
+    model_yaml = os.path.join(get_package_share_directory('mpc_controller'), 'config', 'model.yaml')
     return LaunchDescription([
         Node(
             package="mpc_controller",
             executable="mpc_controller_node",
             name="mpc_controller",
             emulate_tty=True,
-            parameters=[config_yaml],
+            parameters=[config_yaml, model_yaml],
             prefix=debug_prefix(),
         ),
     ])

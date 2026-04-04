@@ -28,46 +28,39 @@ void StepRoutingMask::initialize(const CostMap& cost_map, DirectionMap::ConstPtr
     build_kernel(base_direction_map_->resolution);
 
     // 默认先生成一次“无路径经过”的输出层
-    update(std::nullopt);
+    update({});
 }
 
-void StepRoutingMask::update(const std::optional<SplineD>& global_path) {
+void StepRoutingMask::update(const std::vector<Eigen::Vector2d>& local_trajectory) {
     if (!base_direction_map_) return;
 
     std::vector<double> max_alpha(base_step_cost_data_.size(), 0.0);
 
-    if (global_path && !kernel_.empty()) {
-        const auto& spline = *global_path;
-        const double length = approximate_path_length(spline);
-        if (length > 0.0) {
-            const double sample_spacing = base_direction_map_->resolution * 0.5;
-            const int samples = std::max(1, static_cast<int>(std::ceil(length / sample_spacing)));
+    if (local_trajectory.size() >= 2 && !kernel_.empty()) {
+        for (size_t i = 0; i + 1 < local_trajectory.size(); ++i) {
+            const Eigen::Vector2d& p0 = local_trajectory[i];
+            const Eigen::Vector2d& p1 = local_trajectory[i + 1];
+            Eigen::Vector2d tangent = p1 - p0;
+            const double seg_len = tangent.norm();
+            if (seg_len < 1e-6) continue;
+            tangent /= seg_len;
 
-            for (int i = 0; i <= samples; ++i) {
-                const double u = static_cast<double>(i) / static_cast<double>(samples);
-                const Eigen::Vector2d pos = spline.evaluate(u);
+            // 在线段中点处采样
+            const Eigen::Vector2d pos = 0.5 * (p0 + p1);
+            const Eigen::Vector2d gc_dir = base_direction_map_->map_coord_to_grid(pos);
+            if (!base_direction_map_->is_valid_coord(gc_dir)) continue;
 
-                Eigen::Vector2d tangent = spline.derivative(u, 1);
-                const double tangent_norm = tangent.norm();
-                if (tangent_norm < 1e-6) continue;
-                tangent /= tangent_norm;
+            const Eigen::Vector2d dir = base_direction_map_->interpolate(gc_dir);
+            const double dot = std::abs(tangent.dot(dir));
+            if (dot <= params_.path_align_dot_threshold) continue;
 
-                const Eigen::Vector2d gc_dir = base_direction_map_->map_coord_to_grid(pos);
-                if (!base_direction_map_->is_valid_coord(gc_dir)) continue;
+            const Eigen::Vector2i erase_center{
+                static_cast<int>(std::round(gc_dir.x())),
+                static_cast<int>(std::round(gc_dir.y()))
+            };
+            if (!base_direction_map_->is_valid_coord(erase_center)) continue;
 
-                const Eigen::Vector2d dir = base_direction_map_->interpolate(gc_dir);
-                const double dot = std::abs(tangent.dot(dir));
-                if (dot <= params_.path_align_dot_threshold) continue;
-
-                const Eigen::Vector2d gc_erase = gc_dir;
-                const Eigen::Vector2i erase_center{
-                    static_cast<int>(std::round(gc_erase.x())),
-                    static_cast<int>(std::round(gc_erase.y()))
-                };
-                if (!base_direction_map_->is_valid_coord(erase_center)) continue;
-
-                apply_kernel_at(erase_center, max_alpha);
-            }
+            apply_kernel_at(erase_center, max_alpha);
         }
     }
 
@@ -108,14 +101,10 @@ void StepRoutingMask::update(const std::optional<SplineD>& global_path) {
     );
 }
 
-double StepRoutingMask::approximate_path_length(const SplineD& spline) const {
-    const int samples = std::max(1, params_.length_num_samples);
+double StepRoutingMask::approximate_trajectory_length(const std::vector<Eigen::Vector2d>& trajectory) const {
     double len = 0.0;
-    const double du = 1.0 / static_cast<double>(samples);
-    for (int i = 0; i < samples; ++i) {
-        const double u = (static_cast<double>(i) + 0.5) * du;
-        const Eigen::Vector2d d1 = spline.derivative(u, 1);
-        len += d1.norm() * du;
+    for (size_t i = 1; i < trajectory.size(); ++i) {
+        len += (trajectory[i] - trajectory[i - 1]).norm();
     }
     return len;
 }
