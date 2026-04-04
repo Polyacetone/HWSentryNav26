@@ -1228,7 +1228,7 @@ class WheelLegLqrFollowSimNode(Node):
     def _pub_cloud(self) -> None:
         now = self.get_clock().now()
         radius = 0.3
-        period = 10.0
+        period = 3.0
         cx = 9.0
         cz = 0.2
         cy = 6.0 + 0.5 * math.sin(2.0 * math.pi * now.nanoseconds / 1e9 / period)

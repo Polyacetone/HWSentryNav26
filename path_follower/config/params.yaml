@@ -4,6 +4,7 @@
     global_direction_map_sub_topic: "/map_server/global_direction_map"
     global_cost_map_sub_topic: "/map_server/global_cost_map"
     local_cost_map_sub_topic: "/map_server/local_cost_map"
+    predicted_cost_maps_sub_topic: "/map_server/predicted_cost_maps"
     comp_stage_sub_topic: "/serial_bridge/comp_stage"
     chassis_status_sub_topic: "/serial_bridge/chassis_status"
     spin_cmd_sub_topic: "/decision/spin_cmd"
@@ -21,6 +22,9 @@
       stop_threshold_dist: 0.5 # 停止距离 (m)
       stop_threshold_u: 0.99 # 停止样条参数u (0~1)
       remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
+
+    prediction:
+      decay_factor: 0.8 # 预测代价时间衰减因子，prediction[i] 的代价乘以 decay^i；越小未来预测影响越弱
 
     step_mask: # 台阶路径掩码参数（同时作用于台阶额外代价层与台阶方向场）
       path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积阈值，>= 认为路径经过台阶（触发掩码）

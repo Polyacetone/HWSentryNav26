@@ -13,6 +13,7 @@
 #include <std_msgs/msg/float64.hpp>
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
+#include <interfaces/msg/predicted_cost_maps.hpp>
 #include <interfaces/msg/chassis_cmd.hpp>
 #include <interfaces/msg/comp_stage.hpp>
 #include <interfaces/msg/global_path.hpp>
@@ -37,6 +38,7 @@ private:
     void control_points_callback(const interfaces::msg::GlobalPath::SharedPtr msg);
     void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
     void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+    void predicted_cost_maps_callback(const interfaces::msg::PredictedCostMaps::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
     void control_timer_callback();
 
@@ -55,6 +57,7 @@ private:
     rclcpp::Subscription<interfaces::msg::GlobalPath>::SharedPtr control_points_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
+    rclcpp::Subscription<interfaces::msg::PredictedCostMaps>::SharedPtr predicted_cost_maps_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<interfaces::msg::SpinCmd>::SharedPtr spin_cmd_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
@@ -72,6 +75,7 @@ private:
     // ─── 参数 ───
     bool enable_debug_;
     double remaining_energy_filter_alpha_ = 1.0;  // 一阶惯性滤波系数
+    double prediction_decay_factor_ = 0.8;        // 预测代价时间衰减因子
 
     // ─── 核心组件 ───
     std::unique_ptr<MainController> nav_controller_;
@@ -82,7 +86,7 @@ private:
     DirectionMap::ConstPtr masked_direction_map_;
 
     // ─── 缓存数据 ───
-    CostMap::ConstPtr global_cost_map_, local_cost_map_;
+    CostMap::ConstPtr global_cost_map_, current_local_cost_map_, predicted_local_cost_map_;
     CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
@@ -362,6 +366,12 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { local_cost_map_callback(msg); }
     );
 
+    predicted_cost_maps_sub_ = create_subscription<interfaces::msg::PredictedCostMaps>(
+        declare_parameter<std::string>("predicted_cost_maps_sub_topic"), 1,
+        [this](const interfaces::msg::PredictedCostMaps::SharedPtr msg) { predicted_cost_maps_callback(msg); }
+    );
+    prediction_decay_factor_ = declare_parameter<double>("prediction.decay_factor");
+
     control_points_sub_ = create_subscription<interfaces::msg::GlobalPath>(
         declare_parameter<std::string>("control_points_sub_topic"), 1,
         [this](const interfaces::msg::GlobalPath::SharedPtr msg) { control_points_callback(msg); }
@@ -447,7 +457,34 @@ void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedP
 
 void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     if (!global_cost_map_) return;
-    local_cost_map_ = std::make_shared<CostMap>(*msg);
+    current_local_cost_map_ = std::make_shared<CostMap>(*msg);
+    update_masked_cost_maps();
+}
+
+void PathFollowerNode::predicted_cost_maps_callback(const interfaces::msg::PredictedCostMaps::SharedPtr msg) {
+    if (!global_cost_map_ || msg->maps.empty()) return;
+    const int w = global_cost_map_->width;
+    const int h = global_cost_map_->height;
+    const auto total = static_cast<size_t>(w * h);
+
+    // maps[0] 为当前帧代价图，后续为预测；取时间衰减加权 max 作为复合代价图
+    std::vector<uint8_t> composite(total, 0);
+    for (size_t i = 0; i < msg->maps.size(); i++) {
+        const auto& map_data = msg->maps[i].data;
+        if (map_data.size() != total) continue;
+        const double decay = std::pow(prediction_decay_factor_, static_cast<double>(i));
+        for (size_t j = 0; j < total; j++) {
+            const auto raw = static_cast<uint8_t>(map_data[j]);
+            const auto scaled = static_cast<uint8_t>(std::min(static_cast<double>(raw) * decay, 255.0));
+            if (scaled > composite[j]) composite[j] = scaled;
+        }
+    }
+
+    predicted_local_cost_map_ = std::make_shared<CostMap>(
+        w, h, global_cost_map_->resolution,
+        global_cost_map_->origin_x, global_cost_map_->origin_y,
+        composite
+    );
     update_masked_cost_maps();
 }
 
@@ -477,8 +514,9 @@ void PathFollowerNode::update_masked_cost_maps() {
     try {
         if (step_cost_layer_) {
             masked_global_cost_map_ = std::make_shared<CostMap>(global_cost_map_->merge(*step_cost_layer_));
-            if (local_cost_map_) {
-                final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*local_cost_map_));
+            const CostMap::ConstPtr dynamic_local_cost_map = predicted_local_cost_map_ ? predicted_local_cost_map_ : current_local_cost_map_;
+            if (dynamic_local_cost_map) {
+                final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*dynamic_local_cost_map));
             } else {
                 final_cost_map_ = masked_global_cost_map_;
             }

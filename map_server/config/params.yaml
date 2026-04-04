@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     map_resolution: 0.1 # 地图的每格大小，单位m
-    num_threads: 2 # 用于点云处理的线程数
+    num_threads: 2 # 用于点云处理和粒子滤波的线程数
 
     debug:
       enable: true # 是否启用调试模式
@@ -24,9 +24,9 @@
     local_map:
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       cost_map_pub_topic: "/map_server/local_cost_map" # 局部代价地图发布话题名称
-      cloud_accumulate_frames: 10 # 局部点云累积帧数
+      cloud_accumulate_frames: 3 # 局部点云累积帧数。启用 DOGMa 时不要太大，否则移动障碍物会先被时域拖影再拿去做预测
       roi_xy_radius_min: 0.4 # 局部点云ROI的xy平面半径最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
-      roi_xy_radius_max: 4.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
+      roi_xy_radius_max: 5.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_max: 0.2 # 局部点云ROI的z轴最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_min: -0.55 # 局部点云ROI的z轴最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m
@@ -42,3 +42,21 @@
         inscribed_radius: 0.3 # 机器人内切圆半径，单位m
         cost_scaling_factor: 8.0 # 代价缩放因子
         obstacle_threshold: 100 # 超过该值的格子被视为障碍物
+
+    dogma: # DOGMa 粒子滤波预测参数
+      predicted_cost_maps_pub_topic: "/map_server/predicted_cost_maps" # 预测代价地图发布话题
+      num_particles_per_cell: 16 # 新出现占据栅格出生的粒子数
+      persistent_birth_count: 0 # 持续占据栅格每帧补充粒子数。默认关闭，避免稳定障碍物持续变厚
+      birth_velocity_range: 3.0 # 预测允许的最大速度 (m/s)。同时用于连通域匹配门限，建议接近真实最大速度
+      velocity_noise_std: 0.05 # 速度随机游走/出生扰动 σ (m/s每次更新)。越小越稳，但转向跟随会更慢
+      free_decay: 0.35 # 未观测时粒子存在置信度衰减因子。越小离开ROI后消失越快
+      occupied_boost: 1.2 # 观测命中时粒子存在置信度提升因子。越大收敛越快，但更容易抖
+      velocity_correction_gain: 0.15 # 观测速度对粒子速度的校正增益。越小越稳但更慢
+      unobserved_velocity_damping: 0.85 # 未观测时的速度阻尼，抑制离开ROI后的外推发散
+      min_particle_confidence: 0.05 # 粒子最小存在置信度，低于该值直接删除
+      max_unseen_updates: 5 # 连续未观测超过该次数后删除粒子
+      resample_ess_ratio: 0.5 # ESS/N 低于此值触发重采样
+      max_particles: 6000 # 粒子总数上限
+      prediction_steps: 5 # 未来预测步数
+      prediction_dt: 0.2 # 预测步长 (s)，prediction_steps × prediction_dt = 总预测时长
+      occupancy_threshold: 4.0 # 预测占据阈值（加权粒子计数），越低越容易出现淡灰扩散尾迹

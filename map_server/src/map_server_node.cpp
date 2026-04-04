@@ -12,11 +12,13 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <interfaces/msg/robot_status.hpp>
+#include <interfaces/msg/predicted_cost_maps.hpp>
 #include <common_utils/convert.hpp>
 #include <small_gicp/ann/kdtree_omp.hpp>
 #include <small_gicp/points/point_cloud.hpp>
 #include <small_gicp/util/downsampling_omp.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
+#include <map_server/dogma_predictor.hpp>
 
 namespace map_server {
 class MapServerNode: public rclcpp::Node {
@@ -64,12 +66,18 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr global_direction_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_pub_;
+    rclcpp::Publisher<interfaces::msg::PredictedCostMaps>::SharedPtr predicted_cost_maps_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_dynamic_points_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_accumulated_cloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_global_cloud_pub_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     rclcpp::TimerBase::SharedPtr timer_;
+
+    // DOGMa 预测
+    DOGMaParams dogma_params_;
+    std::unique_ptr<DOGMaPredictor> dogma_predictor_;
+    std::chrono::steady_clock::time_point last_dogma_update_time_;
 
     void timer_callback();
     void local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg);
@@ -80,8 +88,10 @@ private:
     small_gicp::PointCloud remove_statistical_outliers(const small_gicp::PointCloud& cloud) const;
     small_gicp::PointCloud filter_points_by_normal_orientation(const small_gicp::PointCloud& cloud) const;
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
+    cv::Mat create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const;
     cv::Mat dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const;
     cv::Mat inflate_cost_map(const cv::Mat& cost_map) const;
+    void fill_occupancy_grid(const cv::Mat& cost_map, const rclcpp::Time& stamp, nav_msgs::msg::OccupancyGrid& grid) const;
     void pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher) const;
     void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp, const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher) const;
     void pub_cloud(const small_gicp::PointCloud& cloud, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher) const;
@@ -129,6 +139,28 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
+
+    // DOGMa 预测参数
+    dogma_params_ = {
+        .num_particles_per_cell = (int)declare_parameter<int>("dogma.num_particles_per_cell"),
+        .persistent_birth_count = (int)declare_parameter<int>("dogma.persistent_birth_count"),
+        .birth_velocity_range = declare_parameter<double>("dogma.birth_velocity_range"),
+        .velocity_noise_std = declare_parameter<double>("dogma.velocity_noise_std"),
+        .free_decay = declare_parameter<double>("dogma.free_decay"),
+        .occupied_boost = declare_parameter<double>("dogma.occupied_boost"),
+        .velocity_correction_gain = declare_parameter<double>("dogma.velocity_correction_gain"),
+        .unobserved_velocity_damping = declare_parameter<double>("dogma.unobserved_velocity_damping"),
+        .min_particle_confidence = declare_parameter<double>("dogma.min_particle_confidence"),
+        .max_unseen_updates = (int)declare_parameter<int>("dogma.max_unseen_updates"),
+        .resample_ess_ratio = declare_parameter<double>("dogma.resample_ess_ratio"),
+        .max_particles = (int)declare_parameter<int>("dogma.max_particles"),
+        .prediction_steps = (int)declare_parameter<int>("dogma.prediction_steps"),
+        .prediction_dt = declare_parameter<double>("dogma.prediction_dt"),
+        .occupancy_threshold = declare_parameter<double>("dogma.occupancy_threshold"),
+        .num_threads = num_threads_
+    };
+    std::string predicted_cost_maps_pub_topic = declare_parameter<std::string>("dogma.predicted_cost_maps_pub_topic");
+    predicted_cost_maps_pub_ = create_publisher<interfaces::msg::PredictedCostMaps>(predicted_cost_maps_pub_topic, 1);
 
     // 加载全局点云
     std::string global_cloud_filename = declare_parameter<std::string>("global_map.cloud_filename");
@@ -268,8 +300,50 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
     RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", dynamic_points.points.size());
 
     // 动态障碍物分析，发布代价地图
-    cv::Mat local_cost_map = dynamic_obstacle_analysis(dynamic_points);
+    cv::Mat obstacle_mask = create_obstacle_mask(dynamic_points);
+    cv::Mat local_cost_map = inflate_cost_map(obstacle_mask);
     pub_cost_map(local_cost_map, msg->header.stamp, local_cost_map_pub_);
+
+    // DOGMa 预测
+    if (!dogma_predictor_) {
+        dogma_predictor_ = std::make_unique<DOGMaPredictor>(map_size_x_, map_size_y_, map_resolution_, dogma_params_);
+        last_dogma_update_time_ = std::chrono::steady_clock::now();
+    }
+    const auto now_time = std::chrono::steady_clock::now();
+    double dt = std::clamp(std::chrono::duration<double>(now_time - last_dogma_update_time_).count(), 0.01, 0.5);
+    last_dogma_update_time_ = now_time;
+
+    const auto dogma_update_begin = std::chrono::steady_clock::now();
+    auto predicted_masks = dogma_predictor_->update(obstacle_mask, dt);
+    const auto dogma_update_end = std::chrono::steady_clock::now();
+
+    // 并行膨胀预测栅格
+    const auto dogma_inflate_begin = std::chrono::steady_clock::now();
+    #pragma omp parallel for num_threads(num_threads_) schedule(static)
+    for (int i = 0; i < static_cast<int>(predicted_masks.size()); i++) {
+        predicted_masks[static_cast<size_t>(i)] = inflate_cost_map(predicted_masks[static_cast<size_t>(i)]);
+    }
+    const auto dogma_inflate_end = std::chrono::steady_clock::now();
+
+    RCLCPP_DEBUG(
+        get_logger(),
+        "DOGMa timing: pf_update=%.3f ms, future_inflate=%.3f ms, particles=%zu, obstacle_cells=%d, dt=%.3f s",
+        std::chrono::duration<double, std::milli>(dogma_update_end - dogma_update_begin).count(),
+        std::chrono::duration<double, std::milli>(dogma_inflate_end - dogma_inflate_begin).count(),
+        dogma_predictor_->particle_count(),
+        cv::countNonZero(obstacle_mask),
+        dt
+    );
+
+    // 打包发布预测代价地图
+    interfaces::msg::PredictedCostMaps pcm;
+    pcm.prediction_dt = dogma_params_.prediction_dt;
+    pcm.maps.resize(predicted_masks.size() + 1);
+    fill_occupancy_grid(local_cost_map, msg->header.stamp, pcm.maps[0]);
+    for (size_t i = 0; i < predicted_masks.size(); i++) {
+        fill_occupancy_grid(predicted_masks[i], msg->header.stamp, pcm.maps[i + 1]);
+    }
+    predicted_cost_maps_pub_->publish(pcm);
 
     // 调试信息发布
     if (enable_debug_) {
@@ -488,20 +562,24 @@ small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(
     return dynamic_points;
 }
 
-cv::Mat MapServerNode::dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const {
-    cv::Mat dynamic_points_count = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
-    cv::Mat local_cost_map = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
+cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const {
+    cv::Mat counts = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
+    cv::Mat mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
     for (const auto& pt : dynamic_points.points) {
         const int map_x = static_cast<int>(pt.x() / map_resolution_);
         const int map_y = static_cast<int>(pt.y() / map_resolution_);
         if (map_x < 0 || map_x >= map_size_x_ || map_y < 0 || map_y >= map_size_y_) continue;
-        uint8_t& cell = dynamic_points_count.at<uint8_t>(map_y, map_x);
+        uint8_t& cell = counts.at<uint8_t>(map_y, map_x);
         cell = (cell < 255) ? (cell + 1) : 255;
         if (cell >= local_map_params_.cell_obstacle_point_threshold) {
-            local_cost_map.at<uint8_t>(map_y, map_x) = 255; // 标记为动态障碍物
+            mask.at<uint8_t>(map_y, map_x) = 255;
         }
     }
-    return inflate_cost_map(local_cost_map);
+    return mask;
+}
+
+cv::Mat MapServerNode::dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const {
+    return inflate_cost_map(create_obstacle_mask(dynamic_points));
 }
 
 small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const {
@@ -585,19 +663,27 @@ void MapServerNode::pub_direction_map(
     publisher->publish(*direction_map_msg);
 }
 
+void MapServerNode::fill_occupancy_grid(
+    const cv::Mat& cost_map,
+    const rclcpp::Time& stamp,
+    nav_msgs::msg::OccupancyGrid& grid
+) const {
+    grid.header.frame_id = "map";
+    grid.header.stamp = stamp;
+    grid.info.resolution = static_cast<float>(map_resolution_);
+    grid.info.height = static_cast<uint32_t>(map_size_y_);
+    grid.info.width = static_cast<uint32_t>(map_size_x_);
+    grid.data.resize(static_cast<size_t>(map_size_x_ * map_size_y_));
+    std::copy(cost_map.data, cost_map.data + map_size_x_ * map_size_y_, grid.data.data());
+}
+
 void MapServerNode::pub_cost_map(
     const cv::Mat& cost_map,
     const rclcpp::Time& stamp,
     const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher
 ) const {
     nav_msgs::msg::OccupancyGrid occupancy_grid;
-    occupancy_grid.header.frame_id = "map";
-    occupancy_grid.header.stamp = stamp;
-    occupancy_grid.info.resolution = static_cast<float>(map_resolution_);
-    occupancy_grid.info.height = static_cast<uint32_t>(map_size_y_);
-    occupancy_grid.info.width = static_cast<uint32_t>(map_size_x_);
-    occupancy_grid.data.resize(static_cast<size_t>(map_size_x_ * map_size_y_));
-    std::copy(cost_map.data, cost_map.data + map_size_x_ * map_size_y_, occupancy_grid.data.data());
+    fill_occupancy_grid(cost_map, stamp, occupancy_grid);
     publisher->publish(occupancy_grid);
 }
 
