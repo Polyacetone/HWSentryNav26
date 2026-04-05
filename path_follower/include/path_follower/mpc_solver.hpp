@@ -220,13 +220,6 @@ struct MPCFixedWeights {
     double step_terminal;
 };
 
-struct ObstacleAwareTrackingParams {
-    double lookahead_distance;   // 沿参考路径前瞻距离 (m)
-    int num_samples;             // 前瞻采样数
-    double cost_threshold;       // 代价超过此值开始降低跟踪权重 (0~255)
-    double min_weight_scale;     // 最小权重缩放因子 (0~1)
-};
-
 struct EnergyParams {
     bool enable;
     double threshold;
@@ -236,8 +229,8 @@ struct EnergyParams {
 
 struct MultiHypothesisParams {
     bool enable;
-    int keep_steps;
     double lateral_offset;
+    double target_ey_penalty;
 };
 
 /// MPC 预测轨迹
@@ -262,7 +255,6 @@ struct MPCParams {
     MPCFixedLimits fixed_limits;
     MPCFixedWeights fixed_weights;
 
-    ObstacleAwareTrackingParams obstacle_aware_tracking;
     EnergyParams energy;
     MultiHypothesisParams mh_params;
 };
@@ -345,13 +337,15 @@ public:
     FollowProblem(
         const std::vector<Eigen::Vector2d>& ref_control_points,
         const MPCParams& params,
-        const CostMapGridView& cost_grid,
+        const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
+        double prediction_dt,
         const DirectionMapGridView& dir_grid,
         const GridInfo& dir_info,
         const ArclengthTable& arclength_table,
         double remaining_energy,
-        double rfr_pwr_limit
+        double rfr_pwr_limit,
+        double target_ey = 0.0
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -376,15 +370,19 @@ public:
     ControlVec u_upper() const;
 
 private:
+    const CostMapGridView& cost_grid_for_step(int k) const;
+
     const std::vector<Eigen::Vector2d>& ref_cps_;
     const MPCParams& p_;
-    const CostMapGridView& cost_grid_;
+    const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
+    double prediction_dt_;
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     const ArclengthTable& arc_table_;
     double remaining_energy_;
     double rfr_pwr_limit_;
+    double target_ey_;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -587,6 +585,8 @@ public:
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
         const CostMap& cost_map,
+        const std::vector<const CostMap*>& per_step_cost_maps,
+        double prediction_dt,
         const DirectionMap& direction_map
     );
 
@@ -659,17 +659,6 @@ private:
         double path_u
     ) const;
     static MPCPrediction extract_prediction(const StateVec* xs, int n);
-
-    // 生成横向偏移的 warm start 控制序列
-    static void generate_lateral_hypothesis(
-        fddp::Solver<FollowProblem>& solver,
-        const fddp::Solver<FollowProblem>& base_solver,
-        const FollowProblem& prob,
-        const StateVec& x0,
-        const std::vector<Eigen::Vector2d>& ref_cps,
-        int keep_steps,
-        double lateral_offset
-    );
 };
 
 }

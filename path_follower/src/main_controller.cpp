@@ -366,7 +366,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->follow_path(
         *input.global_path, input.chassis_pose_map, input.chassis_status,
-        *input.final_cost_map, *input.masked_direction_map
+        *input.final_cost_map, input.per_step_cost_maps, input.prediction_dt,
+        *input.masked_direction_map
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());

@@ -1229,9 +1229,9 @@ class WheelLegLqrFollowSimNode(Node):
         now = self.get_clock().now()
         radius = 0.3
         period = 3.0
-        cx = 9.0
+        cx = 15.0
         cz = 0.2
-        cy = 6.0 + 0.5 * math.sin(2.0 * math.pi * now.nanoseconds / 1e9 / period)
+        cy = 6.0 + 1.5 * math.sin(1.0 * math.pi * now.nanoseconds / 1e9 / period)
 
         # sample sphere surface with grid in spherical coordinates
         num_theta = 40

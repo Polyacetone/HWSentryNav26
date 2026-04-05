@@ -441,23 +441,27 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, MatXX& f
 FollowProblem::FollowProblem(
     const std::vector<Eigen::Vector2d>& ref_control_points,
     const MPCParams& params,
-    const CostMapGridView& cost_grid,
+    const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
+    double prediction_dt,
     const DirectionMapGridView& dir_grid,
     const GridInfo& dir_info,
     const ArclengthTable& arclength_table,
     double remaining_energy,
-    double rfr_pwr_limit
+    double rfr_pwr_limit,
+    double target_ey
 ):
     ref_cps_(ref_control_points),
     p_(params),
-    cost_grid_(cost_grid),
+    step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
+    prediction_dt_(prediction_dt),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     arc_table_(arclength_table),
     remaining_energy_(remaining_energy),
-    rfr_pwr_limit_(rfr_pwr_limit) {}
+    rfr_pwr_limit_(rfr_pwr_limit),
+    target_ey_(target_ey) {}
 
 StateVec FollowProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
     StateVec xn = mpc_dynamics(x, u);
@@ -504,7 +508,8 @@ namespace {
         const GridInfo& ci,
         const DirectionMapGridView& dg,
         const GridInfo& di,
-        double rfr_pwr_limit
+        double rfr_pwr_limit,
+        double target_ey
     ) {
         const auto& w = p.follow_weights;
         const auto& lim = p.follow_limits;
@@ -540,7 +545,7 @@ namespace {
 
         const double dv_lim = lim.acc_max * MPC_DT;
         const double dw_lim = lim.alpha_max * MPC_DT;
-        r(0) = w.q_y * ey;
+        r(0) = w.q_y * (ey - target_ey);
         r(1) = w.q_theta * etheta;
         r(2) = w.q_u * (1.0 - uc);
         r(3) = w.r_v * v_cmd;
@@ -586,19 +591,25 @@ namespace {
 
 } // anonymous namespace
 
+const CostMapGridView& FollowProblem::cost_grid_for_step(int k) const {
+    if (step_cost_grids_.size() <= 1) return step_cost_grids_[0];
+    int idx = static_cast<int>(static_cast<double>(k) * MPC_DT / prediction_dt_);
+    return step_cost_grids_[static_cast<size_t>(std::min(idx, static_cast<int>(step_cost_grids_.size()) - 1))];
+}
+
 double FollowProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
-    (void)k;
     return residual_cost(follow_residual_impl(
         x,
         u,
         ref_cps_,
         arc_table_,
         p_,
-        cost_grid_,
+        cost_grid_for_step(k),
         cost_info_,
         dir_grid_,
         dir_info_,
-        rfr_pwr_limit_
+        rfr_pwr_limit_,
+        target_ey_
     ));
 }
 
@@ -612,7 +623,7 @@ void FollowProblem::running_cost_derivatives(
     Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
     Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
 ) const {
-    (void)k;
+    const auto& cg = cost_grid_for_step(k);
     auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
         return follow_residual_impl(
             xv,
@@ -620,11 +631,12 @@ void FollowProblem::running_cost_derivatives(
             ref_cps_,
             arc_table_,
             p_,
-            cost_grid_,
+            cg,
             cost_info_,
             dir_grid_,
             dir_info_,
-            rfr_pwr_limit_
+            rfr_pwr_limit_,
+            target_ey_
         );
     };
     gauss_newton_running_derivatives<FOLLOW_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
@@ -1133,6 +1145,10 @@ void FixedProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, M
 
 namespace {
 
+double follow_hypothesis_selection_bias(const MultiHypothesisParams& params, double target_ey) {
+    return params.target_ey_penalty * target_ey * target_ey;
+}
+
 template<typename SolverT>
 void shift_warm_start(SolverT& solver) {
     const auto xs_prev = solver.xs;
@@ -1276,93 +1292,13 @@ MPCPrediction MPCSolver::extract_prediction(const StateVec* xs, int n) {
     return pred;
 }
 
-void MPCSolver::generate_lateral_hypothesis(
-    fddp::Solver<FollowProblem>& solver,
-    const fddp::Solver<FollowProblem>& base_solver,
-    const FollowProblem& prob,
-    const StateVec& x0,
-    const std::vector<Eigen::Vector2d>& ref_cps,
-    int keep_steps,
-    double lateral_offset
-) {
-    // 复制基准 solver 的完整轨迹（已 shift 过的 warm start）
-    solver.xs = base_solver.xs;
-    solver.us = base_solver.us;
-
-    const int K = keep_steps;
-    const int N = static_cast<int>(MPC_HORIZON);
-    if (K >= N - 1 || ref_cps.size() < 3) return;
-
-    // 获取 splice point（第 K 步）状态
-    const auto& x_splice = base_solver.xs[static_cast<size_t>(K)];
-    const double splice_v = x_splice(ix::V);
-
-    // 参考路径在末端的位置和方向（目标纵向位置）
-    const auto& x_end = base_solver.xs[static_cast<size_t>(N)];
-    const double end_u = std::clamp(x_end(ix::PATH_U), 0.0, 1.0);
-    Eigen::Vector2d pr_end, d1_end;
-    eval_bspline2(ref_cps, end_u, &pr_end, &d1_end, nullptr);
-    const double end_theta_ref = std::atan2(d1_end.y(), d1_end.x());
-
-    // 在 Frenet 坐标中，构造五次多项式使横向偏移从 0 平滑过渡到 lateral_offset
-    // s ∈ [0, 1]（归一化时间），ey(0)=0, ey'(0)=0, ey''(0)=0，ey(1)=offset, ey'(1)=0, ey''(1)=0
-    // 五次多项式: ey(s) = offset * (10*s³ - 15*s⁴ + 6*s⁵)
-    const int steps_remaining = N - K;
-    const double dt_inv = 1.0 / static_cast<double>(steps_remaining);
-
-    // 目标位置：沿参考方向移动，向法线方向偏移
-    const Eigen::Vector2d tang(std::cos(end_theta_ref), std::sin(end_theta_ref));
-    const Eigen::Vector2d normal(-tang.y(), tang.x());
-
-    for (int i = 0; i <= steps_remaining; ++i) {
-        const double s = static_cast<double>(i) * dt_inv;
-        const double s3 = s * s * s, s4 = s3 * s, s5 = s4 * s;
-        const double ey = lateral_offset * (10.0 * s3 - 15.0 * s4 + 6.0 * s5);
-        const double dey_ds = lateral_offset * (30.0 * s * s - 60.0 * s3 + 30.0 * s4);
-
-        // 线性插值 base 轨迹位置作为纵向参考
-        const auto& x_base = base_solver.xs[static_cast<size_t>(K + i)];
-        const double base_x = x_base(ix::X), base_y = x_base(ix::Y);
-
-        // 横向偏移
-        auto& xs_k = solver.xs[static_cast<size_t>(K + i)];
-        xs_k = x_base;
-        xs_k(ix::X) = base_x + normal.x() * ey;
-        xs_k(ix::Y) = base_y + normal.y() * ey;
-
-        // 微分平坦反推角度：偏移后的航向考虑横向运动
-        if (i < steps_remaining) {
-            const double theta_corr = std::atan2(dey_ds * dt_inv * normal.y(), splice_v * tang.x() + dey_ds * dt_inv * normal.x());
-            xs_k(ix::THETA) = x_base(ix::THETA) + theta_corr * 0.3;
-        }
-    }
-
-    // 用 modified 的状态通过动力学反推控制序列
-    for (int k = K; k < N; ++k) {
-        // 简化：使用 base solver 的控制量，但调整 omega 以匹配修改后的航向
-        solver.us[static_cast<size_t>(k)] = base_solver.us[static_cast<size_t>(k)];
-        if (k + 1 <= N) {
-            const double theta_cur = solver.xs[static_cast<size_t>(k)](ix::THETA);
-            const double theta_next = solver.xs[static_cast<size_t>(k + 1)](ix::THETA);
-            const double dtheta = wrap_pi(theta_next - theta_cur);
-            // 粗略估算所需角速度指令
-            const double w_est = dtheta / MPC_DT;
-            solver.us[static_cast<size_t>(k)](1) = std::clamp(w_est, prob.u_lower()(1), prob.u_upper()(1));
-        }
-    }
-
-    // 从 x0 开始重新前向 rollout 以保证动力学一致性
-    solver.xs[0] = x0;
-    for (int k = 0; k < N; ++k) {
-        solver.xs[static_cast<size_t>(k + 1)] = prob.dynamics(k, solver.xs[static_cast<size_t>(k)], solver.us[static_cast<size_t>(k)]);
-    }
-}
-
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::follow_path(
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const Eigen::Vector2d& chassis_status,
     const CostMap& cost_map,
+    const std::vector<const CostMap*>& per_step_cost_maps,
+    double prediction_dt,
     const DirectionMap& direction_map
 ) {
     const auto& ref_cps = global_path.getControlPoints();
@@ -1398,12 +1334,6 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         )
     );
 
-    const CostMapGridView cg(cost_map);
-    const GridInfo ci = make_grid_info(cost_map);
-    const DirectionMapGridView dg(direction_map);
-    const GridInfo di = make_grid_info(direction_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, u0);
-
     const auto& arc = [&]() -> const ArclengthTable& {
         const int ns = params_.follow_limits.slow_down_num_samples;
         if (prev_arc_samples_ != ns || !same_cps(prev_ref_control_points_, ref_cps)) {
@@ -1414,36 +1344,23 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         return prev_arclength_table_;
     }();
 
-    // ── 局部障碍物感知：前瞻检测并动态缩放跟踪权重 ──
-    const auto& oat = params_.obstacle_aware_tracking;
-    MPCParams effective_params = params_;
-    {
-        double max_cost = 0.0;
-        Eigen::Vector2d prev_pos;
-        eval_bspline2(ref_cps, u0, &prev_pos, nullptr, nullptr);
-        double cum_dist = 0.0;
-        const int n = std::max(1, oat.num_samples);
-        const double u_remain = 1.0 - u0;
-        for (int i = 1; i <= n; i++) {
-            const double u = u0 + u_remain * static_cast<double>(i) / static_cast<double>(n);
-            Eigen::Vector2d pos;
-            eval_bspline2(ref_cps, u, &pos, nullptr, nullptr);
-            cum_dist += (pos - prev_pos).norm();
-            prev_pos = pos;
-            if (cum_dist > oat.lookahead_distance) break;
-            max_cost = std::max(max_cost, eval_cost_bicubic(cg, ci, pos.x(), pos.y()).value);
-        }
-        if (max_cost > oat.cost_threshold) {
-            const double t = std::clamp(
-                (max_cost - oat.cost_threshold) / (255.0 - oat.cost_threshold), 0.0, 1.0
-            );
-            const double scale = 1.0 - t * (1.0 - oat.min_weight_scale);
-            effective_params.follow_weights.q_y *= scale;
-            effective_params.follow_weights.q_theta *= scale;
+    // ── 构建每个预测步的 cost grid view ──
+    std::vector<CostMapGridView> step_cost_grids;
+    if (per_step_cost_maps.empty()) {
+        step_cost_grids.emplace_back(cost_map);
+    } else {
+        for (const auto* cm : per_step_cost_maps) {
+            step_cost_grids.emplace_back(*cm);
         }
     }
+    const double pred_dt = per_step_cost_maps.empty() ? MPC_DT : prediction_dt;
 
-    FollowProblem prob(ref_cps, effective_params, cg, ci, dg, di, arc, remaining_energy_, rfr_pwr_limit_);
+    const GridInfo ci = make_grid_info(cost_map);
+    const DirectionMapGridView dg(direction_map);
+    const GridInfo di = make_grid_info(direction_map);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, u0);
+
+    FollowProblem prob_center(ref_cps, params_, step_cost_grids, ci, pred_dt, dg, di, arc, remaining_energy_, rfr_pwr_limit_, 0.0);
 
     fddp::SolverOptions opts;
     opts.max_iters = 25;
@@ -1451,28 +1368,16 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     opts.tol_cost = 1e-6;
 
     // ── 初始化中心假设 ──
-    initialize_primal_trajectory(follow_solver_, prob, x0, follow_warm_);
+    initialize_primal_trajectory(follow_solver_, prob_center, x0, follow_warm_);
 
     if (params_.mh_params.enable && follow_warm_) {
-        // ── 生成左右偏移假设 ──
-        generate_lateral_hypothesis(
-            follow_solver_left_,
-            follow_solver_,
-            prob,
-            x0,
-            ref_cps,
-            params_.mh_params.keep_steps,
-            -params_.mh_params.lateral_offset
-        );
-        generate_lateral_hypothesis(
-            follow_solver_right_,
-            follow_solver_,
-            prob,
-            x0,
-            ref_cps,
-            params_.mh_params.keep_steps,
-            +params_.mh_params.lateral_offset
-        );
+        // ── 创建左右偏移问题（代价函数中 target_ey 不同） ──
+        FollowProblem prob_left(ref_cps, params_, step_cost_grids, ci, pred_dt, dg, di, arc, remaining_energy_, rfr_pwr_limit_, +params_.mh_params.lateral_offset);
+        FollowProblem prob_right(ref_cps, params_, step_cost_grids, ci, pred_dt, dg, di, arc, remaining_energy_, rfr_pwr_limit_, -params_.mh_params.lateral_offset);
+
+        // 左右 solver 使用各自的 warm start
+        initialize_primal_trajectory(follow_solver_left_, prob_left, x0, follow_warm_);
+        initialize_primal_trajectory(follow_solver_right_, prob_right, x0, follow_warm_);
 
         // ── 并行求解 3 个假设 ──
         std::array<double, 3> costs {};
@@ -1480,43 +1385,39 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         {
             #pragma omp section
             {
-                auto r = follow_solver_.solve(prob, opts);
-                costs[0] = r.cost;
+                auto r = follow_solver_.solve(prob_center, opts);
+                costs[0] = r.cost + follow_hypothesis_selection_bias(params_.mh_params, 0.0);
             }
             #pragma omp section
             {
-                auto r = follow_solver_left_.solve(prob, opts);
-                costs[1] = r.cost;
+                auto r = follow_solver_left_.solve(prob_left, opts);
+                costs[1] = r.cost + follow_hypothesis_selection_bias(params_.mh_params, +params_.mh_params.lateral_offset);
             }
             #pragma omp section
             {
-                auto r = follow_solver_right_.solve(prob, opts);
-                costs[2] = r.cost;
+                auto r = follow_solver_right_.solve(prob_right, opts);
+                costs[2] = r.cost + follow_hypothesis_selection_bias(params_.mh_params, -params_.mh_params.lateral_offset);
             }
         }
 
-        // ── 选取最优 ──
+        // ── 选取最优，将最优解传播回主 solver 以供下帧 warm start ──
         const int best = static_cast<int>(std::min_element(costs.begin(), costs.end()) - costs.begin());
-        auto* best_solver = &follow_solver_;
-        // 将最优解传播回主 solver，使下一帧 warm start 使用最优轨迹
         if (best == 1) {
-            best_solver = &follow_solver_left_;
-            follow_solver_.xs = best_solver->xs;
-            follow_solver_.us = best_solver->us;
+            follow_solver_.xs = follow_solver_left_.xs;
+            follow_solver_.us = follow_solver_left_.us;
         } else if (best == 2) {
-            best_solver = &follow_solver_right_;
-            follow_solver_.xs = best_solver->xs;
-            follow_solver_.us = best_solver->us;
+            follow_solver_.xs = follow_solver_right_.xs;
+            follow_solver_.us = follow_solver_right_.us;
         }
     } else {
         // 单假设求解
-        follow_solver_.solve(prob, opts);
+        follow_solver_.solve(prob_center, opts);
     }
 
     follow_warm_ = true;
     const Eigen::Vector2d cmd(follow_solver_.us[0](0), follow_solver_.us[0](1));
     last_cmd_ = cmd;
-    return std::tuple {cmd, rollout_prediction(prob, follow_solver_, x0)};
+    return std::tuple {cmd, rollout_prediction(prob_center, follow_solver_, x0)};
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::stop(

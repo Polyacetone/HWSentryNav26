@@ -12,9 +12,9 @@
     global_map:
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图
       robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-      blue_nav_map_filename: "RMUL2026blue.png" # 全局导航地图路径（蓝方）
-      red_nav_map_filename: "RMUL2026red.png" # 全局导航地图路径（红方）
-      default_nav_map_filename: "RMUL2026.png" # 获取机器人颜色超时后使用此全局导航地图
+      blue_nav_map_filename: "RMUC2026blue.png" # 全局导航地图路径（蓝方）
+      red_nav_map_filename: "RMUC2026red.png" # 全局导航地图路径（红方）
+      default_nav_map_filename: "RMUC2026.png" # 获取机器人颜色超时后使用此全局导航地图
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
       cloud_filename: "RMUL2026.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
@@ -45,13 +45,13 @@
 
     dogma: # DOGMa 粒子滤波预测参数
       predicted_cost_maps_pub_topic: "/map_server/predicted_cost_maps" # 预测代价地图发布话题
-      num_particles_per_cell: 16 # 新出现占据栅格出生的粒子数
-      persistent_birth_count: 0 # 持续占据栅格每帧补充粒子数。默认关闭，避免稳定障碍物持续变厚
+      num_particles_per_cell: 20 # 新出现占据栅格出生的粒子数
+      persistent_birth_count: 0 # 持续占据栅格每帧补充粒子数
       birth_velocity_range: 3.0 # 预测允许的最大速度 (m/s)。同时用于连通域匹配门限，建议接近真实最大速度
       velocity_noise_std: 0.05 # 速度随机游走/出生扰动 σ (m/s每次更新)。越小越稳，但转向跟随会更慢
       free_decay: 0.35 # 未观测时粒子存在置信度衰减因子。越小离开ROI后消失越快
-      occupied_boost: 1.2 # 观测命中时粒子存在置信度提升因子。越大收敛越快，但更容易抖
-      velocity_correction_gain: 0.15 # 观测速度对粒子速度的校正增益。越小越稳但更慢
+      occupied_boost: 1.1 # 观测命中时粒子存在置信度提升因子。越大收敛越快，但更容易抖
+      velocity_correction_gain: 0.1 # 观测速度对粒子速度的校正增益。越小越稳但更慢
       unobserved_velocity_damping: 0.85 # 未观测时的速度阻尼，抑制离开ROI后的外推发散
       min_particle_confidence: 0.05 # 粒子最小存在置信度，低于该值直接删除
       max_unseen_updates: 5 # 连续未观测超过该次数后删除粒子

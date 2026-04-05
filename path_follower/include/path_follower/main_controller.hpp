@@ -51,6 +51,10 @@ struct ControlInput {
     const CostMap* const masked_global_cost_map; // 全局先验代价地图 + 台阶掩码（不含动态障碍物）
     const DirectionMap* const masked_direction_map; // 全局先验方向场 - 台阶掩码
 
+    // ─── 逐步预测代价地图 ───
+    std::vector<const CostMap*> per_step_cost_maps; // 每个预测时间步的代价地图（可为空）
+    double prediction_dt = 0.0; // 预测步长 (s)
+
     // ─── 时间 ───
     std::chrono::steady_clock::time_point stamp;
 };

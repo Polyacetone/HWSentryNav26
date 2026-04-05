@@ -75,7 +75,7 @@ private:
     // ─── 参数 ───
     bool enable_debug_;
     double remaining_energy_filter_alpha_ = 1.0;  // 一阶惯性滤波系数
-    double prediction_decay_factor_ = 0.8;        // 预测代价时间衰减因子
+    double prediction_dt_ = 0.2;                  // 预测步长 (s)
 
     // ─── 核心组件 ───
     std::unique_ptr<MainController> nav_controller_;
@@ -86,7 +86,9 @@ private:
     DirectionMap::ConstPtr masked_direction_map_;
 
     // ─── 缓存数据 ───
-    CostMap::ConstPtr global_cost_map_, current_local_cost_map_, predicted_local_cost_map_;
+    CostMap::ConstPtr global_cost_map_, current_local_cost_map_;
+    std::vector<CostMap::ConstPtr> prediction_maps_;           // 逐步预测代价地图（动态障碍物）
+    std::vector<CostMap::ConstPtr> per_step_final_cost_maps_;  // 逐步融合后的最终代价地图
     CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
@@ -238,12 +240,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .obstacle_terminal = declare_parameter<double>("mpc.fixed.weights.obstacle_terminal"),
             .step_terminal = declare_parameter<double>("mpc.fixed.weights.step_terminal")
         },
-        .obstacle_aware_tracking = {
-            .lookahead_distance = declare_parameter<double>("mpc.follow_path.obstacle_aware_tracking.lookahead_distance"),
-            .num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.obstacle_aware_tracking.num_samples")),
-            .cost_threshold = declare_parameter<double>("mpc.follow_path.obstacle_aware_tracking.cost_threshold"),
-            .min_weight_scale = declare_parameter<double>("mpc.follow_path.obstacle_aware_tracking.min_weight_scale")
-        },
         .energy = {
             .enable = declare_parameter<bool>("mpc.energy.enable"),
             .threshold = declare_parameter<double>("mpc.energy.threshold"),
@@ -252,8 +248,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         },
         .mh_params = {
             .enable = declare_parameter<bool>("mpc.multi_hypothesis.enable"),
-            .keep_steps = static_cast<int>(declare_parameter<int>("mpc.multi_hypothesis.keep_steps")),
-            .lateral_offset = declare_parameter<double>("mpc.multi_hypothesis.lateral_offset")
+            .lateral_offset = declare_parameter<double>("mpc.multi_hypothesis.lateral_offset"),
+            .target_ey_penalty = declare_parameter<double>("mpc.multi_hypothesis.target_ey_penalty")
         }
     };
 
@@ -370,7 +366,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         declare_parameter<std::string>("predicted_cost_maps_sub_topic"), 1,
         [this](const interfaces::msg::PredictedCostMaps::SharedPtr msg) { predicted_cost_maps_callback(msg); }
     );
-    prediction_decay_factor_ = declare_parameter<double>("prediction.decay_factor");
 
     control_points_sub_ = create_subscription<interfaces::msg::GlobalPath>(
         declare_parameter<std::string>("control_points_sub_topic"), 1,
@@ -467,24 +462,20 @@ void PathFollowerNode::predicted_cost_maps_callback(const interfaces::msg::Predi
     const int h = global_cost_map_->height;
     const auto total = static_cast<size_t>(w * h);
 
-    // maps[0] 为当前帧代价图，后续为预测；取时间衰减加权 max 作为复合代价图
-    std::vector<uint8_t> composite(total, 0);
-    for (size_t i = 0; i < msg->maps.size(); i++) {
-        const auto& map_data = msg->maps[i].data;
-        if (map_data.size() != total) continue;
-        const double decay = std::pow(prediction_decay_factor_, static_cast<double>(i));
+    prediction_dt_ = msg->prediction_dt;
+    prediction_maps_.clear();
+    for (const auto& map : msg->maps) {
+        if (map.data.size() != total) continue;
+        std::vector<uint8_t> data(total);
         for (size_t j = 0; j < total; j++) {
-            const auto raw = static_cast<uint8_t>(map_data[j]);
-            const auto scaled = static_cast<uint8_t>(std::min(static_cast<double>(raw) * decay, 255.0));
-            if (scaled > composite[j]) composite[j] = scaled;
+            data[j] = static_cast<uint8_t>(map.data[j]);
         }
+        prediction_maps_.push_back(std::make_shared<CostMap>(
+            w, h, global_cost_map_->resolution,
+            global_cost_map_->origin_x, global_cost_map_->origin_y,
+            data
+        ));
     }
-
-    predicted_local_cost_map_ = std::make_shared<CostMap>(
-        w, h, global_cost_map_->resolution,
-        global_cost_map_->origin_x, global_cost_map_->origin_y,
-        composite
-    );
     update_masked_cost_maps();
 }
 
@@ -514,9 +505,18 @@ void PathFollowerNode::update_masked_cost_maps() {
     try {
         if (step_cost_layer_) {
             masked_global_cost_map_ = std::make_shared<CostMap>(global_cost_map_->merge(*step_cost_layer_));
-            const CostMap::ConstPtr dynamic_local_cost_map = predicted_local_cost_map_ ? predicted_local_cost_map_ : current_local_cost_map_;
-            if (dynamic_local_cost_map) {
-                final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*dynamic_local_cost_map));
+
+            // 构建逐步预测代价地图
+            per_step_final_cost_maps_.clear();
+            if (!prediction_maps_.empty()) {
+                for (const auto& pred_map : prediction_maps_) {
+                    per_step_final_cost_maps_.push_back(
+                        std::make_shared<CostMap>(masked_global_cost_map_->merge(*pred_map))
+                    );
+                }
+                final_cost_map_ = per_step_final_cost_maps_[0];
+            } else if (current_local_cost_map_) {
+                final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*current_local_cost_map_));
             } else {
                 final_cost_map_ = masked_global_cost_map_;
             }
@@ -550,6 +550,12 @@ void PathFollowerNode::control_timer_callback() {
     Eigen::Vector3d chassis_pose_map;
     if (!get_chassis_pose(chassis_pose_map)) return;
 
+    // 构建逐步代价地图指针数组
+    std::vector<const CostMap*> per_step_ptrs;
+    for (const auto& m : per_step_final_cost_maps_) {
+        per_step_ptrs.push_back(m.get());
+    }
+
     // 组装控制输入
     const ControlInput input = {
         .global_path = global_path_,
@@ -569,6 +575,8 @@ void PathFollowerNode::control_timer_callback() {
         .final_cost_map = final_cost_map_.get(),
         .masked_global_cost_map = masked_global_cost_map_.get(),
         .masked_direction_map = masked_direction_map_.get(),
+        .per_step_cost_maps = std::move(per_step_ptrs),
+        .prediction_dt = prediction_dt_,
         .stamp = std::chrono::steady_clock::now()
     };
 
