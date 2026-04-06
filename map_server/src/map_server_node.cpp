@@ -18,7 +18,7 @@
 #include <small_gicp/points/point_cloud.hpp>
 #include <small_gicp/util/downsampling_omp.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
-#include <map_server/dogma_predictor.hpp>
+#include <map_server/object_tracker.hpp>
 
 namespace map_server {
 class MapServerNode: public rclcpp::Node {
@@ -38,8 +38,6 @@ private:
         double roi_z_max;
         double roi_z_min;
         double downsample_voxel_size;
-        int sor_num_neighbors;
-        double sor_std_mul;
         struct {
             double distance_threshold;
         } with_global_cloud;
@@ -47,6 +45,8 @@ private:
             int normal_num_neighbors;
             double vertical_normal_abs_z_max;
         } without_global_cloud;
+        int sor_num_neighbors;
+        double sor_std_mul;
         int cell_obstacle_point_threshold;
         struct {
             double inflation_radius;
@@ -76,19 +76,18 @@ private:
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     rclcpp::TimerBase::SharedPtr timer_;
 
-    // DOGMa 预测
-    DOGMaParams dogma_params_;
-    std::unique_ptr<DOGMaPredictor> dogma_predictor_;
-    std::chrono::steady_clock::time_point last_dogma_update_time_;
+    // 目标跟踪预测
+    ObjectTrackerParams tracker_params_;
+    std::unique_ptr<ObjectTracker> object_tracker_;
+    std::chrono::steady_clock::time_point last_tracker_update_time_;
 
     void timer_callback();
     void local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg);
     small_gicp::PointCloud::Ptr preprocess_cloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) const;
-    small_gicp::PointCloud extract_dynamic_points_with_global_map(const small_gicp::PointCloud& accumulated_cloud) const;
-    small_gicp::PointCloud extract_dynamic_points_without_global_map(const small_gicp::PointCloud& accumulated_cloud) const;
+    small_gicp::PointCloud extract_dynamic_points_with_global_map(const small_gicp::PointCloud& cloud) const;
+    small_gicp::PointCloud extract_dynamic_points_without_global_map(const small_gicp::PointCloud& cloud) const;
     small_gicp::PointCloud remove_statistical_outliers(const small_gicp::PointCloud& cloud) const;
-    small_gicp::PointCloud filter_points_by_normal_orientation(const small_gicp::PointCloud& cloud) const;
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
     cv::Mat create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const;
     cv::Mat dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const;
@@ -114,8 +113,6 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .roi_z_max = declare_parameter<double>("local_map.roi_z_max"),
         .roi_z_min = declare_parameter<double>("local_map.roi_z_min"),
         .downsample_voxel_size = declare_parameter<double>("local_map.downsample_voxel_size"),
-        .sor_num_neighbors = (int)declare_parameter<int>("local_map.sor_num_neighbors"),
-        .sor_std_mul = declare_parameter<double>("local_map.sor_std_mul"),
         .with_global_cloud = {
             .distance_threshold = declare_parameter<double>("local_map.with_global_cloud.distance_threshold")
         },
@@ -123,6 +120,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
             .normal_num_neighbors = (int)declare_parameter<int>("local_map.without_global_cloud.normal_num_neighbors"),
             .vertical_normal_abs_z_max = declare_parameter<double>("local_map.without_global_cloud.vertical_normal_abs_z_max")
         },
+        .sor_num_neighbors = (int)declare_parameter<int>("local_map.sor_num_neighbors"),
+        .sor_std_mul = declare_parameter<double>("local_map.sor_std_mul"),
         .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
         .cost_map_inflation = {
             .inflation_radius = declare_parameter<double>("local_map.cost_map_inflation.inflation_radius"),
@@ -144,28 +143,23 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
 
-    // DOGMa 预测参数
-    dogma_params_ = {
-        .num_particles_per_cell = (int)declare_parameter<int>("local_map.dogma.num_particles_per_cell"),
-        .persistent_birth_count = (int)declare_parameter<int>("local_map.dogma.persistent_birth_count"),
-        .birth_velocity_range = declare_parameter<double>("local_map.dogma.birth_velocity_range"),
-        .velocity_noise_std = declare_parameter<double>("local_map.dogma.velocity_noise_std"),
-        .free_decay = declare_parameter<double>("local_map.dogma.free_decay"),
-        .unobserved_velocity_damping = declare_parameter<double>("local_map.dogma.unobserved_velocity_damping"),
-        .min_particle_confidence = declare_parameter<double>("local_map.dogma.min_particle_confidence"),
-        .max_unseen_updates = (int)declare_parameter<int>("local_map.dogma.max_unseen_updates"),
-        .resample_ess_ratio = declare_parameter<double>("local_map.dogma.resample_ess_ratio"),
-        .max_particles = (int)declare_parameter<int>("local_map.dogma.max_particles"),
-        .prediction_steps = (int)declare_parameter<int>("local_map.dogma.prediction_steps"),
-        .prediction_dt = declare_parameter<double>("local_map.dogma.prediction_dt"),
-        .occupancy_threshold = declare_parameter<double>("local_map.dogma.occupancy_threshold"),
-        .position_sigma_cells = declare_parameter<double>("local_map.dogma.position_sigma_cells"),
-        .velocity_sigma = declare_parameter<double>("local_map.dogma.velocity_sigma"),
-        .birth_direction_noise_std = declare_parameter<double>("local_map.dogma.birth_direction_noise_std"),
-        .morph_open_kernel_size = (int)declare_parameter<int>("local_map.dogma.morph_open_kernel_size"),
+    // 目标跟踪预测参数
+    tracker_params_ = {
+        .morph_open_kernel_size = (int)declare_parameter<int>("local_map.object_tracker.morph_open_kernel_size"),
+        .min_blob_area = (int)declare_parameter<int>("local_map.object_tracker.min_blob_area"),
+        .local_grid_size = (int)declare_parameter<int>("local_map.object_tracker.local_grid_size"),
+        .max_association_dist = declare_parameter<double>("local_map.object_tracker.max_association_dist"),
+        .process_noise_std = declare_parameter<double>("local_map.object_tracker.process_noise_std"),
+        .measurement_noise_std = declare_parameter<double>("local_map.object_tracker.measurement_noise_std"),
+        .max_lost_frames = (int)declare_parameter<int>("local_map.object_tracker.max_lost_frames"),
+        .min_hits_to_confirm = (int)declare_parameter<int>("local_map.object_tracker.min_hits_to_confirm"),
+        .local_grid_decay = declare_parameter<double>("local_map.object_tracker.local_grid_decay"),
+        .local_grid_render_threshold = declare_parameter<double>("local_map.object_tracker.local_grid_render_threshold"),
+        .prediction_steps = (int)declare_parameter<int>("local_map.object_tracker.prediction_steps"),
+        .prediction_dt = declare_parameter<double>("local_map.object_tracker.prediction_dt"),
         .num_threads = num_threads_
     };
-    std::string predicted_cost_maps_pub_topic = declare_parameter<std::string>("local_map.dogma.predicted_cost_maps_pub_topic");
+    std::string predicted_cost_maps_pub_topic = declare_parameter<std::string>("local_map.object_tracker.predicted_cost_maps_pub_topic");
     predicted_cost_maps_pub_ = create_publisher<interfaces::msg::PredictedCostMaps>(predicted_cost_maps_pub_topic, 1);
 
     // 加载全局点云
@@ -296,55 +290,55 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         RCLCPP_DEBUG(get_logger(), "Downsampled local cloud has %zu points", accumulated.points.size());
     }
 
-    // 动态障碍物点提取：统一先做 SOR 去噪，再按是否有全局点云分支。
-    const small_gicp::PointCloud denoised_accumulated = remove_statistical_outliers(accumulated);
+    // 先提取动态障碍物点，再进行离群点过滤
     small_gicp::PointCloud dynamic_points;
     if (global_kdtree_) {
-        dynamic_points = extract_dynamic_points_with_global_map(denoised_accumulated);
+        dynamic_points = extract_dynamic_points_with_global_map(accumulated);
     } else {
-        dynamic_points = extract_dynamic_points_without_global_map(denoised_accumulated);
+        dynamic_points = extract_dynamic_points_without_global_map(accumulated);
     }
-    RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", dynamic_points.points.size());
+    const small_gicp::PointCloud denoised_dynamic_points = remove_statistical_outliers(dynamic_points);
+    RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", denoised_dynamic_points.points.size());
 
     // 动态障碍物分析，发布代价地图
-    cv::Mat obstacle_mask = create_obstacle_mask(dynamic_points);
+    cv::Mat obstacle_mask = create_obstacle_mask(denoised_dynamic_points);
     cv::Mat local_cost_map = inflate_cost_map(obstacle_mask);
     pub_cost_map(local_cost_map, msg->header.stamp, local_cost_map_pub_);
 
-    // DOGMa 预测
-    if (!dogma_predictor_) {
-        dogma_predictor_ = std::make_unique<DOGMaPredictor>(map_size_x_, map_size_y_, map_resolution_, dogma_params_);
-        last_dogma_update_time_ = std::chrono::steady_clock::now();
+    // 目标跟踪预测
+    if (!object_tracker_) {
+        object_tracker_ = std::make_unique<ObjectTracker>(map_size_x_, map_size_y_, map_resolution_, tracker_params_);
+        last_tracker_update_time_ = std::chrono::steady_clock::now();
     }
     const auto now_time = std::chrono::steady_clock::now();
-    double dt = std::clamp(std::chrono::duration<double>(now_time - last_dogma_update_time_).count(), 0.01, 0.5);
-    last_dogma_update_time_ = now_time;
+    double dt = std::clamp(std::chrono::duration<double>(now_time - last_tracker_update_time_).count(), 0.01, 0.5);
+    last_tracker_update_time_ = now_time;
 
-    const auto dogma_update_begin = std::chrono::steady_clock::now();
-    auto predicted_masks = dogma_predictor_->update(obstacle_mask, dt);
-    const auto dogma_update_end = std::chrono::steady_clock::now();
+    const auto tracker_update_begin = std::chrono::steady_clock::now();
+    auto predicted_masks = object_tracker_->update(obstacle_mask, dt);
+    const auto tracker_update_end = std::chrono::steady_clock::now();
 
     // 并行膨胀预测栅格
-    const auto dogma_inflate_begin = std::chrono::steady_clock::now();
+    const auto tracker_inflate_begin = std::chrono::steady_clock::now();
     #pragma omp parallel for num_threads(num_threads_) schedule(static)
     for (int i = 0; i < static_cast<int>(predicted_masks.size()); i++) {
         predicted_masks[static_cast<size_t>(i)] = inflate_cost_map(predicted_masks[static_cast<size_t>(i)]);
     }
-    const auto dogma_inflate_end = std::chrono::steady_clock::now();
+    const auto tracker_inflate_end = std::chrono::steady_clock::now();
 
     RCLCPP_DEBUG(
         get_logger(),
-        "DOGMa timing: pf_update=%.3f ms, future_inflate=%.3f ms, particles=%zu, obstacle_cells=%d, dt=%.3f s",
-        std::chrono::duration<double, std::milli>(dogma_update_end - dogma_update_begin).count(),
-        std::chrono::duration<double, std::milli>(dogma_inflate_end - dogma_inflate_begin).count(),
-        dogma_predictor_->particle_count(),
+        "ObjectTracker timing: update=%.3f ms, inflate=%.3f ms, tracks=%zu, obstacle_cells=%d, dt=%.3f s",
+        std::chrono::duration<double, std::milli>(tracker_update_end - tracker_update_begin).count(),
+        std::chrono::duration<double, std::milli>(tracker_inflate_end - tracker_inflate_begin).count(),
+        object_tracker_->track_count(),
         cv::countNonZero(obstacle_mask),
         dt
     );
 
     // 打包发布预测代价地图
     interfaces::msg::PredictedCostMaps pcm;
-    pcm.prediction_dt = dogma_params_.prediction_dt;
+    pcm.prediction_dt = tracker_params_.prediction_dt;
     pcm.maps.resize(predicted_masks.size() + 1);
     fill_occupancy_grid(local_cost_map, msg->header.stamp, pcm.maps[0]);
     for (size_t i = 0; i < predicted_masks.size(); i++) {
@@ -354,7 +348,7 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
 
     // 调试信息发布
     if (enable_debug_) {
-        pub_cloud(dynamic_points, msg->header.stamp, debug_dynamic_points_pub_);
+        pub_cloud(denoised_dynamic_points, msg->header.stamp, debug_dynamic_points_pub_);
         pub_cloud(accumulated, msg->header.stamp, debug_accumulated_cloud_pub_);
     }
 }
@@ -430,10 +424,10 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
     return preprocessed;
 }
 
-small_gicp::PointCloud MapServerNode::extract_dynamic_points_with_global_map(const small_gicp::PointCloud& accumulated_cloud) const {
+small_gicp::PointCloud MapServerNode::extract_dynamic_points_with_global_map(const small_gicp::PointCloud& cloud) const {
     small_gicp::PointCloud dynamic_points;
     const double distance_sq_threshold = local_map_params_.with_global_cloud.distance_threshold * local_map_params_.with_global_cloud.distance_threshold;
-    for (const auto& point : accumulated_cloud.points) {
+    for (const auto& point : cloud.points) {
         size_t index = 0;
         double sq_dist = 0.0;
         global_kdtree_->knn_search(point, 1, &index, &sq_dist);
@@ -526,7 +520,7 @@ small_gicp::PointCloud MapServerNode::remove_statistical_outliers(const small_gi
     return filtered;
 }
 
-small_gicp::PointCloud MapServerNode::filter_points_by_normal_orientation(const small_gicp::PointCloud& cloud) const {
+small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(const small_gicp::PointCloud& cloud) const {
     small_gicp::PointCloud dynamic_points;
     if (cloud.empty()) {
         return dynamic_points;
@@ -560,11 +554,6 @@ small_gicp::PointCloud MapServerNode::filter_points_by_normal_orientation(const 
         cloud_with_normals_ptr->size(),
         max_abs_nz
     );
-    return dynamic_points;
-}
-
-small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(const small_gicp::PointCloud& accumulated_cloud) const {
-    const small_gicp::PointCloud dynamic_points = filter_points_by_normal_orientation(accumulated_cloud);
     return dynamic_points;
 }
 

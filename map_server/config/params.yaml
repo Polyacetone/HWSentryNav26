@@ -24,39 +24,34 @@
     local_map:
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       cost_map_pub_topic: "/map_server/local_cost_map" # 局部代价地图发布话题名称
-      cloud_accumulate_frames: 5 # 局部点云累积帧数。启用 DOGMa 时不要太大，否则移动障碍物会先被时域拖影再拿去做预测
+      cloud_accumulate_frames: 5 # 局部点云累积帧数
       roi_xy_radius_min: 0.4 # 局部点云ROI的xy平面半径最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_xy_radius_max: 6.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_max: 0.2 # 局部点云ROI的z轴最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_min: -0.55 # 局部点云ROI的z轴最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m
-      sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
-      sor_std_mul: 1.0 # SOR保留阈值=均值+sor_std_mul*标准差
       with_global_cloud: # 有全局点云时通过比较局部点云与全局点云的最近邻距离来判断动态障碍物
         distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m。有全局点云时使用
       without_global_cloud: # 无全局点云时采用法向量垂直z轴的特征来判断动态障碍物
         normal_num_neighbors: 12 # 法向量估计使用的K近邻数量
         vertical_normal_abs_z_max: 0.3 # |normal.z|小于该值视为法向量垂直z轴（认为是动态障碍物）
+      sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
+      sor_std_mul: 2.0 # SOR保留阈值=均值+sor_std_mul*标准差
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
-      dogma: # DOGMa 粒子滤波预测参数
+      object_tracker: # 基于目标的动态障碍物跟踪与预测参数
         predicted_cost_maps_pub_topic: "/map_server/predicted_cost_maps" # 预测代价地图发布话题
-        num_particles_per_cell: 100 # 新出现占据栅格出生的粒子数
-        persistent_birth_count: 0 # 持续占据栅格每帧补充粒子数
-        birth_velocity_range: 3.0 # 预测允许的最大速度 (m/s)，用于粒子速度先验采样与限幅
-        velocity_noise_std: 0.05 # 速度随机游走/出生扰动 σ (m/s每次更新)。越小越稳，但转向跟随会更慢
-        free_decay: 0.35 # 未观测时粒子存在置信度衰减因子。越小离开ROI后消失越快
-        unobserved_velocity_damping: 0.85 # 未观测时的速度阻尼，抑制离开ROI后的外推发散
-        min_particle_confidence: 0.05 # 粒子最小存在置信度，低于该值直接删除
-        max_unseen_updates: 5 # 连续未观测超过该次数后删除粒子
-        resample_ess_ratio: 0.5 # ESS/N 低于此值触发重采样
-        max_particles: 6000 # 粒子总数上限
-        prediction_steps: 5 # 未来预测步数
-        prediction_dt: 0.2 # 预测步长 (s)，prediction_steps × prediction_dt = 总预测时长
-        occupancy_threshold: 4.0 # 预测占据阈值（加权粒子计数），越低越容易出现淡灰扩散尾迹
-        position_sigma_cells: 2.0 # 距离变换位置似然的 σ（单位：栅格数）。越大允许越靠近边缘的粒子存活
-        velocity_sigma: 1.0 # 速度一致性似然的 σ (m/s)。越大对速度偏差越宽容，越小收敛越快但噪声敏感
-        birth_direction_noise_std: 0.1 # 新生粒子法向速度方向噪声 σ (rad)。越小越集中于估计方向
-        morph_open_kernel_size: 3 # 形态学开运算核大小（0或1=关闭）。去除掩码噪声毛刺
+        morph_open_kernel_size: 3 # 形态学开运算核大小（0或1=关闭），去除掩码噪声毛刺
+        min_blob_area: 2 # 最小连通域面积（像素），滤除噪声小斑块
+        local_grid_size: 50 # 局部栅格地图边长（像素）
+        max_association_dist: 0.5 # 匈牙利匹配最大关联距离（m），超过则视为新目标
+        process_noise_std: 4.0 # KF 过程噪声（加速度标准差，m/s²），越大越信任量测，越小越信任模型
+        measurement_noise_std: 0.08 # KF 测量噪声标准差（m），对应质心观测精度
+        max_lost_frames: 3 # 连续未匹配帧数上限，超过则删除航迹
+        min_hits_to_confirm: 2 # 航迹连续匹配此次数后才参与预测输出，防止噪声产生幻影
+        local_grid_decay: 0.8 # 未匹配时局部栅格衰减因子，越小形状消失越快
+        local_grid_render_threshold: 0.3 # 局部栅格渲染阈值（0~1），低于此值不渲染
+        prediction_steps: 10 # 未来预测步数
+        prediction_dt: 0.1 # 预测步长（s），prediction_steps × prediction_dt = 总预测时长
       cost_map_inflation: # 局部代价地图膨胀参数
         inflation_radius: 0.8 # 代价地图膨胀半径，单位m
         inscribed_radius: 0.3 # 机器人内切圆半径，单位m

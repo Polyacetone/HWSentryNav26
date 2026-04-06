@@ -1,0 +1,382 @@
+#include <map_server/object_tracker.hpp>
+#include <opencv2/imgproc.hpp>
+#include <omp.h>
+#include <algorithm>
+#include <cmath>
+
+namespace map_server {
+
+// ═══════════════ Hungarian Algorithm (Kuhn-Munkres, O(n³)) ═══════════════
+
+static std::vector<int>
+hungarian_solve(const std::vector<std::vector<double>>& cost, int n_rows, int n_cols, double gate) {
+    if (n_rows == 0 || n_cols == 0) return std::vector<int>(static_cast<size_t>(n_rows), -1);
+
+    const int n = std::max(n_rows, n_cols);
+    const double BIG = gate + 1.0;
+
+    // 1-indexed cost matrix, padded with BIG
+    std::vector<std::vector<double>> a(
+        static_cast<size_t>(n + 1),
+        std::vector<double>(static_cast<size_t>(n + 1), BIG)
+    );
+    for (int i = 0; i < n_rows; i++)
+        for (int j = 0; j < n_cols; j++)
+            a[static_cast<size_t>(i + 1)][static_cast<size_t>(j + 1)] =
+                std::min(cost[static_cast<size_t>(i)][static_cast<size_t>(j)], BIG);
+
+    std::vector<double> u(static_cast<size_t>(n + 1), 0.0);
+    std::vector<double> v(static_cast<size_t>(n + 1), 0.0);
+    std::vector<int> p(static_cast<size_t>(n + 1), 0);
+    std::vector<int> way(static_cast<size_t>(n + 1), 0);
+
+    for (int i = 1; i <= n; i++) {
+        p[0] = i;
+        int j0 = 0;
+        std::vector<double> minv(static_cast<size_t>(n + 1), 1e18);
+        std::vector<bool> used(static_cast<size_t>(n + 1), false);
+
+        do {
+            used[static_cast<size_t>(j0)] = true;
+            int i0 = p[static_cast<size_t>(j0)];
+            int j1 = 0;
+            double delta = 1e18;
+            for (int j = 1; j <= n; j++) {
+                if (used[static_cast<size_t>(j)]) continue;
+                double cur = a[static_cast<size_t>(i0)][static_cast<size_t>(j)] - u[static_cast<size_t>(i0)]
+                    - v[static_cast<size_t>(j)];
+                if (cur < minv[static_cast<size_t>(j)]) {
+                    minv[static_cast<size_t>(j)] = cur;
+                    way[static_cast<size_t>(j)] = j0;
+                }
+                if (minv[static_cast<size_t>(j)] < delta) {
+                    delta = minv[static_cast<size_t>(j)];
+                    j1 = j;
+                }
+            }
+            for (int j = 0; j <= n; j++) {
+                if (used[static_cast<size_t>(j)]) {
+                    u[static_cast<size_t>(p[static_cast<size_t>(j)])] += delta;
+                    v[static_cast<size_t>(j)] -= delta;
+                } else {
+                    minv[static_cast<size_t>(j)] -= delta;
+                }
+            }
+            j0 = j1;
+        } while (p[static_cast<size_t>(j0)] != 0);
+
+        do {
+            int j1 = way[static_cast<size_t>(j0)];
+            p[static_cast<size_t>(j0)] = p[static_cast<size_t>(j1)];
+            j0 = j1;
+        } while (j0);
+    }
+
+    // Extract assignment, filter by gate
+    std::vector<int> result(static_cast<size_t>(n_rows), -1);
+    for (int j = 1; j <= n; j++) {
+        int row = p[static_cast<size_t>(j)] - 1;
+        int col = j - 1;
+        if (row >= 0 && row < n_rows && col >= 0 && col < n_cols) {
+            if (cost[static_cast<size_t>(row)][static_cast<size_t>(col)] < gate) {
+                result[static_cast<size_t>(row)] = col;
+            }
+        }
+    }
+    return result;
+}
+
+// ═══════════════ Constructor ═══════════════
+
+ObjectTracker::ObjectTracker(int width, int height, double resolution, const ObjectTrackerParams& params):
+    width_(width),
+    height_(height),
+    resolution_(resolution),
+    params_(params) {}
+
+// ═══════════════ Main Update ═══════════════
+
+std::vector<cv::Mat> ObjectTracker::update(const cv::Mat& obstacle_mask, double dt) {
+    const cv::Mat clean_mask = preprocess_mask(obstacle_mask);
+    const std::vector<Detection> detections = detect(clean_mask);
+
+    // KF predict for all existing tracks
+    for (auto& track: tracks_) {
+        kf_predict(track, dt);
+    }
+
+    // Data association (Hungarian)
+    const std::vector<int> assignment = associate(detections);
+
+    // Track management: update matched, create new, delete lost
+    manage_tracks(detections, assignment);
+
+    // Generate future predictions
+    std::vector<cv::Mat> predictions(static_cast<size_t>(params_.prediction_steps));
+    #pragma omp parallel for num_threads(params_.num_threads) schedule(static)
+    for (int i = 0; i < params_.prediction_steps; i++) {
+        predictions[static_cast<size_t>(i)] = render_prediction(static_cast<double>(i + 1) * params_.prediction_dt);
+    }
+    return predictions;
+}
+
+// ═══════════════ Preprocessing ═══════════════
+
+cv::Mat ObjectTracker::preprocess_mask(const cv::Mat& mask) const {
+    if (params_.morph_open_kernel_size <= 1) return mask;
+    cv::Mat cleaned;
+    const int ks = params_.morph_open_kernel_size | 1; // ensure odd
+    const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, {ks, ks});
+    cv::morphologyEx(mask, cleaned, cv::MORPH_OPEN, kernel);
+    return cleaned;
+}
+
+// ═══════════════ Detection (Connected Component Analysis) ═══════════════
+
+std::vector<ObjectTracker::Detection> ObjectTracker::detect(const cv::Mat& mask) const {
+    std::vector<Detection> detections;
+
+    cv::Mat labels, stats, centroids;
+    const int n_labels = cv::connectedComponentsWithStats(mask, labels, stats, centroids, 8, CV_32S);
+
+    const int half = params_.local_grid_size / 2;
+    const int grid_sz = params_.local_grid_size;
+
+    // Label 0 is background
+    for (int label = 1; label < n_labels; label++) {
+        const int area = stats.at<int>(label, cv::CC_STAT_AREA);
+        if (area < params_.min_blob_area) continue;
+
+        // Centroid (pixel, sub-pixel precision)
+        const double cx_px = centroids.at<double>(label, 0);
+        const double cy_px = centroids.at<double>(label, 1);
+
+        Detection det;
+        det.centroid_m = {cx_px * resolution_, cy_px * resolution_};
+
+        // Extract local grid relative to rounded centroid
+        const int cx_int = static_cast<int>(std::round(cx_px));
+        const int cy_int = static_cast<int>(std::round(cy_px));
+        det.local_grid = cv::Mat::zeros(grid_sz, grid_sz, CV_32FC1);
+
+        const int bb_left = stats.at<int>(label, cv::CC_STAT_LEFT);
+        const int bb_top = stats.at<int>(label, cv::CC_STAT_TOP);
+        const int bb_w = stats.at<int>(label, cv::CC_STAT_WIDTH);
+        const int bb_h = stats.at<int>(label, cv::CC_STAT_HEIGHT);
+
+        for (int gy = bb_top; gy < bb_top + bb_h; gy++) {
+            const int* label_row = labels.ptr<int>(gy);
+            for (int gx = bb_left; gx < bb_left + bb_w; gx++) {
+                if (label_row[gx] != label) continue;
+                const int lx = gx - cx_int + half;
+                const int ly = gy - cy_int + half;
+                if (lx >= 0 && lx < grid_sz && ly >= 0 && ly < grid_sz) {
+                    det.local_grid.at<float>(ly, lx) = 1.0f;
+                }
+            }
+        }
+
+        detections.push_back(std::move(det));
+    }
+    return detections;
+}
+
+// ═══════════════ Kalman Filter: Constant Velocity Model ═══════════════
+
+void ObjectTracker::kf_predict(Track& track, double dt) const {
+    // State transition
+    Eigen::Matrix4d F = Eigen::Matrix4d::Identity();
+    F(0, 2) = dt;
+    F(1, 3) = dt;
+
+    // Process noise: discrete white-noise acceleration model
+    const double dt2 = dt * dt;
+    const double dt3 = dt2 * dt;
+    const double dt4 = dt3 * dt;
+    const double q = params_.process_noise_std * params_.process_noise_std;
+
+    Eigen::Matrix4d Q = Eigen::Matrix4d::Zero();
+    Q(0, 0) = dt4 / 4.0;
+    Q(0, 2) = dt3 / 2.0;
+    Q(1, 1) = dt4 / 4.0;
+    Q(1, 3) = dt3 / 2.0;
+    Q(2, 0) = dt3 / 2.0;
+    Q(2, 2) = dt2;
+    Q(3, 1) = dt3 / 2.0;
+    Q(3, 3) = dt2;
+    Q *= q;
+
+    track.x = F * track.x;
+    track.P = F * track.P * F.transpose() + Q;
+}
+
+void ObjectTracker::kf_update(Track& track, const Eigen::Vector2d& z) const {
+    // Observation model: H = [I₂ 0₂]
+    Eigen::Matrix<double, 2, 4> H = Eigen::Matrix<double, 2, 4>::Zero();
+    H(0, 0) = 1.0;
+    H(1, 1) = 1.0;
+
+    const double rm = params_.measurement_noise_std * params_.measurement_noise_std;
+    const Eigen::Matrix2d R = Eigen::Matrix2d::Identity() * rm;
+
+    // Innovation
+    const Eigen::Vector2d y = z - H * track.x;
+    const Eigen::Matrix2d S = H * track.P * H.transpose() + R;
+
+    // Kalman gain
+    const Eigen::Matrix<double, 4, 2> K = track.P * H.transpose() * S.inverse();
+
+    // State update
+    track.x += K * y;
+
+    // Covariance update (Joseph form for numerical stability)
+    const Eigen::Matrix4d I_KH = Eigen::Matrix4d::Identity() - K * H;
+    track.P = I_KH * track.P * I_KH.transpose() + K * R * K.transpose();
+}
+
+// ═══════════════ Data Association ═══════════════
+
+std::vector<int> ObjectTracker::associate(const std::vector<Detection>& detections) const {
+    const int n_tracks = static_cast<int>(tracks_.size());
+    const int n_dets = static_cast<int>(detections.size());
+
+    if (n_tracks == 0 || n_dets == 0) {
+        return std::vector<int>(static_cast<size_t>(n_tracks), -1);
+    }
+
+    // Cost matrix: Euclidean distance between predicted centroid and detection centroid
+    std::vector<std::vector<double>> cost(
+        static_cast<size_t>(n_tracks),
+        std::vector<double>(static_cast<size_t>(n_dets))
+    );
+
+    for (int i = 0; i < n_tracks; i++) {
+        const Eigen::Vector2d pred = tracks_[static_cast<size_t>(i)].x.head<2>();
+        for (int j = 0; j < n_dets; j++) {
+            cost[static_cast<size_t>(i)][static_cast<size_t>(j)] =
+                (pred - detections[static_cast<size_t>(j)].centroid_m).norm();
+        }
+    }
+
+    return hungarian_solve(cost, n_tracks, n_dets, params_.max_association_dist);
+}
+
+// ═══════════════ Track Management ═══════════════
+
+void ObjectTracker::manage_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment) {
+    std::vector<bool> det_used(detections.size(), false);
+
+    // Update matched tracks / age unmatched tracks
+    for (size_t i = 0; i < tracks_.size(); i++) {
+        if (assignment[i] >= 0) {
+            const auto j = static_cast<size_t>(assignment[i]);
+            det_used[j] = true;
+
+            // Save predicted centroid before KF update (for local grid alignment)
+            const Eigen::Vector2d centroid_before = tracks_[i].x.head<2>();
+
+            // KF measurement update
+            kf_update(tracks_[i], detections[j].centroid_m);
+
+            // Compute centroid shift in pixels
+            const Eigen::Vector2d centroid_after = tracks_[i].x.head<2>();
+            const double dx_px = (centroid_after[0] - centroid_before[0]) / resolution_;
+            const double dy_px = (centroid_after[1] - centroid_before[1]) / resolution_;
+
+            // Shift old local grid to align with new centroid frame
+            cv::Mat shifted_old;
+            const cv::Mat shift_mat = (cv::Mat_<double>(2, 3) << 1.0, 0.0, -dx_px, 0.0, 1.0, -dy_px);
+            cv::warpAffine(
+                tracks_[i].local_grid,
+                shifted_old,
+                shift_mat,
+                tracks_[i].local_grid.size(),
+                cv::INTER_LINEAR,
+                cv::BORDER_CONSTANT,
+                cv::Scalar(0)
+            );
+
+            // Blend: decayed shifted old + new observation (take element-wise max)
+            shifted_old *= params_.local_grid_decay;
+            cv::max(shifted_old, detections[j].local_grid, tracks_[i].local_grid);
+
+            tracks_[i].hit_streak++;
+            tracks_[i].lost_frames = 0;
+        } else {
+            tracks_[i].hit_streak = 0;
+            tracks_[i].lost_frames++;
+            tracks_[i].local_grid *= params_.local_grid_decay;
+        }
+        tracks_[i].age++;
+    }
+
+    // Remove dead tracks
+    tracks_.erase(
+        std::remove_if(
+            tracks_.begin(),
+            tracks_.end(),
+            [this](const Track& t) { return t.lost_frames > params_.max_lost_frames; }
+        ),
+        tracks_.end()
+    );
+
+    // Create new tracks for unmatched detections
+    for (size_t j = 0; j < detections.size(); j++) {
+        if (det_used[j]) continue;
+
+        Track t {};
+        t.id = next_id_++;
+        t.x << detections[j].centroid_m[0], detections[j].centroid_m[1], 0.0, 0.0;
+        t.P = Eigen::Matrix4d::Zero();
+        const double rm = params_.measurement_noise_std * params_.measurement_noise_std;
+        t.P(0, 0) = rm;
+        t.P(1, 1) = rm;
+        t.P(2, 2) = 4.0; // initial velocity uncertainty: 2 m/s std
+        t.P(3, 3) = 4.0;
+        t.local_grid = detections[j].local_grid.clone();
+        t.hit_streak = 1;
+        t.lost_frames = 0;
+        t.age = 1;
+        tracks_.push_back(std::move(t));
+    }
+}
+
+// ═══════════════ Prediction Rendering ═══════════════
+
+cv::Mat ObjectTracker::render_prediction(double t_future) const {
+    cv::Mat prediction = cv::Mat::zeros(height_, width_, CV_8UC1);
+    const int half = params_.local_grid_size / 2;
+    const int grid_sz = params_.local_grid_size;
+    const double inv_res = 1.0 / resolution_;
+    const float render_thresh = static_cast<float>(params_.local_grid_render_threshold);
+
+    for (const auto& track: tracks_) {
+        // Only output confirmed tracks
+        if (track.hit_streak < params_.min_hits_to_confirm) continue;
+
+        // Predicted centroid (pixels)
+        const double pred_x_m = track.x[0] + track.x[2] * t_future;
+        const double pred_y_m = track.x[1] + track.x[3] * t_future;
+        const int cx_px = static_cast<int>(std::round(pred_x_m * inv_res));
+        const int cy_px = static_cast<int>(std::round(pred_y_m * inv_res));
+
+        // Paste local grid onto global prediction
+        for (int ly = 0; ly < grid_sz; ly++) {
+            const int gy = cy_px + ly - half;
+            if (gy < 0 || gy >= height_) continue;
+            const float* lg_row = track.local_grid.ptr<float>(ly);
+            uint8_t* out_row = prediction.ptr<uint8_t>(gy);
+            for (int lx = 0; lx < grid_sz; lx++) {
+                if (lg_row[lx] > render_thresh) {
+                    const int gx = cx_px + lx - half;
+                    if (gx >= 0 && gx < width_) {
+                        out_row[gx] = 255;
+                    }
+                }
+            }
+        }
+    }
+    return prediction;
+}
+
+} // namespace map_server
