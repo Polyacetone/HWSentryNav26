@@ -228,7 +228,6 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.spin_requested = input.spin_requested;
     fsm_input.spin_high_priority = input.spin_high_priority;
     fsm_input.is_hazard = compute_is_hazard(input);
-    fsm_input.force_hazard_recovery = just_revived && fsm_input.is_hazard;
     fsm_input.is_stuck = check_stuck(input);
     fsm_input.is_recovery_safe = update_recovery_safe_flag(input);
     // STOPPING 退出判定按“控制指令是否收敛到零”进行，而不是底盘实速

@@ -38,20 +38,22 @@ private:
         double roi_z_max;
         double roi_z_min;
         double downsample_voxel_size;
-        double distance_threshold;
-        int cell_obstacle_point_threshold;
+        int sor_num_neighbors;
+        double sor_std_mul;
         struct {
-            int sor_num_neighbors;
-            double sor_std_mul;
+            double distance_threshold;
+        } with_global_cloud;
+        struct {
             int normal_num_neighbors;
             double vertical_normal_abs_z_max;
-        } no_global_cloud_fallback;
+        } without_global_cloud;
+        int cell_obstacle_point_threshold;
         struct {
             double inflation_radius;
             double inscribed_radius;
             double cost_scaling_factor;
             int obstacle_threshold;
-        } cost_map_inflation_params;
+        } cost_map_inflation;
     } local_map_params_;
 
     cv::Mat global_direction_map_, global_cost_map_;
@@ -112,19 +114,21 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .roi_z_max = declare_parameter<double>("local_map.roi_z_max"),
         .roi_z_min = declare_parameter<double>("local_map.roi_z_min"),
         .downsample_voxel_size = declare_parameter<double>("local_map.downsample_voxel_size"),
-        .distance_threshold = declare_parameter<double>("local_map.distance_threshold"),
-        .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
-        .no_global_cloud_fallback = {
-            .sor_num_neighbors = (int)declare_parameter<int>("local_map.no_global_cloud_fallback.sor_num_neighbors"),
-            .sor_std_mul = declare_parameter<double>("local_map.no_global_cloud_fallback.sor_std_mul"),
-            .normal_num_neighbors = (int)declare_parameter<int>("local_map.no_global_cloud_fallback.normal_num_neighbors"),
-            .vertical_normal_abs_z_max = declare_parameter<double>("local_map.no_global_cloud_fallback.vertical_normal_abs_z_max"),
+        .sor_num_neighbors = (int)declare_parameter<int>("local_map.sor_num_neighbors"),
+        .sor_std_mul = declare_parameter<double>("local_map.sor_std_mul"),
+        .with_global_cloud = {
+            .distance_threshold = declare_parameter<double>("local_map.with_global_cloud.distance_threshold")
         },
-        .cost_map_inflation_params = {
+        .without_global_cloud = {
+            .normal_num_neighbors = (int)declare_parameter<int>("local_map.without_global_cloud.normal_num_neighbors"),
+            .vertical_normal_abs_z_max = declare_parameter<double>("local_map.without_global_cloud.vertical_normal_abs_z_max")
+        },
+        .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
+        .cost_map_inflation = {
             .inflation_radius = declare_parameter<double>("local_map.cost_map_inflation.inflation_radius"),
             .inscribed_radius = declare_parameter<double>("local_map.cost_map_inflation.inscribed_radius"),
             .cost_scaling_factor = declare_parameter<double>("local_map.cost_map_inflation.cost_scaling_factor"),
-            .obstacle_threshold = (int)declare_parameter<int>("local_map.cost_map_inflation.obstacle_threshold"),
+            .obstacle_threshold = (int)declare_parameter<int>("local_map.cost_map_inflation.obstacle_threshold")
         }
     };
 
@@ -142,24 +146,26 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
 
     // DOGMa 预测参数
     dogma_params_ = {
-        .num_particles_per_cell = (int)declare_parameter<int>("dogma.num_particles_per_cell"),
-        .persistent_birth_count = (int)declare_parameter<int>("dogma.persistent_birth_count"),
-        .birth_velocity_range = declare_parameter<double>("dogma.birth_velocity_range"),
-        .velocity_noise_std = declare_parameter<double>("dogma.velocity_noise_std"),
-        .free_decay = declare_parameter<double>("dogma.free_decay"),
-        .occupied_boost = declare_parameter<double>("dogma.occupied_boost"),
-        .velocity_correction_gain = declare_parameter<double>("dogma.velocity_correction_gain"),
-        .unobserved_velocity_damping = declare_parameter<double>("dogma.unobserved_velocity_damping"),
-        .min_particle_confidence = declare_parameter<double>("dogma.min_particle_confidence"),
-        .max_unseen_updates = (int)declare_parameter<int>("dogma.max_unseen_updates"),
-        .resample_ess_ratio = declare_parameter<double>("dogma.resample_ess_ratio"),
-        .max_particles = (int)declare_parameter<int>("dogma.max_particles"),
-        .prediction_steps = (int)declare_parameter<int>("dogma.prediction_steps"),
-        .prediction_dt = declare_parameter<double>("dogma.prediction_dt"),
-        .occupancy_threshold = declare_parameter<double>("dogma.occupancy_threshold"),
+        .num_particles_per_cell = (int)declare_parameter<int>("local_map.dogma.num_particles_per_cell"),
+        .persistent_birth_count = (int)declare_parameter<int>("local_map.dogma.persistent_birth_count"),
+        .birth_velocity_range = declare_parameter<double>("local_map.dogma.birth_velocity_range"),
+        .velocity_noise_std = declare_parameter<double>("local_map.dogma.velocity_noise_std"),
+        .free_decay = declare_parameter<double>("local_map.dogma.free_decay"),
+        .unobserved_velocity_damping = declare_parameter<double>("local_map.dogma.unobserved_velocity_damping"),
+        .min_particle_confidence = declare_parameter<double>("local_map.dogma.min_particle_confidence"),
+        .max_unseen_updates = (int)declare_parameter<int>("local_map.dogma.max_unseen_updates"),
+        .resample_ess_ratio = declare_parameter<double>("local_map.dogma.resample_ess_ratio"),
+        .max_particles = (int)declare_parameter<int>("local_map.dogma.max_particles"),
+        .prediction_steps = (int)declare_parameter<int>("local_map.dogma.prediction_steps"),
+        .prediction_dt = declare_parameter<double>("local_map.dogma.prediction_dt"),
+        .occupancy_threshold = declare_parameter<double>("local_map.dogma.occupancy_threshold"),
+        .position_sigma_cells = declare_parameter<double>("local_map.dogma.position_sigma_cells"),
+        .velocity_sigma = declare_parameter<double>("local_map.dogma.velocity_sigma"),
+        .birth_direction_noise_std = declare_parameter<double>("local_map.dogma.birth_direction_noise_std"),
+        .morph_open_kernel_size = (int)declare_parameter<int>("local_map.dogma.morph_open_kernel_size"),
         .num_threads = num_threads_
     };
-    std::string predicted_cost_maps_pub_topic = declare_parameter<std::string>("dogma.predicted_cost_maps_pub_topic");
+    std::string predicted_cost_maps_pub_topic = declare_parameter<std::string>("local_map.dogma.predicted_cost_maps_pub_topic");
     predicted_cost_maps_pub_ = create_publisher<interfaces::msg::PredictedCostMaps>(predicted_cost_maps_pub_topic, 1);
 
     // 加载全局点云
@@ -290,12 +296,13 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         RCLCPP_DEBUG(get_logger(), "Downsampled local cloud has %zu points", accumulated.points.size());
     }
 
-    // 动态障碍物点提取：有全局点云时做先验减法，无全局点云时走退化方案。
+    // 动态障碍物点提取：统一先做 SOR 去噪，再按是否有全局点云分支。
+    const small_gicp::PointCloud denoised_accumulated = remove_statistical_outliers(accumulated);
     small_gicp::PointCloud dynamic_points;
     if (global_kdtree_) {
-        dynamic_points = extract_dynamic_points_with_global_map(accumulated);
+        dynamic_points = extract_dynamic_points_with_global_map(denoised_accumulated);
     } else {
-        dynamic_points = extract_dynamic_points_without_global_map(accumulated);
+        dynamic_points = extract_dynamic_points_without_global_map(denoised_accumulated);
     }
     RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", dynamic_points.points.size());
 
@@ -425,7 +432,7 @@ small_gicp::PointCloud::Ptr MapServerNode::preprocess_cloud(sensor_msgs::msg::Po
 
 small_gicp::PointCloud MapServerNode::extract_dynamic_points_with_global_map(const small_gicp::PointCloud& accumulated_cloud) const {
     small_gicp::PointCloud dynamic_points;
-    const double distance_sq_threshold = local_map_params_.distance_threshold * local_map_params_.distance_threshold;
+    const double distance_sq_threshold = local_map_params_.with_global_cloud.distance_threshold * local_map_params_.with_global_cloud.distance_threshold;
     for (const auto& point : accumulated_cloud.points) {
         size_t index = 0;
         double sq_dist = 0.0;
@@ -443,7 +450,7 @@ small_gicp::PointCloud MapServerNode::remove_statistical_outliers(const small_gi
         return filtered;
     }
 
-    const int knn = std::max(1, local_map_params_.no_global_cloud_fallback.sor_num_neighbors);
+    const int knn = std::max(1, local_map_params_.sor_num_neighbors);
     const size_t knn_query_size = static_cast<size_t>(knn) + 1;
     if (cloud.size() < knn_query_size) {
         return cloud;
@@ -498,7 +505,7 @@ small_gicp::PointCloud MapServerNode::remove_statistical_outliers(const small_gi
     }
     var /= static_cast<double>(valid_count);
     const double stddev = std::sqrt(var);
-    const double threshold = mean + local_map_params_.no_global_cloud_fallback.sor_std_mul * stddev;
+    const double threshold = mean + local_map_params_.sor_std_mul * stddev;
 
     filtered.points.reserve(cloud.size());
     for (size_t i = 0; i < cloud.size(); i++) {
@@ -509,7 +516,7 @@ small_gicp::PointCloud MapServerNode::remove_statistical_outliers(const small_gi
 
     RCLCPP_DEBUG(
         get_logger(),
-        "Fallback SOR kept %zu / %zu points (mean=%.4f, std=%.4f, threshold=%.4f)",
+        "SOR kept %zu / %zu points (mean=%.4f, std=%.4f, threshold=%.4f)",
         filtered.points.size(),
         cloud.size(),
         mean,
@@ -525,7 +532,7 @@ small_gicp::PointCloud MapServerNode::filter_points_by_normal_orientation(const 
         return dynamic_points;
     }
 
-    const int normal_knn = std::max(5, local_map_params_.no_global_cloud_fallback.normal_num_neighbors);
+    const int normal_knn = std::max(5, local_map_params_.without_global_cloud.normal_num_neighbors);
     if (cloud.size() < static_cast<size_t>(normal_knn)) {
         return dynamic_points;
     }
@@ -534,7 +541,7 @@ small_gicp::PointCloud MapServerNode::filter_points_by_normal_orientation(const 
     auto local_tree = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(cloud_with_normals_ptr, small_gicp::KdTreeBuilderOMP(num_threads_));
     small_gicp::estimate_normals_omp(*cloud_with_normals_ptr, *local_tree, normal_knn, num_threads_);
 
-    const double max_abs_nz = std::clamp(local_map_params_.no_global_cloud_fallback.vertical_normal_abs_z_max, 0.0, 1.0);
+    const double max_abs_nz = std::clamp(local_map_params_.without_global_cloud.vertical_normal_abs_z_max, 0.0, 1.0);
     dynamic_points.points.reserve(cloud_with_normals_ptr->size());
     for (size_t i = 0; i < cloud_with_normals_ptr->size(); i++) {
         const Eigen::Vector3d normal = cloud_with_normals_ptr->normal(i).head<3>();
@@ -557,8 +564,7 @@ small_gicp::PointCloud MapServerNode::filter_points_by_normal_orientation(const 
 }
 
 small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(const small_gicp::PointCloud& accumulated_cloud) const {
-    const small_gicp::PointCloud denoised_cloud = remove_statistical_outliers(accumulated_cloud);
-    const small_gicp::PointCloud dynamic_points = filter_points_by_normal_orientation(denoised_cloud);
+    const small_gicp::PointCloud dynamic_points = filter_points_by_normal_orientation(accumulated_cloud);
     return dynamic_points;
 }
 
@@ -598,10 +604,10 @@ small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::
 
 cv::Mat MapServerNode::inflate_cost_map(const cv::Mat& cost_map) const {
     CV_Assert(cost_map.type() == CV_8UC1);
-    const float inflation_radius = static_cast<float>(local_map_params_.cost_map_inflation_params.inflation_radius);
-    const float inscribed_radius = static_cast<float>(local_map_params_.cost_map_inflation_params.inscribed_radius);
-    const float cost_scaling_factor = static_cast<float>(local_map_params_.cost_map_inflation_params.cost_scaling_factor);
-    const int obstacle_threshold = local_map_params_.cost_map_inflation_params.obstacle_threshold;
+    const float inflation_radius = static_cast<float>(local_map_params_.cost_map_inflation.inflation_radius);
+    const float inscribed_radius = static_cast<float>(local_map_params_.cost_map_inflation.inscribed_radius);
+    const float cost_scaling_factor = static_cast<float>(local_map_params_.cost_map_inflation.cost_scaling_factor);
+    const int obstacle_threshold = local_map_params_.cost_map_inflation.obstacle_threshold;
 
     // Step 1: 创建二值障碍物掩码（1=障碍，0=非障碍）
     cv::Mat obstacle_mask;

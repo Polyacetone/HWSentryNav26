@@ -86,9 +86,6 @@ struct FsmInput {
     bool spin_requested = false;
     bool spin_high_priority = false;
 
-    // 强制切换（用于外部事件：例如底盘复活后需要先做危险恢复）
-    bool force_hazard_recovery = false;
-
     // 安全布尔（全部在 FSM 外计算）
     bool is_hazard = false;
     bool is_stuck = false;
