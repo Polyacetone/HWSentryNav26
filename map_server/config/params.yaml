@@ -12,12 +12,12 @@
     global_map:
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图
       robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-      blue_nav_map_filename: "pool.png" # 全局导航地图路径（蓝方）
-      red_nav_map_filename: "pool.png" # 全局导航地图路径（红方）
-      default_nav_map_filename: "pool.png" # 获取机器人颜色超时后使用此全局导航地图
+      blue_nav_map_filename: "RMUL2026.png" # 全局导航地图路径（蓝方）
+      red_nav_map_filename: "RMUL2026.png" # 全局导航地图路径（红方）
+      default_nav_map_filename: "RMUL2026.png" # 获取机器人颜色超时后使用此全局导航地图
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
-      cloud_filename: "pool.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
+      cloud_filename: "RMUL2026.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
       downsample_voxel_size: 0.05 # 全局点云下采样体素大小，单位m
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
 
@@ -29,7 +29,7 @@
       roi_xy_radius_max: 6.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_max: 0.2 # 局部点云ROI的z轴最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_min: -0.55 # 局部点云ROI的z轴最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
-      downsample_voxel_size: 0.05 # 局部点云下采样体素大小，单位m
+      downsample_voxel_size: 0.03 # 局部点云下采样体素大小，单位m
       with_global_cloud: # 有全局点云时通过比较局部点云与全局点云的最近邻距离来判断动态障碍物
         distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m。有全局点云时使用
       without_global_cloud: # 无全局点云时采用法向量垂直z轴的特征来判断动态障碍物
@@ -40,14 +40,14 @@
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
       object_tracker: # 基于目标的动态障碍物跟踪与预测参数
         predicted_cost_maps_pub_topic: "/map_server/predicted_cost_maps" # 预测代价地图发布话题
-        morph_open_kernel_size: 3 # 形态学开运算核大小（0或1=关闭），去除掩码噪声毛刺
-        min_blob_area: 2 # 最小连通域面积（像素），滤除噪声小斑块
+        morph_close_kernel_size: 5 # 形态学闭运算核大小（0或1=关闭）
+        min_blob_area: 3 # 最小连通域面积（像素），滤除噪声小斑块
         local_grid_size: 50 # 局部栅格地图边长（像素）
-        max_association_dist: 0.5 # 匈牙利匹配最大关联距离（m），超过则视为新目标
+        max_association_dist: 0.3 # 匈牙利匹配最大关联距离（m），超过则视为新目标
         process_noise_std: 4.0 # KF 过程噪声（加速度标准差，m/s²），越大越信任量测，越小越信任模型
         measurement_noise_std: 0.08 # KF 测量噪声标准差（m），对应质心观测精度
         max_lost_frames: 3 # 连续未匹配帧数上限，超过则删除航迹
-        min_hits_to_confirm: 2 # 航迹连续匹配此次数后才参与预测输出，防止噪声产生幻影
+        min_hits_to_confirm: 3 # 航迹连续匹配此次数后才进入运动预测；未确认障碍仍会静态保底写入未来代价图
         local_grid_decay: 0.8 # 未匹配时局部栅格衰减因子，越小形状消失越快
         local_grid_render_threshold: 0.3 # 局部栅格渲染阈值（0~1），低于此值不渲染
         prediction_steps: 10 # 未来预测步数

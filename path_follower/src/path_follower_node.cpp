@@ -48,6 +48,7 @@ private:
     std::optional<double> get_chassis_theta_imu_world() const;
     void publish_chassis_cmd(const ControlOutput& output);
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
+    bool should_use_prediction_maps() const;
 
     // ─── 台阶掩码层更新 ───
     void update_step_layers();
@@ -74,6 +75,7 @@ private:
 
     // ─── 参数 ───
     bool enable_debug_;
+    bool use_predicted_cost_maps_ = true;
     double remaining_energy_filter_alpha_ = 1.0;  // 一阶惯性滤波系数
     double prediction_dt_ = 0.2;                  // 预测步长 (s)
 
@@ -87,7 +89,7 @@ private:
 
     // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_, current_local_cost_map_;
-    std::vector<CostMap::ConstPtr> prediction_maps_;           // 逐步预测代价地图（动态障碍物）
+    std::vector<CostMap::ConstPtr> prediction_maps_;           // 逐步预测代价地图（maps[0] 为当前帧）
     std::vector<CostMap::ConstPtr> per_step_final_cost_maps_;  // 逐步融合后的最终代价地图
     CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
@@ -100,6 +102,8 @@ private:
     uint8_t comp_stage_ = 4;
     double rfr_pwr_limit_ = 90.0;
     double remaining_energy_filtered_ = 1400.0;
+    int64_t current_local_cost_map_stamp_ns_ = 0;
+    int64_t prediction_maps_stamp_ns_ = 0;
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 };
@@ -317,6 +321,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
 
     // ─── 功率限制滤波参数 ───
     remaining_energy_filter_alpha_ = declare_parameter<double>("misc.remaining_energy_filter_alpha");
+    use_predicted_cost_maps_ = declare_parameter<bool>("prediction.use_predicted_cost_maps");
 
     // ─── 订阅 / 发布 ───
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -453,6 +458,7 @@ void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedP
 void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
     if (!global_cost_map_) return;
     current_local_cost_map_ = std::make_shared<CostMap>(*msg);
+    current_local_cost_map_stamp_ns_ = rclcpp::Time(msg->header.stamp).nanoseconds();
     update_masked_cost_maps();
 }
 
@@ -463,6 +469,7 @@ void PathFollowerNode::predicted_cost_maps_callback(const interfaces::msg::Predi
     const auto total = static_cast<size_t>(w * h);
 
     prediction_dt_ = msg->prediction_dt;
+    prediction_maps_stamp_ns_ = rclcpp::Time(msg->maps.front().header.stamp).nanoseconds();
     prediction_maps_.clear();
     for (const auto& map : msg->maps) {
         if (map.data.size() != total) continue;
@@ -480,6 +487,16 @@ void PathFollowerNode::predicted_cost_maps_callback(const interfaces::msg::Predi
 }
 
 // ═══════════════════ 台阶掩码层更新 ════════════════════════════════
+
+bool PathFollowerNode::should_use_prediction_maps() const {
+    if (!use_predicted_cost_maps_ || prediction_maps_.empty()) {
+        return false;
+    }
+    if (!current_local_cost_map_ || current_local_cost_map_stamp_ns_ == 0 || prediction_maps_stamp_ns_ == 0) {
+        return true;
+    }
+    return prediction_maps_stamp_ns_ == current_local_cost_map_stamp_ns_;
+}
 
 void PathFollowerNode::update_step_layers() {
     if (!global_cost_map_ || !global_direction_map_ || !step_routing_mask_) return;
@@ -505,21 +522,27 @@ void PathFollowerNode::update_masked_cost_maps() {
     try {
         if (step_cost_layer_) {
             masked_global_cost_map_ = std::make_shared<CostMap>(global_cost_map_->merge(*step_cost_layer_));
+        } else {
+            masked_global_cost_map_ = global_cost_map_;
+        }
 
-            // 构建逐步预测代价地图
-            per_step_final_cost_maps_.clear();
-            if (!prediction_maps_.empty()) {
-                for (const auto& pred_map : prediction_maps_) {
-                    per_step_final_cost_maps_.push_back(
-                        std::make_shared<CostMap>(masked_global_cost_map_->merge(*pred_map))
-                    );
-                }
-                final_cost_map_ = per_step_final_cost_maps_[0];
-            } else if (current_local_cost_map_) {
-                final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*current_local_cost_map_));
-            } else {
-                final_cost_map_ = masked_global_cost_map_;
+        per_step_final_cost_maps_.clear();
+        if (should_use_prediction_maps()) {
+            for (const auto& pred_map : prediction_maps_) {
+                per_step_final_cost_maps_.push_back(
+                    std::make_shared<CostMap>(masked_global_cost_map_->merge(*pred_map))
+                );
             }
+            if (!per_step_final_cost_maps_.empty()) {
+                final_cost_map_ = per_step_final_cost_maps_[0];
+                return;
+            }
+        }
+
+        if (current_local_cost_map_) {
+            final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*current_local_cost_map_));
+        } else {
+            final_cost_map_ = masked_global_cost_map_;
         }
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Failed to merge cost maps: %s", e.what());

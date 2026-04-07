@@ -23,6 +23,9 @@
       stop_threshold_u: 0.99 # 停止样条参数u (0~1)
       remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
 
+    prediction:
+      use_predicted_cost_maps: true # 若启用，follow模式使用预测的代价地图进行避障
+
     step_mask: # 台阶路径掩码参数（同时作用于台阶额外代价层与台阶方向场）
       path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积阈值，>= 认为路径经过台阶（触发掩码）
       full_effect_radius: 0.4 # 掩码满强度半径 (m)：<= 该距离 alpha=1（cost 全擦除，dir 全保留）

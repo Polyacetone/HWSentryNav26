@@ -20,10 +20,12 @@ hungarian_solve(const std::vector<std::vector<double>>& cost, int n_rows, int n_
         static_cast<size_t>(n + 1),
         std::vector<double>(static_cast<size_t>(n + 1), BIG)
     );
-    for (int i = 0; i < n_rows; i++)
-        for (int j = 0; j < n_cols; j++)
+    for (int i = 0; i < n_rows; i++) {
+        for (int j = 0; j < n_cols; j++) {
             a[static_cast<size_t>(i + 1)][static_cast<size_t>(j + 1)] =
                 std::min(cost[static_cast<size_t>(i)][static_cast<size_t>(j)], BIG);
+        }
+    }
 
     std::vector<double> u(static_cast<size_t>(n + 1), 0.0);
     std::vector<double> v(static_cast<size_t>(n + 1), 0.0);
@@ -96,7 +98,7 @@ ObjectTracker::ObjectTracker(int width, int height, double resolution, const Obj
 
 // ═══════════════ Main Update ═══════════════
 
-std::vector<cv::Mat> ObjectTracker::update(const cv::Mat& obstacle_mask, double dt) {
+ObjectTracker::PredictionResult ObjectTracker::update(const cv::Mat& obstacle_mask, double dt) {
     const cv::Mat clean_mask = preprocess_mask(obstacle_mask);
     const std::vector<Detection> detections = detect(clean_mask);
 
@@ -109,25 +111,38 @@ std::vector<cv::Mat> ObjectTracker::update(const cv::Mat& obstacle_mask, double 
     const std::vector<int> assignment = associate(detections);
 
     // Track management: update matched, create new, delete lost
-    manage_tracks(detections, assignment);
+    const ManageTracksResult manage_result = manage_tracks(detections, assignment);
 
-    // Generate future predictions
-    std::vector<cv::Mat> predictions(static_cast<size_t>(params_.prediction_steps));
+    PredictionResult result;
+    result.motion_track_count = static_cast<size_t>(std::count_if(
+        tracks_.begin(),
+        tracks_.end(),
+        [this](const Track& track) { return is_motion_predictable(track); }
+    ));
+    result.static_fallback_mask = build_static_fallback_mask(
+        obstacle_mask,
+        detections,
+        manage_result.detections_with_motion_prediction
+    );
+    result.future_masks.resize(static_cast<size_t>(params_.prediction_steps));
+
+    // 未来预测 = 运动预测 + 当前帧未被覆盖的静态障碍保底。
     #pragma omp parallel for num_threads(params_.num_threads) schedule(static)
     for (int i = 0; i < params_.prediction_steps; i++) {
-        predictions[static_cast<size_t>(i)] = render_prediction(static_cast<double>(i + 1) * params_.prediction_dt);
+        cv::Mat motion_prediction = render_motion_prediction(static_cast<double>(i + 1) * params_.prediction_dt);
+        cv::max(motion_prediction, result.static_fallback_mask, result.future_masks[static_cast<size_t>(i)]);
     }
-    return predictions;
+    return result;
 }
 
 // ═══════════════ Preprocessing ═══════════════
 
 cv::Mat ObjectTracker::preprocess_mask(const cv::Mat& mask) const {
-    if (params_.morph_open_kernel_size <= 1) return mask;
+    if (params_.morph_close_kernel_size <= 1) return mask;
     cv::Mat cleaned;
-    const int ks = params_.morph_open_kernel_size | 1; // ensure odd
+    const int ks = params_.morph_close_kernel_size | 1; // ensure odd
     const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, {ks, ks});
-    cv::morphologyEx(mask, cleaned, cv::MORPH_OPEN, kernel);
+    cv::morphologyEx(mask, cleaned, cv::MORPH_CLOSE, kernel);
     return cleaned;
 }
 
@@ -157,6 +172,7 @@ std::vector<ObjectTracker::Detection> ObjectTracker::detect(const cv::Mat& mask)
         // Extract local grid relative to rounded centroid
         const int cx_int = static_cast<int>(std::round(cx_px));
         const int cy_int = static_cast<int>(std::round(cy_px));
+        det.centroid_px = {cx_int, cy_int};
         det.local_grid = cv::Mat::zeros(grid_sz, grid_sz, CV_32FC1);
 
         const int bb_left = stats.at<int>(label, cv::CC_STAT_LEFT);
@@ -263,8 +279,10 @@ std::vector<int> ObjectTracker::associate(const std::vector<Detection>& detectio
 
 // ═══════════════ Track Management ═══════════════
 
-void ObjectTracker::manage_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment) {
+ObjectTracker::ManageTracksResult ObjectTracker::manage_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment) {
     std::vector<bool> det_used(detections.size(), false);
+    ManageTracksResult result;
+    result.detections_with_motion_prediction.resize(detections.size(), false);
 
     // Update matched tracks / age unmatched tracks
     for (size_t i = 0; i < tracks_.size(); i++) {
@@ -283,25 +301,27 @@ void ObjectTracker::manage_tracks(const std::vector<Detection>& detections, cons
             const double dx_px = (centroid_after[0] - centroid_before[0]) / resolution_;
             const double dy_px = (centroid_after[1] - centroid_before[1]) / resolution_;
 
-            // Shift old local grid to align with new centroid frame
-            cv::Mat shifted_old;
-            const cv::Mat shift_mat = (cv::Mat_<double>(2, 3) << 1.0, 0.0, -dx_px, 0.0, 1.0, -dy_px);
-            cv::warpAffine(
-                tracks_[i].local_grid,
-                shifted_old,
-                shift_mat,
-                tracks_[i].local_grid.size(),
-                cv::INTER_LINEAR,
-                cv::BORDER_CONSTANT,
-                cv::Scalar(0)
+            // 将旧形状和当前量测都对齐到后验航迹坐标系，避免快速运动时出现形状/状态失配。
+            const cv::Mat shifted_old = shift_local_grid(tracks_[i].local_grid, dx_px, dy_px);
+            const double meas_to_track_dx_px = (centroid_after[0] - detections[j].centroid_m[0]) / resolution_;
+            const double meas_to_track_dy_px = (centroid_after[1] - detections[j].centroid_m[1]) / resolution_;
+            const cv::Mat measurement_in_track_frame = shift_local_grid(
+                detections[j].local_grid,
+                meas_to_track_dx_px,
+                meas_to_track_dy_px
             );
 
             // Blend: decayed shifted old + new observation (take element-wise max)
-            shifted_old *= params_.local_grid_decay;
-            cv::max(shifted_old, detections[j].local_grid, tracks_[i].local_grid);
+            cv::Mat decayed_old = shifted_old;
+            decayed_old *= params_.local_grid_decay;
+            cv::max(decayed_old, measurement_in_track_frame, tracks_[i].local_grid);
 
             tracks_[i].hit_streak++;
+            tracks_[i].confirmed = tracks_[i].confirmed || tracks_[i].hit_streak >= params_.min_hits_to_confirm;
             tracks_[i].lost_frames = 0;
+            if (tracks_[i].confirmed) {
+                result.detections_with_motion_prediction[j] = true;
+            }
         } else {
             tracks_[i].hit_streak = 0;
             tracks_[i].lost_frames++;
@@ -335,48 +355,87 @@ void ObjectTracker::manage_tracks(const std::vector<Detection>& detections, cons
         t.P(3, 3) = 4.0;
         t.local_grid = detections[j].local_grid.clone();
         t.hit_streak = 1;
+        t.confirmed = t.hit_streak >= params_.min_hits_to_confirm;
         t.lost_frames = 0;
         t.age = 1;
         tracks_.push_back(std::move(t));
     }
+    return result;
 }
 
 // ═══════════════ Prediction Rendering ═══════════════
 
-cv::Mat ObjectTracker::render_prediction(double t_future) const {
-    cv::Mat prediction = cv::Mat::zeros(height_, width_, CV_8UC1);
+cv::Mat ObjectTracker::shift_local_grid(const cv::Mat& local_grid, double dx_px, double dy_px) const {
+    cv::Mat shifted;
+    const cv::Mat shift_mat = (cv::Mat_<double>(2, 3) << 1.0, 0.0, -dx_px, 0.0, 1.0, -dy_px);
+    cv::warpAffine(
+        local_grid,
+        shifted,
+        shift_mat,
+        local_grid.size(),
+        cv::INTER_LINEAR,
+        cv::BORDER_CONSTANT,
+        cv::Scalar(0)
+    );
+    return shifted;
+}
+
+void ObjectTracker::rasterize_local_grid(
+    cv::Mat& mask,
+    const cv::Mat& local_grid,
+    const Eigen::Vector2i& centroid_px,
+    uint8_t value
+) const {
     const int half = params_.local_grid_size / 2;
     const int grid_sz = params_.local_grid_size;
-    const double inv_res = 1.0 / resolution_;
     const float render_thresh = static_cast<float>(params_.local_grid_render_threshold);
 
-    for (const auto& track: tracks_) {
-        // Only output confirmed tracks
-        if (track.hit_streak < params_.min_hits_to_confirm) continue;
-
-        // Predicted centroid (pixels)
-        const double pred_x_m = track.x[0] + track.x[2] * t_future;
-        const double pred_y_m = track.x[1] + track.x[3] * t_future;
-        const int cx_px = static_cast<int>(std::round(pred_x_m * inv_res));
-        const int cy_px = static_cast<int>(std::round(pred_y_m * inv_res));
-
-        // Paste local grid onto global prediction
-        for (int ly = 0; ly < grid_sz; ly++) {
-            const int gy = cy_px + ly - half;
-            if (gy < 0 || gy >= height_) continue;
-            const float* lg_row = track.local_grid.ptr<float>(ly);
-            uint8_t* out_row = prediction.ptr<uint8_t>(gy);
-            for (int lx = 0; lx < grid_sz; lx++) {
-                if (lg_row[lx] > render_thresh) {
-                    const int gx = cx_px + lx - half;
-                    if (gx >= 0 && gx < width_) {
-                        out_row[gx] = 255;
-                    }
-                }
+    for (int ly = 0; ly < grid_sz; ly++) {
+        const int gy = centroid_px.y() + ly - half;
+        if (gy < 0 || gy >= height_) continue;
+        const float* lg_row = local_grid.ptr<float>(ly);
+        uint8_t* out_row = mask.ptr<uint8_t>(gy);
+        for (int lx = 0; lx < grid_sz; lx++) {
+            if (lg_row[lx] <= render_thresh) continue;
+            const int gx = centroid_px.x() + lx - half;
+            if (gx >= 0 && gx < width_) {
+                out_row[gx] = value;
             }
         }
     }
+}
+
+bool ObjectTracker::is_motion_predictable(const Track& track) const {
+    return track.confirmed;
+}
+
+cv::Mat ObjectTracker::render_motion_prediction(double t_future) const {
+    cv::Mat prediction = cv::Mat::zeros(height_, width_, CV_8UC1);
+    const double inv_res = 1.0 / resolution_;
+    for (const auto& track: tracks_) {
+        if (!is_motion_predictable(track)) continue;
+        const double pred_x_m = track.x[0] + track.x[2] * t_future;
+        const double pred_y_m = track.x[1] + track.x[3] * t_future;
+        const Eigen::Vector2i centroid_px(
+            static_cast<int>(std::round(pred_x_m * inv_res)),
+            static_cast<int>(std::round(pred_y_m * inv_res))
+        );
+        rasterize_local_grid(prediction, track.local_grid, centroid_px, 255);
+    }
     return prediction;
+}
+
+cv::Mat ObjectTracker::build_static_fallback_mask(
+    const cv::Mat& obstacle_mask,
+    const std::vector<Detection>& detections,
+    const std::vector<bool>& detections_with_motion_prediction
+) const {
+    cv::Mat fallback_mask = obstacle_mask.clone();
+    for (size_t i = 0; i < detections.size(); i++) {
+        if (!detections_with_motion_prediction[i]) continue;
+        rasterize_local_grid(fallback_mask, detections[i].local_grid, detections[i].centroid_px, 0);
+    }
+    return fallback_mask;
 }
 
 } // namespace map_server

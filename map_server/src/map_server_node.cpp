@@ -145,7 +145,7 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
 
     // 目标跟踪预测参数
     tracker_params_ = {
-        .morph_open_kernel_size = (int)declare_parameter<int>("local_map.object_tracker.morph_open_kernel_size"),
+        .morph_close_kernel_size = (int)declare_parameter<int>("local_map.object_tracker.morph_close_kernel_size"),
         .min_blob_area = (int)declare_parameter<int>("local_map.object_tracker.min_blob_area"),
         .local_grid_size = (int)declare_parameter<int>("local_map.object_tracker.local_grid_size"),
         .max_association_dist = declare_parameter<double>("local_map.object_tracker.max_association_dist"),
@@ -315,23 +315,25 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
     last_tracker_update_time_ = now_time;
 
     const auto tracker_update_begin = std::chrono::steady_clock::now();
-    auto predicted_masks = object_tracker_->update(obstacle_mask, dt);
+    auto prediction_result = object_tracker_->update(obstacle_mask, dt);
     const auto tracker_update_end = std::chrono::steady_clock::now();
 
     // 并行膨胀预测栅格
     const auto tracker_inflate_begin = std::chrono::steady_clock::now();
     #pragma omp parallel for num_threads(num_threads_) schedule(static)
-    for (int i = 0; i < static_cast<int>(predicted_masks.size()); i++) {
-        predicted_masks[static_cast<size_t>(i)] = inflate_cost_map(predicted_masks[static_cast<size_t>(i)]);
+    for (int i = 0; i < static_cast<int>(prediction_result.future_masks.size()); i++) {
+        prediction_result.future_masks[static_cast<size_t>(i)] = inflate_cost_map(prediction_result.future_masks[static_cast<size_t>(i)]);
     }
     const auto tracker_inflate_end = std::chrono::steady_clock::now();
 
     RCLCPP_DEBUG(
         get_logger(),
-        "ObjectTracker timing: update=%.3f ms, inflate=%.3f ms, tracks=%zu, obstacle_cells=%d, dt=%.3f s",
+        "ObjectTracker timing: update=%.3f ms, inflate=%.3f ms, tracks=%zu, motion_tracks=%zu, fallback_cells=%d, obstacle_cells=%d, dt=%.3f s",
         std::chrono::duration<double, std::milli>(tracker_update_end - tracker_update_begin).count(),
         std::chrono::duration<double, std::milli>(tracker_inflate_end - tracker_inflate_begin).count(),
         object_tracker_->track_count(),
+        prediction_result.motion_track_count,
+        cv::countNonZero(prediction_result.static_fallback_mask),
         cv::countNonZero(obstacle_mask),
         dt
     );
@@ -339,10 +341,10 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
     // 打包发布预测代价地图
     interfaces::msg::PredictedCostMaps pcm;
     pcm.prediction_dt = tracker_params_.prediction_dt;
-    pcm.maps.resize(predicted_masks.size() + 1);
+    pcm.maps.resize(prediction_result.future_masks.size() + 1);
     fill_occupancy_grid(local_cost_map, msg->header.stamp, pcm.maps[0]);
-    for (size_t i = 0; i < predicted_masks.size(); i++) {
-        fill_occupancy_grid(predicted_masks[i], msg->header.stamp, pcm.maps[i + 1]);
+    for (size_t i = 0; i < prediction_result.future_masks.size(); i++) {
+        fill_occupancy_grid(prediction_result.future_masks[i], msg->header.stamp, pcm.maps[i + 1]);
     }
     predicted_cost_maps_pub_->publish(pcm);
 
