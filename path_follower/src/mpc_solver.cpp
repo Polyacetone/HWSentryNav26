@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <utility>
 
 namespace path_follower {
 
@@ -19,6 +20,49 @@ inline double softplus(double x) {
     if (x > 20.0) return x;
     if (x < -20.0) return std::exp(x);
     return std::log(1.0 + std::exp(x));
+}
+
+constexpr double SOFTPLUS_AT_ZERO = 0.6931471805599453;
+
+struct SoftplusEval {
+    double value;
+    double deriv;
+};
+
+inline SoftplusEval softplus_eval(double x) {
+    if (x > 20.0) {
+        return {x, 1.0};
+    }
+    if (x < -20.0) {
+        const double ex = std::exp(x);
+        return {ex, ex};
+    }
+    const double ex = std::exp(x);
+    return {std::log(1.0 + ex), ex / (1.0 + ex)};
+}
+
+struct SmoothReluEval {
+    double value;
+    double deriv;
+};
+
+inline SmoothReluEval smooth_relu_eval(double x) {
+    const auto sp = softplus_eval(x);
+    const double y = sp.value - SOFTPLUS_AT_ZERO;
+    if (y <= 0.0) {
+        return {0.0, 0.0};
+    }
+    return {y, sp.deriv};
+}
+
+inline double signum(double x) {
+    if (x > 0.0) return 1.0;
+    if (x < 0.0) return -1.0;
+    return 0.0;
+}
+
+inline double clamp_derivative(double x, double lo, double hi) {
+    return (x > lo && x < hi) ? 1.0 : 0.0;
 }
 
 Eigen::Vector2d apply_goal_deadzone(const Eigen::Vector2d& delta, double deadzone) {
@@ -52,16 +96,38 @@ inline double wrap_pi(double a) {
 }
 
 inline double relu(double x) {
-    // replace hard ReLU with a softplus-based deadzone so costs grow
-    // smoothly. subtract the baseline softplus(0) so relu(0) == 0.
-    double y = softplus(x) - softplus(0.0);
-    return (y > 0.0) ? y : 0.0;
+    return smooth_relu_eval(x).value;
 }
 
 inline double predict_power(double v, double w, double a, double alpha) {
     return PWR_C[0] + PWR_C[1] * v * a + PWR_C[2] * w * alpha + PWR_C[3] * a * a + PWR_C[4] * alpha * alpha
         + PWR_C[5] * sabs(v) + PWR_C[6] * sabs(w) + PWR_C[7] * v * v + PWR_C[8] * w * w + PWR_C[9] * sabs(a)
         + PWR_C[10] * sabs(alpha) + PWR_C[11] * sabs(v * w);
+}
+
+struct PowerEval {
+    double value;
+    double dv;
+    double dw;
+};
+
+inline PowerEval predict_power_eval_vw(double v, double w) {
+    const double sabs_v = sabs(v);
+    const double sabs_w = sabs(w);
+    const double vw = v * w;
+    const double sabs_vw = sabs(vw);
+
+    const double dsabs_v = v / sabs_v;
+    const double dsabs_w = w / sabs_w;
+    const double dsabs_vw_dvw = vw / sabs_vw;
+
+    PowerEval out {};
+    out.value = PWR_C[0] + PWR_C[5] * sabs_v + PWR_C[6] * sabs_w + PWR_C[7] * v * v + PWR_C[8] * w * w
+        + PWR_C[11] * sabs_vw;
+
+    out.dv = PWR_C[5] * dsabs_v + 2.0 * PWR_C[7] * v + PWR_C[11] * dsabs_vw_dvw * w;
+    out.dw = PWR_C[6] * dsabs_w + 2.0 * PWR_C[8] * w + PWR_C[11] * dsabs_vw_dvw * v;
+    return out;
 }
 
 inline double clamp_prev_cmd(double cmd_prev, double status, double cmd_act_diff_max, double rate_max, double dt) {
@@ -72,6 +138,15 @@ inline double clamp_prev_cmd(double cmd_prev, double status, double cmd_act_diff
 }
 
 double advance_u_progress(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps);
+double advance_u_progress_extrapolated(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps);
+
+struct AdvanceUProgressEval {
+    double u_next_extrap;
+    StateVec du_next_dx;
+};
+
+AdvanceUProgressEval
+advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps);
 
 // ─── B-spline 求值 ───
 
@@ -101,6 +176,32 @@ inline void eval_bspline2(
     if (p) *p = 0.5 * omt * omt * p0 + 0.5 * (-2 * t * t + 2 * t + 1) * p1 + 0.5 * t * t * p2;
     if (d1) *d1 = (-omt * p0 + (-2 * t + 1) * p1 + t * p2) * scale;
     if (d2) *d2 = (p0 - 2 * p1 + p2) * (scale * scale);
+}
+
+inline void eval_bspline2_extrapolated(
+    const std::vector<Eigen::Vector2d>& cps,
+    double u_in,
+    Eigen::Vector2d* p,
+    Eigen::Vector2d* d1,
+    Eigen::Vector2d* d2
+) {
+    if (u_in >= 0.0 && u_in <= 1.0) {
+        eval_bspline2(cps, u_in, p, d1, d2);
+        return;
+    }
+
+    Eigen::Vector2d p_edge = Eigen::Vector2d::Zero();
+    Eigen::Vector2d d1_edge = Eigen::Vector2d::Zero();
+    if (u_in < 0.0) {
+        eval_bspline2(cps, 0.0, &p_edge, &d1_edge, nullptr);
+        if (p) *p = p_edge + d1_edge * u_in;
+    } else {
+        eval_bspline2(cps, 1.0, &p_edge, &d1_edge, nullptr);
+        if (p) *p = p_edge + d1_edge * (u_in - 1.0);
+    }
+
+    if (d1) *d1 = d1_edge;
+    if (d2) *d2 = Eigen::Vector2d::Zero();
 }
 
 inline double estimate_arclength(const std::vector<Eigen::Vector2d>& cps, double u_in, int ns) {
@@ -145,12 +246,19 @@ inline ArclengthTable build_arclength_table(const std::vector<Eigen::Vector2d>& 
     return t;
 }
 
-inline double lookup_arclength(const ArclengthTable& table, double u) {
-    u = std::clamp(u, 0.0, 1.0);
+inline std::pair<double, double> lookup_arclength_with_derivative(const ArclengthTable& table, double u_raw) {
+    const double u = std::clamp(u_raw, 0.0, 1.0);
     const double idx = u * static_cast<double>(ARCLENGTH_TABLE_SIZE);
     const int i0 = std::min(static_cast<int>(std::floor(idx)), ARCLENGTH_TABLE_SIZE - 1);
     const double t = idx - static_cast<double>(i0);
-    return (1.0 - t) * table[static_cast<size_t>(i0)] + t * table[static_cast<size_t>(i0 + 1)];
+    const double s0 = table[static_cast<size_t>(i0)];
+    const double s1 = table[static_cast<size_t>(i0 + 1)];
+    const double value = (1.0 - t) * s0 + t * s1;
+    if (u <= 0.0 || u >= 1.0) {
+        return {value, 0.0};
+    }
+    const double ds_du = (s1 - s0) * static_cast<double>(ARCLENGTH_TABLE_SIZE);
+    return {value, ds_du};
 }
 
 // ─── Gauss-Newton 残差辅助 ───
@@ -229,89 +337,76 @@ void gauss_newton_terminal_derivatives(ResidualFn&& residual_fn, const StateVec&
 } // anonymous namespace
 
 // ════════════════════════════════════════════════════════════════
-//  代价地图 Bicubic 采样（Catmull-Rom, C¹ 连续梯度）
+//  代价地图双线性采样（保留函数名以兼容现有调用）
 // ════════════════════════════════════════════════════════════════
 
-namespace {
-
-    // Catmull-Rom 基函数及其导数
-    inline void catmull_rom_weights(double t, double w[4], double dw[4]) {
-        const double t2 = t * t, t3 = t2 * t;
-        w[0] = -0.5 * t3 + t2 - 0.5 * t;
-        w[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
-        w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
-        w[3] = 0.5 * t3 - 0.5 * t2;
-        dw[0] = -1.5 * t2 + 2.0 * t - 0.5;
-        dw[1] = 4.5 * t2 - 5.0 * t;
-        dw[2] = -4.5 * t2 + 4.0 * t + 0.5;
-        dw[3] = 1.5 * t2 - t;
-    }
-
-} // anonymous namespace
-
-CostSample eval_cost_bicubic(const CostMapGridView& grid, const GridInfo& info, double x_map, double y_map) {
+CostSample eval_cost_bilinear(const CostMapGridView& grid, const GridInfo& info, double x_map, double y_map) {
     CostSample s {255.0, 0.0, 0.0};
     if (!std::isfinite(x_map) || !std::isfinite(y_map)) return s;
-    if (info.width < 4 || info.height < 4) return s;
+    if (info.width < 2 || info.height < 2) return s;
 
     const double gx = (x_map - info.origin_x) * info.inv_resolution;
     const double gy = (y_map - info.origin_y) * info.inv_resolution;
-    if (gx < 1.0 || gy < 1.0 || gx >= info.width - 2 || gy >= info.height - 2) return s;
+    if (gx < 0.0 || gy < 0.0 || gx >= static_cast<double>(info.width - 1)
+        || gy >= static_cast<double>(info.height - 1)) {
+        return s;
+    }
 
     const int ix0 = static_cast<int>(std::floor(gx));
     const int iy0 = static_cast<int>(std::floor(gy));
-    const double tx = gx - ix0, ty = gy - iy0;
+    const double tx = gx - static_cast<double>(ix0);
+    const double ty = gy - static_cast<double>(iy0);
 
-    double wx[4], dwx[4], wy[4], dwy[4];
-    catmull_rom_weights(tx, wx, dwx);
-    catmull_rom_weights(ty, wy, dwy);
+    const double f00 = grid.value_at_clamped(iy0, ix0);
+    const double f10 = grid.value_at_clamped(iy0, ix0 + 1);
+    const double f01 = grid.value_at_clamped(iy0 + 1, ix0);
+    const double f11 = grid.value_at_clamped(iy0 + 1, ix0 + 1);
 
-    double val = 0.0, dvdgx = 0.0, dvdgy = 0.0;
-    for (int j = -1; j <= 2; ++j) {
-        for (int i = -1; i <= 2; ++i) {
-            const double f = grid.value_at_clamped(iy0 + j, ix0 + i);
-            val += wx[i + 1] * wy[j + 1] * f;
-            dvdgx += dwx[i + 1] * wy[j + 1] * f;
-            dvdgy += wx[i + 1] * dwy[j + 1] * f;
-        }
-    }
+    const double w00 = (1.0 - tx) * (1.0 - ty);
+    const double w10 = tx * (1.0 - ty);
+    const double w01 = (1.0 - tx) * ty;
+    const double w11 = tx * ty;
 
-    s.value = val;
+    s.value = w00 * f00 + w10 * f10 + w01 * f01 + w11 * f11;
+
+    const double dvdgx = (1.0 - ty) * (f10 - f00) + ty * (f11 - f01);
+    const double dvdgy = (1.0 - tx) * (f01 - f00) + tx * (f11 - f10);
     s.dx = dvdgx * info.inv_resolution;
     s.dy = dvdgy * info.inv_resolution;
     return s;
 }
 
-DirSample eval_dir_bicubic(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map) {
+DirSample eval_dir_bilinear(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map) {
     DirSample s {Eigen::Vector2d::Zero(), Eigen::Matrix2d::Zero()};
     if (!std::isfinite(x_map) || !std::isfinite(y_map)) return s;
-    if (info.width < 4 || info.height < 4) return s;
+    if (info.width < 2 || info.height < 2) return s;
 
     const double gx = (x_map - info.origin_x) * info.inv_resolution;
     const double gy = (y_map - info.origin_y) * info.inv_resolution;
-    if (gx < 1.0 || gy < 1.0 || gx >= info.width - 2 || gy >= info.height - 2) return s;
+    if (gx < 0.0 || gy < 0.0 || gx >= static_cast<double>(info.width - 1)
+        || gy >= static_cast<double>(info.height - 1)) {
+        return s;
+    }
 
     const int ix0 = static_cast<int>(std::floor(gx));
     const int iy0 = static_cast<int>(std::floor(gy));
-    const double tx = gx - ix0, ty = gy - iy0;
+    const double tx = gx - static_cast<double>(ix0);
+    const double ty = gy - static_cast<double>(iy0);
 
-    double wx[4], dwx[4], wy[4], dwy[4];
-    catmull_rom_weights(tx, wx, dwx);
-    catmull_rom_weights(ty, wy, dwy);
+    const Eigen::Vector2d f00 = grid.value_at_clamped(iy0, ix0);
+    const Eigen::Vector2d f10 = grid.value_at_clamped(iy0, ix0 + 1);
+    const Eigen::Vector2d f01 = grid.value_at_clamped(iy0 + 1, ix0);
+    const Eigen::Vector2d f11 = grid.value_at_clamped(iy0 + 1, ix0 + 1);
 
-    Eigen::Vector2d val = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dvdgx = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dvdgy = Eigen::Vector2d::Zero();
-    for (int j = -1; j <= 2; ++j) {
-        for (int i = -1; i <= 2; ++i) {
-            const auto f = grid.value_at_clamped(iy0 + j, ix0 + i);
-            val += wx[i + 1] * wy[j + 1] * f;
-            dvdgx += dwx[i + 1] * wy[j + 1] * f;
-            dvdgy += wx[i + 1] * dwy[j + 1] * f;
-        }
-    }
+    const double w00 = (1.0 - tx) * (1.0 - ty);
+    const double w10 = tx * (1.0 - ty);
+    const double w01 = (1.0 - tx) * ty;
+    const double w11 = tx * ty;
 
-    s.value = val;
+    s.value = w00 * f00 + w10 * f10 + w01 * f01 + w11 * f11;
+
+    const Eigen::Vector2d dvdgx = (1.0 - ty) * (f10 - f00) + ty * (f11 - f01);
+    const Eigen::Vector2d dvdgy = (1.0 - tx) * (f01 - f00) + tx * (f11 - f10);
     s.J.col(0) = dvdgx * info.inv_resolution;
     s.J.col(1) = dvdgy * info.inv_resolution;
     return s;
@@ -472,16 +567,9 @@ StateVec FollowProblem::dynamics(int, const StateVec& x, const ControlVec& u) co
 void FollowProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
     mpc_dynamics_jacobians(x, u, dfx, dfu);
 
-    constexpr double eps = 1e-5;
-    for (int i = 0; i < MPC_NX; ++i) {
-        StateVec xp = x;
-        xp(i) += eps;
-        StateVec xm = x;
-        xm(i) -= eps;
-        dfx(ix::PATH_U, i) =
-            (advance_u_progress(xp(ix::PATH_U), xp, ref_cps_) - advance_u_progress(xm(ix::PATH_U), xm, ref_cps_))
-            / (2.0 * eps);
-    }
+    const auto adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, ref_cps_);
+    const double dout_din = clamp_derivative(adv.u_next_extrap, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+    dfx.row(ix::PATH_U) = (dout_din * adv.du_next_dx).transpose();
     dfu.row(ix::PATH_U).setZero();
 }
 
@@ -498,7 +586,13 @@ namespace {
     constexpr int FOLLOW_RESIDUAL_DIM = 15;
     using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
-    FollowResidualVec follow_residual_impl(
+    struct FollowResidualLinearization {
+        FollowResidualVec r;
+        Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, MPC_NX> jx;
+        Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, MPC_NU> ju;
+    };
+
+    FollowResidualLinearization follow_residual_linearized_impl(
         const StateVec& x,
         const ControlVec& u,
         const std::vector<Eigen::Vector2d>& ref_cps,
@@ -514,79 +608,301 @@ namespace {
         const auto& w = p.follow_weights;
         const auto& lim = p.follow_limits;
 
-        FollowResidualVec r = FollowResidualVec::Zero();
+        FollowResidualLinearization out;
+        out.r.setZero();
+        out.jx.setZero();
+        out.ju.setZero();
+
         const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
         const double v_act = x(ix::V), w_act = x(ix::W);
         const double v_cmd = u(0), w_cmd = u(1);
         const double dv_cmd = v_cmd - x(ix::DV);
         const double dw_cmd = w_cmd - x(ix::DW);
 
-        const double uc = std::clamp(x(ix::PATH_U), 0.0, 1.0);
+        const double uc_raw = x(ix::PATH_U);
+        const double uc = clamp_path_u_extrapolated(uc_raw);
+        const double duc_dpathu = clamp_derivative(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+
+        const auto u_adv = advance_u_progress_extrapolated_with_jacobian(uc_raw, x, ref_cps);
+        const double u_next_extrap = u_adv.u_next_extrap;
+        const double u_progress = std::min(1.0, u_next_extrap);
+
+        StateVec du_progress_dx = StateVec::Zero();
+        if (u_next_extrap < 1.0) {
+            du_progress_dx = u_adv.du_next_dx;
+        }
+
         Eigen::Vector2d pr, d1, d2;
-        eval_bspline2(ref_cps, uc, &pr, &d1, &d2);
+        eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
 
         const double thetar = std::atan2(d1.y(), d1.x());
-        const double ex = px - pr.x(), ey_w = py - pr.y();
-        const double ey = -ex * std::sin(thetar) + ey_w * std::cos(thetar);
-        const double etheta = wrap_pi(theta - thetar);
+        const double sin_r = std::sin(thetar);
+        const double cos_r = std::cos(thetar);
 
-        const double s_remain = lookup_arclength(arc_table, uc);
-        const auto cs = eval_cost_bicubic(cg, ci, px, py);
-        const auto ds = eval_dir_bicubic(dg, di, px, py);
+        const double d1_norm2 = d1.squaredNorm();
+        const double dtheta_du = (d1.x() * d2.y() - d1.y() * d2.x()) / std::max(d1_norm2, 1e-12);
+
+        const double ex = px - pr.x(), ey_w = py - pr.y();
+        const double ey = -ex * sin_r + ey_w * cos_r;
+        const double dey_dpx = -sin_r;
+        const double dey_dpy = cos_r;
+        const double dey_du =
+            sin_r * d1.x() - cos_r * d1.y() - dtheta_du * (ex * cos_r + ey_w * sin_r);
+        const double dey_dpathu = dey_du * duc_dpathu;
+
+        const double etheta = wrap_pi(theta - thetar);
+        const double detheta_dpathu = -dtheta_du * duc_dpathu;
+
+        const auto s_eval = lookup_arclength_with_derivative(arc_table, uc);
+        const double s_remain = s_eval.first;
+        const double ds_du_clamped = s_eval.second;
+        const double du01_duc = clamp_derivative(uc, 0.0, 1.0);
+        const double ds_dpathu = ds_du_clamped * du01_duc * duc_dpathu;
+
+        const auto cs = eval_cost_bilinear(cg, ci, px, py);
+        const auto ds = eval_dir_bilinear(dg, di, px, py);
+
+        const Eigen::Vector2d dir = ds.value;
         const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
-        const Eigen::Vector2d dir_unit = ds.value / dir_norm;
-        const Eigen::Vector2d heading(std::cos(theta), std::sin(theta));
-        const double cross = heading.x() * ds.value.y() - heading.y() * ds.value.x();
+        const double inv_dir_norm = 1.0 / dir_norm;
+        const Eigen::Vector2d dir_unit = dir * inv_dir_norm;
+
+        const double cos_t = std::cos(theta);
+        const double sin_t = std::sin(theta);
+        const Eigen::Vector2d heading(cos_t, sin_t);
+
+        const Eigen::Vector2d ddir_dx = ds.J.col(0);
+        const Eigen::Vector2d ddir_dy = ds.J.col(1);
+        const double dnorm_dx = dir.dot(ddir_dx) * inv_dir_norm;
+        const double dnorm_dy = dir.dot(ddir_dy) * inv_dir_norm;
+
+        const Eigen::Vector2d dunit_dx = (ddir_dx - dir_unit * dir_unit.dot(ddir_dx)) * inv_dir_norm;
+        const Eigen::Vector2d dunit_dy = (ddir_dy - dir_unit * dir_unit.dot(ddir_dy)) * inv_dir_norm;
+
+        const Eigen::Vector2d dheading_dtheta(-sin_t, cos_t);
+
+        const double cross = heading.x() * dir.y() - heading.y() * dir.x();
+        const double dcross_dtheta = -sin_t * dir.y() - cos_t * dir.x();
+        const double dcross_dx = cos_t * ddir_dx.y() - sin_t * ddir_dx.x();
+        const double dcross_dy = cos_t * ddir_dy.y() - sin_t * ddir_dy.x();
+
         const double cos_th = heading.dot(dir_unit);
+        const double dcos_th_dtheta = dheading_dtheta.dot(dir_unit);
+        const double dcos_th_dx = heading.dot(dunit_dx);
+        const double dcos_th_dy = heading.dot(dunit_dy);
+
         const double weight_up = (cos_th + 1.0) / 2.0;
         const double target_vel = weight_up * lim.vel_step_up + (1.0 - weight_up) * lim.vel_step_down;
+        const double dtarget_dcos = 0.5 * (lim.vel_step_up - lim.vel_step_down);
+        const double dtarget_dtheta = dtarget_dcos * dcos_th_dtheta;
+        const double dtarget_dx = dtarget_dcos * dcos_th_dx;
+        const double dtarget_dy = dtarget_dcos * dcos_th_dy;
+
         const double v_dec = std::sqrt(2.0 * lim.slow_down_deceleration * s_remain + sq(lim.slow_down_target_vel));
         const double a_lat = std::abs(v_act * w_act);
 
         const double dv_lim = lim.acc_max * MPC_DT;
         const double dw_lim = lim.alpha_max * MPC_DT;
-        r(0) = w.q_y * (ey - target_ey);
-        r(1) = w.q_theta * etheta;
-        r(2) = w.q_u * (1.0 - uc);
-        r(3) = w.r_v * v_cmd;
-        r(4) = w.r_omega * w_cmd;
-        r(5) = w.r_dv * dv_cmd;
-        r(6) = w.r_domega * dw_cmd;
-        r(7) = w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
-        r(8) = w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
-        r(9) = w.lat_acc * relu(a_lat - lim.a_lat_max);
-        r(10) = w.obstacle * cs.value / 255.0;
-        r(11) = w.direction * std::abs(cross);
-        r(12) = w.vel_on_step * dir_norm * std::abs(v_act - target_vel);
-        r(13) = w.q_v_final * relu(v_act - v_dec);
+
+        out.r(0) = w.q_y * (ey - target_ey);
+        out.jx(0, ix::X) = w.q_y * dey_dpx;
+        out.jx(0, ix::Y) = w.q_y * dey_dpy;
+        out.jx(0, ix::PATH_U) = w.q_y * dey_dpathu;
+
+        out.r(1) = w.q_theta * etheta;
+        out.jx(1, ix::THETA) = w.q_theta;
+        out.jx(1, ix::PATH_U) = w.q_theta * detheta_dpathu;
+
+        const auto relu_progress = smooth_relu_eval(1.0 - u_progress);
+        out.r(2) = w.q_u * relu_progress.value;
+        out.jx.row(2) = (-w.q_u * relu_progress.deriv * du_progress_dx).transpose();
+
+        out.r(3) = w.r_v * v_cmd;
+        out.ju(3, 0) = w.r_v;
+
+        out.r(4) = w.r_omega * w_cmd;
+        out.ju(4, 1) = w.r_omega;
+
+        out.r(5) = w.r_dv * dv_cmd;
+        out.ju(5, 0) = w.r_dv;
+        out.jx(5, ix::DV) = -w.r_dv;
+
+        out.r(6) = w.r_domega * dw_cmd;
+        out.ju(6, 1) = w.r_domega;
+        out.jx(6, ix::DW) = -w.r_domega;
+
+        const double sign_dv_cmd = signum(dv_cmd);
+        const auto relu_dv = smooth_relu_eval(std::abs(dv_cmd) - dv_lim);
+        out.r(7) = w.acc_limit * relu_dv.value;
+        const double coeff_dv = w.acc_limit * relu_dv.deriv * sign_dv_cmd;
+        out.ju(7, 0) = coeff_dv;
+        out.jx(7, ix::DV) = -coeff_dv;
+
+        const double sign_dw_cmd = signum(dw_cmd);
+        const auto relu_dw = smooth_relu_eval(std::abs(dw_cmd) - dw_lim);
+        out.r(8) = w.alpha_limit * relu_dw.value;
+        const double coeff_dw = w.alpha_limit * relu_dw.deriv * sign_dw_cmd;
+        out.ju(8, 1) = coeff_dw;
+        out.jx(8, ix::DW) = -coeff_dw;
+
+        const double sign_lat = signum(v_act * w_act);
+        const auto relu_lat = smooth_relu_eval(a_lat - lim.a_lat_max);
+        out.r(9) = w.lat_acc * relu_lat.value;
+        const double coeff_lat = w.lat_acc * relu_lat.deriv;
+        out.jx(9, ix::V) = coeff_lat * sign_lat * w_act;
+        out.jx(9, ix::W) = coeff_lat * sign_lat * v_act;
+
+        out.r(10) = w.obstacle * cs.value / 255.0;
+        out.jx(10, ix::X) = w.obstacle * cs.dx / 255.0;
+        out.jx(10, ix::Y) = w.obstacle * cs.dy / 255.0;
+
+        const double sign_cross = signum(cross);
+        out.r(11) = w.direction * std::abs(cross);
+        out.jx(11, ix::X) = w.direction * sign_cross * dcross_dx;
+        out.jx(11, ix::Y) = w.direction * sign_cross * dcross_dy;
+        out.jx(11, ix::THETA) = w.direction * sign_cross * dcross_dtheta;
+
+        const double v_err = v_act - target_vel;
+        const double abs_v_err = std::abs(v_err);
+        const double sign_v_err = signum(v_err);
+        out.r(12) = w.vel_on_step * dir_norm * abs_v_err;
+        out.jx(12, ix::X) = w.vel_on_step * (dnorm_dx * abs_v_err + dir_norm * sign_v_err * (-dtarget_dx));
+        out.jx(12, ix::Y) = w.vel_on_step * (dnorm_dy * abs_v_err + dir_norm * sign_v_err * (-dtarget_dy));
+        out.jx(12, ix::THETA) = w.vel_on_step * (dir_norm * sign_v_err * (-dtarget_dtheta));
+        out.jx(12, ix::V) = w.vel_on_step * dir_norm * sign_v_err;
+
+        const auto relu_vfinal = smooth_relu_eval(v_act - v_dec);
+        out.r(13) = w.q_v_final * relu_vfinal.value;
+        out.jx(13, ix::V) = w.q_v_final * relu_vfinal.deriv;
+        const double dvdec_ds = lim.slow_down_deceleration / std::max(v_dec, 1e-6);
+        out.jx(13, ix::PATH_U) = -w.q_v_final * relu_vfinal.deriv * dvdec_ds * ds_dpathu;
 
         if (p.energy.enable) {
-            const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+            const auto pwr = predict_power_eval_vw(v_act, w_act);
             const double thr = std::max(p.energy.threshold, 1.0);
             const double beta = std::max(p.energy.softplus_beta, 1e-6);
-            const double excess = (pwr - rfr_pwr_limit) / thr;
-            const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
-            r(14) = p.energy.weight * std::max(0.0, sp);
+            const double excess = (pwr.value - rfr_pwr_limit) / thr;
+            const auto sp = softplus_eval(beta * excess);
+            const double energy_relu = sp.value / beta - SOFTPLUS_AT_ZERO / beta;
+            if (energy_relu > 0.0) {
+                out.r(14) = p.energy.weight * energy_relu;
+                const double common = p.energy.weight * sp.deriv / thr;
+                out.jx(14, ix::V) = common * pwr.dv;
+                out.jx(14, ix::W) = common * pwr.dw;
+            }
         }
 
-        return r;
+        return out;
+    }
+
+    FollowResidualVec follow_residual_impl(
+        const StateVec& x,
+        const ControlVec& u,
+        const std::vector<Eigen::Vector2d>& ref_cps,
+        const ArclengthTable& arc_table,
+        const MPCParams& p,
+        const CostMapGridView& cg,
+        const GridInfo& ci,
+        const DirectionMapGridView& dg,
+        const GridInfo& di,
+        double rfr_pwr_limit,
+        double target_ey
+    ) {
+        return follow_residual_linearized_impl(x, u, ref_cps, arc_table, p, cg, ci, dg, di, rfr_pwr_limit, target_ey)
+            .r;
+    }
+
+    AdvanceUProgressEval
+    advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps) {
+        AdvanceUProgressEval out {};
+        out.du_next_dx.setZero();
+
+        const double uc = clamp_path_u_extrapolated(u_cur);
+        const double duc_dpathu = clamp_derivative(x(ix::PATH_U), PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+
+        Eigen::Vector2d pr, d1, d2;
+        eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+
+        const double d1_norm2 = d1.squaredNorm();
+        const double d1_norm = std::sqrt(d1_norm2 + 1e-18);
+        const double dsdu = d1_norm + 1e-6;
+        const double inv_dsdu = 1.0 / dsdu;
+
+        const double cross12 = d1.x() * d2.y() - d1.y() * d2.x();
+        const double kappa = cross12 / (dsdu * dsdu * dsdu);
+
+        const double thetar = std::atan2(d1.y(), d1.x());
+        const double sin_r = std::sin(thetar);
+        const double cos_r = std::cos(thetar);
+        const double dtheta_du = cross12 / std::max(d1_norm2, 1e-12);
+
+        const double ex = x(ix::X) - pr.x();
+        const double ey_w = x(ix::Y) - pr.y();
+        const double ey = -ex * sin_r + ey_w * cos_r;
+
+        const double dey_dpx = -sin_r;
+        const double dey_dpy = cos_r;
+        const double dey_du = sin_r * d1.x() - cos_r * d1.y() - dtheta_du * (ex * cos_r + ey_w * sin_r);
+
+        const double etheta = wrap_pi(x(ix::THETA) - thetar);
+        const double cos_e = std::cos(etheta);
+        const double sin_e = std::sin(etheta);
+
+        const double num = x(ix::V) * cos_e;
+        const double dnum_dv = cos_e;
+        const double dnum_dtheta = -x(ix::V) * sin_e;
+        const double dnum_du = x(ix::V) * (-sin_e) * (-dtheta_du);
+
+        const double denom_raw = 1.0 - kappa * ey;
+        double denom = signum(denom_raw) * std::max(std::abs(denom_raw), 0.1);
+        if (denom == 0.0) {
+            denom = 0.1;
+        }
+        const bool denom_linear = std::abs(denom_raw) > 0.1;
+
+        double ddenom_dpx = -kappa * dey_dpx;
+        double ddenom_dpy = -kappa * dey_dpy;
+        double ddenom_du = -kappa * dey_du;
+        if (!denom_linear) {
+            ddenom_dpx = 0.0;
+            ddenom_dpy = 0.0;
+            ddenom_du = 0.0;
+        }
+
+        const double inv_denom = 1.0 / denom;
+        const double inv_denom2 = inv_denom * inv_denom;
+        const double dsdt = num * inv_denom;
+
+        const double ddsdt_dpx = -num * ddenom_dpx * inv_denom2;
+        const double ddsdt_dpy = -num * ddenom_dpy * inv_denom2;
+        const double ddsdt_dtheta = dnum_dtheta * inv_denom;
+        const double ddsdt_dv = dnum_dv * inv_denom;
+        const double ddsdt_du = (dnum_du * denom - num * ddenom_du) * inv_denom2;
+
+        const double ddsdu_du = (d1_norm > 1e-12) ? (d1.dot(d2) / d1_norm) : 0.0;
+        const double d_inv_dsdu_dpathu = -ddsdu_du * duc_dpathu / (dsdu * dsdu);
+
+        out.u_next_extrap = uc + MPC_DT * dsdt * inv_dsdu;
+
+        out.du_next_dx(ix::X) = MPC_DT * ddsdt_dpx * inv_dsdu;
+        out.du_next_dx(ix::Y) = MPC_DT * ddsdt_dpy * inv_dsdu;
+        out.du_next_dx(ix::THETA) = MPC_DT * ddsdt_dtheta * inv_dsdu;
+        out.du_next_dx(ix::V) = MPC_DT * ddsdt_dv * inv_dsdu;
+
+        const double ddsdt_dpathu = ddsdt_du * duc_dpathu;
+        out.du_next_dx(ix::PATH_U) =
+            duc_dpathu + MPC_DT * (ddsdt_dpathu * inv_dsdu + dsdt * d_inv_dsdu_dpathu);
+
+        return out;
+    }
+
+    double advance_u_progress_extrapolated(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps) {
+        return advance_u_progress_extrapolated_with_jacobian(u_cur, x, ref_cps).u_next_extrap;
     }
 
     /// 更新 Frenet 进度
     double advance_u_progress(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps) {
-        u_cur = std::clamp(u_cur, 0.0, 1.0);
-        Eigen::Vector2d pr, d1, d2;
-        eval_bspline2(ref_cps, u_cur, &pr, &d1, &d2);
-        const double dsdu = std::sqrt(d1.squaredNorm()) + 1e-6;
-        const double kappa = (d1.x() * d2.y() - d1.y() * d2.x()) / (dsdu * dsdu * dsdu);
-        const double thetar = std::atan2(d1.y(), d1.x());
-        const double ex = x(ix::X) - pr.x(), ey_w = x(ix::Y) - pr.y();
-        const double ey = -ex * std::sin(thetar) + ey_w * std::cos(thetar);
-        const double etheta = wrap_pi(x(ix::THETA) - thetar);
-        double denom = 1.0 - kappa * ey;
-        denom = (denom > 0 ? 1.0 : -1.0) * std::max(std::abs(denom), 0.1);
-        const double dsdt = x(ix::V) * std::cos(etheta) / denom;
-        return std::clamp(u_cur + (dsdt / dsdu) * MPC_DT, 0.0, 1.0);
+        return clamp_path_u_extrapolated(advance_u_progress_extrapolated(u_cur, x, ref_cps));
     }
 
 } // anonymous namespace
@@ -624,22 +940,30 @@ void FollowProblem::running_cost_derivatives(
     Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
 ) const {
     const auto& cg = cost_grid_for_step(k);
-    auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
-        return follow_residual_impl(
-            xv,
-            uv,
-            ref_cps_,
-            arc_table_,
-            p_,
-            cg,
-            cost_info_,
-            dir_grid_,
-            dir_info_,
-            rfr_pwr_limit_,
-            target_ey_
-        );
-    };
-    gauss_newton_running_derivatives<FOLLOW_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
+    const auto lin = follow_residual_linearized_impl(
+        x,
+        u,
+        ref_cps_,
+        arc_table_,
+        p_,
+        cg,
+        cost_info_,
+        dir_grid_,
+        dir_info_,
+        rfr_pwr_limit_,
+        target_ey_
+    );
+
+    lx = lin.jx.transpose() * lin.r;
+    lu = lin.ju.transpose() * lin.r;
+    lxx = (lin.jx.transpose() * lin.jx).eval();
+    lux = (lin.ju.transpose() * lin.jx).eval();
+    luu = (lin.ju.transpose() * lin.ju).eval();
+    lxx = (lxx + lxx.transpose()).eval() * 0.5;
+    luu = (luu + luu.transpose()).eval() * 0.5;
+    for (int i = 0; i < MPC_NU; ++i) {
+        luu(i, i) = std::max(luu(i, i), 1e-8);
+    }
 }
 
 double FollowProblem::terminal_cost(const StateVec&) const {
@@ -712,8 +1036,8 @@ StopResidualVec stop_residual_impl(
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
 
-    const auto cs = eval_cost_bicubic(cg, ci, px, py);
-    const auto ds = eval_dir_bicubic(dg, di, px, py);
+    const auto cs = eval_cost_bilinear(cg, ci, px, py);
+    const auto ds = eval_dir_bilinear(dg, di, px, py);
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     const Eigen::Vector2d dir_unit = ds.value / dir_norm;
     const Eigen::Vector2d heading(std::cos(theta), std::sin(theta));
@@ -761,8 +1085,8 @@ StopTerminalResidualVec stop_terminal_residual_impl(
 ) {
     StopTerminalResidualVec r = StopTerminalResidualVec::Zero();
     const auto& w = p.stop_weights;
-    const auto cs = eval_cost_bicubic(cost_grid, cost_info, x(ix::X), x(ix::Y));
-    const auto ds = eval_dir_bicubic(dir_grid, dir_info, x(ix::X), x(ix::Y));
+    const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
+    const auto ds = eval_dir_bilinear(dir_grid, dir_info, x(ix::X), x(ix::Y));
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     r(0) = w.obstacle_terminal * cs.value / 255.0;
     r(1) = w.step_terminal * dir_norm;
@@ -874,8 +1198,8 @@ RecoveryResidualVec recovery_residual_impl(
     const double desired_theta = std::atan2(goal.y() - py, goal.x() - px);
     const double heading_sin = std::sin(theta - desired_theta);
 
-    const auto cs = eval_cost_bicubic(cg, ci, px, py);
-    const auto ds = eval_dir_bicubic(dg, di, px, py);
+    const auto cs = eval_cost_bilinear(cg, ci, px, py);
+    const auto ds = eval_dir_bilinear(dg, di, px, py);
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     const double a_lat = std::abs(v_act * w_act);
 
@@ -922,8 +1246,8 @@ RecoveryTerminalResidualVec recovery_terminal_residual_impl(
     const auto& w = p.recovery_weights;
     const double dxT = x(ix::X) - goal.x();
     const double dyT = x(ix::Y) - goal.y();
-    const auto cs = eval_cost_bicubic(cost_grid, cost_info, x(ix::X), x(ix::Y));
-    const auto ds = eval_dir_bicubic(dir_grid, dir_info, x(ix::X), x(ix::Y));
+    const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
+    const auto ds = eval_dir_bilinear(dir_grid, dir_info, x(ix::X), x(ix::Y));
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     r(0) = w.q_goal_xy_terminal * dxT;
     r(1) = w.q_goal_xy_terminal * dyT;
@@ -1042,8 +1366,8 @@ FixedResidualVec fixed_residual_impl(
     const double desired_theta = std::atan2(goal.y() - py, goal.x() - px);
     const double heading_sin = std::sin(theta - desired_theta);
 
-    const auto cs = eval_cost_bicubic(cg, ci, px, py);
-    const auto ds = eval_dir_bicubic(dg, di, px, py);
+    const auto cs = eval_cost_bilinear(cg, ci, px, py);
+    const auto ds = eval_dir_bilinear(dg, di, px, py);
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     const double a_lat = std::abs(v_act * w_act);
 
@@ -1092,8 +1416,8 @@ FixedTerminalResidualVec fixed_terminal_residual_impl(
         Eigen::Vector2d(x(ix::X) - goal.x(), x(ix::Y) - goal.y()),
         w.goal_deadzone
     );
-    const auto cs = eval_cost_bicubic(cost_grid, cost_info, x(ix::X), x(ix::Y));
-    const auto ds = eval_dir_bicubic(dir_grid, dir_info, x(ix::X), x(ix::Y));
+    const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
+    const auto ds = eval_dir_bilinear(dir_grid, dir_info, x(ix::X), x(ix::Y));
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     r(0) = w.q_goal_xy_terminal * terminal_delta.x();
     r(1) = w.q_goal_xy_terminal * terminal_delta.y();
@@ -1213,7 +1537,9 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 } // anonymous namespace
 
-MPCSolver::MPCSolver(const MPCParams& params): params_(params) {}
+MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
+    step_cost_grids_cache_.reserve(MPC_HORIZON + 1);
+}
 
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
     last_cmd_ = cmd;
@@ -1303,14 +1629,16 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 ) {
     const auto& ref_cps = global_path.getControlPoints();
     const bool path_changed = !same_cps(prev_ref_control_points_, ref_cps);
-    const double projection_hint = path_changed ? 0.0 : last_u_;
-    const double u0 = project_to_spline_u(
+    const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
+    const double u0 = project_to_spline_u_extrapolated(
         global_path,
         chassis_pose_map.head<2>(),
         projection_hint,
         params_.follow_projection.proj_num_samples,
         params_.follow_projection.proj_search_window,
-        params_.follow_projection.local_search_lazy_distance
+        params_.follow_projection.local_search_lazy_distance,
+        PATH_U_EXTRAP_MIN,
+        PATH_U_EXTRAP_MAX
     );
     if (path_changed) {
         follow_warm_ = false;
@@ -1344,13 +1672,18 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         return prev_arclength_table_;
     }();
 
-    // ── 构建每个预测步的 cost grid view ──
-    std::vector<CostMapGridView> step_cost_grids;
+    // ── 构建每个预测步的 cost grid view（复用缓存，避免重复分配） ──
+    step_cost_grids_cache_.clear();
     if (per_step_cost_maps.empty()) {
-        step_cost_grids.emplace_back(cost_map);
+        step_cost_grids_cache_.reserve(1);
+    } else {
+        step_cost_grids_cache_.reserve(std::max(step_cost_grids_cache_.capacity(), per_step_cost_maps.size()));
+    }
+    if (per_step_cost_maps.empty()) {
+        step_cost_grids_cache_.emplace_back(cost_map);
     } else {
         for (const auto* cm : per_step_cost_maps) {
-            step_cost_grids.emplace_back(*cm);
+            step_cost_grids_cache_.emplace_back(*cm);
         }
     }
     const double pred_dt = per_step_cost_maps.empty() ? MPC_DT : prediction_dt;
@@ -1360,20 +1693,56 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, u0);
 
-    FollowProblem prob_center(ref_cps, params_, step_cost_grids, ci, pred_dt, dg, di, arc, remaining_energy_, rfr_pwr_limit_, 0.0);
+    FollowProblem prob_center(
+        ref_cps,
+        params_,
+        step_cost_grids_cache_,
+        ci,
+        pred_dt,
+        dg,
+        di,
+        arc,
+        remaining_energy_,
+        rfr_pwr_limit_,
+        0.0
+    );
 
     fddp::SolverOptions opts;
-    opts.max_iters = 25;
-    opts.tol_grad = 1e-4;
-    opts.tol_cost = 1e-6;
+    opts.max_iters = 80;
+    opts.tol_grad = 1e-6;
+    opts.tol_cost = 1e-8;
 
     // ── 初始化中心假设 ──
     initialize_primal_trajectory(follow_solver_, prob_center, x0, follow_warm_);
 
     if (params_.mh_params.enable && follow_warm_) {
         // ── 创建左右偏移问题（代价函数中 target_ey 不同） ──
-        FollowProblem prob_left(ref_cps, params_, step_cost_grids, ci, pred_dt, dg, di, arc, remaining_energy_, rfr_pwr_limit_, +params_.mh_params.lateral_offset);
-        FollowProblem prob_right(ref_cps, params_, step_cost_grids, ci, pred_dt, dg, di, arc, remaining_energy_, rfr_pwr_limit_, -params_.mh_params.lateral_offset);
+        FollowProblem prob_left(
+            ref_cps,
+            params_,
+            step_cost_grids_cache_,
+            ci,
+            pred_dt,
+            dg,
+            di,
+            arc,
+            remaining_energy_,
+            rfr_pwr_limit_,
+            +params_.mh_params.lateral_offset
+        );
+        FollowProblem prob_right(
+            ref_cps,
+            params_,
+            step_cost_grids_cache_,
+            ci,
+            pred_dt,
+            dg,
+            di,
+            arc,
+            remaining_energy_,
+            rfr_pwr_limit_,
+            -params_.mh_params.lateral_offset
+        );
 
         // 左右 solver 使用各自的 warm start
         initialize_primal_trajectory(follow_solver_left_, prob_left, x0, follow_warm_);
@@ -1453,9 +1822,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 25;
-    opts.tol_grad = 1e-4;
-    opts.tol_cost = 1e-6;
+    opts.max_iters = 80;
+    opts.tol_grad = 1e-6;
+    opts.tol_cost = 1e-8;
     stop_solver_.solve(prob, opts);
     stop_warm_ = true;
 
@@ -1498,9 +1867,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(recovery_solver_, prob, x0, recovery_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 25;
-    opts.tol_grad = 1e-4;
-    opts.tol_cost = 1e-6;
+    opts.max_iters = 80;
+    opts.tol_grad = 1e-6;
+    opts.tol_cost = 1e-8;
     recovery_solver_.solve(prob, opts);
     recovery_warm_ = true;
 
@@ -1543,9 +1912,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(fixed_solver_, prob, x0, fixed_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 25;
-    opts.tol_grad = 1e-4;
-    opts.tol_cost = 1e-6;
+    opts.max_iters = 80;
+    opts.tol_grad = 1e-6;
+    opts.tol_cost = 1e-8;
     fixed_solver_.solve(prob, opts);
     fixed_warm_ = true;
 

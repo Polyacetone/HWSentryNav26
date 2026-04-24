@@ -203,10 +203,23 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     clear_step_up_attempt_history_if_needed(has_path, has_new_path);
 
+    // 路标点重算：新路径到达时重新分割；路径消失时清空
+    if (has_new_path) {
+        recompute_follow_landmarks(*input.global_path);
+        follow_max_landmark_idx_ = -1;
+    } else if (!has_path) {
+        follow_landmarks_u_.clear();
+        follow_max_landmark_idx_ = -1;
+    }
+
     bool cancel_follow_task_now = false;
     if (pending_cancel_follow_task_) {
         cancel_follow_task_now = true;
         pending_cancel_follow_task_ = false;
+    }
+    // 路标点无进度检测：在 FOLLOW 模式下，若 3s 未推进最高路标点则取消任务
+    if (!cancel_follow_task_now && check_no_progress(input)) {
+        cancel_follow_task_now = true;
     }
 
     // Dead->Mature 常发生在上台阶失败后的恢复循环中。
@@ -299,7 +312,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     if (!input.global_path || !input.final_cost_map || !input.masked_direction_map) return out;
 
     // 投影当前位置到样条
-    const double u0 = project_to_spline_u(
+    const double u0 = project_to_spline_u_extrapolated(
         *input.global_path, input.chassis_pose_map.head<2>(), last_reference_u_,
         mpc_controller_->params().follow_projection.proj_num_samples,
         mpc_controller_->params().follow_projection.proj_search_window,
@@ -453,12 +466,13 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         stuck_active_ = false;
     }
 
-    // 离开 FOLLOW 时重置台阶检测防抖状态
+    // 离开 FOLLOW 时重置台阶检测防抖状态 + 无进度检测索引
     if (prev == FsmState::FOLLOW && next != FsmState::FOLLOW) {
         step_up_on_count_ = step_up_off_count_ = 0;
         step_down_on_count_ = step_down_off_count_ = 0;
         step_up_flag_ = step_down_flag_ = false;
         last_reference_u_ = 0.0;
+        follow_max_landmark_idx_ = -1;
         mpc_controller_->reset_warm_start();
     }
 
@@ -782,6 +796,80 @@ bool MainController::register_step_up_attempt_and_should_cancel(const Eigen::Vec
         );
     }
     return similar;
+}
+
+// ═══════════════════ Follow 路标点无进度检测 ══════════════════
+
+void MainController::recompute_follow_landmarks(const SplineD& path) {
+    follow_landmarks_u_.clear();
+    if (!nav_params_.no_progress_enable) return;
+
+    const int N = 500;
+    const double spacing = std::max(0.1, nav_params_.no_progress_landmark_spacing);
+    double arc = 0.0;
+    double next_threshold = 0.0;
+    Eigen::Vector2d prev = path.evaluate(0.0);
+
+    for (int i = 0; i <= N; i++) {
+        const double u = static_cast<double>(i) / static_cast<double>(N);
+        const Eigen::Vector2d cur = path.evaluate(u);
+        if (i > 0) arc += (cur - prev).norm();
+        prev = cur;
+        if (arc >= next_threshold) {
+            follow_landmarks_u_.push_back(u);
+            next_threshold += spacing;
+        }
+    }
+
+    if (follow_landmarks_u_.empty() || follow_landmarks_u_.back() < 1.0) {
+        follow_landmarks_u_.push_back(1.0);
+    }
+}
+
+bool MainController::check_no_progress(const ControlInput& input) {
+    if (!nav_params_.no_progress_enable) return false;
+    if (last_fsm_state_ != FsmState::FOLLOW) return false;
+    if (follow_landmarks_u_.empty()) return false;
+
+    if (input.global_path) {
+        last_reference_u_ = project_to_spline_u_extrapolated(
+            *input.global_path,
+            input.chassis_pose_map.head<2>(),
+            last_reference_u_,
+            mpc_controller_->params().follow_projection.proj_num_samples,
+            mpc_controller_->params().follow_projection.proj_search_window,
+            mpc_controller_->params().follow_projection.local_search_lazy_distance
+        );
+    }
+
+    const int n = static_cast<int>(follow_landmarks_u_.size());
+
+    // 寻找当前 u 能覆盖的最高路标点索引
+    int new_max = follow_max_landmark_idx_;
+    for (int i = std::max(0, new_max + 1); i < n; i++) {
+        if (last_reference_u_ >= follow_landmarks_u_[static_cast<size_t>(i)]) {
+            new_max = i;
+        } else {
+            break;
+        }
+    }
+
+    // 路标点前进（包括首次初始化）：重置计时器
+    if (follow_max_landmark_idx_ < 0 || new_max > follow_max_landmark_idx_) {
+        follow_max_landmark_idx_ = new_max;
+        follow_max_landmark_time_ = input.stamp;
+        return false;
+    }
+
+    const double elapsed = std::chrono::duration<double>(input.stamp - follow_max_landmark_time_).count();
+    if (elapsed >= nav_params_.no_progress_timeout) {
+        const double landmark_u = follow_max_landmark_idx_ >= 0 ? follow_landmarks_u_[static_cast<size_t>(follow_max_landmark_idx_)] : -1.0;
+        RCLCPP_WARN(logger_,
+            "Follow no-progress: stuck at landmark %d/%d (landmark_u=%.3f, progress_u=%.3f) for %.1fs, cancelling task",
+            follow_max_landmark_idx_, n - 1, landmark_u, last_reference_u_, elapsed);
+        return true;
+    }
+    return false;
 }
 
 }

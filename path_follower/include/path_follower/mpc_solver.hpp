@@ -14,7 +14,7 @@ namespace path_follower {
 //  MPC 编译期常量
 // ═══════════════════════════════════════════════════════════════
 
-constexpr int MPC_HORIZON = 20;
+constexpr int MPC_HORIZON = 30;
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
@@ -297,21 +297,21 @@ struct DirectionMapGridView {
     const DirectionMap& map_;
 };
 
-/// Bicubic 采样代价地图值 + 梯度（∂cost/∂x, ∂cost/∂y），$C^1$ 连续
+/// 双线性采样代价地图值 + 梯度（∂cost/∂x, ∂cost/∂y）
 struct CostSample {
     double value;
     double dx, dy; // ∂value/∂x_map, ∂value/∂y_map
 };
 
-CostSample eval_cost_bicubic(const CostMapGridView& grid, const GridInfo& info, double x_map, double y_map);
+CostSample eval_cost_bilinear(const CostMapGridView& grid, const GridInfo& info, double x_map, double y_map);
 
-/// Bicubic 采样方向场值 + 雅可比（2×2: ∂dir/∂(x,y)），$C^1$ 连续
+/// 双线性采样方向场值 + 雅可比（2×2: ∂dir/∂(x,y)）
 struct DirSample {
     Eigen::Vector2d value;
     Eigen::Matrix2d J; // ∂value/∂(x_map, y_map)
 };
 
-DirSample eval_dir_bicubic(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map);
+DirSample eval_dir_bilinear(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map);
 
 // ═══════════════════════════════════════════════════════════════
 //  共享动力学模型（supply analytic Jacobians for FDDP）
@@ -635,6 +635,9 @@ private:
     // 多假设 solver（左/右偏移，仅用于 follow_path）
     fddp::Solver<FollowProblem> follow_solver_left_;
     fddp::Solver<FollowProblem> follow_solver_right_;
+
+    // 复用每步代价图视图，避免 follow_path 中反复分配
+    std::vector<CostMapGridView> step_cost_grids_cache_;
 
     // 缓存的弧长查找表
     std::vector<Eigen::Vector2d> prev_ref_control_points_;

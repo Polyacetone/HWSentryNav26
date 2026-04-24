@@ -48,6 +48,11 @@
       similar_attempts: 5 # 连续相近位置出现次数阈值
       similar_dist: 2.0 # 位置相近判定距离 (m)
 
+    follow_no_progress_guard: # Follow无进度检测（防止在障碍物前蠕动卡死）
+      enable: true # 若启用，在路径跟随模式下如果超时未推进最高路标点则取消任务
+      landmark_spacing: 1.0 # 路标点间距 (m)，路径沿弧长每隔该距离设一个路标点
+      timeout: 6.0 # 无进度超时 (s)，超时未更新最高路标点则认为卡住，取消follow任务
+
     state_machine: # 控制状态机参数
       follow_to_spin_vel_max: 0.2 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
       spin_to_follow_omega_max: 0.6 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
@@ -62,7 +67,7 @@
         weight: 5.0 # 能量软约束权重
         softplus_beta: 5.0 # softplus斜率(越大越接近硬折线惩罚)
       multi_hypothesis: # 多假设求解参数
-        enable: true # 是否启用多假设求解
+        enable: false # 是否启用多假设求解
         lateral_offset: 1.0 # 横向偏移量 (m)，左/右求解器的 target_ey
         target_ey_penalty: 1.0 # 候选解比较时对非中心 target_ey 的固定附加代价系数，实际附加项为 penalty * target_ey^2
       follow_path: # 路径跟随模式
@@ -72,15 +77,15 @@
           local_search_lazy_distance: 0.1 # 如果局部搜索到的点与当前位置距离小于该值，则认为找到了合适的投影点 (m)
         limits: # 运动限制
           vel_max: 2.4 # 最大速度 (m/s)
-          vel_min: 0.1 # 最小速度 (m/s)
+          vel_min: -0.8 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 1.0 # 上台阶期望速度 (m/s)
-          vel_step_down: 1.0 # 下台阶期望速度 (m/s)
+          vel_step_up: 2.0 # 上台阶期望速度 (m/s)
+          vel_step_down: 2.0 # 下台阶期望速度 (m/s)
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
           slow_down_target_vel: 0.3 # 终点减速目标速度 (m/s)
@@ -97,9 +102,9 @@
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 0.1 # 台阶区域速度保持权重
-          obstacle: 3.0 # 避障权重（全局+局部）
-          direction: 3.0 # 台阶方向对齐权重
+          vel_on_step: 1.0 # 台阶区域速度保持权重
+          obstacle: 1.0 # 避障权重（全局+局部）
+          direction: 2.0 # 台阶方向对齐权重
       stop: # 停止模式
         limits: # 运动限制
           vel_max: 2.4 # 最大线速度硬约束 (m/s)
@@ -109,8 +114,8 @@
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 1.0 # 上台阶期望速度 (m/s)
-          vel_step_down: 1.0 # 下台阶期望速度 (m/s)
+          vel_step_up: 2.0 # 上台阶期望速度 (m/s)
+          vel_step_down: 2.0 # 下台阶期望速度 (m/s)
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights: # 权重
           q_v: 0.6 # 线速度正则

@@ -1,14 +1,12 @@
 #pragma once
 
 /// @file fddp_solver.hpp
-/// @brief Enhanced FDDP solver with Trust-Region, Filter line-search,
-///        and Augmented Lagrangian box constraints.
-///
-/// Reference: Mastalli et al., "Feasibility-Driven DDP" (RAL 2020).
+/// @brief Feasibility-driven DDP solver with trust-region, filter line-search,
+///        and control-limited (box-constrained) backward pass.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
-#include <algorithm>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -65,7 +63,7 @@ struct SolverOptions {
     double tr_min = 0.1;
     double tr_max = 100.0;
 
-    // Augmented Lagrangian for box constraints
+    // Deprecated: kept for config compatibility, ignored in Box-DDP.
     double al_penalty_init = 10.0;
     double al_penalty_max = 1e4;
     double al_penalty_factor = 5.0;
@@ -132,28 +130,24 @@ private:
 
     std::array<VecX, N + 1> fs_;
 
+    // ─── Reused forward-pass buffers ───
+    std::array<VecX, N + 1> xs_try_;
+    std::array<VecU, N> us_try_;
+    std::array<VecX, N + 1> xs_old_;
+    std::array<VecU, N> us_old_;
+
     double dV1_ = 0.0;
     double dV2_ = 0.0;
-
-    // ─── Augmented Lagrangian multipliers & penalty ───
-    std::array<VecU, N> lambda_lo_;
-    std::array<VecU, N> lambda_hi_;
-    double al_penalty_ = 10.0;
 
     // ─── Filter ───
     std::vector<FilterEntry> filter_;
 
     // ─── Methods ───
     double rollout_cost(const Problem& prob) const;
-    double rollout_augmented_cost(const Problem& prob, const VecU& u_lo, const VecU& u_hi) const;
     void compute_gaps(const Problem& prob);
     double gap_norm() const;
     bool backward_pass(const Problem& prob, double mu, double tr_radius, const VecU& u_lo, const VecU& u_hi);
     double forward_pass(const Problem& prob, double alpha, const VecU& u_lo, const VecU& u_hi);
-
-    // AL penalty/gradient additions for a single control
-    void
-    al_cost_derivatives(int k, const VecU& u, const VecU& u_lo, const VecU& u_hi, VecU& lu_al, MatUU& luu_al) const;
 
     bool filter_accepts(double cost, double cv) const;
     void filter_add(double cost, double cv);
@@ -161,6 +155,18 @@ private:
     static VecU clamp_u(const VecU& u, const VecU& lo, const VecU& hi) {
         return u.cwiseMax(lo).cwiseMin(hi);
     }
+
+    static bool solve_spd(const MatUU& h, const VecU& b, VecU& x);
+    static bool solve_spd(const MatUU& h, const MatUX& b, MatUX& x);
+    static bool solve_box_qp(
+        const MatUU& h,
+        const VecU& g,
+        const MatUX& gx,
+        const VecU& du_lo,
+        const VecU& du_hi,
+        VecU& k,
+        MatUX& K
+    );
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -174,25 +180,6 @@ double Solver<P>::rollout_cost(const P& prob) const {
         c += prob.running_cost(k, xs[k], us[k]);
     }
     c += prob.terminal_cost(xs[N]);
-    return c;
-}
-
-template<typename P>
-double Solver<P>::rollout_augmented_cost(const P& prob, const VecU& u_lo, const VecU& u_hi) const {
-    double c = rollout_cost(prob);
-    // Add AL penalty terms
-    for (int k = 0; k < N; ++k) {
-        for (int i = 0; i < NU; ++i) {
-            const double viol_lo = u_lo(i) - us[k](i);
-            const double viol_hi = us[k](i) - u_hi(i);
-            if (viol_lo > 0.0) {
-                c += lambda_lo_[k](i) * viol_lo + 0.5 * al_penalty_ * viol_lo * viol_lo;
-            }
-            if (viol_hi > 0.0) {
-                c += lambda_hi_[k](i) * viol_hi + 0.5 * al_penalty_ * viol_hi * viol_hi;
-            }
-        }
-    }
     return c;
 }
 
@@ -214,27 +201,134 @@ double Solver<P>::gap_norm() const {
 }
 
 template<typename P>
-void Solver<P>::al_cost_derivatives(
-    int k,
-    const VecU& u,
-    const VecU& u_lo,
-    const VecU& u_hi,
-    VecU& lu_al,
-    MatUU& luu_al
-) const {
-    lu_al.setZero();
-    luu_al.setZero();
-    for (int i = 0; i < NU; ++i) {
-        const double viol_lo = u_lo(i) - u(i);
-        const double viol_hi = u(i) - u_hi(i);
-        if (viol_lo > 0.0) {
-            lu_al(i) += -(lambda_lo_[k](i) + al_penalty_ * viol_lo);
-            luu_al(i, i) += al_penalty_;
+bool Solver<P>::solve_spd(const MatUU& h, const VecU& b, VecU& x) {
+    if constexpr (NU == 2) {
+        const double a = h(0, 0);
+        const double b01 = h(0, 1);
+        const double b10 = h(1, 0);
+        const double d = h(1, 1);
+        const double det = a * d - b01 * b10;
+        if (!(det > 1e-14)) {
+            return false;
         }
-        if (viol_hi > 0.0) {
-            lu_al(i) += lambda_hi_[k](i) + al_penalty_ * viol_hi;
-            luu_al(i, i) += al_penalty_;
+
+        const double inv00 = d / det;
+        const double inv01 = -b01 / det;
+        const double inv10 = -b10 / det;
+        const double inv11 = a / det;
+
+        x(0) = inv00 * b(0) + inv01 * b(1);
+        x(1) = inv10 * b(0) + inv11 * b(1);
+        return std::isfinite(x(0)) && std::isfinite(x(1));
+    } else {
+        Eigen::LLT<MatUU> llt(h);
+        if (llt.info() != Eigen::Success) {
+            return false;
         }
+        x = llt.solve(b);
+        return llt.info() == Eigen::Success;
+    }
+}
+
+template<typename P>
+bool Solver<P>::solve_spd(const MatUU& h, const MatUX& b, MatUX& x) {
+    if constexpr (NU == 2) {
+        const double a = h(0, 0);
+        const double b01 = h(0, 1);
+        const double b10 = h(1, 0);
+        const double d = h(1, 1);
+        const double det = a * d - b01 * b10;
+        if (!(det > 1e-14)) {
+            return false;
+        }
+
+        const double inv00 = d / det;
+        const double inv01 = -b01 / det;
+        const double inv10 = -b10 / det;
+        const double inv11 = a / det;
+
+        x.row(0).noalias() = inv00 * b.row(0) + inv01 * b.row(1);
+        x.row(1).noalias() = inv10 * b.row(0) + inv11 * b.row(1);
+        return x.allFinite();
+    } else {
+        Eigen::LLT<MatUU> llt(h);
+        if (llt.info() != Eigen::Success) {
+            return false;
+        }
+        x = llt.solve(b);
+        return llt.info() == Eigen::Success;
+    }
+}
+
+template<typename P>
+bool Solver<P>::solve_box_qp(
+    const MatUU& h,
+    const VecU& g,
+    const MatUX& gx,
+    const VecU& du_lo,
+    const VecU& du_hi,
+    VecU& k,
+    MatUX& K
+) {
+    VecU k_unc;
+    MatUX K_unc;
+    if (!solve_spd(h, -g, k_unc) || !solve_spd(h, -gx, K_unc)) {
+        return false;
+    }
+
+    if constexpr (NU == 2) {
+        k = k_unc;
+        K = K_unc;
+
+        std::array<bool, 2> active {false, false};
+        for (int i = 0; i < 2; ++i) {
+            if (k(i) < du_lo(i)) {
+                k(i) = du_lo(i);
+                active[static_cast<size_t>(i)] = true;
+            } else if (k(i) > du_hi(i)) {
+                k(i) = du_hi(i);
+                active[static_cast<size_t>(i)] = true;
+            }
+        }
+
+        const int active_cnt = (active[0] ? 1 : 0) + (active[1] ? 1 : 0);
+        if (active_cnt == 0) {
+            return true;
+        }
+        if (active_cnt == 2) {
+            K.setZero();
+            return true;
+        }
+
+        const int a = active[0] ? 0 : 1;
+        const int f = 1 - a;
+        K.row(a).setZero();
+
+        const double hff = h(f, f);
+        if (!(hff > 1e-12)) {
+            return false;
+        }
+
+        const double hfa = h(f, a);
+        const double kf = -(g(f) + hfa * k(a)) / hff;
+        if (kf <= du_lo(f) || kf >= du_hi(f)) {
+            k(f) = std::clamp(kf, du_lo(f), du_hi(f));
+            K.row(f).setZero();
+            return true;
+        }
+
+        k(f) = kf;
+        K.row(f).noalias() = -gx.row(f) / hff;
+        return true;
+    } else {
+        k = clamp_u(k_unc, du_lo, du_hi);
+        K = K_unc;
+        for (int i = 0; i < NU; ++i) {
+            if (k(i) <= du_lo(i) + 1e-12 || k(i) >= du_hi(i) - 1e-12) {
+                K.row(i).setZero();
+            }
+        }
+        return true;
     }
 }
 
@@ -258,7 +352,6 @@ void Solver<P>::filter_add(double cost, double cv) {
 
 template<typename P>
 bool Solver<P>::backward_pass(const P& prob, double mu, double tr_radius, const VecU& u_lo, const VecU& u_hi) {
-    // Terminal
     prob.terminal_cost_derivatives(xs[N], Vx_[N], Vxx_[N]);
     Vx_[N] -= Vxx_[N] * fs_[N];
 
@@ -275,42 +368,71 @@ bool Solver<P>::backward_pass(const P& prob, double mu, double tr_radius, const 
         MatUU luu;
         prob.running_cost_derivatives(k, xs[k], us[k], lx, lu, lxx, lux, luu);
 
-        // Add AL penalty derivatives
-        VecU lu_al;
-        MatUU luu_al;
-        al_cost_derivatives(k, us[k], u_lo, u_hi, lu_al, luu_al);
-        lu += lu_al;
-        luu += luu_al;
-
         const MatXX& Vxx_next = Vxx_[k + 1];
         const VecX& Vx_next = Vx_[k + 1];
 
         const MatXX FxTV = fx_[k].transpose() * Vxx_next;
 
         VecX Qx = lx + fx_[k].transpose() * Vx_next;
-        VecU Qu = lu + fu_[k].transpose() * Vx_next;
         MatXX Qxx = lxx + FxTV * fx_[k];
-        MatUX Qux = lux + fu_[k].transpose() * Vxx_next * fx_[k];
-        MatUU Quu = luu + fu_[k].transpose() * Vxx_next * fu_[k];
 
-        // Regularization
-        MatUU Quu_reg = Quu;
+        VecU Qu = lu;
+        for (int i = 0; i < NU; ++i) {
+            double acc = 0.0;
+            for (int r = 0; r < NX; ++r) {
+                const double fri = fu_[k](r, i);
+                if (fri != 0.0) {
+                    acc += fri * Vx_next(r);
+                }
+            }
+            Qu(i) += acc;
+        }
+
+        MatUX Qux = lux;
+        for (int i = 0; i < NU; ++i) {
+            for (int r = 0; r < NX; ++r) {
+                const double fri = fu_[k](r, i);
+                if (fri != 0.0) {
+                    Qux.row(i).noalias() += fri * (Vxx_next.row(r) * fx_[k]);
+                }
+            }
+        }
+
+        MatUU Quu = luu;
+        for (int i = 0; i < NU; ++i) {
+            for (int j = 0; j < NU; ++j) {
+                double acc = 0.0;
+                for (int r = 0; r < NX; ++r) {
+                    const double fri = fu_[k](r, i);
+                    if (fri == 0.0) {
+                        continue;
+                    }
+                    for (int c = 0; c < NX; ++c) {
+                        const double fcj = fu_[k](c, j);
+                        if (fcj != 0.0) {
+                            acc += fri * Vxx_next(r, c) * fcj;
+                        }
+                    }
+                }
+                Quu(i, j) += acc;
+            }
+        }
+
+        MatUU Quu_reg = (Quu + Quu.transpose()).eval() * 0.5;
         for (int i = 0; i < NU; ++i) {
             Quu_reg(i, i) += mu;
         }
-        Quu_reg = (Quu_reg + Quu_reg.transpose()).eval() * 0.5;
 
-        Eigen::LLT<MatUU> llt(Quu_reg);
-        if (llt.info() != Eigen::Success) {
+        VecU k_ff;
+        MatUX K_fb;
+        const VecU du_lo = u_lo - us[k];
+        const VecU du_hi = u_hi - us[k];
+        if (!solve_box_qp(Quu_reg, Qu, Qux, du_lo, du_hi, k_ff, K_fb)) {
             return false;
         }
 
-        VecU k_ff = -llt.solve(Qu);
-        MatUX K_fb = -llt.solve(Qux);
-
-        // Trust-region: scale down feed-forward if too large
         const double k_norm = k_ff.norm();
-        if (k_norm > tr_radius) {
+        if (k_norm > tr_radius && k_norm > 1e-12) {
             k_ff *= tr_radius / k_norm;
         }
 
@@ -332,40 +454,22 @@ bool Solver<P>::backward_pass(const P& prob, double mu, double tr_radius, const 
 
 template<typename P>
 double Solver<P>::forward_pass(const P& prob, double alpha, const VecU& u_lo, const VecU& u_hi) {
-    std::array<VecX, N + 1> xs_try;
-    std::array<VecU, N> us_try;
-
-    xs_try[0] = xs[0];
+    xs_try_[0] = xs[0];
 
     for (int k = 0; k < N; ++k) {
-        const VecX dx = xs_try[k] - xs[k];
-        us_try[k] = us[k] + alpha * gains_[k].k + gains_[k].K * dx;
-        us_try[k] = clamp_u(us_try[k], u_lo, u_hi);
-        xs_try[k + 1] = prob.dynamics(k, xs_try[k], us_try[k]) - (1.0 - alpha) * fs_[k + 1];
+        const VecX dx = xs_try_[k] - xs[k];
+        us_try_[k] = clamp_u(us[k] + alpha * gains_[k].k + gains_[k].K * dx, u_lo, u_hi);
+        xs_try_[k + 1] = prob.dynamics(k, xs_try_[k], us_try_[k]) - (1.0 - alpha) * fs_[k + 1];
     }
 
     double cost = 0.0;
     for (int k = 0; k < N; ++k) {
-        cost += prob.running_cost(k, xs_try[k], us_try[k]);
+        cost += prob.running_cost(k, xs_try_[k], us_try_[k]);
     }
-    cost += prob.terminal_cost(xs_try[N]);
+    cost += prob.terminal_cost(xs_try_[N]);
 
-    // Add AL penalty to cost for acceptance criterion
-    for (int k = 0; k < N; ++k) {
-        for (int i = 0; i < NU; ++i) {
-            const double viol_lo = u_lo(i) - us_try[k](i);
-            const double viol_hi = us_try[k](i) - u_hi(i);
-            if (viol_lo > 0.0) {
-                cost += lambda_lo_[k](i) * viol_lo + 0.5 * al_penalty_ * viol_lo * viol_lo;
-            }
-            if (viol_hi > 0.0) {
-                cost += lambda_hi_[k](i) * viol_hi + 0.5 * al_penalty_ * viol_hi * viol_hi;
-            }
-        }
-    }
-
-    xs = xs_try;
-    us = us_try;
+    xs = xs_try_;
+    us = us_try_;
     return cost;
 }
 
@@ -374,188 +478,107 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
     const VecU u_lo = prob.u_lower();
     const VecU u_hi = prob.u_upper();
 
-    // Initialize AL multipliers and penalty
-    al_penalty_ = opts.al_penalty_init;
     for (int k = 0; k < N; ++k) {
-        lambda_lo_[k].setZero();
-        lambda_hi_[k].setZero();
-        // Clamp initial controls to keep them near feasible
         us[k] = clamp_u(us[k], u_lo, u_hi);
     }
 
-    // Initialize filter
     filter_.clear();
+    filter_.reserve(static_cast<size_t>(std::max(opts.max_iters, 8)) + 8U);
 
-    double cost = rollout_augmented_cost(prob, u_lo, u_hi);
+    double cost = rollout_cost(prob);
     double tr_radius = opts.trust_region_radius;
     double mu = opts.mu_init;
+
     SolverResult result;
     result.cost = cost;
 
-    int total_iters = 0;
+    for (int iter = 0; iter < opts.max_iters; ++iter) {
+        result.iters = iter + 1;
 
-    for (int al_iter = 0; al_iter < opts.al_outer_iters; ++al_iter) {
-        const int inner_iters = (al_iter == 0) ? opts.max_iters : std::max(opts.max_iters / 2, 5);
+        compute_gaps(prob);
+        const double gnorm = gap_norm();
+        const bool use_fddp = (gnorm > opts.gap_threshold);
 
-        for (int iter = 0; iter < inner_iters; ++iter) {
-            ++total_iters;
-
-            compute_gaps(prob);
-            const double gnorm = gap_norm();
-            const bool use_fddp = (gnorm > opts.gap_threshold);
-
-            // Backward pass
-            bool bp_ok = false;
-            for (int retry = 0; retry < 20; ++retry) {
-                bp_ok = backward_pass(prob, mu, tr_radius, u_lo, u_hi);
-                if (bp_ok) break;
-                mu = std::min(mu * opts.mu_factor, opts.mu_max);
+        bool bp_ok = false;
+        for (int retry = 0; retry < 20; ++retry) {
+            bp_ok = backward_pass(prob, mu, tr_radius, u_lo, u_hi);
+            if (bp_ok) {
+                break;
             }
-            if (!bp_ok) {
-                result.iters = total_iters;
-                return result;
-            }
-
-            // Gradient convergence check
-            {
-                double grad_max = 0.0;
-                for (int k = 0; k < N; ++k) {
-                    for (int i = 0; i < NU; ++i) {
-                        grad_max = std::max(grad_max, std::abs(gains_[k].k(i)));
-                    }
-                }
-                if (grad_max < opts.tol_grad && gnorm < opts.gap_threshold) {
-                    result.cost = cost;
-                    result.iters = total_iters;
-                    result.converged = true;
-                    // Do final clamp + dual update before returning
-                    goto al_update;
-                }
-            }
-
-            // Forward pass with Filter-based line search
-            {
-                const auto xs_old = xs;
-                const auto us_old = us;
-                const double cost_old = cost;
-
-                // Compute constraint violation of current trajectory
-                double cv_old = gnorm;
-                for (int k = 0; k < N; ++k) {
-                    for (int i = 0; i < NU; ++i) {
-                        cv_old += std::max(0.0, u_lo(i) - us[k](i));
-                        cv_old += std::max(0.0, us[k](i) - u_hi(i));
-                    }
-                }
-
-                bool accepted = false;
-                double alpha = 1.0;
-                while (alpha >= opts.alpha_min) {
-                    xs = xs_old;
-                    us = us_old;
-
-                    const double cost_try = forward_pass(prob, alpha, u_lo, u_hi);
-
-                    // Compute new constraint violation
-                    compute_gaps(prob);
-                    double cv_try = gap_norm();
-                    for (int k = 0; k < N; ++k) {
-                        for (int i = 0; i < NU; ++i) {
-                            cv_try += std::max(0.0, u_lo(i) - us[k](i));
-                            cv_try += std::max(0.0, us[k](i) - u_hi(i));
-                        }
-                    }
-
-                    // Filter criterion: accept if not dominated by any filter entry
-                    // AND (Armijo condition OR significant feasibility improvement)
-                    const double dV_expected = alpha * dV1_ + 0.5 * alpha * alpha * dV2_;
-                    const double cost_reduction = cost_old - cost_try;
-                    const double expected_reduction = -dV_expected;
-
-                    bool armijo_ok =
-                        (expected_reduction > 0.0 && cost_reduction / expected_reduction >= opts.armijo_c1);
-
-                    bool filter_ok = filter_accepts(cost_try, cv_try);
-
-                    // Accept if: (1) Armijo holds, or (2) FDDP gap reduction, or
-                    // (3) passes filter (cost or feasibility improved enough)
-                    if (armijo_ok || (use_fddp && cost_try < cost_old) || filter_ok) {
-                        cost = cost_try;
-                        accepted = true;
-                        filter_add(cost_try, cv_try);
-
-                        // Trust-region expansion on good step
-                        tr_radius = std::min(tr_radius * opts.tr_expand_factor, opts.tr_max);
-                        break;
-                    }
-
-                    alpha *= 0.5;
-                }
-
-                if (!accepted) {
-                    xs = xs_old;
-                    us = us_old;
-                    mu = std::min(mu * opts.mu_factor, opts.mu_max);
-                    tr_radius = std::max(tr_radius * opts.tr_shrink_factor, opts.tr_min);
-                } else {
-                    mu = std::max(mu / opts.mu_factor, opts.mu_min);
-
-                    if (std::abs(cost_old - cost) < opts.tol_cost * std::abs(cost_old) && gnorm < opts.gap_threshold) {
-                        result.cost = cost;
-                        result.iters = total_iters;
-                        result.converged = true;
-                        goto al_update;
-                    }
-                }
-            }
-
-            result.cost = cost;
-            result.iters = total_iters;
+            mu = std::min(mu * opts.mu_factor, opts.mu_max);
+        }
+        if (!bp_ok) {
+            break;
         }
 
-    al_update:
-        // Augmented Lagrangian outer loop: update multipliers & penalty
-        bool all_feasible = true;
+        double grad_max = 0.0;
         for (int k = 0; k < N; ++k) {
             for (int i = 0; i < NU; ++i) {
-                const double viol_lo = u_lo(i) - us[k](i);
-                const double viol_hi = us[k](i) - u_hi(i);
-                if (viol_lo > 0.0) {
-                    lambda_lo_[k](i) = std::max(0.0, lambda_lo_[k](i) + al_penalty_ * viol_lo);
-                    all_feasible = false;
-                } else {
-                    lambda_lo_[k](i) = 0.0;
-                }
-                if (viol_hi > 0.0) {
-                    lambda_hi_[k](i) = std::max(0.0, lambda_hi_[k](i) + al_penalty_ * viol_hi);
-                    all_feasible = false;
-                } else {
-                    lambda_hi_[k](i) = 0.0;
-                }
+                grad_max = std::max(grad_max, std::abs(gains_[k].k(i)));
             }
         }
-
-        if (all_feasible && result.converged) {
-            // Final clamp for numerical precision
-            for (int k = 0; k < N; ++k) {
-                us[k] = clamp_u(us[k], u_lo, u_hi);
-            }
-            return result;
+        if (grad_max < opts.tol_grad && gnorm < opts.gap_threshold) {
+            result.converged = true;
+            break;
         }
 
-        // Increase penalty for next outer iteration
-        al_penalty_ = std::min(al_penalty_ * opts.al_penalty_factor, opts.al_penalty_max);
+        xs_old_ = xs;
+        us_old_ = us;
+        const double cost_old = cost;
 
-        // Recompute cost with updated multipliers
-        cost = rollout_augmented_cost(prob, u_lo, u_hi);
-        filter_.clear();
+        bool accepted = false;
+        double alpha = 1.0;
+        while (alpha >= opts.alpha_min) {
+            xs = xs_old_;
+            us = us_old_;
+
+            const double cost_try = forward_pass(prob, alpha, u_lo, u_hi);
+
+            compute_gaps(prob);
+            const double cv_try = gap_norm();
+
+            const double dV_expected = alpha * dV1_ + 0.5 * alpha * alpha * dV2_;
+            const double expected_reduction = -dV_expected;
+            const double cost_reduction = cost_old - cost_try;
+
+            const bool armijo_ok =
+                (expected_reduction > 0.0 && (cost_reduction / expected_reduction) >= opts.armijo_c1);
+            const bool filter_ok = filter_accepts(cost_try, cv_try);
+
+            if (armijo_ok || (use_fddp && cost_try < cost_old) || filter_ok) {
+                cost = cost_try;
+                accepted = true;
+                filter_add(cost_try, cv_try);
+                tr_radius = std::min(tr_radius * opts.tr_expand_factor, opts.tr_max);
+                break;
+            }
+
+            alpha *= 0.5;
+        }
+
+        if (!accepted) {
+            xs = xs_old_;
+            us = us_old_;
+            mu = std::min(mu * opts.mu_factor, opts.mu_max);
+            tr_radius = std::max(tr_radius * opts.tr_shrink_factor, opts.tr_min);
+            continue;
+        }
+
+        mu = std::max(mu / opts.mu_factor, opts.mu_min);
+        result.cost = cost;
+
+        const double denom = std::max(std::abs(cost_old), 1.0);
+        if (std::abs(cost_old - cost) < opts.tol_cost * denom && gnorm < opts.gap_threshold) {
+            result.converged = true;
+            break;
+        }
     }
 
-    // Final clamp
     for (int k = 0; k < N; ++k) {
         us[k] = clamp_u(us[k], u_lo, u_hi);
     }
 
+    result.cost = cost;
     return result;
 }
 

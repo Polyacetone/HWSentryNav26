@@ -308,6 +308,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     nav_params.step_up_failsafe_similar_attempts = static_cast<int>(declare_parameter<int>("step_up_failsafe.similar_attempts"));
     nav_params.step_up_failsafe_similar_dist = declare_parameter<double>("step_up_failsafe.similar_dist");
 
+    nav_params.no_progress_enable = declare_parameter<bool>("follow_no_progress_guard.enable");
+    nav_params.no_progress_landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing");
+    nav_params.no_progress_timeout = declare_parameter<double>("follow_no_progress_guard.timeout");
+
     // ─── 创建 MainController ───
     nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
 

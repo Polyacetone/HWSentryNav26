@@ -105,6 +105,11 @@ struct NavigationParams {
     bool step_up_failsafe_enable;
     int step_up_failsafe_similar_attempts;   // 连续相近位置出现次数阈值
     double step_up_failsafe_similar_dist;    // 位置相近判定距离 (m)
+
+    // Follow 路标点无进度检测（防止在障碍物前蠕动不前）
+    bool no_progress_enable;
+    double no_progress_landmark_spacing;     // 路标点间距 (m)
+    double no_progress_timeout;              // 无进度超时 (s)
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -144,6 +149,8 @@ private:
     bool check_stuck(const ControlInput& input);
     bool compute_is_hazard(const ControlInput& input) const;
     bool update_recovery_safe_flag(const ControlInput& input);
+    void recompute_follow_landmarks(const SplineD& path);
+    bool check_no_progress(const ControlInput& input);
 
     // ─── 工具函数 ───
     struct StepDetectResult {
@@ -202,6 +209,11 @@ private:
     // ─── 上台阶失败兜底状态 ───
     std::deque<Eigen::Vector2d> step_up_attempt_positions_;  // 仅保存最近 N 次
     bool pending_cancel_follow_task_ = false;                // 由 FOLLOW 内检测触发，下一周期执行取消
+
+    // ─── Follow 路标点无进度检测状态 ───
+    std::vector<double> follow_landmarks_u_;                 // 每隔 ~landmark_spacing 的路径参数 u
+    int follow_max_landmark_idx_ = -1;                       // 已到达的最高路标点索引（-1=未初始化）
+    std::chrono::steady_clock::time_point follow_max_landmark_time_;  // 最后一次路标更新时刻
 };
 
 }

@@ -66,6 +66,29 @@ def euler_to_quaternion(roll: float, pitch: float, yaw: float) -> Quaternion:
     return Quaternion(x=float(qx), y=float(qy), z=float(qz), w=float(qw))
 
 # =============================================================================
+# 动态障碍物规格（在 SimConfig 中引用，需先定义）
+# =============================================================================
+
+
+@dataclass
+class ObstacleSpec:
+    """单个动态障碍物的运动参数规格。
+
+    motion_type : "circle"  圆形轨迹（围绕随机中心做匀速/变速圆周运动）
+                  "line"    直线往返（在随机方向的线段上来回运动，端点处平滑换向）
+    speed_type  : "constant"    匀速（恒定 max_speed）
+                  "oscillating" 变速（速度按正弦规律在 0 ~ max_speed 之间振荡）
+    """
+    motion_type: str = "circle"
+    speed_type: str = "constant"
+    max_speed: float = 0.8             # 最大线速度 (m/s)
+    max_accel: float = 1.5             # 最大加速度 (m/s²)，用于速度过渡 & 直线端点制动
+    circle_radius: float = 2.0         # 圆形轨迹轨道半径 (m)，仅 circle 生效
+    line_length: float = 4.0           # 直线往返总长度 (m)，仅 line 生效
+    oscillate_freq: float = 0.25       # 变速振荡频率 (Hz)，仅 oscillating 生效
+
+
+# =============================================================================
 # 配置区（统一写在最上面，直接改即可）
 # =============================================================================
 
@@ -154,6 +177,29 @@ class SimConfig:
     CAPACITOR_MAX_ENERGY: float = 1300.0   # 电容最大可用电量 (J)
     CAPACITOR_INIT_ENERGY: float = 1300.0  # 初始电容电量 (J)
     POWER_LOWPASS_HZ: float = 3.0         # 功率模型速度低通截频 (Hz)
+
+    # --- 动态障碍物 ---
+    # 障碍物生成范围（世界坐标，单位 m）
+    OBSTACLE_SPAWN_X_MIN: float = 0.0
+    OBSTACLE_SPAWN_X_MAX: float = 25.0
+    OBSTACLE_SPAWN_Y_MIN: float = 0.0
+    OBSTACLE_SPAWN_Y_MAX: float = 16.0
+
+    # 障碍物点云外形（每个障碍物为球形点云，球心在 xy 平面运动，z 固定）
+    OBSTACLE_CLOUD_RADIUS_M: float = 0.30          # 球半径 (m)
+    OBSTACLE_CLOUD_CENTER_Z_M: float = 0.50        # 球心固定 z 高度 (m)
+    OBSTACLE_CLOUD_DENSITY_PTS_PER_M2: float = 120.0  # 球面点密度 (points/m^2)
+    OBSTACLE_CLOUD_MIN_POINTS: int = 80            # 每个障碍物最少点数
+
+    # 障碍物种类列表（每项为 ObstacleSpec 实例，可自由增删）
+    OBSTACLE_SPECS: tuple = (
+        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
+        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
+        ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
+        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
+        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
+        ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
+    )
 
     # --- Frame 约定 ---
     FRAME_IMU_WORLD: str = "imu_world"
@@ -665,6 +711,159 @@ class DirectionMap2D:
 
 
 # =============================================================================
+# 动态障碍物运动状态
+# =============================================================================
+
+
+class ObstacleState:
+    """动态障碍物运动状态机。
+
+    两种轨迹类型：
+      circle —— 以随机中心做圆周运动，顺/逆时针随机选取。
+      line   —— 在随机方向的线段上来回运动；临近端点时自动制动，反向后重新
+                加速，全程通过加速度限幅保证速度连续（不会突变）。
+
+    两种速度类型（均受 max_accel 限制过渡）：
+      constant    —— 恒定 max_speed。
+      oscillating —— 速度以 oscillate_freq 频率在 0~max_speed 正弦振荡。
+    """
+
+    def __init__(
+        self,
+        spec: ObstacleSpec,
+        rng: np.random.Generator,
+        x_min: float, x_max: float,
+        y_min: float, y_max: float,
+    ) -> None:
+        self.spec = spec
+        self._sim_time: float = 0.0
+        self._current_speed: float = 0.0  # 当前实际速度（标量，始终 >= 0）
+
+        if spec.motion_type == "circle":
+            r = spec.circle_radius
+            # 圆心范围：确保整条轨道都在 spawn 范围内
+            cx_lo = x_min + r;  cx_hi = x_max - r
+            cy_lo = y_min + r;  cy_hi = y_max - r
+            if cx_lo > cx_hi:
+                cx_lo = cx_hi = (x_min + x_max) * 0.5
+            if cy_lo > cy_hi:
+                cy_lo = cy_hi = (y_min + y_max) * 0.5
+            self._center = np.array([
+                rng.uniform(cx_lo, cx_hi),
+                rng.uniform(cy_lo, cy_hi),
+            ], dtype=float)
+            self._angle: float = float(rng.uniform(0.0, 2.0 * math.pi))
+            # 随机顺/逆时针
+            self._orbit_sign: float = float(rng.choice([-1.0, 1.0]))
+            # 直线用字段（circle 模式下置零，避免 Optional）
+            self._line_start = np.zeros(2, dtype=float)
+            self._line_dir = np.zeros(2, dtype=float)
+            self._progress: float = 0.0
+            self._going_forward: bool = True
+        else:  # "line"
+            ll = spec.line_length
+            angle = float(rng.uniform(0.0, 2.0 * math.pi))
+            dir_x = math.cos(angle)
+            dir_y = math.sin(angle)
+            # 约束起点使整段线段 [start, start + dir*ll] 在 spawn 范围内
+            sx_lo = x_min - min(0.0, dir_x * ll);  sx_hi = x_max - max(0.0, dir_x * ll)
+            sy_lo = y_min - min(0.0, dir_y * ll);  sy_hi = y_max - max(0.0, dir_y * ll)
+            if sx_lo > sx_hi:
+                sx_lo = sx_hi = (x_min + x_max) * 0.5
+            if sy_lo > sy_hi:
+                sy_lo = sy_hi = (y_min + y_max) * 0.5
+            self._line_start = np.array([
+                rng.uniform(sx_lo, sx_hi),
+                rng.uniform(sy_lo, sy_hi),
+            ], dtype=float)
+            self._line_dir = np.array([dir_x, dir_y], dtype=float)
+            self._progress = 0.0
+            self._going_forward = True
+            # circle 用字段置零
+            self._center = np.zeros(2, dtype=float)
+            self._angle = 0.0
+            self._orbit_sign = 1.0
+
+    # ------------------------------------------------------------------
+    # 期望速度（不含加速度限制）
+    # ------------------------------------------------------------------
+
+    def _desired_speed(self) -> float:
+        """根据速度类型和轨迹位置计算期望标量速度（>= 0）。"""
+        spec = self.spec
+
+        # 基础速度
+        if spec.speed_type == "oscillating":
+            phase = 2.0 * math.pi * spec.oscillate_freq * self._sim_time
+            base = spec.max_speed * (0.5 + 0.5 * math.sin(phase))
+        else:
+            base = spec.max_speed
+
+        # 直线轨迹：临近端点时进行运动学制动，保证能在端点平稳停下
+        if spec.motion_type == "line":
+            dist_to_end = (
+                spec.line_length - self._progress
+                if self._going_forward
+                else self._progress
+            )
+            # 当前速度对应的制动距离 d = v² / (2a)
+            brake_dist = self._current_speed ** 2 / (2.0 * spec.max_accel + 1e-9)
+            if dist_to_end < brake_dist:
+                # 计算此距离下的最大允许速度，防止冲出端点
+                safe = math.sqrt(max(0.0, 2.0 * spec.max_accel * dist_to_end))
+                base = min(base, safe)
+
+        return max(0.0, float(base))
+
+    # ------------------------------------------------------------------
+    # 状态推进
+    # ------------------------------------------------------------------
+
+    def update(self, dt: float) -> None:
+        """推进障碍物状态 dt 秒（dt 应与 LQR 步长一致以保持精度）。"""
+        self._sim_time += dt
+        spec = self.spec
+
+        # 用加速度限幅平滑过渡到期望速度
+        desired = self._desired_speed()
+        delta = desired - self._current_speed
+        max_delta = spec.max_accel * dt
+        self._current_speed += float(np.clip(delta, -max_delta, max_delta))
+        self._current_speed = max(0.0, self._current_speed)
+
+        if spec.motion_type == "circle":
+            omega = self._orbit_sign * self._current_speed / (spec.circle_radius + 1e-9)
+            self._angle += omega * dt
+        else:  # "line"
+            if self._going_forward:
+                self._progress += self._current_speed * dt
+                if self._progress >= spec.line_length:
+                    self._progress = float(spec.line_length)
+                    self._going_forward = False  # 到达端点，反向
+            else:
+                self._progress -= self._current_speed * dt
+                if self._progress <= 0.0:
+                    self._progress = 0.0
+                    self._going_forward = True   # 回到起点，正向
+
+    # ------------------------------------------------------------------
+    # 当前位置
+    # ------------------------------------------------------------------
+
+    @property
+    def pos(self) -> tuple[float, float]:
+        """返回当前世界坐标 (x, y)。"""
+        spec = self.spec
+        if spec.motion_type == "circle":
+            x = self._center[0] + spec.circle_radius * math.cos(self._angle)
+            y = self._center[1] + spec.circle_radius * math.sin(self._angle)
+        else:
+            x = self._line_start[0] + self._line_dir[0] * self._progress
+            y = self._line_start[1] + self._line_dir[1] * self._progress
+        return float(x), float(y)
+
+
+# =============================================================================
 # ROS2 Node
 # =============================================================================
 
@@ -735,6 +934,17 @@ class WheelLegLqrFollowSimNode(Node):
         buffer_sec = max(1.0, float(self.cfg.ODOM_DELAY_SEC) + 1.0)
         self._odom_buf: deque[OdomSample] = deque(maxlen=int(buffer_sec * self.cfg.LQR_FREQ_HZ) + 50)
 
+        # 动态障碍物状态列表
+        self._obstacle_states: list[ObstacleState] = [
+            ObstacleState(
+                spec, self._rng,
+                self.cfg.OBSTACLE_SPAWN_X_MIN, self.cfg.OBSTACLE_SPAWN_X_MAX,
+                self.cfg.OBSTACLE_SPAWN_Y_MIN, self.cfg.OBSTACLE_SPAWN_Y_MAX,
+            )
+            for spec in self.cfg.OBSTACLE_SPECS
+        ]
+        self._unit_sphere_points = self._build_unit_sphere_samples()
+
         # pubs
         self.joint_state_pub = self.create_publisher(JointState, self.cfg.TOPIC_JOINT, 2)
         self.odom_pub = self.create_publisher(Odometry, self.cfg.TOPIC_ODOM, 2)
@@ -771,6 +981,26 @@ class WheelLegLqrFollowSimNode(Node):
             f"  Cloud: {self.cfg.CLOUD_PUB_HZ} Hz\n"
             f"  TF(odom->map): {self.cfg.TF_PUB_HZ} Hz"
         )
+
+    def _build_unit_sphere_samples(self) -> list[tuple[float, float, float]]:
+        """生成单位球面均匀采样点（Fibonacci sphere）。"""
+        r = max(1e-6, float(self.cfg.OBSTACLE_CLOUD_RADIUS_M))
+        density = max(0.0, float(self.cfg.OBSTACLE_CLOUD_DENSITY_PTS_PER_M2))
+        area = 4.0 * math.pi * r * r
+        est_points = int(area * density)
+        n = max(int(self.cfg.OBSTACLE_CLOUD_MIN_POINTS), est_points)
+
+        golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+        inv_n = 1.0 / float(n)
+        points: list[tuple[float, float, float]] = []
+
+        for i in range(n):
+            z = 1.0 - 2.0 * ((i + 0.5) * inv_n)
+            rr = math.sqrt(max(0.0, 1.0 - z * z))
+            a = golden_angle * i
+            points.append((rr * math.cos(a), rr * math.sin(a), z))
+
+        return points
 
     # ------------------------
     # map callbacks
@@ -1147,6 +1377,10 @@ class WheelLegLqrFollowSimNode(Node):
             )
         )
 
+        # 推进所有动态障碍物（与 LQR 同频，保证运动时序一致）
+        for obs in self._obstacle_states:
+            obs.update(self._dt_lqr)
+
     # ------------------------
     # publishers
     # ------------------------
@@ -1227,48 +1461,43 @@ class WheelLegLqrFollowSimNode(Node):
 
     def _pub_cloud(self) -> None:
         now = self.get_clock().now()
-        radius = 0.3
-        period = 3.0
-        cx = 15.0
-        cz = 0.2
-        cy = 6.0 + 1.5 * math.sin(1.0 * math.pi * now.nanoseconds / 1e9 / period)
+        cfg = self.cfg
 
-        # sample sphere surface with grid in spherical coordinates
-        num_theta = 40
-        num_phi = 40
-        points = []
-        for i in range(num_phi):
-            phi = math.pi * (i + 0.5) / num_phi
-            for j in range(num_theta):
-                theta = 2.0 * math.pi * j / num_theta
-                px = cx + radius * math.sin(phi) * math.cos(theta)
-                py = cy + radius * math.sin(phi) * math.sin(theta)
-                pz = cz + radius * math.cos(phi)
-                points.append((px, py, pz))
+        radius = float(cfg.OBSTACLE_CLOUD_RADIUS_M)
+        center_z = float(cfg.OBSTACLE_CLOUD_CENTER_Z_M)
+        unit_sphere_points = self._unit_sphere_points
+
+        # 为每个障碍物生成球形点云（球心 z 固定，仅 x/y 随轨迹运动）
+        points: list[tuple[float, float, float]] = []
+        for obs in self._obstacle_states:
+            ox, oy = obs.pos
+            for ux, uy, uz in unit_sphere_points:
+                points.append((
+                    ox + radius * ux,
+                    oy + radius * uy,
+                    center_z + radius * uz,
+                ))
 
         msg = PointCloud2()
         msg.header.stamp = now.to_msg()
         msg.header.frame_id = "odom"
         msg.height = 1
         msg.width = len(points)
-
-        # fields: x, y, z as float32
-        msg.fields = []
-        msg.fields.append(PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1))
-        msg.fields.append(PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1))
-        msg.fields.append(PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1))
-
+        msg.fields = [
+            PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
+        ]
         msg.is_bigendian = False
-        msg.point_step = 12  # 3 * 4 bytes
-        msg.row_step = msg.point_step * msg.width
+        msg.point_step = 12          # 3 × float32
+        msg.row_step = 12 * len(points)
         msg.is_dense = True
 
-        # pack points as float32 little-endian
         data = bytearray()
-        for (px, py, pz) in points:
-            data += struct.pack('<fff', float(px), float(py), float(pz))
-
+        for px, py, pz in points:
+            data += struct.pack('<fff', px, py, pz)
         msg.data = bytes(data)
+
         self.cloud_pub.publish(msg)
 
     def _pub_tf(self) -> None:
