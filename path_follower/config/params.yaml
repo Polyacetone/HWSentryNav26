@@ -62,10 +62,10 @@
 
     mpc: # MPC控制器参数
       energy: # 能量感知参数
-        enable: false # 是否启用能量约束
-        threshold: 500.0 # 电容能量惩罚阈值(J)，低于此值开始惩罚
-        weight: 5.0 # 能量软约束权重
-        softplus_beta: 5.0 # softplus斜率(越大越接近硬折线惩罚)
+        enable: true # 是否启用能量约束
+        threshold: 600.0 # 电容能量惩罚阈值(J)，低于此值开始惩罚
+        weight: 6.0 # 能量软约束权重
+        softplus_beta: 20.0 # softplus斜率(越大越接近硬折线惩罚)
       multi_hypothesis: # 多假设求解参数
         enable: false # 是否启用多假设求解
         lateral_offset: 1.0 # 横向偏移量 (m)，左/右求解器的 target_ey
@@ -84,8 +84,9 @@
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 2.0 # 上台阶期望速度 (m/s)
-          vel_step_down: 2.0 # 下台阶期望速度 (m/s)
+          vel_step_up: 2.2 # 上台阶期望速度 (m/s)
+          vel_step_down: 2.2 # 下台阶期望速度 (m/s)
+          vel_step_deadzone: 0.4 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
           slow_down_target_vel: 0.3 # 终点减速目标速度 (m/s)
@@ -93,7 +94,7 @@
         weights: # 权重
           q_y: 0.4 # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u: 2.0 # 进度项权重
+          q_u: 1.0 # 进度项权重
           q_v_final: 0.4 # 终点减速权重
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
@@ -102,7 +103,7 @@
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 1.0 # 台阶区域速度保持权重
+          vel_on_step: 6.0 # 台阶区域速度保持权重
           obstacle: 1.0 # 避障权重（全局+局部）
           direction: 2.0 # 台阶方向对齐权重
       stop: # 停止模式
@@ -114,8 +115,9 @@
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 2.0 # 上台阶期望速度 (m/s)
-          vel_step_down: 2.0 # 下台阶期望速度 (m/s)
+          vel_step_up: 2.2 # 上台阶期望速度 (m/s)
+          vel_step_down: 2.2 # 下台阶期望速度 (m/s)
+          vel_step_deadzone: 0.4 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights: # 权重
           q_v: 0.6 # 线速度正则

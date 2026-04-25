@@ -765,11 +765,12 @@ namespace {
         const double v_err = v_act - target_vel;
         const double abs_v_err = std::abs(v_err);
         const double sign_v_err = signum(v_err);
-        out.r(12) = w.vel_on_step * dir_norm * abs_v_err;
-        out.jx(12, ix::X) = w.vel_on_step * (dnorm_dx * abs_v_err + dir_norm * sign_v_err * (-dtarget_dx));
-        out.jx(12, ix::Y) = w.vel_on_step * (dnorm_dy * abs_v_err + dir_norm * sign_v_err * (-dtarget_dy));
-        out.jx(12, ix::THETA) = w.vel_on_step * (dir_norm * sign_v_err * (-dtarget_dtheta));
-        out.jx(12, ix::V) = w.vel_on_step * dir_norm * sign_v_err;
+        const auto relu_vstep = smooth_relu_eval(abs_v_err - lim.vel_step_deadzone);
+        out.r(12) = w.vel_on_step * dir_norm * relu_vstep.value;
+        out.jx(12, ix::X) = w.vel_on_step * (dnorm_dx * relu_vstep.value + dir_norm * relu_vstep.deriv * sign_v_err * (-dtarget_dx));
+        out.jx(12, ix::Y) = w.vel_on_step * (dnorm_dy * relu_vstep.value + dir_norm * relu_vstep.deriv * sign_v_err * (-dtarget_dy));
+        out.jx(12, ix::THETA) = w.vel_on_step * (dir_norm * relu_vstep.deriv * sign_v_err * (-dtarget_dtheta));
+        out.jx(12, ix::V) = w.vel_on_step * dir_norm * relu_vstep.deriv * sign_v_err;
 
         const auto relu_vfinal = smooth_relu_eval(v_act - v_dec);
         out.r(13) = w.q_v_final * relu_vfinal.value;
@@ -1058,7 +1059,7 @@ StopResidualVec stop_residual_impl(
     r(6) = w.lat_acc * relu(a_lat - lim.a_lat_max);
     r(7) = w.obstacle * cs.value / 255.0;
     r(8) = w.direction * dir_norm * std::abs(cross);
-    r(9) = w.vel_on_step * dir_norm * dir_norm * std::abs(v_act - target_vel);
+    r(9) = w.vel_on_step * dir_norm * dir_norm * relu(std::abs(v_act - target_vel) - lim.vel_step_deadzone);
 
     if (p.energy.enable) {
         const double pwr = predict_power(v_act, w_act, 0.0, 0.0);

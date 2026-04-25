@@ -137,6 +137,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .alpha_max = declare_parameter<double>("mpc.follow_path.limits.alpha_max"),
             .vel_step_up = declare_parameter<double>("mpc.follow_path.limits.vel_step_up"),
             .vel_step_down = declare_parameter<double>("mpc.follow_path.limits.vel_step_down"),
+            .vel_step_deadzone = declare_parameter<double>("mpc.follow_path.limits.vel_step_deadzone"),
             .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
             .slow_down_deceleration = declare_parameter<double>("mpc.follow_path.limits.slow_down_deceleration"),
             .slow_down_target_vel = declare_parameter<double>("mpc.follow_path.limits.slow_down_target_vel"),
@@ -173,6 +174,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .alpha_max = declare_parameter<double>("mpc.stop.limits.alpha_max"),
             .vel_step_up = declare_parameter<double>("mpc.stop.limits.vel_step_up"),
             .vel_step_down = declare_parameter<double>("mpc.stop.limits.vel_step_down"),
+            .vel_step_deadzone = declare_parameter<double>("mpc.stop.limits.vel_step_deadzone"),
             .a_lat_max = declare_parameter<double>("mpc.stop.limits.a_lat_max")
         },
         .stop_weights = {
