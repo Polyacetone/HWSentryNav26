@@ -12,10 +12,10 @@ Usage examples:
   source /home/yuki/sentry_2026/install/setup.bash
 
   # record until manually stopped
-  python3 navigation_sentry_2026/utils/py/lqr/identify_rec.py --tag test1
+  python3 navigation_sentry_2026/utils/py/lqr/rec_identify_data.py --tag test1
 
   # add a duration (seconds), then the script exits automatically
-  python3 navigation_sentry_2026/utils/py/lqr/identify_rec.py --duration 15.0
+  python3 navigation_sentry_2026/utils/py/lqr/rec_identify_data.py --duration 15.0
 
 The output files are named using a timestamp and optional tag:
 
@@ -27,11 +27,11 @@ The output files are named using a timestamp and optional tag:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import time
-from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 
@@ -63,7 +63,7 @@ def ensure_unique_path(path: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record chassis_cmd and chassis_status")
-    parser.add_argument("--tag", type=str, default="", help="additional tag to put in filename")
+    parser.add_argument("--tag", type=str, required=True, help="additional tag to put in filename")
     parser.add_argument("--out-dir", type=str, default="identify_data", help="output directory")
     parser.add_argument(
         "--duration",
@@ -87,11 +87,17 @@ def main() -> int:
     st_t: List[float] = []
     st_v: List[float] = []
     st_w: List[float] = []
+    st_s: List[float] = []
+    st_yaw: List[float] = []
+    st_pitch: List[float] = []
 
     # delayed ROS imports
     try:
         import rclpy
+        from rclpy.duration import Duration
         from rclpy.node import Node
+        from rclpy.time import Time
+        from tf2_ros import Buffer, TransformListener
         from interfaces.msg import ChassisCmd, ChassisStatus
     except Exception as e:  # pragma: no cover - environment issue
         print("无法导入 ROS2 依赖，请先 source install/setup.bash。\n", e)
@@ -104,9 +110,13 @@ def main() -> int:
             self.sub_status = self.create_subscription(
                 ChassisStatus, "/serial_bridge/chassis_status", self._status_cb, 1
             )
+            self._tf_buffer = Buffer()
+            self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=False)
             self._t0 = time.time()
             self._warmup = warmup
             self._recording_started = warmup <= 0.0
+            self._s_acc = 0.0
+            self._last_pos = None
             self.get_logger().info(f"record node started (warmup={warmup}s)")
 
         def _cmd_cb(self, msg: ChassisCmd) -> None:
@@ -127,6 +137,41 @@ def main() -> int:
             st_t.append(float(t))
             st_v.append(float(msg.velocity))
             st_w.append(float(msg.omega))
+
+            # Query odom<-chassis_link exactly on primary timeline samples.
+            s_meas = float("nan")
+            yaw_meas = float("nan")
+            pitch_meas = float("nan")
+            try:
+                tf_msg = self._tf_buffer.lookup_transform(
+                    "odom", "chassis_link", Time(), timeout=Duration(seconds=0.02)
+                )
+                tr = tf_msg.transform.translation
+                q = tf_msg.transform.rotation
+
+                pos = np.array([float(tr.x), float(tr.y), float(tr.z)], dtype=float)
+                if self._last_pos is not None:
+                    self._s_acc += float(np.linalg.norm(pos - self._last_pos))
+                self._last_pos = pos
+                s_meas = float(self._s_acc)
+
+                # Forward axis in odom from quaternion; roll is intentionally ignored.
+                qx = float(q.x)
+                qy = float(q.y)
+                qz = float(q.z)
+                qw = float(q.w)
+                fx = 1.0 - 2.0 * (qy * qy + qz * qz)
+                fy = 2.0 * (qx * qy + qz * qw)
+                fz = 2.0 * (qx * qz - qy * qw)
+
+                yaw_meas = math.atan2(fy, fx)
+                pitch_meas = math.atan2(-fz, math.hypot(fx, fy))
+            except Exception:
+                pass
+
+            st_s.append(s_meas)
+            st_yaw.append(yaw_meas)
+            st_pitch.append(pitch_meas)
 
     rclpy.init()
     node = RecordNode(warmup=warmup_sec)
@@ -156,10 +201,16 @@ def main() -> int:
     t_st = np.asarray(st_t, dtype=float)
     v_meas = np.asarray(st_v, dtype=float)
     w_meas = np.asarray(st_w, dtype=float)
+    s_meas = np.asarray(st_s, dtype=float)
+    yaw_meas = np.asarray(st_yaw, dtype=float)
+    pitch_meas = np.asarray(st_pitch, dtype=float)
     order_st = np.argsort(t_st)
     t_st = t_st[order_st]
     v_meas = v_meas[order_st]
     w_meas = w_meas[order_st]
+    s_meas = s_meas[order_st]
+    yaw_meas = yaw_meas[order_st]
+    pitch_meas = pitch_meas[order_st]
 
     t_cmd = np.asarray(cmd_t, dtype=float)
     v_cmd_raw = np.asarray(cmd_v, dtype=float)
@@ -170,8 +221,12 @@ def main() -> int:
     w_cmd_raw = w_cmd_raw[order_cmd]
 
     # interpolate command onto the status timeline (same as identify_pub_and_rec)
-    v_cmd = np.interp(t_st, t_cmd, v_cmd_raw)
-    w_cmd = np.interp(t_st, t_cmd, w_cmd_raw)
+    if t_cmd.size > 0:
+        v_cmd = np.interp(t_st, t_cmd, v_cmd_raw)
+        w_cmd = np.interp(t_st, t_cmd, w_cmd_raw)
+    else:
+        v_cmd = np.full_like(t_st, np.nan, dtype=float)
+        w_cmd = np.full_like(t_st, np.nan, dtype=float)
     t = t_st
 
     out_dir = Path(args.out_dir)
@@ -198,13 +253,12 @@ def main() -> int:
         t=t,
         v_meas=v_meas,
         w_meas=w_meas,
+        s_meas=s_meas,
+        yaw_meas=yaw_meas,
+        pitch_meas=pitch_meas,
         # cmd aligned to status timeline
         v_cmd=v_cmd,
         w_cmd=w_cmd,
-        # raw cmd timeline (optional)
-        cmd_t=t_cmd,
-        cmd_v=v_cmd_raw,
-        cmd_w=w_cmd_raw,
     )
 
     plt = try_setup_matplotlib()
@@ -212,8 +266,8 @@ def main() -> int:
         print("matplotlib 不可用，仅保存数据：", str(npz_path))
         return 0
 
-    fig = plt.figure(figsize=(12, 8))
-    ax1 = fig.add_subplot(2, 1, 1)
+    fig = plt.figure(figsize=(12, 14))
+    ax1 = fig.add_subplot(5, 1, 1)
     ax1.plot(t, v_cmd, "k--", linewidth=1.0, label="v_cmd")
     ax1.plot(t, v_meas, "b", linewidth=1.2, label="v_meas")
     ax1.set_ylabel("v [m/s]")
@@ -221,13 +275,31 @@ def main() -> int:
     ax1.legend(loc="best")
     ax1.set_title(f"Recorded (tag={tag})")
 
-    ax2 = fig.add_subplot(2, 1, 2)
+    ax2 = fig.add_subplot(5, 1, 2)
     ax2.plot(t, w_cmd, "k--", linewidth=1.0, label="omega_cmd")
     ax2.plot(t, w_meas, "b", linewidth=1.2, label="omega_meas")
-    ax2.set_xlabel("t [s]")
     ax2.set_ylabel("omega [rad/s]")
     ax2.grid(True, alpha=0.25)
     ax2.legend(loc="best")
+
+    ax3 = fig.add_subplot(5, 1, 3)
+    ax3.plot(t, s_meas, "g", linewidth=1.2, label="s_meas")
+    ax3.set_ylabel("s [m]")
+    ax3.grid(True, alpha=0.25)
+    ax3.legend(loc="best")
+
+    ax4 = fig.add_subplot(5, 1, 4)
+    ax4.plot(t, yaw_meas, "m", linewidth=1.2, label="yaw_meas")
+    ax4.set_ylabel("yaw [rad]")
+    ax4.grid(True, alpha=0.25)
+    ax4.legend(loc="best")
+
+    ax5 = fig.add_subplot(5, 1, 5)
+    ax5.plot(t, pitch_meas, "c", linewidth=1.2, label="pitch_meas")
+    ax5.set_xlabel("t [s]")
+    ax5.set_ylabel("pitch [rad]")
+    ax5.grid(True, alpha=0.25)
+    ax5.legend(loc="best")
 
     fig.tight_layout()
     fig.savefig(png_path, dpi=160)

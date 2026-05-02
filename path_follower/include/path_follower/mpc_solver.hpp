@@ -20,27 +20,28 @@ constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 
 // ── ZOH-discretized model constants (auto-generated) ──
+constexpr int    MODEL_NX  = 5;
 constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = 0.117776965182103;
-constexpr double CF2       = -0.07934663936437283;
-constexpr double CF3       = -0.035922362597109334;
-constexpr double XH0       = -0.1741781626557545;
+constexpr double CF1       = 0.09447413805247361;
+constexpr double CF2       = -0.13901640380277677;
+constexpr double CF3       = -0.02621717183661598;
+constexpr double XH0       = 0.21738455192194533;
 // v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.7843676355861557;
-constexpr double A01       = -0.09648336780318062;
-constexpr double A03       = 0.0037319689718094814;
-constexpr double A10       = 0.3987787787629378;
-constexpr double A11       = 1.1336902129030175;
-constexpr double A13       = 0.0351881685023933;
+constexpr double A00       = 0.8200885057132298;
+constexpr double A01       = -0.5369833585199355;
+constexpr double A03       = 0.19714401029818734;
+constexpr double A10       = 0.060365206096872466;
+constexpr double A11       = 1.0802736336979657;
+constexpr double A13       = 0.03074453908503922;
 // nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.002444300627739186;
-constexpr double GNL_V     = 0.05342869358100494;
-// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.553737 (positive!)
-constexpr double A22       = 0.5537368531002395;
-constexpr double A24       = 0.44626314689976054;
-constexpr double GAMMA_W   = 0.03775072274445112;
+constexpr double GNL_XH    = -0.01363663756756089;
+constexpr double GNL_V     = 0.052116923358857044;
+// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.534045 (positive!)
+constexpr double A22       = 0.5340445821808609;
+constexpr double A24       = 0.4659554178191391;
+constexpr double GAMMA_W   = 0.03714118269293085;
 // hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = 0.46233060886060057;
+constexpr double OBS_L     = 3.64594971083239;
 
 // ── Power model coefficients (auto-generated from identification) ──
 constexpr int PWR_N = 12;

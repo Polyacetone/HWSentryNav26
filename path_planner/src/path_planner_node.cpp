@@ -66,7 +66,7 @@ private:
     rclcpp::Subscription<interfaces::msg::NavGoal>::SharedPtr goal_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
     rclcpp::Publisher<interfaces::msg::GlobalPath>::SharedPtr control_points_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_optimized_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
     rclcpp::TimerBase::SharedPtr replan_timer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -131,8 +131,6 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     if (enable_debug_) {
         std::string rough_path_pub_topic = declare_parameter<std::string>("debug.rough_path_pub_topic");
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(rough_path_pub_topic, 1);
-        std::string optimized_path_pub_topic = declare_parameter<std::string>("debug.optimized_path_pub_topic");
-        debug_optimized_path_pub_ = create_publisher<nav_msgs::msg::Path>(optimized_path_pub_topic, 1);
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
@@ -221,6 +219,10 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
 
     control_points_pub_ = create_publisher<interfaces::msg::GlobalPath>(
         declare_parameter<std::string>("control_points_pub_topic"), 1
+    );
+
+    optimized_path_pub_ = create_publisher<nav_msgs::msg::Path>(
+        declare_parameter<std::string>("optimized_path_pub_topic"), 1
     );
 
     replan_timer_ = create_wall_timer(
@@ -516,10 +518,11 @@ void PathPlannerNode::publish_path(
     }
     gp_msg.fixed = fixed;
     control_points_pub_->publish(gp_msg);
-    last_optimized_path_map_ = to_map_coord(optimized_path);
+    const auto optimized_path_map = to_map_coord(optimized_path);
+    optimized_path_pub_->publish(path_to_nav_msg(optimized_path_map));
+    last_optimized_path_map_ = optimized_path_map;
     if (enable_debug_) {
         debug_rough_path_pub_->publish(path_to_nav_msg(to_map_coord(rough_path)));
-        debug_optimized_path_pub_->publish(path_to_nav_msg(to_map_coord(optimized_path)));
     }
 }
 

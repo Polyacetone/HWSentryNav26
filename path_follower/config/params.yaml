@@ -40,8 +40,8 @@
     step_ahead_flag: # 台阶标志位参数
       detect_norm_threshold: 0.6 # 方向场模长阈值，>=该值认为经过台阶
       detect_dot_threshold: 0.5 # 朝向与方向场点积阈值，用于区分上/下台阶
-      on_count_threshold: 2 # 连续检测到台阶的次数才设置标志位
-      off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
+      on_count_threshold: 3 # 连续检测到台阶的次数才设置标志位
+      off_count_threshold: 3 # 连续未检测到台阶的次数才取消标志位
 
     step_up_failsafe: # 上台阶失败兜底（避免恢复重试循环卡死）
       enable: false # 若启用，在路径跟随模式下如果连续多次检测到相近的位置但未能成功上台阶，则取消本次路径跟随任务
@@ -84,9 +84,9 @@
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 2.2 # 上台阶期望速度 (m/s)
-          vel_step_down: 2.2 # 下台阶期望速度 (m/s)
-          vel_step_deadzone: 0.4 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
+          vel_step_up: 2.0 # 上台阶期望速度 (m/s)
+          vel_step_down: 2.0 # 下台阶期望速度 (m/s)
+          vel_step_deadzone: 0.6 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
           slow_down_target_vel: 0.3 # 终点减速目标速度 (m/s)
@@ -103,7 +103,7 @@
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 6.0 # 台阶区域速度保持权重
+          vel_on_step: 10.0 # 台阶区域速度保持权重
           obstacle: 1.0 # 避障权重（全局+局部）
           direction: 2.0 # 台阶方向对齐权重
       stop: # 停止模式
@@ -115,9 +115,9 @@
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          vel_step_up: 2.2 # 上台阶期望速度 (m/s)
-          vel_step_down: 2.2 # 下台阶期望速度 (m/s)
-          vel_step_deadzone: 0.4 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
+          vel_step_up: 2.0 # 上台阶期望速度 (m/s)
+          vel_step_down: 2.0 # 下台阶期望速度 (m/s)
+          vel_step_deadzone: 0.6 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights: # 权重
           q_v: 0.6 # 线速度正则
@@ -127,7 +127,7 @@
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 6.0 # 台阶区域速度保持权重
+          vel_on_step: 10.0 # 台阶区域速度保持权重
           obstacle: 6.0 # 避障惩罚
           obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
           direction: 3.0 # 在台阶上要求朝向与台阶方向对齐
