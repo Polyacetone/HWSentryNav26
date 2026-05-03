@@ -35,13 +35,47 @@
       feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
 
     path_optimizer:
-      smoothness_weight: 0.4 # 平滑代价权重
-      uniform_speed_weight: 0.2 # 速度均匀代价权重
-      obstacle_weight: 6.0 # 障碍物代价权重
-      direction_weight: 6.0 # 方向代价权重
-      step_weight: 0.3 # 经过台阶惩罚（基于方向场模长）
       step_norm_threshold: 0.01 # 台阶方向场模长阈值（>=该值视为台阶区域）
       step_norm_transition: 0.05 # smoothstep 过渡宽度（避免硬阈值带来的不稳定）
-      start_end_weight: 100.0 # 起终点保持代价权重
-      num_samples_per_length: 1.5 # 每长度采样点个数，用于计算障碍物代价等（以格子为单位）
-      max_iterations: 100 # 优化的最大迭代次数
+      step_detection_samples_per_meter: 10.0 # 台阶扫描采样密度（物理米）
+      warmup:
+        obstacle_weight: 0.5 # Warmup阶段避障权重
+        direction_weight: 5.0 # Warmup阶段台阶方向对齐权重
+        step_weight: 0.25 # Warmup阶段台阶位置惩罚
+        start_end_weight: 15.0 # Warmup阶段起终点保持权重，避免过刚性
+        smoothness_weight: 0.005 # Warmup阶段小权重二阶平滑，抑制局部抖动
+        samples_per_meter: 10.0 # Warmup阶段优化采样密度（物理米）
+        max_iterations: 60 # Warmup阶段最大迭代次数
+        max_curvature: 1.2 # Warmup阶段统一曲率上限 (1/m)
+        length_penalty:
+          weight: 0.06 # Warmup阶段最小化|d1|^2，缩短路径并促使u分布更均匀
+        curvature:
+          base_weight: 0.1 # 低曲率基础惩罚权重，抑制直道zigzag
+          base_beta: 4.0 # 基础惩罚平滑斜率
+          limit_weight: 15.0 # 超曲率上限惩罚权重
+          limit_beta: 16.0 # 超限惩罚平滑斜率
+          min_speed_epsilon: 0.05 # 曲率计算速度保护阈值 (m)
+          speed_gate_threshold: 0.15 # 小速度区域下调曲率惩罚 (m)
+      main:
+        obstacle_weight: 0.5 # Main阶段避障权重
+        direction_weight: 5.0 # Main阶段台阶方向对齐权重
+        step_weight: 0.25 # Main阶段台阶位置惩罚
+        start_end_weight: 15.0 # Main阶段起终点保持权重
+        smoothness_weight: 0.005 # Main阶段保留更小的二阶平滑，避免与显式曲率约束打架
+        samples_per_meter: 10.0 # Main阶段优化采样密度（物理米）
+        max_iterations: 60 # Main阶段单轮最大迭代次数
+        max_refinement_iterations: 0 # 台阶扫描-优化耦合的最大重建轮数
+        near_max_curvature: 0.4 # 台阶附近曲率上限，对齐MPC侧向加速度约束 (1/m)
+        far_max_curvature: 1.2 # 远离台阶时曲率上限 (1/m)
+        step_extension_distance: 1.0 # 台阶检测区间前后扩展距离 (m)
+        step_transition_distance: 1.0 # 近远曲率限制平滑过渡距离 (m)
+        interval_iou_threshold: 0.85 # 连续两轮台阶区间IoU达到该值认为收敛
+        length_penalty:
+          weight: 0.06 # Main阶段最小化|d1|^2，防止过度压短导致贴障碍
+        curvature:
+          base_weight: 0.1 # 低曲率基础惩罚权重，抑制zigzag
+          base_beta: 4.0 # 基础惩罚平滑斜率
+          limit_weight: 15.0 # 超曲率上限惩罚权重
+          limit_beta: 16.0 # 超限惩罚平滑斜率
+          min_speed_epsilon: 0.05 # 曲率计算速度保护阈值 (m)
+          speed_gate_threshold: 0.15 # 小速度区域下调曲率惩罚 (m)

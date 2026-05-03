@@ -143,18 +143,59 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         declare_parameter<int>("path_planner.downsampled_waypoint_max_interval"),
         declare_parameter<int>("path_planner.feasible_threshold")
     );
-    path_optimizer_ = std::make_shared<BSplineOptimizer>(
-        declare_parameter<double>("path_optimizer.smoothness_weight"),
-        declare_parameter<double>("path_optimizer.uniform_speed_weight"),
-        declare_parameter<double>("path_optimizer.obstacle_weight"),
-        declare_parameter<double>("path_optimizer.direction_weight"),
-        declare_parameter<double>("path_optimizer.step_weight"),
-        declare_parameter<double>("path_optimizer.step_norm_threshold"),
-        declare_parameter<double>("path_optimizer.step_norm_transition"),
-        declare_parameter<double>("path_optimizer.start_end_weight"),
-        declare_parameter<double>("path_optimizer.num_samples_per_length"),
-        declare_parameter<int>("path_optimizer.max_iterations")
-    );
+    const BSplineOptimizer::Params path_optimizer_params{
+        .step_norm_threshold = declare_parameter<double>("path_optimizer.step_norm_threshold"),
+        .step_norm_transition = declare_parameter<double>("path_optimizer.step_norm_transition"),
+        .step_detection_samples_per_meter = declare_parameter<double>("path_optimizer.step_detection_samples_per_meter"),
+        .warmup = {
+            .obstacle_weight = declare_parameter<double>("path_optimizer.warmup.obstacle_weight"),
+            .direction_weight = declare_parameter<double>("path_optimizer.warmup.direction_weight"),
+            .step_weight = declare_parameter<double>("path_optimizer.warmup.step_weight"),
+            .start_end_weight = declare_parameter<double>("path_optimizer.warmup.start_end_weight"),
+            .smoothness_weight = declare_parameter<double>("path_optimizer.warmup.smoothness_weight"),
+            .samples_per_meter = declare_parameter<double>("path_optimizer.warmup.samples_per_meter"),
+            .max_iterations = static_cast<int>(declare_parameter<int>("path_optimizer.warmup.max_iterations")),
+            .max_curvature = declare_parameter<double>("path_optimizer.warmup.max_curvature"),
+            .length_penalty = {
+                .weight = declare_parameter<double>("path_optimizer.warmup.length_penalty.weight")
+            },
+            .curvature = {
+                .base_weight = declare_parameter<double>("path_optimizer.warmup.curvature.base_weight"),
+                .base_beta = declare_parameter<double>("path_optimizer.warmup.curvature.base_beta"),
+                .limit_weight = declare_parameter<double>("path_optimizer.warmup.curvature.limit_weight"),
+                .limit_beta = declare_parameter<double>("path_optimizer.warmup.curvature.limit_beta"),
+                .min_speed_epsilon = declare_parameter<double>("path_optimizer.warmup.curvature.min_speed_epsilon"),
+                .speed_gate_threshold = declare_parameter<double>("path_optimizer.warmup.curvature.speed_gate_threshold")
+            }
+        },
+        .main = {
+            .obstacle_weight = declare_parameter<double>("path_optimizer.main.obstacle_weight"),
+            .direction_weight = declare_parameter<double>("path_optimizer.main.direction_weight"),
+            .step_weight = declare_parameter<double>("path_optimizer.main.step_weight"),
+            .start_end_weight = declare_parameter<double>("path_optimizer.main.start_end_weight"),
+            .smoothness_weight = declare_parameter<double>("path_optimizer.main.smoothness_weight"),
+            .samples_per_meter = declare_parameter<double>("path_optimizer.main.samples_per_meter"),
+            .max_iterations = static_cast<int>(declare_parameter<int>("path_optimizer.main.max_iterations")),
+            .max_refinement_iterations = static_cast<int>(declare_parameter<int>("path_optimizer.main.max_refinement_iterations")),
+            .near_max_curvature = declare_parameter<double>("path_optimizer.main.near_max_curvature"),
+            .far_max_curvature = declare_parameter<double>("path_optimizer.main.far_max_curvature"),
+            .step_extension_distance = declare_parameter<double>("path_optimizer.main.step_extension_distance"),
+            .step_transition_distance = declare_parameter<double>("path_optimizer.main.step_transition_distance"),
+            .interval_iou_threshold = declare_parameter<double>("path_optimizer.main.interval_iou_threshold"),
+            .length_penalty = {
+                .weight = declare_parameter<double>("path_optimizer.main.length_penalty.weight")
+            },
+            .curvature = {
+                .base_weight = declare_parameter<double>("path_optimizer.main.curvature.base_weight"),
+                .base_beta = declare_parameter<double>("path_optimizer.main.curvature.base_beta"),
+                .limit_weight = declare_parameter<double>("path_optimizer.main.curvature.limit_weight"),
+                .limit_beta = declare_parameter<double>("path_optimizer.main.curvature.limit_beta"),
+                .min_speed_epsilon = declare_parameter<double>("path_optimizer.main.curvature.min_speed_epsilon"),
+                .speed_gate_threshold = declare_parameter<double>("path_optimizer.main.curvature.speed_gate_threshold")
+            }
+        }
+    };
+    path_optimizer_ = std::make_shared<BSplineOptimizer>(path_optimizer_params);
 
     const std::string global_cost_map_sub_topic = declare_parameter<std::string>("global_cost_map_sub_topic");
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(

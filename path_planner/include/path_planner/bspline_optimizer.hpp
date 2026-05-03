@@ -3,7 +3,6 @@
 #include <expected>
 #include <memory>
 #include <vector>
-#include <Eigen/Core>
 #include <path_planner/nav_map.hpp>
 
 namespace path_planner {
@@ -12,18 +11,59 @@ public:
     using Ptr = std::shared_ptr<BSplineOptimizer>;
     using ConstPtr = std::shared_ptr<const BSplineOptimizer>;
 
-    explicit BSplineOptimizer(
-        const double smoothness_weight,
-        const double uniform_speed_weight,
-        const double obstacle_weight,
-        const double direction_weight,
-        const double step_weight,
-        const double step_norm_threshold,
-        const double step_norm_transition,
-        const double start_end_weight,
-        const double num_samples_per_length,
-        const int max_iterations
-    );
+    struct LengthPenaltyParams {
+        double weight;
+    };
+
+    struct CurvaturePenaltyParams {
+        double base_weight;
+        double base_beta;
+        double limit_weight;
+        double limit_beta;
+        double min_speed_epsilon;
+        double speed_gate_threshold;
+    };
+
+    struct WarmupParams {
+        double obstacle_weight;
+        double direction_weight;
+        double step_weight;
+        double start_end_weight;
+        double smoothness_weight;
+        double samples_per_meter;
+        int max_iterations;
+        double max_curvature;
+        LengthPenaltyParams length_penalty;
+        CurvaturePenaltyParams curvature;
+    };
+
+    struct MainParams {
+        double obstacle_weight;
+        double direction_weight;
+        double step_weight;
+        double start_end_weight;
+        double smoothness_weight;
+        double samples_per_meter;
+        int max_iterations;
+        int max_refinement_iterations;
+        double near_max_curvature;
+        double far_max_curvature;
+        double step_extension_distance;
+        double step_transition_distance;
+        double interval_iou_threshold;
+        LengthPenaltyParams length_penalty;
+        CurvaturePenaltyParams curvature;
+    };
+
+    struct Params {
+        double step_norm_threshold;
+        double step_norm_transition;
+        double step_detection_samples_per_meter;
+        WarmupParams warmup;
+        MainParams main;
+    };
+
+    explicit BSplineOptimizer(Params params);
 
     // 返回优化后的控制点和采样点
     std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> optimize(
@@ -35,18 +75,6 @@ public:
     ) const;
 
 private:
-    const double smoothness_weight_;
-    const double uniform_speed_weight_;
-    const double obstacle_weight_;
-    const double direction_weight_;
-    const double step_weight_;
-    const double step_norm_threshold_;
-    const double step_norm_transition_;
-    const double start_end_weight_;
-    const double num_samples_per_length_;
-    const int max_iterations_;
-
-    std::vector<Eigen::Vector2d> pad_control_points(const std::vector<Eigen::Vector2d>& path) const;
-    double estimate_path_length(const std::vector<Eigen::Vector2d>& path) const;
+    Params params_;
 };
 } // namespace path_planner
