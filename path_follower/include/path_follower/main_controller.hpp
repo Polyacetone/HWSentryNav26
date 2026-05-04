@@ -16,6 +16,15 @@
 
 namespace path_follower {
 
+enum class ChassisMode : uint8_t {
+    NORMAL = 0,
+    SPIN_SLOW = 1,
+    SPIN_FAST = 2,
+    STEP_UP_LEG = 3,
+    STEP_UP_JUMP = 4,
+    STEP_DOWN = 5
+};
+
 // ═══════════════════════ 控制器输入 ═══════════════════════════
 
 /// 每个控制周期由 Node 填写、传入 MainController
@@ -66,10 +75,7 @@ struct ControlOutput {
     // ─── 底盘指令 ───
     double velocity = 0.0;
     double omega = 0.0;
-    bool step_up_ahead = false;
-    bool step_down_ahead = false;
-    bool slow_spin = false;
-    bool fast_spin = false;
+    ChassisMode mode = ChassisMode::NORMAL;
 
     // ─── 状态信息 ───
     FsmState fsm_state = FsmState::IDLE;
@@ -98,6 +104,9 @@ struct NavigationParams {
     // 台阶检测（基于MPC预测轨迹）
     double step_detect_norm_threshold;    // 方向场模长阈值
     double step_detect_dot_threshold;     // 朝向与方向场点积阈值
+    double step_edge_norm_threshold;      // 台阶边缘判定阈值
+    double step_up_vel_jump_threshold;    // 跳跃上台阶速度阈值
+    double step_up_vel_leg_threshold;     // 伸腿上台阶速度阈值
     int step_on_count_threshold;          // 连续检测到台阶的次数才设置标志位
     int step_off_count_threshold;         // 连续未检测到台阶的次数才取消标志位
 
@@ -110,6 +119,21 @@ struct NavigationParams {
     bool no_progress_enable;
     double no_progress_landmark_spacing;     // 路标点间距 (m)
     double no_progress_timeout;              // 无进度超时 (s)
+
+    bool step_runup_enable;
+    double step_runup_radius_min;
+    double step_runup_radius_max;
+    double step_runup_angle_half_range;
+    int step_runup_radius_samples;
+    int step_runup_angle_samples;
+    double step_runup_cost_threshold;
+    double step_runup_path_integral_resolution;
+    int step_runup_line_check_samples;
+    double step_runup_cost_weight;
+    double step_runup_step_dist_weight;
+    double step_runup_angle_weight;
+    double step_runup_robot_dist_weight;
+    double step_runup_robot_path_cost_weight;
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -143,6 +167,7 @@ private:
     ControlOutput execute_recovery(const ControlInput& input);
     ControlOutput execute_stuck_reverse(const ControlInput& input);
     ControlOutput execute_fixed(const ControlInput& input);
+    ControlOutput execute_step_runup(const ControlInput& input);
 
     void on_state_transition(FsmState prev, FsmState next);
     void update_recovery_goal_if_needed(const ControlInput& input);
@@ -151,6 +176,8 @@ private:
     bool update_recovery_safe_flag(const ControlInput& input);
     void recompute_follow_landmarks(const SplineD& path);
     bool check_no_progress(const ControlInput& input);
+    std::optional<Eigen::Vector2d> select_step_runup_point(const ControlInput& input) const;
+    bool is_step_runup_segment_feasible(const CostMap& cost_map, const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const;
 
     // ─── 工具函数 ───
     struct StepDetectResult {
@@ -160,10 +187,20 @@ private:
         bool step_down_rising = false;
     };
 
+    struct StepEdgeInfo {
+        Eigen::Vector2d pos_map = Eigen::Vector2d::Zero();
+        Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
+        double v_pred = 0.0;
+    };
+
     StepDetectResult detect_steps_on_prediction_with_edges(
         const MPCPrediction& prediction,
         const DirectionMap& direction_map
     );
+    std::optional<StepEdgeInfo> find_first_step_edge_on_prediction(
+        const MPCPrediction& prediction,
+        const DirectionMap& direction_map
+    ) const;
 
     void clear_step_up_attempt_history();
     void clear_step_up_attempt_history_if_needed(bool has_path, bool has_new_path);
@@ -187,6 +224,8 @@ private:
     std::optional<Eigen::Vector2d> recovery_goal_map_;
     std::optional<std::chrono::steady_clock::time_point> recovery_goal_set_time_;
     std::optional<std::chrono::steady_clock::time_point> recovery_safe_since_;
+    std::optional<StepEdgeInfo> pending_step_runup_edge_;
+    std::optional<Eigen::Vector2d> step_runup_goal_map_;
     FsmState last_fsm_state_ = FsmState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
 
@@ -203,12 +242,19 @@ private:
     bool step_up_flag_ = false;
     bool step_down_flag_ = false;
 
+    // ─── 上台阶模式锁存（避免 mode=3/4 临界跳变） ───
+    bool step_up_latch_armed_ = false;
+    std::optional<ChassisMode> latched_step_up_mode_;
+    bool latched_step_up_runup_ = false;
+
     // ─── 复活检测（底盘 Dead -> Mature） ───
     bool last_cycle_chassis_dead_ = false;
 
     // ─── 上台阶失败兜底状态 ───
     std::deque<Eigen::Vector2d> step_up_attempt_positions_;  // 仅保存最近 N 次
     bool pending_cancel_follow_task_ = false;                // 由 FOLLOW 内检测触发，下一周期执行取消
+    bool pending_step_runup_ = false;
+    bool step_runup_done_ = false;
 
     // ─── Follow 路标点无进度检测状态 ───
     std::vector<double> follow_landmarks_u_;                 // 每隔 ~landmark_spacing 的路径参数 u

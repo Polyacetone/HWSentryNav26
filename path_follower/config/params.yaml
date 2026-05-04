@@ -40,8 +40,28 @@
     step_ahead_flag: # 台阶标志位参数
       detect_norm_threshold: 0.6 # 方向场模长阈值，>=该值认为经过台阶
       detect_dot_threshold: 0.5 # 朝向与方向场点积阈值，用于区分上/下台阶
-      on_count_threshold: 3 # 连续检测到台阶的次数才设置标志位
-      off_count_threshold: 3 # 连续未检测到台阶的次数才取消标志位
+      edge_norm_threshold: 0.8 # 台阶边缘判定方向场模长阈值
+      step_up_vel_jump_threshold: 1.6 # 跳跃上台阶速度阈值 (m/s)，仅在 step_up 首次锁存时判定一次
+      step_up_vel_leg_threshold: 1.0 # 伸腿上台阶速度阈值 (m/s)，仅在 step_up 首次锁存时判定一次
+      on_count_threshold: 4 # 连续检测到台阶的次数才设置标志位
+      off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
+
+    step_runup: # 上台阶助跑点搜索参数
+      enable: true # 若关闭，低于速度下限就会直接撞到台阶上
+      radius_min: 1.0 # 采样半径下界 (m)，以台阶边缘点 A 为圆心
+      radius_max: 2.0 # 采样半径上界 (m)，以台阶边缘点 A 为圆心
+      angle_half_range: 0.26 # 扇区半角 (rad)
+      radius_samples: 5 # 采样半径数
+      angle_samples: 7 # 每个半径的采样角度数
+      cost_threshold: 50.0 # 候选点插值代价上限 (0~255)，>= 则剔除
+      path_integral_resolution: 0.05 # robot->candidate 路径代价积分采样分辨率 (m)，用于软约束
+      line_check_samples: 20 # candidate->A 连线可通行性硬约束采样数（任一点 >= cost_threshold 则剔除）
+      selection_weights:
+        cost: 1.0 # 终点插值代价 (cost/255)
+        step_dist: 1.0 # 距离台阶项 (1/r)
+        angle: 1.0 # 偏离 approach_dir 的角度误差 (rad)
+        robot_dist: 0.2 # robot->candidate 欧氏距离 (m)
+        robot_path_cost: 0.3 # robot->candidate 代价积分（软约束，越大越不优）
 
     step_up_failsafe: # 上台阶失败兜底（避免恢复重试循环卡死）
       enable: false # 若启用，在路径跟随模式下如果连续多次检测到相近的位置但未能成功上台阶，则取消本次路径跟随任务
@@ -54,10 +74,10 @@
       timeout: 6.0 # 无进度超时 (s)，超时未更新最高路标点则认为卡住，取消follow任务
 
     state_machine: # 控制状态机参数
-      follow_to_spin_vel_max: 0.2 # 从路径跟随切到小陀螺前，线速度需小于该阈值 (m/s)
-      spin_to_follow_omega_max: 0.6 # 从小陀螺切到路径跟随前，角速度需小于该阈值 (rad/s)
-      to_idle_vel_max: 0.2 # 切到空闲前，线速度需小于该阈值 (m/s)
-      to_idle_omega_max: 0.6 # 切到空闲前，角速度需小于该阈值 (rad/s)
+      follow_to_spin_vel_max: 0.2 # STOPPING->SPIN 的退出判定：|v_cmd| < 该阈值 (m/s)
+      spin_to_follow_omega_max: 0.6 # STOPPING->FOLLOW 的退出判定：|omega_cmd| < 该阈值 (rad/s)
+      to_idle_vel_max: 0.2 # STOPPING->IDLE/FIXED 的退出判定：|v_cmd| < 该阈值 (m/s)
+      to_idle_omega_max: 0.6 # STOPPING->IDLE/FIXED 的退出判定：|omega_cmd| < 该阈值 (rad/s)
       stopping_timeout: 1.0 # 停止状态超时 (s)，超过该时间仍未切出停止则强制切出
 
     mpc: # MPC控制器参数
@@ -70,14 +90,14 @@
         enable: false # 是否启用多假设求解
         lateral_offset: 1.0 # 横向偏移量 (m)，左/右求解器的 target_ey
         target_ey_penalty: 1.0 # 候选解比较时对非中心 target_ey 的固定附加代价系数，实际附加项为 penalty * target_ey^2
-      follow_path: # 路径跟随模式
+      follow: # 路径跟随模式
         projection: # 投影参数
           num_samples: 50 # 投影到样条参数u时的采样数
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
           local_search_lazy_distance: 0.1 # 如果局部搜索到的点与当前位置距离小于该值，则认为找到了合适的投影点 (m)
         limits: # 运动限制
           vel_max: 2.4 # 最大速度 (m/s)
-          vel_min: -0.8 # 最小速度 (m/s)
+          vel_min: -1.2 # 最小速度 (m/s)
           omega_max: 7.2 # 最大角速度 (rad/s)
           omega_min: -7.2 # 最小角速度 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
@@ -86,7 +106,7 @@
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           vel_step_up: 2.0 # 上台阶期望速度 (m/s)
           vel_step_down: 2.0 # 下台阶期望速度 (m/s)
-          vel_step_deadzone: 0.6 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
+          vel_step_deadzone: 0.8 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
           slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
           slow_down_target_vel: 0.3 # 终点减速目标速度 (m/s)
@@ -95,20 +115,21 @@
           q_y: 0.4 # 横向误差权重
           q_theta: 0.2 # 航向误差权重
           q_u: 1.0 # 进度项权重
-          q_v_final: 0.4 # 终点减速权重
+          q_v_final: 0.2 # 终点减速权重
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
-          r_dv: 0.8 # 线速度平滑
+          r_dv: 0.6 # 线速度平滑
           r_domega: 0.2 # 角速度平滑
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 10.0 # 台阶区域速度保持权重
+          vel_on_step: 1.0 # 台阶区域速度保持权重
           obstacle: 1.0 # 避障权重（全局+局部）
-          direction: 2.0 # 台阶方向对齐权重
+          direction: 1.0 # 台阶方向对齐权重
       stop: # 停止模式
         limits: # 运动限制
           vel_max: 2.4 # 最大线速度硬约束 (m/s)
+          vel_min: 0.0 # 最小线速度硬约束 (m/s)
           omega_max: 12.5 # 最大角速度硬约束 (rad/s)
           omega_min: -12.5 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
@@ -117,7 +138,7 @@
           alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
           vel_step_up: 2.0 # 上台阶期望速度 (m/s)
           vel_step_down: 2.0 # 下台阶期望速度 (m/s)
-          vel_step_deadzone: 0.6 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
+          vel_step_deadzone: 0.8 # 上下台阶速度惩罚死区 (m/s)，死区内不惩罚
           a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
         weights: # 权重
           q_v: 0.6 # 线速度正则
@@ -127,17 +148,17 @@
           acc_limit: 10.0 # 速度指令变化率超限惩罚
           alpha_limit: 10.0 # 角速度指令变化率超限惩罚
           lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          vel_on_step: 10.0 # 台阶区域速度保持权重
+          vel_on_step: 1.0 # 台阶区域速度保持权重
           obstacle: 6.0 # 避障惩罚
           obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
           direction: 3.0 # 在台阶上要求朝向与台阶方向对齐
           step_terminal: 10.0 # 终端台阶惩罚（防止停在台阶上）
-      recovery: # 恢复模式（向安全点移动）
+      hold: # 定点控制模式（危险恢复/固定点统一使用）
         limits:
-          vel_max: 0.6 # 最大线速度硬约束 (m/s)
-          vel_min: -0.6 # 最小线速度硬约束 (m/s)
-          omega_max: 1.2 # 最大角速度硬约束 (rad/s)
-          omega_min: -1.2 # 最小角速度硬约束 (rad/s)
+          vel_max: 1.2 # 最大线速度硬约束 (m/s)
+          vel_min: -1.2 # 最小线速度硬约束 (m/s)
+          omega_max: 1.6 # 最大角速度硬约束 (rad/s)
+          omega_min: -1.6 # 最小角速度硬约束 (rad/s)
           start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)，该值应当大于最大加速度*控制周期时长
           start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)，该值应当大于最大角加速度*控制周期时长
           acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
@@ -146,6 +167,7 @@
         weights: # 权重
           q_goal_xy: 0.3 # 每步目标点吸引（x/y误差）
           q_goal_theta: 0.2 # 朝向目标点
+          goal_deadzone: 0.2 # 目标吸引死区半径，进入后不再因目标位置误差来回抽动 (m)
           r_v: 0.02 # 线速度正则
           r_omega: 0.08 # 角速度正则
           r_dv: 0.8 # 线速度平滑
@@ -158,33 +180,6 @@
           q_goal_xy_terminal: 3.0 # 终端目标点吸引（x/y误差）
           obstacle_terminal: 12.0 # 终端避障惩罚
           step_terminal: 12.0 # 终端台阶惩罚
-      fixed: # 固定点位保持模式
-        limits:
-          vel_max: 0.5 # 最大线速度硬约束 (m/s)
-          vel_min: -0.5 # 最小线速度硬约束 (m/s)
-          omega_max: 1.0 # 最大角速度硬约束 (rad/s)
-          omega_min: -1.0 # 最小角速度硬约束 (rad/s)
-          start_vel_cmd_act_diff_max: 1.5 # 起始速度指令与实际速度差最大值 (m/s)
-          start_omega_cmd_act_diff_max: 3.0 # 起始角速度指令与实际角速度差最大值 (rad/s)
-          acc_max: 1.8 # 指令变化率限制：最大 dv_cmd/dt (m/s²)
-          alpha_max: 7.0 # 指令变化率限制：最大 domega_cmd/dt (rad/s²)
-          a_lat_max: 2.4 # 侧向加速度限制：|v_act*omega_act| (m/s²)
-        weights:
-          q_goal_xy: 0.3 # 每步目标点吸引（x/y误差）
-          q_goal_theta: 0.2 # 朝向目标点
-          goal_deadzone: 0.2 # 目标吸引死区半径，进入后不再因目标位置误差来回抽动 (m)
-          r_v: 0.02 # 线速度正则
-          r_omega: 0.08 # 角速度正则
-          r_dv: 0.8 # 线速度平滑
-          r_domega: 0.2 # 角速度平滑
-          acc_limit: 10.0 # 速度指令变化率超限惩罚
-          alpha_limit: 10.0 # 角速度指令变化率超限惩罚
-          lat_acc: 10.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-          obstacle: 1.0 # 全程避障惩罚
-          step: 1.0 # 全程台阶惩罚（视为不可通行）
-          q_goal_xy_terminal: 3.0 # 终端目标点吸引（x/y误差）
-          obstacle_terminal: 2.0 # 终端避障惩罚
-          step_terminal: 2.0 # 终端台阶惩罚
 
     recovery:
       enable: true # 是否启用恢复功能
@@ -195,6 +190,7 @@
         cost_threshold: 5.0 # < 认为可通行
         step_norm_threshold: 0.01 # < 认为可通行
       search:
+        recovery_cost_threshold: 20.0 # 候选点插值代价上限，超过则不作为恢复目标
         radius_min: 0.5 # 搜索半径范围下界 (m)
         radius_max: 1.5 # 搜索半径范围上界 (m)
         radius_samples: 5 # 搜索半径采样数

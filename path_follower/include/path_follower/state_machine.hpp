@@ -31,6 +31,7 @@ struct RecoveryParams {
     double safe_step_norm_threshold;
 
     // 搜索可通行点
+    double recovery_cost_threshold;
     double radius_min;
     double radius_max;
     int radius_samples;
@@ -69,7 +70,8 @@ enum class FsmState : uint8_t {
     STOPPING = 4,         // 正常模式间的平滑过渡减速
     HAZARD_RECOVERY = 5,  // 危险恢复（向安全点移动）
     STUCK_REVERSE = 6,    // 倒车脱困
-    FIXED = 7             // 固定在目标点位（持续 MPC 保持位置）
+    FIXED = 7,            // 固定在目标点位（持续 MPC 保持位置）
+    STEP_RUNUP = 8        // 上台阶助跑（先去助跑点，再恢复 FOLLOW）
 };
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
@@ -81,6 +83,8 @@ struct FsmInput {
     bool has_new_path = false;  // 本周期是否收到新路径
     bool fixed_goal_flag = false;
     bool reach_goal = false;
+    bool step_runup_requested = false;
+    bool step_runup_done = false;
 
     // 外部请求
     bool spin_requested = false;

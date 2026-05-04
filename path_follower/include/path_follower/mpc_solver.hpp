@@ -125,6 +125,7 @@ struct MPCFollowProjection {
 
 struct MPCStopLimits {
     double vel_max;
+    double vel_min;
     double omega_max;
     double omega_min;
 
@@ -156,7 +157,7 @@ struct MPCStopWeights {
     double step_terminal;
 };
 
-struct MPCRecoveryLimits {
+struct MPCHoldLimits {
     double vel_max;
     double vel_min;
     double omega_max;
@@ -169,40 +170,7 @@ struct MPCRecoveryLimits {
     double a_lat_max;
 };
 
-struct MPCRecoveryWeights {
-    double q_goal_xy;
-    double q_goal_theta;
-    double r_v;
-    double r_omega;
-    double r_dv;
-    double r_domega;
-
-    double acc_limit;
-    double alpha_limit;
-    double lat_acc;
-
-    double obstacle;
-    double step;
-
-    double q_goal_xy_terminal;
-    double obstacle_terminal;
-    double step_terminal;
-};
-
-struct MPCFixedLimits {
-    double vel_max;
-    double vel_min;
-    double omega_max;
-    double omega_min;
-
-    double start_vel_cmd_act_diff_max;
-    double start_omega_cmd_act_diff_max;
-    double acc_max;
-    double alpha_max;
-    double a_lat_max;
-};
-
-struct MPCFixedWeights {
+struct MPCHoldWeights {
     double q_goal_xy;
     double q_goal_theta;
     double goal_deadzone;
@@ -252,11 +220,8 @@ struct MPCParams {
     MPCStopLimits stop_limits;
     MPCStopWeights stop_weights;
 
-    MPCRecoveryLimits recovery_limits;
-    MPCRecoveryWeights recovery_weights;
-
-    MPCFixedLimits fixed_limits;
-    MPCFixedWeights fixed_weights;
+    MPCHoldLimits hold_limits;
+    MPCHoldWeights hold_weights;
 
     EnergyParams energy;
     MultiHypothesisParams mh_params;
@@ -436,12 +401,12 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  FDDP Problem 类型 — Recovery
+//  FDDP Problem 类型 — Hold
 // ═══════════════════════════════════════════════════════════════
 
-class RecoveryProblem {
+class HoldProblem {
 public:
-    RecoveryProblem(
+    HoldProblem(
         const Eigen::Vector2d& goal_map,
         const MPCParams& params,
         const CostMapGridView& cost_grid,
@@ -485,54 +450,6 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  FDDP Problem 类型 — Fixed（固定在目标点）
-// ═══════════════════════════════════════════════════════════════
-
-class FixedProblem {
-public:
-    FixedProblem(
-        const Eigen::Vector2d& goal_map,
-        const MPCParams& params,
-        const CostMapGridView& cost_grid,
-        const GridInfo& cost_info,
-        const DirectionMapGridView& dir_grid,
-        const GridInfo& dir_info,
-        double remaining_energy,
-        double rfr_pwr_limit
-    );
-
-    StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
-    void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
-
-    double running_cost(int k, const StateVec& x, const ControlVec& u) const;
-    void running_cost_derivatives(
-        int k,
-        const StateVec& x,
-        const ControlVec& u,
-        StateVec& lx,
-        ControlVec& lu,
-        MatXX& lxx,
-        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
-        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
-    ) const;
-
-    double terminal_cost(const StateVec& x) const;
-    void terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const;
-
-    ControlVec u_lower() const;
-    ControlVec u_upper() const;
-
-private:
-    Eigen::Vector2d goal_;
-    const MPCParams& p_;
-    const CostMapGridView& cost_grid_;
-    GridInfo cost_info_;
-    const DirectionMapGridView& dir_grid_;
-    GridInfo dir_info_;
-    double remaining_energy_;
-    double rfr_pwr_limit_;
-};
-
 } // namespace path_follower
 
 // ── FDDP Dims specializations ──
@@ -550,13 +467,7 @@ struct Dims<path_follower::StopProblem> {
     static constexpr int N = path_follower::MPC_HORIZON;
 };
 template<>
-struct Dims<path_follower::RecoveryProblem> {
-    static constexpr int NX = path_follower::MPC_NX;
-    static constexpr int NU = path_follower::MPC_NU;
-    static constexpr int N = path_follower::MPC_HORIZON;
-};
-template<>
-struct Dims<path_follower::FixedProblem> {
+struct Dims<path_follower::HoldProblem> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
     static constexpr int N = path_follower::MPC_HORIZON;
@@ -583,7 +494,7 @@ public:
         return x_h_hat_;
     }
 
-    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> follow_path(
+    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_follow(
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
@@ -593,22 +504,14 @@ public:
         const DirectionMap& direction_map
     );
 
-    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> stop(
+    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
         const CostMap& cost_map,
         const DirectionMap& direction_map
     );
 
-    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> recover_to_point(
-        const Eigen::Vector2d& goal_map,
-        const Eigen::Vector3d& chassis_pose_map,
-        const Eigen::Vector2d& chassis_status,
-        const CostMap& cost_map,
-        const DirectionMap& direction_map
-    );
-
-    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> hold_at_point(
+    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_hold(
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
         const Eigen::Vector2d& chassis_status,
@@ -628,18 +531,16 @@ private:
     // 主 FDDP solver（中心假设）
     fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
-    fddp::Solver<RecoveryProblem> recovery_solver_;
-    fddp::Solver<FixedProblem> fixed_solver_;
+    fddp::Solver<HoldProblem> hold_solver_;
     bool follow_warm_ = false;
     bool stop_warm_ = false;
-    bool recovery_warm_ = false;
-    bool fixed_warm_ = false;
+    bool hold_warm_ = false;
 
-    // 多假设 solver（左/右偏移，仅用于 follow_path）
+    // 多假设 solver（左/右偏移，仅用于 solve_follow）
     fddp::Solver<FollowProblem> follow_solver_left_;
     fddp::Solver<FollowProblem> follow_solver_right_;
 
-    // 复用每步代价图视图，避免 follow_path 中反复分配
+    // 复用每步代价图视图，避免 solve_follow 中反复分配
     std::vector<CostMapGridView> step_cost_grids_cache_;
 
     // 缓存的弧长查找表

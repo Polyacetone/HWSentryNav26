@@ -127,45 +127,46 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     // ─── MPC 参数加载 ───
     MPCParams mpc_params = {
         .follow_limits = {
-            .vel_max = declare_parameter<double>("mpc.follow_path.limits.vel_max"),
-            .vel_min = declare_parameter<double>("mpc.follow_path.limits.vel_min"),
-            .omega_max = declare_parameter<double>("mpc.follow_path.limits.omega_max"),
-            .omega_min = declare_parameter<double>("mpc.follow_path.limits.omega_min"),
-            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.follow_path.limits.start_vel_cmd_act_diff_max"),
-            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.follow_path.limits.start_omega_cmd_act_diff_max"),
-            .acc_max = declare_parameter<double>("mpc.follow_path.limits.acc_max"),
-            .alpha_max = declare_parameter<double>("mpc.follow_path.limits.alpha_max"),
-            .vel_step_up = declare_parameter<double>("mpc.follow_path.limits.vel_step_up"),
-            .vel_step_down = declare_parameter<double>("mpc.follow_path.limits.vel_step_down"),
-            .vel_step_deadzone = declare_parameter<double>("mpc.follow_path.limits.vel_step_deadzone"),
-            .a_lat_max = declare_parameter<double>("mpc.follow_path.limits.a_lat_max"),
-            .slow_down_deceleration = declare_parameter<double>("mpc.follow_path.limits.slow_down_deceleration"),
-            .slow_down_target_vel = declare_parameter<double>("mpc.follow_path.limits.slow_down_target_vel"),
-            .slow_down_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.limits.slow_down_num_samples"))
+            .vel_max = declare_parameter<double>("mpc.follow.limits.vel_max"),
+            .vel_min = declare_parameter<double>("mpc.follow.limits.vel_min"),
+            .omega_max = declare_parameter<double>("mpc.follow.limits.omega_max"),
+            .omega_min = declare_parameter<double>("mpc.follow.limits.omega_min"),
+            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.follow.limits.start_vel_cmd_act_diff_max"),
+            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.follow.limits.start_omega_cmd_act_diff_max"),
+            .acc_max = declare_parameter<double>("mpc.follow.limits.acc_max"),
+            .alpha_max = declare_parameter<double>("mpc.follow.limits.alpha_max"),
+            .vel_step_up = declare_parameter<double>("mpc.follow.limits.vel_step_up"),
+            .vel_step_down = declare_parameter<double>("mpc.follow.limits.vel_step_down"),
+            .vel_step_deadzone = declare_parameter<double>("mpc.follow.limits.vel_step_deadzone"),
+            .a_lat_max = declare_parameter<double>("mpc.follow.limits.a_lat_max"),
+            .slow_down_deceleration = declare_parameter<double>("mpc.follow.limits.slow_down_deceleration"),
+            .slow_down_target_vel = declare_parameter<double>("mpc.follow.limits.slow_down_target_vel"),
+            .slow_down_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow.limits.slow_down_num_samples"))
         },
         .follow_weights = {
-            .q_y = declare_parameter<double>("mpc.follow_path.weights.q_y"),
-            .q_theta = declare_parameter<double>("mpc.follow_path.weights.q_theta"),
-            .q_u = declare_parameter<double>("mpc.follow_path.weights.q_u"),
-            .q_v_final = declare_parameter<double>("mpc.follow_path.weights.q_v_final"),
-            .r_v = declare_parameter<double>("mpc.follow_path.weights.r_v"),
-            .r_omega = declare_parameter<double>("mpc.follow_path.weights.r_omega"),
-            .r_dv = declare_parameter<double>("mpc.follow_path.weights.r_dv"),
-            .r_domega = declare_parameter<double>("mpc.follow_path.weights.r_domega"),
-            .acc_limit = declare_parameter<double>("mpc.follow_path.weights.acc_limit"),
-            .alpha_limit = declare_parameter<double>("mpc.follow_path.weights.alpha_limit"),
-            .lat_acc = declare_parameter<double>("mpc.follow_path.weights.lat_acc"),
-            .vel_on_step = declare_parameter<double>("mpc.follow_path.weights.vel_on_step"),
-            .obstacle = declare_parameter<double>("mpc.follow_path.weights.obstacle"),
-            .direction = declare_parameter<double>("mpc.follow_path.weights.direction")
+            .q_y = declare_parameter<double>("mpc.follow.weights.q_y"),
+            .q_theta = declare_parameter<double>("mpc.follow.weights.q_theta"),
+            .q_u = declare_parameter<double>("mpc.follow.weights.q_u"),
+            .q_v_final = declare_parameter<double>("mpc.follow.weights.q_v_final"),
+            .r_v = declare_parameter<double>("mpc.follow.weights.r_v"),
+            .r_omega = declare_parameter<double>("mpc.follow.weights.r_omega"),
+            .r_dv = declare_parameter<double>("mpc.follow.weights.r_dv"),
+            .r_domega = declare_parameter<double>("mpc.follow.weights.r_domega"),
+            .acc_limit = declare_parameter<double>("mpc.follow.weights.acc_limit"),
+            .alpha_limit = declare_parameter<double>("mpc.follow.weights.alpha_limit"),
+            .lat_acc = declare_parameter<double>("mpc.follow.weights.lat_acc"),
+            .vel_on_step = declare_parameter<double>("mpc.follow.weights.vel_on_step"),
+            .obstacle = declare_parameter<double>("mpc.follow.weights.obstacle"),
+            .direction = declare_parameter<double>("mpc.follow.weights.direction")
         },
         .follow_projection = {
-            .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow_path.projection.num_samples")),
-            .proj_search_window = declare_parameter<double>("mpc.follow_path.projection.search_window"),
-            .local_search_lazy_distance = declare_parameter<double>("mpc.follow_path.projection.local_search_lazy_distance")
+            .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow.projection.num_samples")),
+            .proj_search_window = declare_parameter<double>("mpc.follow.projection.search_window"),
+            .local_search_lazy_distance = declare_parameter<double>("mpc.follow.projection.local_search_lazy_distance")
         },
         .stop_limits = {
             .vel_max = declare_parameter<double>("mpc.stop.limits.vel_max"),
+            .vel_min = declare_parameter<double>("mpc.stop.limits.vel_min"),
             .omega_max = declare_parameter<double>("mpc.stop.limits.omega_max"),
             .omega_min = declare_parameter<double>("mpc.stop.limits.omega_min"),
             .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.stop.limits.start_vel_cmd_act_diff_max"),
@@ -191,60 +192,33 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .direction = declare_parameter<double>("mpc.stop.weights.direction"),
             .step_terminal = declare_parameter<double>("mpc.stop.weights.step_terminal")
         },
-        .recovery_limits = {
-            .vel_max = declare_parameter<double>("mpc.recovery.limits.vel_max"),
-            .vel_min = declare_parameter<double>("mpc.recovery.limits.vel_min"),
-            .omega_max = declare_parameter<double>("mpc.recovery.limits.omega_max"),
-            .omega_min = declare_parameter<double>("mpc.recovery.limits.omega_min"),
-            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.recovery.limits.start_vel_cmd_act_diff_max"),
-            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.recovery.limits.start_omega_cmd_act_diff_max"),
-            .acc_max = declare_parameter<double>("mpc.recovery.limits.acc_max"),
-            .alpha_max = declare_parameter<double>("mpc.recovery.limits.alpha_max"),
-            .a_lat_max = declare_parameter<double>("mpc.recovery.limits.a_lat_max")
+        .hold_limits = {
+            .vel_max = declare_parameter<double>("mpc.hold.limits.vel_max"),
+            .vel_min = declare_parameter<double>("mpc.hold.limits.vel_min"),
+            .omega_max = declare_parameter<double>("mpc.hold.limits.omega_max"),
+            .omega_min = declare_parameter<double>("mpc.hold.limits.omega_min"),
+            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.hold.limits.start_vel_cmd_act_diff_max"),
+            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.hold.limits.start_omega_cmd_act_diff_max"),
+            .acc_max = declare_parameter<double>("mpc.hold.limits.acc_max"),
+            .alpha_max = declare_parameter<double>("mpc.hold.limits.alpha_max"),
+            .a_lat_max = declare_parameter<double>("mpc.hold.limits.a_lat_max")
         },
-        .recovery_weights = {
-            .q_goal_xy = declare_parameter<double>("mpc.recovery.weights.q_goal_xy"),
-            .q_goal_theta = declare_parameter<double>("mpc.recovery.weights.q_goal_theta"),
-            .r_v = declare_parameter<double>("mpc.recovery.weights.r_v"),
-            .r_omega = declare_parameter<double>("mpc.recovery.weights.r_omega"),
-            .r_dv = declare_parameter<double>("mpc.recovery.weights.r_dv"),
-            .r_domega = declare_parameter<double>("mpc.recovery.weights.r_domega"),
-            .acc_limit = declare_parameter<double>("mpc.recovery.weights.acc_limit"),
-            .alpha_limit = declare_parameter<double>("mpc.recovery.weights.alpha_limit"),
-            .lat_acc = declare_parameter<double>("mpc.recovery.weights.lat_acc"),
-            .obstacle = declare_parameter<double>("mpc.recovery.weights.obstacle"),
-            .step = declare_parameter<double>("mpc.recovery.weights.step"),
-            .q_goal_xy_terminal = declare_parameter<double>("mpc.recovery.weights.q_goal_xy_terminal"),
-            .obstacle_terminal = declare_parameter<double>("mpc.recovery.weights.obstacle_terminal"),
-            .step_terminal = declare_parameter<double>("mpc.recovery.weights.step_terminal")
-        },
-        .fixed_limits = {
-            .vel_max = declare_parameter<double>("mpc.fixed.limits.vel_max"),
-            .vel_min = declare_parameter<double>("mpc.fixed.limits.vel_min"),
-            .omega_max = declare_parameter<double>("mpc.fixed.limits.omega_max"),
-            .omega_min = declare_parameter<double>("mpc.fixed.limits.omega_min"),
-            .start_vel_cmd_act_diff_max = declare_parameter<double>("mpc.fixed.limits.start_vel_cmd_act_diff_max"),
-            .start_omega_cmd_act_diff_max = declare_parameter<double>("mpc.fixed.limits.start_omega_cmd_act_diff_max"),
-            .acc_max = declare_parameter<double>("mpc.fixed.limits.acc_max"),
-            .alpha_max = declare_parameter<double>("mpc.fixed.limits.alpha_max"),
-            .a_lat_max = declare_parameter<double>("mpc.fixed.limits.a_lat_max")
-        },
-        .fixed_weights = {
-            .q_goal_xy = declare_parameter<double>("mpc.fixed.weights.q_goal_xy"),
-            .q_goal_theta = declare_parameter<double>("mpc.fixed.weights.q_goal_theta"),
-            .goal_deadzone = declare_parameter<double>("mpc.fixed.weights.goal_deadzone"),
-            .r_v = declare_parameter<double>("mpc.fixed.weights.r_v"),
-            .r_omega = declare_parameter<double>("mpc.fixed.weights.r_omega"),
-            .r_dv = declare_parameter<double>("mpc.fixed.weights.r_dv"),
-            .r_domega = declare_parameter<double>("mpc.fixed.weights.r_domega"),
-            .acc_limit = declare_parameter<double>("mpc.fixed.weights.acc_limit"),
-            .alpha_limit = declare_parameter<double>("mpc.fixed.weights.alpha_limit"),
-            .lat_acc = declare_parameter<double>("mpc.fixed.weights.lat_acc"),
-            .obstacle = declare_parameter<double>("mpc.fixed.weights.obstacle"),
-            .step = declare_parameter<double>("mpc.fixed.weights.step"),
-            .q_goal_xy_terminal = declare_parameter<double>("mpc.fixed.weights.q_goal_xy_terminal"),
-            .obstacle_terminal = declare_parameter<double>("mpc.fixed.weights.obstacle_terminal"),
-            .step_terminal = declare_parameter<double>("mpc.fixed.weights.step_terminal")
+        .hold_weights = {
+            .q_goal_xy = declare_parameter<double>("mpc.hold.weights.q_goal_xy"),
+            .q_goal_theta = declare_parameter<double>("mpc.hold.weights.q_goal_theta"),
+            .goal_deadzone = declare_parameter<double>("mpc.hold.weights.goal_deadzone"),
+            .r_v = declare_parameter<double>("mpc.hold.weights.r_v"),
+            .r_omega = declare_parameter<double>("mpc.hold.weights.r_omega"),
+            .r_dv = declare_parameter<double>("mpc.hold.weights.r_dv"),
+            .r_domega = declare_parameter<double>("mpc.hold.weights.r_domega"),
+            .acc_limit = declare_parameter<double>("mpc.hold.weights.acc_limit"),
+            .alpha_limit = declare_parameter<double>("mpc.hold.weights.alpha_limit"),
+            .lat_acc = declare_parameter<double>("mpc.hold.weights.lat_acc"),
+            .obstacle = declare_parameter<double>("mpc.hold.weights.obstacle"),
+            .step = declare_parameter<double>("mpc.hold.weights.step"),
+            .q_goal_xy_terminal = declare_parameter<double>("mpc.hold.weights.q_goal_xy_terminal"),
+            .obstacle_terminal = declare_parameter<double>("mpc.hold.weights.obstacle_terminal"),
+            .step_terminal = declare_parameter<double>("mpc.hold.weights.step_terminal")
         },
         .energy = {
             .enable = declare_parameter<bool>("mpc.energy.enable"),
@@ -276,6 +250,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .hazard_step_norm_threshold = declare_parameter<double>("recovery.hazard.step_norm_threshold"),
         .safe_cost_threshold = declare_parameter<double>("recovery.safe.cost_threshold"),
         .safe_step_norm_threshold = declare_parameter<double>("recovery.safe.step_norm_threshold"),
+        .recovery_cost_threshold = declare_parameter<double>("recovery.search.recovery_cost_threshold"),
         .radius_min = declare_parameter<double>("recovery.search.radius_min"),
         .radius_max = declare_parameter<double>("recovery.search.radius_max"),
         .radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.radius_samples")),
@@ -303,6 +278,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     nav_params.follow_proj_cost_samples = static_cast<int>(declare_parameter<int>("follow_proj_guard.proj_cost_samples"));
     nav_params.step_detect_norm_threshold = declare_parameter<double>("step_ahead_flag.detect_norm_threshold");
     nav_params.step_detect_dot_threshold = declare_parameter<double>("step_ahead_flag.detect_dot_threshold");
+    nav_params.step_edge_norm_threshold = declare_parameter<double>("step_ahead_flag.edge_norm_threshold");
+    nav_params.step_up_vel_jump_threshold = declare_parameter<double>("step_ahead_flag.step_up_vel_jump_threshold");
+    nav_params.step_up_vel_leg_threshold = declare_parameter<double>("step_ahead_flag.step_up_vel_leg_threshold");
     nav_params.step_on_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.on_count_threshold"));
     nav_params.step_off_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.off_count_threshold"));
 
@@ -313,6 +291,21 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     nav_params.no_progress_enable = declare_parameter<bool>("follow_no_progress_guard.enable");
     nav_params.no_progress_landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing");
     nav_params.no_progress_timeout = declare_parameter<double>("follow_no_progress_guard.timeout");
+
+    nav_params.step_runup_enable = declare_parameter<bool>("step_runup.enable");
+    nav_params.step_runup_radius_min = declare_parameter<double>("step_runup.radius_min");
+    nav_params.step_runup_radius_max = declare_parameter<double>("step_runup.radius_max");
+    nav_params.step_runup_angle_half_range = declare_parameter<double>("step_runup.angle_half_range");
+    nav_params.step_runup_radius_samples = static_cast<int>(declare_parameter<int>("step_runup.radius_samples"));
+    nav_params.step_runup_angle_samples = static_cast<int>(declare_parameter<int>("step_runup.angle_samples"));
+    nav_params.step_runup_cost_threshold = declare_parameter<double>("step_runup.cost_threshold");
+    nav_params.step_runup_path_integral_resolution = declare_parameter<double>("step_runup.path_integral_resolution");
+    nav_params.step_runup_line_check_samples = static_cast<int>(declare_parameter<int>("step_runup.line_check_samples"));
+    nav_params.step_runup_cost_weight = declare_parameter<double>("step_runup.selection_weights.cost");
+    nav_params.step_runup_step_dist_weight = declare_parameter<double>("step_runup.selection_weights.step_dist");
+    nav_params.step_runup_angle_weight = declare_parameter<double>("step_runup.selection_weights.angle");
+    nav_params.step_runup_robot_dist_weight = declare_parameter<double>("step_runup.selection_weights.robot_dist");
+    nav_params.step_runup_robot_path_cost_weight = declare_parameter<double>("step_runup.selection_weights.robot_path_cost");
 
     // ─── 创建 MainController ───
     nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
@@ -652,10 +645,7 @@ void PathFollowerNode::publish_chassis_cmd(const ControlOutput& output) {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = static_cast<float>(output.velocity);
     msg.omega = static_cast<float>(output.omega);
-    msg.step_up_ahead = output.step_up_ahead;
-    msg.step_down_ahead = output.step_down_ahead;
-    msg.slow_spin = output.slow_spin;
-    msg.fast_spin = output.fast_spin;
+    msg.mode = static_cast<uint8_t>(output.mode);
     chassis_cmd_pub_->publish(msg);
 }
 
