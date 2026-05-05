@@ -12,6 +12,23 @@ namespace path_follower {
 
 namespace {
 
+const MPCMotionConstraints& select_follow_motion_constraints(
+    const MPCFollowParams& params,
+    std::optional<ChassisMode> latched_step_up_mode
+) {
+    if (latched_step_up_mode == ChassisMode::STEP_UP_LEG) {
+        return params.motion_constraints.leg;
+    }
+    if (latched_step_up_mode == ChassisMode::STEP_UP_JUMP) {
+        return params.motion_constraints.jump;
+    }
+    return params.motion_constraints.normal;
+}
+
+bool is_latched_follow_step_mode(std::optional<ChassisMode> latched_step_up_mode) {
+    return latched_step_up_mode == ChassisMode::STEP_UP_LEG || latched_step_up_mode == ChassisMode::STEP_UP_JUMP;
+}
+
 inline double sq(double x) {
     return x * x;
 }
@@ -544,6 +561,7 @@ FollowProblem::FollowProblem(
     const ArclengthTable& arclength_table,
     double remaining_energy,
     double rfr_pwr_limit,
+    std::optional<ChassisMode> latched_step_up_mode,
     double target_ey
 ):
     ref_cps_(ref_control_points),
@@ -556,6 +574,7 @@ FollowProblem::FollowProblem(
     arc_table_(arclength_table),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
+    latched_step_up_mode_(latched_step_up_mode),
     target_ey_(target_ey) {}
 
 StateVec FollowProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
@@ -574,11 +593,11 @@ void FollowProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec&
 }
 
 ControlVec FollowProblem::u_lower() const {
-    return ControlVec(p_.follow_limits.vel_min, p_.follow_limits.omega_min);
+    return ControlVec(p_.follow.command_bounds.vel_min, p_.follow.command_bounds.omega_min);
 }
 
 ControlVec FollowProblem::u_upper() const {
-    return ControlVec(p_.follow_limits.vel_max, p_.follow_limits.omega_max);
+    return ControlVec(p_.follow.command_bounds.vel_max, p_.follow.command_bounds.omega_max);
 }
 
 namespace {
@@ -603,10 +622,19 @@ namespace {
         const DirectionMapGridView& dg,
         const GridInfo& di,
         double rfr_pwr_limit,
+        std::optional<ChassisMode> latched_step_up_mode,
         double target_ey
     ) {
-        const auto& w = p.follow_weights;
-        const auto& lim = p.follow_limits;
+        const auto& follow = p.follow;
+        const auto& tracking_w = follow.tracking_weights;
+        const auto& command_w = follow.command_weights;
+        const auto& motion_w = follow.motion_constraint_weights;
+        const auto& terrain_lim = follow.terrain_limits;
+        const auto& terrain_w = follow.terrain_weights;
+        const auto& env_w = follow.environment_weights;
+        const auto& terminal_lim = follow.terminal_limits;
+        const auto& terminal_w = follow.terminal_weights;
+        const auto& motion_lim = select_follow_motion_constraints(follow, latched_step_up_mode);
 
         FollowResidualLinearization out;
         out.r.setZero();
@@ -663,10 +691,9 @@ namespace {
         const auto ds = eval_dir_bilinear(dg, di, px, py);
 
         const Eigen::Vector2d dir = ds.value;
+        const double dir_norm_sq = dir.squaredNorm();
         const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
         const double inv_dir_norm = 1.0 / dir_norm;
-        const Eigen::Vector2d dir_unit = dir * inv_dir_norm;
-
         const double cos_t = std::cos(theta);
         const double sin_t = std::sin(theta);
         const Eigen::Vector2d heading(cos_t, sin_t);
@@ -676,107 +703,94 @@ namespace {
         const double dnorm_dx = dir.dot(ddir_dx) * inv_dir_norm;
         const double dnorm_dy = dir.dot(ddir_dy) * inv_dir_norm;
 
-        const Eigen::Vector2d dunit_dx = (ddir_dx - dir_unit * dir_unit.dot(ddir_dx)) * inv_dir_norm;
-        const Eigen::Vector2d dunit_dy = (ddir_dy - dir_unit * dir_unit.dot(ddir_dy)) * inv_dir_norm;
-
-        const Eigen::Vector2d dheading_dtheta(-sin_t, cos_t);
-
         const double cross = heading.x() * dir.y() - heading.y() * dir.x();
         const double dcross_dtheta = -sin_t * dir.y() - cos_t * dir.x();
         const double dcross_dx = cos_t * ddir_dx.y() - sin_t * ddir_dx.x();
         const double dcross_dy = cos_t * ddir_dy.y() - sin_t * ddir_dy.x();
 
-        const double cos_th = heading.dot(dir_unit);
-        const double dcos_th_dtheta = dheading_dtheta.dot(dir_unit);
-        const double dcos_th_dx = heading.dot(dunit_dx);
-        const double dcos_th_dy = heading.dot(dunit_dy);
-
-        const double weight_up = (cos_th + 1.0) / 2.0;
-        const double target_vel = weight_up * lim.vel_step_up + (1.0 - weight_up) * lim.vel_step_down;
-        const double dtarget_dcos = 0.5 * (lim.vel_step_up - lim.vel_step_down);
-        const double dtarget_dtheta = dtarget_dcos * dcos_th_dtheta;
-        const double dtarget_dx = dtarget_dcos * dcos_th_dx;
-        const double dtarget_dy = dtarget_dcos * dcos_th_dy;
-
-        const double v_dec = std::sqrt(2.0 * lim.slow_down_deceleration * s_remain + sq(lim.slow_down_target_vel));
+        const double v_dec =
+            std::sqrt(2.0 * terminal_lim.slow_down_deceleration * s_remain + sq(terminal_lim.slow_down_target_vel));
         const double a_lat = std::abs(v_act * w_act);
 
-        const double dv_lim = lim.acc_max * MPC_DT;
-        const double dw_lim = lim.alpha_max * MPC_DT;
+        const double dv_lim = motion_lim.acc_max * MPC_DT;
+        const double dw_lim = motion_lim.alpha_max * MPC_DT;
 
-        out.r(0) = w.q_y * (ey - target_ey);
-        out.jx(0, ix::X) = w.q_y * dey_dpx;
-        out.jx(0, ix::Y) = w.q_y * dey_dpy;
-        out.jx(0, ix::PATH_U) = w.q_y * dey_dpathu;
+        out.r(0) = tracking_w.q_y * (ey - target_ey);
+        out.jx(0, ix::X) = tracking_w.q_y * dey_dpx;
+        out.jx(0, ix::Y) = tracking_w.q_y * dey_dpy;
+        out.jx(0, ix::PATH_U) = tracking_w.q_y * dey_dpathu;
 
-        out.r(1) = w.q_theta * etheta;
-        out.jx(1, ix::THETA) = w.q_theta;
-        out.jx(1, ix::PATH_U) = w.q_theta * detheta_dpathu;
+        out.r(1) = tracking_w.q_theta * etheta;
+        out.jx(1, ix::THETA) = tracking_w.q_theta;
+        out.jx(1, ix::PATH_U) = tracking_w.q_theta * detheta_dpathu;
 
         const auto relu_progress = smooth_relu_eval(1.0 - u_progress);
-        out.r(2) = w.q_u * relu_progress.value;
-        out.jx.row(2) = (-w.q_u * relu_progress.deriv * du_progress_dx).transpose();
+        out.r(2) = tracking_w.q_u * relu_progress.value;
+        out.jx.row(2) = (-tracking_w.q_u * relu_progress.deriv * du_progress_dx).transpose();
 
-        out.r(3) = w.r_v * v_cmd;
-        out.ju(3, 0) = w.r_v;
+        out.r(3) = command_w.r_v * v_cmd;
+        out.ju(3, 0) = command_w.r_v;
 
-        out.r(4) = w.r_omega * w_cmd;
-        out.ju(4, 1) = w.r_omega;
+        out.r(4) = command_w.r_omega * w_cmd;
+        out.ju(4, 1) = command_w.r_omega;
 
-        out.r(5) = w.r_dv * dv_cmd;
-        out.ju(5, 0) = w.r_dv;
-        out.jx(5, ix::DV) = -w.r_dv;
+        out.r(5) = command_w.r_dv * dv_cmd;
+        out.ju(5, 0) = command_w.r_dv;
+        out.jx(5, ix::DV) = -command_w.r_dv;
 
-        out.r(6) = w.r_domega * dw_cmd;
-        out.ju(6, 1) = w.r_domega;
-        out.jx(6, ix::DW) = -w.r_domega;
+        out.r(6) = command_w.r_domega * dw_cmd;
+        out.ju(6, 1) = command_w.r_domega;
+        out.jx(6, ix::DW) = -command_w.r_domega;
 
         const double sign_dv_cmd = signum(dv_cmd);
         const auto relu_dv = smooth_relu_eval(std::abs(dv_cmd) - dv_lim);
-        out.r(7) = w.acc_limit * relu_dv.value;
-        const double coeff_dv = w.acc_limit * relu_dv.deriv * sign_dv_cmd;
+        out.r(7) = motion_w.acc_limit * relu_dv.value;
+        const double coeff_dv = motion_w.acc_limit * relu_dv.deriv * sign_dv_cmd;
         out.ju(7, 0) = coeff_dv;
         out.jx(7, ix::DV) = -coeff_dv;
 
         const double sign_dw_cmd = signum(dw_cmd);
         const auto relu_dw = smooth_relu_eval(std::abs(dw_cmd) - dw_lim);
-        out.r(8) = w.alpha_limit * relu_dw.value;
-        const double coeff_dw = w.alpha_limit * relu_dw.deriv * sign_dw_cmd;
+        out.r(8) = motion_w.alpha_limit * relu_dw.value;
+        const double coeff_dw = motion_w.alpha_limit * relu_dw.deriv * sign_dw_cmd;
         out.ju(8, 1) = coeff_dw;
         out.jx(8, ix::DW) = -coeff_dw;
 
         const double sign_lat = signum(v_act * w_act);
-        const auto relu_lat = smooth_relu_eval(a_lat - lim.a_lat_max);
-        out.r(9) = w.lat_acc * relu_lat.value;
-        const double coeff_lat = w.lat_acc * relu_lat.deriv;
+        const auto relu_lat = smooth_relu_eval(a_lat - motion_lim.a_lat_max);
+        out.r(9) = motion_w.lat_acc * relu_lat.value;
+        const double coeff_lat = motion_w.lat_acc * relu_lat.deriv;
         out.jx(9, ix::V) = coeff_lat * sign_lat * w_act;
         out.jx(9, ix::W) = coeff_lat * sign_lat * v_act;
 
-        out.r(10) = w.obstacle * cs.value / 255.0;
-        out.jx(10, ix::X) = w.obstacle * cs.dx / 255.0;
-        out.jx(10, ix::Y) = w.obstacle * cs.dy / 255.0;
+        out.r(10) = env_w.obstacle * cs.value / 255.0;
+        out.jx(10, ix::X) = env_w.obstacle * cs.dx / 255.0;
+        out.jx(10, ix::Y) = env_w.obstacle * cs.dy / 255.0;
 
         const double sign_cross = signum(cross);
-        out.r(11) = w.direction * std::abs(cross);
-        out.jx(11, ix::X) = w.direction * sign_cross * dcross_dx;
-        out.jx(11, ix::Y) = w.direction * sign_cross * dcross_dy;
-        out.jx(11, ix::THETA) = w.direction * sign_cross * dcross_dtheta;
+        out.r(11) = terrain_w.direction * std::abs(cross);
+        out.jx(11, ix::X) = terrain_w.direction * sign_cross * dcross_dx;
+        out.jx(11, ix::Y) = terrain_w.direction * sign_cross * dcross_dy;
+        out.jx(11, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
 
-        const double v_err = v_act - target_vel;
-        const double abs_v_err = std::abs(v_err);
-        const double sign_v_err = signum(v_err);
-        const auto relu_vstep = smooth_relu_eval(abs_v_err - lim.vel_step_deadzone);
-        out.r(12) = w.vel_on_step * dir_norm * relu_vstep.value;
-        out.jx(12, ix::X) = w.vel_on_step * (dnorm_dx * relu_vstep.value + dir_norm * relu_vstep.deriv * sign_v_err * (-dtarget_dx));
-        out.jx(12, ix::Y) = w.vel_on_step * (dnorm_dy * relu_vstep.value + dir_norm * relu_vstep.deriv * sign_v_err * (-dtarget_dy));
-        out.jx(12, ix::THETA) = w.vel_on_step * (dir_norm * relu_vstep.deriv * sign_v_err * (-dtarget_dtheta));
-        out.jx(12, ix::V) = w.vel_on_step * dir_norm * relu_vstep.deriv * sign_v_err;
+        if (dir_norm_sq > 1e-10 && is_latched_follow_step_mode(latched_step_up_mode)) {
+            const double target_vel =
+                (latched_step_up_mode == ChassisMode::STEP_UP_JUMP) ? terrain_lim.step_vel_jump : terrain_lim.step_vel_leg;
+            const double v_err = v_act - target_vel;
+            const double abs_v_err = std::abs(v_err);
+            const double sign_v_err = signum(v_err);
+            const auto relu_vstep = smooth_relu_eval(abs_v_err - terrain_lim.step_vel_deadzone);
+            out.r(12) = terrain_w.step_vel_weight * dir_norm * relu_vstep.value;
+            out.jx(12, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep.value;
+            out.jx(12, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep.value;
+            out.jx(12, ix::V) = terrain_w.step_vel_weight * dir_norm * relu_vstep.deriv * sign_v_err;
+        }
 
         const auto relu_vfinal = smooth_relu_eval(v_act - v_dec);
-        out.r(13) = w.q_v_final * relu_vfinal.value;
-        out.jx(13, ix::V) = w.q_v_final * relu_vfinal.deriv;
-        const double dvdec_ds = lim.slow_down_deceleration / std::max(v_dec, 1e-6);
-        out.jx(13, ix::PATH_U) = -w.q_v_final * relu_vfinal.deriv * dvdec_ds * ds_dpathu;
+        out.r(13) = terminal_w.q_v_final * relu_vfinal.value;
+        out.jx(13, ix::V) = terminal_w.q_v_final * relu_vfinal.deriv;
+        const double dvdec_ds = terminal_lim.slow_down_deceleration / std::max(v_dec, 1e-6);
+        out.jx(13, ix::PATH_U) = -terminal_w.q_v_final * relu_vfinal.deriv * dvdec_ds * ds_dpathu;
 
         if (p.energy.enable) {
             const auto pwr = predict_power_eval_vw(v_act, w_act);
@@ -807,9 +821,23 @@ namespace {
         const DirectionMapGridView& dg,
         const GridInfo& di,
         double rfr_pwr_limit,
+        std::optional<ChassisMode> latched_step_up_mode,
         double target_ey
     ) {
-        return follow_residual_linearized_impl(x, u, ref_cps, arc_table, p, cg, ci, dg, di, rfr_pwr_limit, target_ey)
+        return follow_residual_linearized_impl(
+                   x,
+                   u,
+                   ref_cps,
+                   arc_table,
+                   p,
+                   cg,
+                   ci,
+                   dg,
+                   di,
+                   rfr_pwr_limit,
+                   latched_step_up_mode,
+                   target_ey
+               )
             .r;
     }
 
@@ -926,6 +954,7 @@ double FollowProblem::running_cost(int k, const StateVec& x, const ControlVec& u
         dir_grid_,
         dir_info_,
         rfr_pwr_limit_,
+        latched_step_up_mode_,
         target_ey_
     ));
 }
@@ -952,6 +981,7 @@ void FollowProblem::running_cost_derivatives(
         dir_grid_,
         dir_info_,
         rfr_pwr_limit_,
+        latched_step_up_mode_,
         target_ey_
     );
 
@@ -1005,11 +1035,11 @@ void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 }
 
 ControlVec StopProblem::u_lower() const {
-    return ControlVec(p_.stop_limits.vel_min, p_.stop_limits.omega_min);
+    return ControlVec(p_.stop.command_bounds.vel_min, p_.stop.command_bounds.omega_min);
 }
 
 ControlVec StopProblem::u_upper() const {
-    return ControlVec(p_.stop_limits.vel_max, p_.stop_limits.omega_max);
+    return ControlVec(p_.stop.command_bounds.vel_max, p_.stop.command_bounds.omega_max);
 }
 
 namespace {
@@ -1027,8 +1057,13 @@ StopResidualVec stop_residual_impl(
     const GridInfo& di,
     double rfr_pwr_limit
 ) {
-    const auto& w = p.stop_weights;
-    const auto& lim = p.stop_limits;
+    const auto& stop = p.stop;
+    const auto& motion_lim = stop.motion_constraints;
+    const auto& command_w = stop.command_weights;
+    const auto& motion_w = stop.motion_constraint_weights;
+    const auto& terrain_lim = stop.terrain_limits;
+    const auto& terrain_w = stop.terrain_weights;
+    const auto& env_w = stop.environment_weights;
 
     StopResidualVec r = StopResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
@@ -1039,27 +1074,28 @@ StopResidualVec stop_residual_impl(
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
     const auto ds = eval_dir_bilinear(dg, di, px, py);
+    const double dir_norm_sq = ds.value.squaredNorm();
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     const Eigen::Vector2d dir_unit = ds.value / dir_norm;
     const Eigen::Vector2d heading(std::cos(theta), std::sin(theta));
     const double cross = heading.x() * ds.value.y() - heading.y() * ds.value.x();
     const double cos_th = heading.dot(dir_unit);
-    const double weight_up = (cos_th + 1.0) / 2.0;
-    const double target_vel = weight_up * lim.vel_step_up + (1.0 - weight_up) * lim.vel_step_down;
     const double a_lat = std::abs(v_act * w_act);
 
-    const double dv_lim = lim.acc_max * MPC_DT;
-    const double dw_lim = lim.alpha_max * MPC_DT;
-    r(0) = w.q_v * v_cmd;
-    r(1) = w.q_omega * w_cmd;
-    r(2) = w.r_dv * dv_cmd;
-    r(3) = w.r_domega * dw_cmd;
-    r(4) = w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
-    r(5) = w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
-    r(6) = w.lat_acc * relu(a_lat - lim.a_lat_max);
-    r(7) = w.obstacle * cs.value / 255.0;
-    r(8) = w.direction * dir_norm * std::abs(cross);
-    r(9) = w.vel_on_step * dir_norm * dir_norm * relu(std::abs(v_act - target_vel) - lim.vel_step_deadzone);
+    const double dv_lim = motion_lim.acc_max * MPC_DT;
+    const double dw_lim = motion_lim.alpha_max * MPC_DT;
+    r(0) = command_w.q_v * v_cmd;
+    r(1) = command_w.q_omega * w_cmd;
+    r(2) = command_w.r_dv * dv_cmd;
+    r(3) = command_w.r_domega * dw_cmd;
+    r(4) = motion_w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
+    r(5) = motion_w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
+    r(6) = motion_w.lat_acc * relu(a_lat - motion_lim.a_lat_max);
+    r(7) = env_w.obstacle * cs.value / 255.0;
+    r(8) = terrain_w.direction * dir_norm * std::abs(cross);
+    if (dir_norm_sq > 1e-10 && cos_th > 0.0) {
+        r(9) = terrain_w.step_vel_weight_stop * dir_norm * relu(std::abs(v_act - terrain_lim.step_vel_stop) - terrain_lim.step_vel_deadzone_stop);
+    }
 
     if (p.energy.enable) {
         const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
@@ -1085,7 +1121,7 @@ StopTerminalResidualVec stop_terminal_residual_impl(
     const GridInfo& dir_info
 ) {
     StopTerminalResidualVec r = StopTerminalResidualVec::Zero();
-    const auto& w = p.stop_weights;
+    const auto& w = p.stop.terminal_weights;
     const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
     const auto ds = eval_dir_bilinear(dir_grid, dir_info, x(ix::X), x(ix::Y));
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
@@ -1161,11 +1197,11 @@ void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 }
 
 ControlVec HoldProblem::u_lower() const {
-    return ControlVec(p_.hold_limits.vel_min, p_.hold_limits.omega_min);
+    return ControlVec(p_.hold.command_bounds.vel_min, p_.hold.command_bounds.omega_min);
 }
 
 ControlVec HoldProblem::u_upper() const {
-    return ControlVec(p_.hold_limits.vel_max, p_.hold_limits.omega_max);
+    return ControlVec(p_.hold.command_bounds.vel_max, p_.hold.command_bounds.omega_max);
 }
 
 namespace {
@@ -1184,8 +1220,12 @@ HoldResidualVec hold_residual_impl(
     const GridInfo& di,
     double rfr_pwr_limit
 ) {
-    const auto& w = p.hold_weights;
-    const auto& lim = p.hold_limits;
+    const auto& hold = p.hold;
+    const auto& goal_w = hold.goal_weights;
+    const auto& command_w = hold.command_weights;
+    const auto& motion_w = hold.motion_constraint_weights;
+    const auto& env_w = hold.environment_weights;
+    const auto& motion_lim = hold.motion_constraints;
 
     HoldResidualVec r = HoldResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
@@ -1196,7 +1236,7 @@ HoldResidualVec hold_residual_impl(
 
     const Eigen::Vector2d goal_delta = apply_goal_deadzone(
         Eigen::Vector2d(px - goal.x(), py - goal.y()),
-        w.goal_deadzone
+        goal_w.goal_deadzone
     );
     const double ddx = goal_delta.x(), ddy = goal_delta.y();
     const double desired_theta = std::atan2(goal.y() - py, goal.x() - px);
@@ -1207,20 +1247,20 @@ HoldResidualVec hold_residual_impl(
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     const double a_lat = std::abs(v_act * w_act);
 
-    const double dv_lim = lim.acc_max * MPC_DT;
-    const double dw_lim = lim.alpha_max * MPC_DT;
-    r(0) = w.q_goal_xy * ddx;
-    r(1) = w.q_goal_xy * ddy;
-    r(2) = w.q_goal_theta * std::abs(heading_sin);
-    r(3) = w.r_v * v_cmd;
-    r(4) = w.r_omega * w_cmd;
-    r(5) = w.r_dv * dv_cmd;
-    r(6) = w.r_domega * dw_cmd;
-    r(7) = w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
-    r(8) = w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
-    r(9) = w.lat_acc * relu(a_lat - lim.a_lat_max);
-    r(10) = w.obstacle * cs.value / 255.0;
-    r(11) = w.step * dir_norm;
+    const double dv_lim = motion_lim.acc_max * MPC_DT;
+    const double dw_lim = motion_lim.alpha_max * MPC_DT;
+    r(0) = goal_w.q_goal_xy * ddx;
+    r(1) = goal_w.q_goal_xy * ddy;
+    r(2) = goal_w.q_goal_theta * std::abs(heading_sin);
+    r(3) = command_w.r_v * v_cmd;
+    r(4) = command_w.r_omega * w_cmd;
+    r(5) = command_w.r_dv * dv_cmd;
+    r(6) = command_w.r_domega * dw_cmd;
+    r(7) = motion_w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
+    r(8) = motion_w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
+    r(9) = motion_w.lat_acc * relu(a_lat - motion_lim.a_lat_max);
+    r(10) = env_w.obstacle * cs.value / 255.0;
+    r(11) = env_w.step * dir_norm;
 
     if (p.energy.enable) {
         const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
@@ -1247,18 +1287,19 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
     const GridInfo& dir_info
 ) {
     HoldTerminalResidualVec r = HoldTerminalResidualVec::Zero();
-    const auto& w = p.hold_weights;
+    const auto& goal_w = p.hold.goal_weights;
+    const auto& terminal_w = p.hold.terminal_weights;
     const Eigen::Vector2d terminal_delta = apply_goal_deadzone(
         Eigen::Vector2d(x(ix::X) - goal.x(), x(ix::Y) - goal.y()),
-        w.goal_deadzone
+        goal_w.goal_deadzone
     );
     const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
     const auto ds = eval_dir_bilinear(dir_grid, dir_info, x(ix::X), x(ix::Y));
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
-    r(0) = w.q_goal_xy_terminal * terminal_delta.x();
-    r(1) = w.q_goal_xy_terminal * terminal_delta.y();
-    r(2) = w.obstacle_terminal * cs.value / 255.0;
-    r(3) = w.step_terminal * dir_norm;
+    r(0) = terminal_w.q_goal_xy_terminal * terminal_delta.x();
+    r(1) = terminal_w.q_goal_xy_terminal * terminal_delta.y();
+    r(2) = terminal_w.obstacle_terminal * cs.value / 255.0;
+    r(3) = terminal_w.step_terminal * dir_norm;
     return r;
 }
 
@@ -1459,7 +1500,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const CostMap& cost_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
-    const DirectionMap& direction_map
+    const DirectionMap& direction_map,
+    std::optional<ChassisMode> latched_step_up_mode
 ) {
     const auto& ref_cps = global_path.getControlPoints();
     const bool path_changed = !same_cps(prev_ref_control_points_, ref_cps);
@@ -1468,9 +1510,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         global_path,
         chassis_pose_map.head<2>(),
         projection_hint,
-        params_.follow_projection.proj_num_samples,
-        params_.follow_projection.proj_search_window,
-        params_.follow_projection.local_search_lazy_distance,
+        params_.follow.projection.proj_num_samples,
+        params_.follow.projection.proj_search_window,
+        params_.follow.projection.local_search_lazy_distance,
         PATH_U_EXTRAP_MIN,
         PATH_U_EXTRAP_MAX
     );
@@ -1479,25 +1521,26 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     }
     last_u_ = u0;
 
+    const auto& follow_motion_lim = select_follow_motion_constraints(params_.follow, latched_step_up_mode);
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
             last_cmd_.x(),
             chassis_status.x(),
-            params_.follow_limits.start_vel_cmd_act_diff_max,
-            params_.follow_limits.acc_max,
+            params_.follow.start_command.vel_cmd_act_gap_max,
+            follow_motion_lim.acc_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_status.y(),
-            params_.follow_limits.start_omega_cmd_act_diff_max,
-            params_.follow_limits.alpha_max,
+            params_.follow.start_command.omega_cmd_act_gap_max,
+            follow_motion_lim.alpha_max,
             MPC_DT
         )
     );
 
     const auto& arc = [&]() -> const ArclengthTable& {
-        const int ns = params_.follow_limits.slow_down_num_samples;
+        const int ns = params_.follow.terminal_limits.slow_down_num_samples;
         if (prev_arc_samples_ != ns || !same_cps(prev_ref_control_points_, ref_cps)) {
             prev_arclength_table_ = build_arclength_table(ref_cps, ns);
             prev_ref_control_points_ = ref_cps;
@@ -1538,6 +1581,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         arc,
         remaining_energy_,
         rfr_pwr_limit_,
+        latched_step_up_mode,
         0.0
     );
 
@@ -1562,6 +1606,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             arc,
             remaining_energy_,
             rfr_pwr_limit_,
+            latched_step_up_mode,
             +params_.mh_params.lateral_offset
         );
         FollowProblem prob_right(
@@ -1575,6 +1620,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             arc,
             remaining_energy_,
             rfr_pwr_limit_,
+            latched_step_up_mode,
             -params_.mh_params.lateral_offset
         );
 
@@ -1633,15 +1679,15 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         clamp_prev_cmd(
             last_cmd_.x(),
             chassis_status.x(),
-            params_.stop_limits.start_vel_cmd_act_diff_max,
-            params_.stop_limits.acc_max,
+            params_.stop.start_command.vel_cmd_act_gap_max,
+            params_.stop.motion_constraints.acc_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_status.y(),
-            params_.stop_limits.start_omega_cmd_act_diff_max,
-            params_.stop_limits.alpha_max,
+            params_.stop.start_command.omega_cmd_act_gap_max,
+            params_.stop.motion_constraints.alpha_max,
             MPC_DT
         )
     );
@@ -1678,15 +1724,15 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         clamp_prev_cmd(
             last_cmd_.x(),
             chassis_status.x(),
-            params_.hold_limits.start_vel_cmd_act_diff_max,
-            params_.hold_limits.acc_max,
+            params_.hold.start_command.vel_cmd_act_gap_max,
+            params_.hold.motion_constraints.acc_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_status.y(),
-            params_.hold_limits.start_omega_cmd_act_diff_max,
-            params_.hold_limits.alpha_max,
+            params_.hold.start_command.omega_cmd_act_gap_max,
+            params_.hold.motion_constraints.alpha_max,
             MPC_DT
         )
     );

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -9,21 +8,13 @@
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
 
+#include <path_follower/chassis_mode.hpp>
 #include <path_follower/state_machine.hpp>
 #include <path_follower/mpc_solver.hpp>
 #include <path_follower/nav_map.hpp>
 #include <path_follower/utils.hpp>
 
 namespace path_follower {
-
-enum class ChassisMode : uint8_t {
-    NORMAL = 0,
-    SPIN_SLOW = 1,
-    SPIN_FAST = 2,
-    STEP_UP_LEG = 3,
-    STEP_UP_JUMP = 4,
-    STEP_DOWN = 5
-};
 
 // ═══════════════════════ 控制器输入 ═══════════════════════════
 
@@ -120,20 +111,20 @@ struct NavigationParams {
     double no_progress_landmark_spacing;     // 路标点间距 (m)
     double no_progress_timeout;              // 无进度超时 (s)
 
-    bool step_runup_enable;
-    double step_runup_radius_min;
-    double step_runup_radius_max;
-    double step_runup_angle_half_range;
-    int step_runup_radius_samples;
-    int step_runup_angle_samples;
-    double step_runup_cost_threshold;
-    double step_runup_path_integral_resolution;
-    int step_runup_line_check_samples;
-    double step_runup_cost_weight;
-    double step_runup_step_dist_weight;
-    double step_runup_angle_weight;
-    double step_runup_robot_dist_weight;
-    double step_runup_robot_path_cost_weight;
+    // 上台阶助跑点搜索参数
+    double step_runup_radius_min;               // 采样半径下界 (m)，以台阶边缘点 A 为圆心
+    double step_runup_radius_max;               // 采样半径上界 (m)，以台阶边缘点 A 为圆心
+    double step_runup_angle_half_range;         // 扇区半角 (rad)，以台阶边缘点 A 的方向为扇区中心，逆时针为正
+    int step_runup_radius_samples;              // 半径维采样数
+    int step_runup_angle_samples;               // 角度维采样数
+    double step_runup_cost_threshold;           // 助跑点代价阈值（0~255），超过则认为不可行
+    double step_runup_path_integral_resolution; // 助跑点到台阶边缘点 A 连线的路径积分采样分辨率 (m)
+    int step_runup_line_check_samples;          // 助跑点到台阶边缘点 A 连线的代价检查采样数（用于取最大代价）
+    double step_runup_cost_weight;              // 助跑点代价权重（0~1），用于与距离/角度成本加权求和，选取总成本最低的点
+    double step_runup_step_dist_weight;         // 助跑点到台阶边缘点 A 的距离权重（0~1），用于与代价/角度成本加权求和
+    double step_runup_angle_weight;             // 助跑点与台阶边缘点 A 的连线与台阶边缘方向夹角权重（0~1），用于与距离/代价成本加权求和
+    double step_runup_robot_dist_weight;        // 助跑点到机器人当前位置的距离权重（0~1），用于与代价/角度成本加权求和，鼓励选择更靠近机器人的助跑点，避免过长的助跑路径
+    double step_runup_robot_path_cost_weight;   // 助跑点到机器人当前位置的路径代价权重（0~1），用于与距离/角度成本加权求和，鼓励选择路径代价更低的助跑点，避免过于复杂的助跑路径
 };
 
 // ═══════════════════ MainController ═════════════════════

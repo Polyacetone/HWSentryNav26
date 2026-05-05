@@ -2,8 +2,10 @@
 
 #include <array>
 #include <expected>
+#include <optional>
 #include <string>
 #include <Eigen/Dense>
+#include <path_follower/chassis_mode.hpp>
 #include <path_follower/fddp_solver.hpp>
 #include <path_follower/nav_map.hpp>
 #include <path_follower/utils.hpp>
@@ -75,46 +77,75 @@ namespace ix {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  Parameter structs (unchanged public interface)
+//  Parameter structs
 // ═══════════════════════════════════════════════════════════════
 
-struct MPCFollowLimits {
+struct MPCCommandBounds {
     double vel_max;
     double vel_min;
     double omega_max;
     double omega_min;
-    double start_vel_cmd_act_diff_max;
-    double start_omega_cmd_act_diff_max;
+};
+
+struct MPCStartCommandLimits {
+    double vel_cmd_act_gap_max;
+    double omega_cmd_act_gap_max;
+};
+
+struct MPCMotionConstraints {
     double acc_max;
     double alpha_max;
-
-    double vel_step_up;
-    double vel_step_down;
-    double vel_step_deadzone;
     double a_lat_max;
+};
 
+struct MPCMotionConstraintWeights {
+    double acc_limit;
+    double alpha_limit;
+    double lat_acc;
+};
+
+struct MPCFollowMotionProfiles {
+    MPCMotionConstraints normal;
+    MPCMotionConstraints leg;
+    MPCMotionConstraints jump;
+};
+
+struct MPCFollowTrackingWeights {
+    double q_y;
+    double q_theta;
+    double q_u;
+};
+
+struct MPCFollowCommandWeights {
+    double r_v;
+    double r_omega;
+    double r_dv;
+    double r_domega;
+};
+
+struct MPCFollowTerrainLimits {
+    double step_vel_jump;
+    double step_vel_leg;
+    double step_vel_deadzone;
+};
+
+struct MPCFollowTerrainWeights {
+    double step_vel_weight;
+    double direction;
+};
+
+struct MPCFollowEnvironmentWeights {
+    double obstacle;
+};
+
+struct MPCFollowTerminalLimits {
     double slow_down_deceleration;
     double slow_down_target_vel;
     int slow_down_num_samples;
 };
 
-struct MPCFollowWeights {
-    double q_y;
-    double q_theta;
-    double q_u;
+struct MPCFollowTerminalWeights {
     double q_v_final;
-    double r_v;
-    double r_omega;
-    double r_dv;
-    double r_domega;
-
-    double acc_limit;
-    double alpha_limit;
-    double lat_acc;
-
-    double vel_on_step;
-    double obstacle;
-    double direction;
 };
 
 struct MPCFollowProjection {
@@ -123,72 +154,92 @@ struct MPCFollowProjection {
     double local_search_lazy_distance;
 };
 
-struct MPCStopLimits {
-    double vel_max;
-    double vel_min;
-    double omega_max;
-    double omega_min;
-
-    double start_vel_cmd_act_diff_max;
-    double start_omega_cmd_act_diff_max;
-    double acc_max;
-    double alpha_max;
-
-    double vel_step_up;
-    double vel_step_down;
-    double vel_step_deadzone;
-    double a_lat_max;
+struct MPCFollowParams {
+    MPCCommandBounds command_bounds;
+    MPCStartCommandLimits start_command;
+    MPCFollowMotionProfiles motion_constraints;
+    MPCFollowTrackingWeights tracking_weights;
+    MPCFollowCommandWeights command_weights;
+    MPCMotionConstraintWeights motion_constraint_weights;
+    MPCFollowTerrainLimits terrain_limits;
+    MPCFollowTerrainWeights terrain_weights;
+    MPCFollowEnvironmentWeights environment_weights;
+    MPCFollowTerminalLimits terminal_limits;
+    MPCFollowTerminalWeights terminal_weights;
+    MPCFollowProjection projection;
 };
 
-struct MPCStopWeights {
+struct MPCStopCommandWeights {
     double q_v;
     double q_omega;
     double r_dv;
     double r_domega;
+};
 
-    double acc_limit;
-    double alpha_limit;
-    double lat_acc;
-    double vel_on_step;
+struct MPCStopTerrainLimits {
+    double step_vel_stop;
+    double step_vel_deadzone_stop;
+};
 
-    double obstacle;
-    double obstacle_terminal;
+struct MPCStopTerrainWeights {
+    double step_vel_weight_stop;
     double direction;
+};
+
+struct MPCStopEnvironmentWeights {
+    double obstacle;
+};
+
+struct MPCStopTerminalWeights {
+    double obstacle_terminal;
     double step_terminal;
 };
 
-struct MPCHoldLimits {
-    double vel_max;
-    double vel_min;
-    double omega_max;
-    double omega_min;
-
-    double start_vel_cmd_act_diff_max;
-    double start_omega_cmd_act_diff_max;
-    double acc_max;
-    double alpha_max;
-    double a_lat_max;
+struct MPCStopParams {
+    MPCCommandBounds command_bounds;
+    MPCStartCommandLimits start_command;
+    MPCMotionConstraints motion_constraints;
+    MPCStopCommandWeights command_weights;
+    MPCMotionConstraintWeights motion_constraint_weights;
+    MPCStopTerrainLimits terrain_limits;
+    MPCStopTerrainWeights terrain_weights;
+    MPCStopEnvironmentWeights environment_weights;
+    MPCStopTerminalWeights terminal_weights;
 };
 
-struct MPCHoldWeights {
+struct MPCHoldGoalWeights {
     double q_goal_xy;
     double q_goal_theta;
     double goal_deadzone;
+};
+
+struct MPCHoldCommandWeights {
     double r_v;
     double r_omega;
     double r_dv;
     double r_domega;
+};
 
-    double acc_limit;
-    double alpha_limit;
-    double lat_acc;
-
+struct MPCHoldEnvironmentWeights {
     double obstacle;
     double step;
+};
 
+struct MPCHoldTerminalWeights {
     double q_goal_xy_terminal;
     double obstacle_terminal;
     double step_terminal;
+};
+
+struct MPCHoldParams {
+    MPCCommandBounds command_bounds;
+    MPCStartCommandLimits start_command;
+    MPCMotionConstraints motion_constraints;
+    MPCHoldGoalWeights goal_weights;
+    MPCHoldCommandWeights command_weights;
+    MPCMotionConstraintWeights motion_constraint_weights;
+    MPCHoldEnvironmentWeights environment_weights;
+    MPCHoldTerminalWeights terminal_weights;
 };
 
 struct EnergyParams {
@@ -213,15 +264,9 @@ struct MPCPrediction {
 };
 
 struct MPCParams {
-    MPCFollowLimits follow_limits;
-    MPCFollowWeights follow_weights;
-    MPCFollowProjection follow_projection;
-
-    MPCStopLimits stop_limits;
-    MPCStopWeights stop_weights;
-
-    MPCHoldLimits hold_limits;
-    MPCHoldWeights hold_weights;
+    MPCFollowParams follow;
+    MPCStopParams stop;
+    MPCHoldParams hold;
 
     EnergyParams energy;
     MultiHypothesisParams mh_params;
@@ -313,6 +358,7 @@ public:
         const ArclengthTable& arclength_table,
         double remaining_energy,
         double rfr_pwr_limit,
+        std::optional<ChassisMode> latched_step_up_mode,
         double target_ey = 0.0
     );
 
@@ -350,6 +396,7 @@ private:
     const ArclengthTable& arc_table_;
     double remaining_energy_;
     double rfr_pwr_limit_;
+    std::optional<ChassisMode> latched_step_up_mode_;
     double target_ey_;
 };
 
@@ -501,7 +548,8 @@ public:
         const CostMap& cost_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
-        const DirectionMap& direction_map
+        const DirectionMap& direction_map,
+        std::optional<ChassisMode> latched_step_up_mode
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(

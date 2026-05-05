@@ -363,9 +363,9 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     // 投影当前位置到样条
     const double u0 = project_to_spline_u_extrapolated(
         *input.global_path, input.chassis_pose_map.head<2>(), last_reference_u_,
-        mpc_controller_->params().follow_projection.proj_num_samples,
-        mpc_controller_->params().follow_projection.proj_search_window,
-        mpc_controller_->params().follow_projection.local_search_lazy_distance
+        mpc_controller_->params().follow.projection.proj_num_samples,
+        mpc_controller_->params().follow.projection.proj_search_window,
+        mpc_controller_->params().follow.projection.local_search_lazy_distance
     );
     last_reference_u_ = u0;
 
@@ -428,7 +428,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     const auto result = mpc_controller_->solve_follow(
         *input.global_path, input.chassis_pose_map, input.chassis_status,
         *input.final_cost_map, input.per_step_cost_maps, input.prediction_dt,
-        *input.masked_direction_map
+        *input.masked_direction_map,
+        latched_step_up_mode_
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
@@ -493,12 +494,10 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
                 } else if (v_edge >= nav_params_.step_up_vel_leg_threshold) {
                     latched_step_up_mode_ = ChassisMode::STEP_UP_LEG;
                     out.mode = *latched_step_up_mode_;
-                } else if (nav_params_.step_runup_enable) {
+                } else  {
                     latched_step_up_runup_ = true;
                     pending_step_runup_ = true;
                     pending_step_runup_edge_ = step_edge;
-                    out.mode = ChassisMode::NORMAL;
-                } else {
                     out.mode = ChassisMode::NORMAL;
                 }
 
@@ -817,7 +816,7 @@ ControlOutput MainController::execute_step_runup(const ControlInput& input) {
     out.valid = true;
 
     const double dist_to_goal = (input.chassis_pose_map.head<2>() - *step_runup_goal_map_).norm();
-    if (dist_to_goal <= mpc_controller_->params().hold_weights.goal_deadzone) {
+    if (dist_to_goal <= mpc_controller_->params().hold.goal_weights.goal_deadzone) {
         step_runup_done_ = true;
     }
     return out;
@@ -1039,7 +1038,7 @@ bool MainController::is_step_runup_segment_feasible(
 }
 
 std::optional<Eigen::Vector2d> MainController::select_step_runup_point(const ControlInput& input) const {
-    if (!nav_params_.step_runup_enable || !pending_step_runup_edge_ || !input.masked_global_cost_map) {
+    if (!pending_step_runup_edge_ || !input.masked_global_cost_map) {
         return std::nullopt;
     }
 
@@ -1143,9 +1142,9 @@ bool MainController::check_no_progress(const ControlInput& input) {
             *input.global_path,
             input.chassis_pose_map.head<2>(),
             last_reference_u_,
-            mpc_controller_->params().follow_projection.proj_num_samples,
-            mpc_controller_->params().follow_projection.proj_search_window,
-            mpc_controller_->params().follow_projection.local_search_lazy_distance
+            mpc_controller_->params().follow.projection.proj_num_samples,
+            mpc_controller_->params().follow.projection.proj_search_window,
+            mpc_controller_->params().follow.projection.local_search_lazy_distance
         );
     }
 
