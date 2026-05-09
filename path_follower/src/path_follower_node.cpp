@@ -66,6 +66,7 @@ private:
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::Publisher<interfaces::msg::FollowerState>::SharedPtr follower_state_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_predicted_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_step_preview_path_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
@@ -119,6 +120,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
         debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.predicted_path_pub_topic"), 1);
+        debug_step_preview_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.step_preview_path_pub_topic"), 1);
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.w_pred_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("debug.final_cost_map_pub_topic"), 1);
@@ -127,31 +129,52 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     // ─── MPC 参数加载 ───
     MPCParams mpc_params = {
         .follow = {
-            .command_bounds = {
-                .vel_max = declare_parameter<double>("mpc.follow.command_bounds.vel_max"),
-                .vel_min = declare_parameter<double>("mpc.follow.command_bounds.vel_min"),
-                .omega_max = declare_parameter<double>("mpc.follow.command_bounds.omega_max"),
-                .omega_min = declare_parameter<double>("mpc.follow.command_bounds.omega_min")
-            },
             .start_command = {
                 .vel_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.vel_cmd_act_gap_max"),
                 .omega_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.omega_cmd_act_gap_max")
             },
-            .motion_constraints = {
+            .mode_profiles = {
                 .normal = {
-                    .acc_max = declare_parameter<double>("mpc.follow.motion_constraints.normal.acc_max"),
-                    .alpha_max = declare_parameter<double>("mpc.follow.motion_constraints.normal.alpha_max"),
-                    .a_lat_max = declare_parameter<double>("mpc.follow.motion_constraints.normal.a_lat_max")
+                    .command_bounds = {
+                        .vel_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.command_bounds.vel_max"),
+                        .vel_min = declare_parameter<double>("mpc.follow.mode_profiles.normal.command_bounds.vel_min"),
+                        .omega_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.command_bounds.omega_max"),
+                        .omega_min = declare_parameter<double>("mpc.follow.mode_profiles.normal.command_bounds.omega_min")
+                    },
+                    .motion_constraints = {
+                        .acc_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.motion_constraints.acc_max"),
+                        .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.motion_constraints.alpha_max"),
+                        .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.motion_constraints.a_lat_max")
+                    },
+                    .lpv_rho = 0.0 // normal 跟随仍使用实测状态调度，此值仅作占位
                 },
                 .leg = {
-                    .acc_max = declare_parameter<double>("mpc.follow.motion_constraints.leg.acc_max"),
-                    .alpha_max = declare_parameter<double>("mpc.follow.motion_constraints.leg.alpha_max"),
-                    .a_lat_max = declare_parameter<double>("mpc.follow.motion_constraints.leg.a_lat_max")
+                    .command_bounds = {
+                        .vel_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.command_bounds.vel_max"),
+                        .vel_min = declare_parameter<double>("mpc.follow.mode_profiles.leg.command_bounds.vel_min"),
+                        .omega_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.command_bounds.omega_max"),
+                        .omega_min = declare_parameter<double>("mpc.follow.mode_profiles.leg.command_bounds.omega_min")
+                    },
+                    .motion_constraints = {
+                        .acc_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.motion_constraints.acc_max"),
+                        .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.motion_constraints.alpha_max"),
+                        .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.motion_constraints.a_lat_max")
+                    },
+                    .lpv_rho = declare_parameter<double>("mpc.follow.mode_profiles.leg.lpv_rho")
                 },
                 .jump = {
-                    .acc_max = declare_parameter<double>("mpc.follow.motion_constraints.jump.acc_max"),
-                    .alpha_max = declare_parameter<double>("mpc.follow.motion_constraints.jump.alpha_max"),
-                    .a_lat_max = declare_parameter<double>("mpc.follow.motion_constraints.jump.a_lat_max")
+                    .command_bounds = {
+                        .vel_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.command_bounds.vel_max"),
+                        .vel_min = declare_parameter<double>("mpc.follow.mode_profiles.jump.command_bounds.vel_min"),
+                        .omega_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.command_bounds.omega_max"),
+                        .omega_min = declare_parameter<double>("mpc.follow.mode_profiles.jump.command_bounds.omega_min")
+                    },
+                    .motion_constraints = {
+                        .acc_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.motion_constraints.acc_max"),
+                        .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.motion_constraints.alpha_max"),
+                        .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.motion_constraints.a_lat_max")
+                    },
+                    .lpv_rho = declare_parameter<double>("mpc.follow.mode_profiles.jump.lpv_rho")
                 }
             },
             .tracking_weights = {
@@ -292,6 +315,16 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .lateral_offset = declare_parameter<double>("mpc.multi_hypothesis.lateral_offset"),
             .target_ey_penalty = declare_parameter<double>("mpc.multi_hypothesis.target_ey_penalty")
         },
+        .step_preview = {
+            .q_y = declare_parameter<double>("mpc.step_preview.q_y"),
+            .q_theta = declare_parameter<double>("mpc.step_preview.q_theta"),
+            .q_u = declare_parameter<double>("mpc.step_preview.q_u"),
+            .r_dv = declare_parameter<double>("mpc.step_preview.r_dv"),
+            .r_domega = declare_parameter<double>("mpc.step_preview.r_domega"),
+            .acc_limit = declare_parameter<double>("mpc.step_preview.acc_limit"),
+            .alpha_limit = declare_parameter<double>("mpc.step_preview.alpha_limit"),
+            .lat_acc = declare_parameter<double>("mpc.step_preview.lat_acc")
+        },
         .kinematic_model = {
             .z_ref = declare_parameter<double>("kinematic_model.z_ref"),
             .z_scale = declare_parameter<double>("kinematic_model.z_scale"),
@@ -383,13 +416,21 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     nav_params.follow_proj_dist_max = declare_parameter<double>("follow_proj_guard.proj_dist_max");
     nav_params.follow_proj_cost_max = declare_parameter<double>("follow_proj_guard.proj_cost_max");
     nav_params.follow_proj_cost_samples = static_cast<int>(declare_parameter<int>("follow_proj_guard.proj_cost_samples"));
-    nav_params.step_detect_norm_threshold = declare_parameter<double>("step_ahead_flag.detect_norm_threshold");
-    nav_params.step_detect_dot_threshold = declare_parameter<double>("step_ahead_flag.detect_dot_threshold");
-    nav_params.step_edge_norm_threshold = declare_parameter<double>("step_ahead_flag.edge_norm_threshold");
-    nav_params.step_up_vel_jump_threshold = declare_parameter<double>("step_ahead_flag.step_up_vel_jump_threshold");
-    nav_params.step_up_vel_leg_threshold = declare_parameter<double>("step_ahead_flag.step_up_vel_leg_threshold");
-    nav_params.step_on_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.on_count_threshold"));
-    nav_params.step_off_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.off_count_threshold"));
+    nav_params.step_detect_norm_threshold = declare_parameter<double>("step_ahead_flag.step_detection.detect_norm_threshold");
+    nav_params.step_detect_dot_threshold = declare_parameter<double>("step_ahead_flag.step_detection.detect_dot_threshold");
+    nav_params.step_edge_norm_threshold = declare_parameter<double>("step_ahead_flag.step_detection.edge_norm_threshold");
+    nav_params.step_on_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.step_down_flag.on_count_threshold"));
+    nav_params.step_off_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.step_down_flag.off_count_threshold"));
+    nav_params.step_path_lookahead_distance = declare_parameter<double>("step_ahead_flag.step_up_flag.path_lookahead_distance");
+    nav_params.step_path_sample_resolution = declare_parameter<double>("step_ahead_flag.step_up_flag.path_sample_resolution");
+    nav_params.step_target_match_distance = declare_parameter<double>("step_ahead_flag.step_up_flag.target_match_distance");
+    nav_params.step_latch_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.step_up_flag.latch_threshold"));
+    nav_params.step_preview_hit_distance = declare_parameter<double>("step_ahead_flag.step_up_preview.preview_hit_distance");
+    nav_params.step_preview_speed_error_threshold = declare_parameter<double>("step_ahead_flag.step_up_preview.preview_speed_error_threshold");
+    nav_params.step_preview_heading_error_threshold = declare_parameter<double>("step_ahead_flag.step_up_preview.preview_heading_error_threshold");
+    nav_params.step_preview_speed_error_weight = declare_parameter<double>("step_ahead_flag.step_up_preview.preview_speed_error_weight");
+    nav_params.step_preview_heading_error_weight = declare_parameter<double>("step_ahead_flag.step_up_preview.preview_heading_error_weight");
+    nav_params.step_release_distance = declare_parameter<double>("step_ahead_flag.step_up_flag.release_distance");
 
     nav_params.step_up_failsafe_enable = declare_parameter<bool>("step_up_failsafe.enable");
     nav_params.step_up_failsafe_similar_attempts = static_cast<int>(declare_parameter<int>("step_up_failsafe.similar_attempts"));
@@ -735,6 +776,9 @@ void PathFollowerNode::control_timer_callback() {
         if (enable_debug_) {
             if (output.predicted_path_map) {
                 debug_predicted_path_pub_->publish(path_to_nav_msg(*output.predicted_path_map));
+            }
+            if (output.step_preview_path_map) {
+                debug_step_preview_path_pub_->publish(path_to_nav_msg(*output.step_preview_path_map));
             }
             if (output.predicted_v && output.predicted_w) {
                 std_msgs::msg::Float64 v_msg, w_msg;

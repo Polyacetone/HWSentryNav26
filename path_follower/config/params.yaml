@@ -14,6 +14,7 @@
     debug:
       enable: true
       predicted_path_pub_topic: "/path_follower/debug/predicted_path"
+      step_preview_path_pub_topic: "/path_follower/debug/step_preview_path"
       v_pred_pub_topic: "/path_follower/debug/v_pred"
       w_pred_pub_topic: "/path_follower/debug/w_pred"
       final_cost_map_pub_topic: "/path_follower/debug/final_cost_map"
@@ -38,20 +39,35 @@
       proj_cost_samples: 20 # 连线最大代价估计采样数
 
     step_ahead_flag:
-      detect_norm_threshold: 0.8 # 方向场模长阈值，>=该值认为经过台阶
-      detect_dot_threshold: 0.5 # 朝向与方向场点积阈值，用于区分上/下台阶
-      edge_norm_threshold: 0.8 # 台阶边缘判定方向场模长阈值
-      step_up_vel_jump_threshold: 2.0 # 跳跃上台阶速度阈值 (m/s)，仅在 step_up 首次锁存时判定一次
-      step_up_vel_leg_threshold: 1.0 # 伸腿上台阶速度阈值 (m/s)，仅在 step_up 首次锁存时判定一次
-      on_count_threshold: 8 # 连续检测到台阶的次数才设置标志位
-      off_count_threshold: 2 # 连续未检测到台阶的次数才取消标志位
+      step_detection:
+        detect_norm_threshold: 0.8 # 方向场模长阈值，>=该值认为经过台阶区域
+        detect_dot_threshold: 0.5 # 朝向与方向场点积阈值；< -dot_threshold 为下台阶，> dot_threshold 为上台阶
+        edge_norm_threshold: 0.8 # 台阶边缘判定方向场模长阈值（上台阶空间检测使用）
+
+      step_down_flag:
+        on_count_threshold: 3 # 连续检测到台阶轨迹的次数才设置 step_down_flag
+        off_count_threshold: 3 # 连续未检测到台阶轨迹的次数才清除 step_down_flag
+
+      step_up_flag:
+        path_lookahead_distance: 3.0 # 沿路径向前扫查台阶目标的固定距离 (m)
+        path_sample_resolution: 0.05 # 沿路径采样分辨率 (m)
+        target_match_distance: 0.4 # 连续检测时视为同一台阶目标的位置阈值 (m)
+        latch_threshold: 3 # 连续检测到同一台阶目标的次数才锁存
+        release_distance: 0.5 # 通过台阶后释放锁存的最小滞回距离 (m)
+
+      step_up_preview:
+        preview_hit_distance: 0.4 # 长预测命中已锁存台阶目标的位置阈值 (m)
+        preview_speed_error_threshold: 0.5 # 候选方案命中台阶处的速度误差阈值 (m/s)
+        preview_heading_error_threshold: 0.6 # 候选方案命中台阶处的姿态对齐误差阈值 (rad)
+        preview_speed_error_weight: 1.0 # 候选方案比较时的速度误差权重
+        preview_heading_error_weight: 1.0 # 候选方案比较时的姿态误差权重
 
     step_runup:
       radius_min: 1.0 # 采样半径下界 (m)，以台阶边缘点 A 为圆心
       radius_max: 2.0 # 采样半径上界 (m)，以台阶边缘点 A 为圆心
       angle_half_range: 0.26 # 扇区半角 (rad)
-      radius_samples: 5 # 采样半径数
-      angle_samples: 7 # 每个半径的采样角度数
+      radius_samples: 8 # 采样半径数
+      angle_samples: 8 # 每个半径的采样角度数
       cost_threshold: 50.0 # 候选点插值代价上限 (0~255)，>= 则剔除
       path_integral_resolution: 0.05 # robot->candidate 路径代价积分采样分辨率 (m)，用于软约束
       line_check_samples: 20 # candidate->A 连线可通行性硬约束采样数（任一点 >= cost_threshold 则剔除）
@@ -91,27 +107,42 @@
         target_ey_penalty: 1.0 # 候选解比较时对非中心 target_ey 的固定附加代价系数，实际附加项为 penalty * target_ey^2
 
       follow:
-        command_bounds:
-          vel_max: 2.4 # 最大速度 (m/s)
-          vel_min: -1.2 # 最小速度 (m/s)
-          omega_max: 7.2 # 最大角速度 (rad/s)
-          omega_min: -7.2 # 最小角速度 (rad/s)
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际速度允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际角速度允许差值上限 (rad/s)
-        motion_constraints:
+        mode_profiles:
           normal:
-            acc_max: 1.8 # 正常跟随最大 dv_cmd/dt (m/s²)
-            alpha_max: 7.0 # 正常跟随最大 domega_cmd/dt (rad/s²)
-            a_lat_max: 2.8 # 正常跟随最大侧向加速度 |v_act*omega_act| (m/s²)
+            command_bounds:
+              vel_max: 2.4 # 最大速度 (m/s)
+              vel_min: -1.2 # 最小速度 (m/s)
+              omega_max: 7.2 # 最大角速度 (rad/s)
+              omega_min: -7.2 # 最小角速度 (rad/s)
+            motion_constraints:
+              acc_max: 1.8 # 正常跟随最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # 正常跟随最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 2.8 # 正常跟随最大侧向加速度 |v_act*omega_act| (m/s²)
           leg:
-            acc_max: 1.5 # LEG 模式最大 dv_cmd/dt (m/s²)
-            alpha_max: 7.0 # LEG 模式最大 domega_cmd/dt (rad/s²)
-            a_lat_max: 1.5 # LEG 模式最大侧向加速度，适应伸腿后的重心变化 (m/s²)
+            command_bounds:
+              vel_max: 1.5 # LEG 模式最大速度 (m/s)
+              vel_min: -1.2 # LEG 模式最小速度 (m/s)
+              omega_max: 7.2 # LEG 模式最大角速度 (rad/s)
+              omega_min: -7.2 # LEG 模式最小角速度 (rad/s)
+            motion_constraints:
+              acc_max: 1.5 # LEG 模式最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # LEG 模式最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 1.5 # LEG 模式最大侧向加速度，适应伸腿后的重心变化 (m/s²)
+            lpv_rho: 0.95 # LEG 预览使用固定腿构型调度量
           jump:
-            acc_max: 1.8 # JUMP 模式最大 dv_cmd/dt (m/s²)
-            alpha_max: 7.0 # JUMP 模式最大 domega_cmd/dt (rad/s²)
-            a_lat_max: 2.8 # JUMP 模式最大侧向加速度 |v_act*omega_act| (m/s²)
+            command_bounds:
+              vel_max: 2.4 # JUMP 模式最大速度 (m/s)
+              vel_min: -1.2 # JUMP 模式最小速度 (m/s)
+              omega_max: 7.2 # JUMP 模式最大角速度 (rad/s)
+              omega_min: -7.2 # JUMP 模式最小角速度 (rad/s)
+            motion_constraints:
+              acc_max: 1.8 # JUMP 模式最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # JUMP 模式最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 2.8 # JUMP 模式最大侧向加速度 |v_act*omega_act| (m/s²)
+            lpv_rho: -0.87 # JUMP 预览使用固定腿构型调度量
         tracking_weights:
           q_y: 0.4 # 横向误差权重
           q_theta: 0.2 # 航向误差权重
@@ -144,6 +175,16 @@
           num_samples: 50 # 投影到样条参数u时的采样数
           search_window: 0.1 # 局部搜索窗口大小 (0~1)
           local_search_lazy_distance: 0.1 # 如果局部搜索到的点与当前位置距离小于该值，则认为找到了合适的投影点 (m)
+
+      step_preview:
+        q_y: 0.6 # 上台阶预览路径横向偏差权重
+        q_theta: 0.4 # 上台阶预览航向偏差权重
+        q_u: 1.0 # 上台阶预览进度鼓励权重
+        r_dv: 0.6 # 上台阶预览指令平滑权重（线速度）
+        r_domega: 0.2 # 上台阶预览指令平滑权重（角速度）
+        acc_limit: 20.0 # 上台阶预览加速度约束惩罚权重
+        alpha_limit: 20.0 # 上台阶预览角加速度约束惩罚权重
+        lat_acc: 20.0 # 上台阶预览侧向加速度约束惩罚权重
 
       stop:
         command_bounds:

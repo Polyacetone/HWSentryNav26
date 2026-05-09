@@ -17,6 +17,7 @@ namespace path_follower {
 // ═══════════════════════════════════════════════════════════════
 
 constexpr int MPC_HORIZON = 30;
+constexpr int MPC_STEP_PREVIEW_HORIZON = 60;
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
@@ -63,10 +64,16 @@ struct MPCMotionConstraintWeights {
     double lat_acc;
 };
 
-struct MPCFollowMotionProfiles {
-    MPCMotionConstraints normal;
-    MPCMotionConstraints leg;
-    MPCMotionConstraints jump;
+struct MPCFollowModeProfile {
+    MPCCommandBounds command_bounds;
+    MPCMotionConstraints motion_constraints;
+    double lpv_rho;
+};
+
+struct MPCFollowModeProfiles {
+    MPCFollowModeProfile normal;
+    MPCFollowModeProfile leg;
+    MPCFollowModeProfile jump;
 };
 
 struct MPCFollowTrackingWeights {
@@ -186,9 +193,8 @@ struct MPCFollowProjection {
 };
 
 struct MPCFollowParams {
-    MPCCommandBounds command_bounds;
     MPCStartCommandLimits start_command;
-    MPCFollowMotionProfiles motion_constraints;
+    MPCFollowModeProfiles mode_profiles;
     MPCFollowTrackingWeights tracking_weights;
     MPCFollowCommandWeights command_weights;
     MPCMotionConstraintWeights motion_constraint_weights;
@@ -286,6 +292,21 @@ struct MultiHypothesisParams {
     double target_ey_penalty;
 };
 
+// ═══════════════════════════════════════════════════════════════
+//  StepPreviewProblem 独立参数
+// ═══════════════════════════════════════════════════════════════
+
+struct MPCStepPreviewWeights {
+    double q_y;
+    double q_theta;
+    double q_u;
+    double r_dv;
+    double r_domega;
+    double acc_limit;
+    double alpha_limit;
+    double lat_acc;
+};
+
 /// MPC 预测轨迹
 struct MPCPrediction {
     std::vector<Eigen::Vector2d> path_map;
@@ -301,6 +322,7 @@ struct MPCParams {
 
     EnergyParams energy;
     MultiHypothesisParams mh_params;
+    MPCStepPreviewWeights step_preview;
     LPVKinematicModelParams kinematic_model;
     PowerModelParams power_model;
 };
@@ -368,9 +390,10 @@ using ControlVec = Eigen::Matrix<double, MPC_NU, 1>;
 using MatXX = Eigen::Matrix<double, MPC_NX, MPC_NX>;
 using MatXU = Eigen::Matrix<double, MPC_NX, MPC_NU>;
 
-class FollowProblem {
+template<int Horizon>
+class FollowProblemT {
 public:
-    FollowProblem(
+    FollowProblemT(
         const std::vector<Eigen::Vector2d>& ref_control_points,
         const MPCParams& params,
         const std::vector<CostMapGridView>& per_step_cost_grids,
@@ -423,6 +446,51 @@ private:
     double rfr_pwr_limit_;
     std::optional<ChassisMode> latched_step_up_mode_;
     double target_ey_;
+};
+
+using FollowProblem = FollowProblemT<MPC_HORIZON>;
+
+// ═══════════════════════════════════════════════════════════════
+//  StepPreviewProblem — 上台阶候选预评估
+//  使用简化代价：仅包含路径跟踪、进度鼓励、指令平滑、运动学约束
+//  不含避障、台阶对齐、台阶限速、终点减速、能量约束
+// ═══════════════════════════════════════════════════════════════
+
+class StepPreviewProblem {
+public:
+    StepPreviewProblem(
+        const std::vector<Eigen::Vector2d>& ref_control_points,
+        const MPCParams& params,
+        double schedule_rho,
+        std::optional<ChassisMode> preview_mode
+    );
+
+    StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
+    void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
+
+    double running_cost(int k, const StateVec& x, const ControlVec& u) const;
+    void running_cost_derivatives(
+        int k,
+        const StateVec& x,
+        const ControlVec& u,
+        StateVec& lx,
+        ControlVec& lu,
+        MatXX& lxx,
+        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
+    ) const;
+
+    double terminal_cost(const StateVec& x) const;
+    void terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const;
+
+    ControlVec u_lower() const;
+    ControlVec u_upper() const;
+
+private:
+    const std::vector<Eigen::Vector2d>& ref_cps_;
+    const MPCParams& p_;
+    LPVDiscreteModel model_ {};
+    std::optional<ChassisMode> preview_mode_;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -530,11 +598,11 @@ private:
 
 // ── FDDP Dims specializations ──
 namespace fddp {
-template<>
-struct Dims<path_follower::FollowProblem> {
+template<int Horizon>
+struct Dims<path_follower::FollowProblemT<Horizon>> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
-    static constexpr int N = path_follower::MPC_HORIZON;
+    static constexpr int N = Horizon;
 };
 template<>
 struct Dims<path_follower::StopProblem> {
@@ -547,6 +615,12 @@ struct Dims<path_follower::HoldProblem> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
     static constexpr int N = path_follower::MPC_HORIZON;
+};
+template<>
+struct Dims<path_follower::StepPreviewProblem> {
+    static constexpr int NX = path_follower::MPC_NX;
+    static constexpr int NU = path_follower::MPC_NU;
+    static constexpr int N = path_follower::MPC_STEP_PREVIEW_HORIZON;
 };
 }
 
@@ -581,6 +655,15 @@ public:
         std::optional<ChassisMode> latched_step_up_mode
     );
 
+    std::expected<MPCPrediction, std::string> preview_follow(
+        const SplineD& global_path,
+        double path_u,
+        const Eigen::Vector3d& chassis_pose_map,
+        const ChassisMotionState& chassis_state,
+        const Eigen::Vector2d& cmd_seed,
+        ChassisMode preview_mode
+    );
+
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
@@ -601,6 +684,20 @@ public:
     }
 
 private:
+    struct PreviewContext {
+        StateVec x0;
+        StepPreviewProblem problem;
+
+        PreviewContext(
+            const StateVec& initial_state,
+            const std::vector<Eigen::Vector2d>& ref_cps,
+            const MPCParams& params,
+            double schedule_rho,
+            std::optional<ChassisMode> preview_mode
+        ) : x0(initial_state),
+            problem(ref_cps, params, schedule_rho, preview_mode) {}
+    };
+
     MPCParams params_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
@@ -609,9 +706,12 @@ private:
     fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
+    fddp::Solver<StepPreviewProblem> step_preview_leg_solver_;
+    fddp::Solver<StepPreviewProblem> step_preview_jump_solver_;
     bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
+    std::optional<ChassisMode> last_follow_mode_;
 
     // 多假设 solver（左/右偏移，仅用于 solve_follow）
     fddp::Solver<FollowProblem> follow_solver_left_;
@@ -643,7 +743,15 @@ private:
         const Eigen::Vector2d& cmd_clamped,
         double path_u
     ) const;
-    static MPCPrediction extract_prediction(const StateVec* xs, int n);
+    PreviewContext make_preview_context(
+        const SplineD& global_path,
+        double path_u,
+        const Eigen::Vector3d& chassis_pose_map,
+        const ChassisMotionState& chassis_state,
+        const Eigen::Vector2d& cmd_seed,
+        ChassisMode preview_mode
+    ) const;
+    static MPCPrediction extract_prediction(const StateVec* xs, size_t n);
 };
 
 }

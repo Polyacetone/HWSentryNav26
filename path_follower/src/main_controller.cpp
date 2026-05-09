@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <future>
 #include <limits>
 #include <numbers>
 #include <rclcpp/logging.hpp>
@@ -12,6 +13,16 @@ namespace path_follower {
 namespace {
 
 constexpr double ANGLE_EPSILON = 1e-6;
+
+const char* mode_label(ChassisMode m) {
+    switch (m) {
+        case ChassisMode::STEP_UP_LEG: return "LEG";
+        case ChassisMode::STEP_UP_JUMP: return "JUMP";
+        case ChassisMode::NORMAL: return "NORMAL";
+        case ChassisMode::STEP_DOWN: return "DOWN";
+        default: return "?";
+    }
+}
 
 inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_status) {
     // leg_mode: 2:Flight, 4:Mature
@@ -196,10 +207,32 @@ MainController::MainController(
     rclcpp::Logger logger
 ) : control_fsm_(std::make_unique<StateMachine>(fsm_params, logger)),
     mpc_controller_(std::move(mpc_controller)),
+    preview_leg_controller_(std::make_shared<MPCSolver>(mpc_controller_->params())),
+    preview_jump_controller_(std::make_shared<MPCSolver>(mpc_controller_->params())),
     logger_(logger),
     nav_params_(nav_params),
     fsm_params_(fsm_params) {
     last_fsm_state_ = control_fsm_->state();
+}
+
+void MainController::sync_mpc_context(const ControlInput& input) {
+    mpc_controller_->set_last_cmd(last_cmd_);
+    preview_leg_controller_->set_last_cmd(last_cmd_);
+    preview_jump_controller_->set_last_cmd(last_cmd_);
+
+    mpc_controller_->update_observer(input.chassis_state);
+    preview_leg_controller_->update_observer(input.chassis_state);
+    preview_jump_controller_->update_observer(input.chassis_state);
+
+    mpc_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
+    preview_leg_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
+    preview_jump_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
+}
+
+void MainController::reset_all_mpc_warm_start() {
+    mpc_controller_->reset_warm_start();
+    preview_leg_controller_->reset_warm_start();
+    preview_jump_controller_->reset_warm_start();
 }
 
 // ═══════════════════════ 主更新接口 ══════════════════════════
@@ -217,8 +250,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         out.valid = true;
 
         last_cmd_ = Eigen::Vector2d::Zero();
-        mpc_controller_->set_last_cmd(last_cmd_);
-        mpc_controller_->reset_warm_start();
+        reset_all_mpc_warm_start();
         stuck_active_ = false;
         recovery_safe_since_ = std::nullopt;
         return out;
@@ -228,13 +260,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     last_cycle_chassis_dead_ = false;
 
     const FsmState prev_state = last_fsm_state_;
-    mpc_controller_->set_last_cmd(last_cmd_);
-
-    // 0. 更新隐藏状态观测器（在 MPC 求解之前）
-    mpc_controller_->update_observer(input.chassis_state);
-
-    // 0.5 更新能量状态
-    mpc_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
+    sync_mpc_context(input);
 
     if (prev_state == FsmState::HAZARD_RECOVERY) {
         update_recovery_goal_if_needed(input);
@@ -244,6 +270,10 @@ ControlOutput MainController::update(const ControlInput& input) {
     const bool has_new_path = has_path && input.path_updated;
 
     clear_step_up_attempt_history_if_needed(has_path, has_new_path);
+    update_step_up_state_for_path_change(has_new_path);
+    if (!has_path) {
+        clear_step_up_decision();
+    }
 
     // 路标点重算：新路径到达时重新分割；路径消失时清空
     if (has_new_path) {
@@ -266,7 +296,7 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     // Dead->Mature 常发生在上台阶失败后的恢复循环中。
     // 若复活时仍处于“上台阶标志位已拉高”状态，则按一次“拉高事件”计入兜底。
-    if (just_revived && !has_new_path && last_fsm_state_ == FsmState::FOLLOW && has_path && step_up_flag_) {
+    if (just_revived && !has_new_path && last_fsm_state_ == FsmState::FOLLOW && has_path && latched_step_target_) {
         if (register_step_up_attempt_and_should_cancel(input.chassis_pose_map.head<2>())) {
             cancel_follow_task_now = true;
         }
@@ -323,6 +353,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     if (output.consume_global_path) {
         last_reference_u_ = 0.0;
         clear_step_up_attempt_history();
+        clear_step_up_decision();
     }
 
     // 4. 同步已发布指令到 FSM / MPC，并在非 MPC 状态时重置 MPC 的 warm start
@@ -331,7 +362,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         mpc_controller_->set_last_cmd(last_cmd_);
         const bool non_mpc_state = (state == FsmState::IDLE) || (state == FsmState::SPIN) || (state == FsmState::STUCK_REVERSE);
         if (non_mpc_state) {
-            mpc_controller_->reset_warm_start();
+            reset_all_mpc_warm_start();
         }
     }
 
@@ -368,6 +399,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         mpc_controller_->params().follow.projection.local_search_lazy_distance
     );
     last_reference_u_ = u0;
+    update_step_up_release(*input.global_path, u0);
 
     // 路径跟随任务取消条件（投影守卫）
     // 1) 投影距离过大：说明路径与当前位置严重不一致
@@ -385,7 +417,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         out.omega = 0.0;
         out.consume_global_path = true;
         out.valid = true;
-        mpc_controller_->reset_warm_start();
+        reset_all_mpc_warm_start();
         return out;
     }
 
@@ -404,7 +436,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
             out.omega = 0.0;
             out.consume_global_path = true;
             out.valid = true;
-            mpc_controller_->reset_warm_start();
+            reset_all_mpc_warm_start();
             return out;
         }
 
@@ -418,19 +450,54 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
             out.omega = 0.0;
             out.consume_global_path = true;
             out.valid = true;
-            mpc_controller_->reset_warm_start();
+            reset_all_mpc_warm_start();
             return out;
         }
     }
 
+    std::optional<PathStepTarget> step_target;
+    if (!latched_step_target_) {
+        step_target = try_latch_step_up_target(*input.global_path, u0, *input.masked_direction_map);
+    }
+
+    std::future<std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string>> follow_future =
+        std::async(std::launch::async, [&]() {
+            return mpc_controller_->solve_follow(
+                *input.global_path, input.chassis_pose_map, input.chassis_state,
+                *input.final_cost_map, input.per_step_cost_maps, input.prediction_dt,
+                *input.masked_direction_map,
+                latched_step_up_mode_
+            );
+        });
+
+    std::future<std::optional<StepPreviewEvaluation>> leg_future;
+    std::future<std::optional<StepPreviewEvaluation>> jump_future;
+    if (step_target) {
+        leg_future = std::async(std::launch::async, [&]() {
+            return evaluate_step_preview_candidate(
+                *preview_leg_controller_,
+                input,
+                *input.global_path,
+                *step_target,
+                u0,
+                ChassisMode::STEP_UP_LEG
+            );
+        });
+        jump_future = std::async(std::launch::async, [&]() {
+            return evaluate_step_preview_candidate(
+                *preview_jump_controller_,
+                input,
+                *input.global_path,
+                *step_target,
+                u0,
+                ChassisMode::STEP_UP_JUMP
+            );
+        });
+    }
+
     // 调用 MPC
     auto start_time = std::chrono::steady_clock::now();
-    const auto result = mpc_controller_->solve_follow(
-        *input.global_path, input.chassis_pose_map, input.chassis_state,
-        *input.final_cost_map, input.per_step_cost_maps, input.prediction_dt,
-        *input.masked_direction_map,
-        latched_step_up_mode_
-    );
+    const auto result = follow_future.get();
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
         return out;
@@ -446,75 +513,29 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     // 台阶检测（基于 MPC 预测轨迹）
     const auto& [cmd, prediction] = *result;
     const auto step = detect_steps_on_prediction_with_edges(prediction, *input.masked_direction_map);
-    const auto step_edge = find_first_step_edge_on_prediction(prediction, *input.masked_direction_map);
-
-    if (step.step_up_rising) {
-        const Eigen::Vector2d pos = input.chassis_pose_map.head<2>();
-        if (register_step_up_attempt_and_should_cancel(pos)) {
-            RCLCPP_ERROR(logger_, "StepUp failsafe: cancel current follow task");
-            pending_cancel_follow_task_ = true;
-        }
-    }
 
     out.velocity = cmd.x();
     out.omega = cmd.y();
 
-    // Step-up mode latching: decide only once when step_up is first detected (debounced rising),
-    // and keep the decision until step_up flag goes low.
-    if (step.step_up_rising) {
-        step_up_latch_armed_ = true;
-        latched_step_up_mode_ = std::nullopt;
-        latched_step_up_runup_ = false;
-    }
-
-    // If we enter FOLLOW while step_up is already active (e.g., revive), arm once as well.
-    if (step.step_up && !step_up_latch_armed_ && !latched_step_up_mode_ && !latched_step_up_runup_) {
-        step_up_latch_armed_ = true;
-    }
-
-    if (!step.step_up) {
-        step_up_latch_armed_ = false;
-        latched_step_up_mode_ = std::nullopt;
-        latched_step_up_runup_ = false;
-    }
-
-    if (step.step_up) {
-        if (latched_step_up_mode_) {
-            out.mode = *latched_step_up_mode_;
-        } else if (latched_step_up_runup_) {
-            out.mode = ChassisMode::NORMAL;
-        } else {
-            // If rising edge happened but step edge info wasn't available that cycle,
-            // latch on the first cycle that has a valid edge while step_up stays active.
-            if (step_up_latch_armed_ && step_edge) {
-                const double v_edge = step_edge->v_pred;
-                if (v_edge >= nav_params_.step_up_vel_jump_threshold) {
-                    latched_step_up_mode_ = ChassisMode::STEP_UP_JUMP;
-                    out.mode = *latched_step_up_mode_;
-                } else if (v_edge >= nav_params_.step_up_vel_leg_threshold) {
-                    latched_step_up_mode_ = ChassisMode::STEP_UP_LEG;
-                    out.mode = *latched_step_up_mode_;
-                } else  {
-                    latched_step_up_runup_ = true;
-                    pending_step_runup_ = true;
-                    pending_step_runup_edge_ = step_edge;
-                    out.mode = ChassisMode::NORMAL;
-                }
-
-                // Disarm after first decision.
-                step_up_latch_armed_ = false;
-            } else {
-                out.mode = ChassisMode::NORMAL;
-            }
-        }
+    if (latched_step_up_mode_) {
+        out.mode = *latched_step_up_mode_;
     } else if (step.step_down) {
         out.mode = ChassisMode::STEP_DOWN;
     } else {
         out.mode = ChassisMode::NORMAL;
     }
+
+    if (step_target) {
+        latched_step_target_ = *step_target;
+        pending_step_target_detection_ = std::nullopt;
+        pending_step_target_on_count_ = 0;
+        finalize_step_up_mode_selection(input, leg_future.get(), jump_future.get());
+    }
+
     out.predicted_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
+    out.step_preview_path_map = debug_step_preview_path_map_;
     out.valid = true;
     return out;
 }
@@ -569,11 +590,10 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         stuck_active_ = false;
     }
 
-    // 离开 FOLLOW/STEP_RUNUP 时重置台阶检测防抖状态 + 无进度检测索引
+    // 离开 FOLLOW/STEP_RUNUP 时重置下台阶检测与无进度检测索引
     if ((prev == FsmState::FOLLOW || prev == FsmState::STEP_RUNUP) && next != FsmState::FOLLOW && next != FsmState::STEP_RUNUP) {
-        step_up_on_count_ = step_up_off_count_ = 0;
         step_down_on_count_ = step_down_off_count_ = 0;
-        step_up_flag_ = step_down_flag_ = false;
+        step_down_flag_ = false;
         last_reference_u_ = 0.0;
         follow_max_landmark_idx_ = -1;
         mpc_controller_->reset_warm_start();
@@ -585,18 +605,12 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
 
     if (next == FsmState::STEP_RUNUP && prev != FsmState::STEP_RUNUP) {
         step_runup_goal_map_ = std::nullopt;
-
-        // STEP_RUNUP does not use step flags; reset debouncing + latching so we can re-detect after runup.
-        step_up_on_count_ = step_up_off_count_ = 0;
         step_down_on_count_ = step_down_off_count_ = 0;
-        step_up_flag_ = step_down_flag_ = false;
-        step_up_latch_armed_ = false;
-        latched_step_up_mode_ = std::nullopt;
-        latched_step_up_runup_ = false;
+        step_down_flag_ = false;
     }
     if (prev == FsmState::STEP_RUNUP && next != FsmState::STEP_RUNUP) {
         step_runup_goal_map_ = std::nullopt;
-        pending_step_runup_edge_ = std::nullopt;
+        pending_step_runup_target_ = std::nullopt;
     }
 
     if (next == FsmState::HAZARD_RECOVERY) {
@@ -779,6 +793,7 @@ ControlOutput MainController::execute_step_runup(const ControlInput& input) {
     if (!step_runup_goal_map_) {
         step_runup_goal_map_ = select_step_runup_point(input);
         if (!step_runup_goal_map_) {
+            pending_step_runup_target_ = std::nullopt;
             RCLCPP_ERROR(logger_, "STEP_RUNUP failed to find a feasible runup point, cancelling follow task");
             out.velocity = 0.0;
             out.omega = 0.0;
@@ -874,7 +889,6 @@ MainController::StepDetectResult MainController::detect_steps_on_prediction_with
     const MPCPrediction& prediction,
     const DirectionMap& direction_map
 ) {
-    std::optional<size_t> nearest_step_up_idx;
     std::optional<size_t> nearest_step_down_idx;
 
     for (size_t i = 0; i < prediction.path_map.size(); ++i) {
@@ -893,81 +907,322 @@ MainController::StepDetectResult MainController::detect_steps_on_prediction_with
 
         const Eigen::Vector2d heading(std::cos(theta), std::sin(theta));
         const double dot = dir.normalized().dot(heading);
-        if (dot > nav_params_.step_detect_dot_threshold && !nearest_step_up_idx) {
-            nearest_step_up_idx = i;
-        }
         if (dot < -nav_params_.step_detect_dot_threshold && !nearest_step_down_idx) {
             nearest_step_down_idx = i;
         }
     }
 
-    bool raw_step_up = false;
-    bool raw_step_down = false;
-    if (nearest_step_up_idx && nearest_step_down_idx) {
-        if (*nearest_step_up_idx <= *nearest_step_down_idx) {
-            raw_step_up = true;
-        } else {
-            raw_step_down = true;
-        }
-    } else {
-        raw_step_up = nearest_step_up_idx.has_value();
-        raw_step_down = nearest_step_down_idx.has_value();
-    }
-
-    const bool prev_up = step_up_flag_;
     const bool prev_down = step_down_flag_;
-
-    // 防抖：连续多次检测到才设置标志位，连续多次未检测到才取消
-    if (raw_step_up) {
-        step_up_on_count_++;
-        step_up_off_count_ = 0;
-        if (step_up_on_count_ >= nav_params_.step_on_count_threshold) step_up_flag_ = true;
-    } else {
-        step_up_off_count_++;
-        step_up_on_count_ = 0;
-        if (step_up_off_count_ >= nav_params_.step_off_count_threshold) step_up_flag_ = false;
-    }
+    const bool raw_step_down = nearest_step_down_idx.has_value();
 
     if (raw_step_down) {
         step_down_on_count_++;
         step_down_off_count_ = 0;
-        if (step_down_on_count_ >= nav_params_.step_on_count_threshold) step_down_flag_ = true;
+        if (step_down_on_count_ >= nav_params_.step_on_count_threshold && !step_down_flag_) {
+            step_down_flag_ = true;
+            RCLCPP_INFO(logger_, "StepDown ON (raw_count=%d/%d)", step_down_on_count_, nav_params_.step_on_count_threshold);
+        }
     } else {
         step_down_off_count_++;
         step_down_on_count_ = 0;
-        if (step_down_off_count_ >= nav_params_.step_off_count_threshold) step_down_flag_ = false;
+        if (step_down_off_count_ >= nav_params_.step_off_count_threshold && step_down_flag_) {
+            step_down_flag_ = false;
+            RCLCPP_INFO(logger_, "StepDown OFF (raw_off_count=%d/%d)", step_down_off_count_, nav_params_.step_off_count_threshold);
+        }
     }
 
     StepDetectResult out;
-    out.step_up = step_up_flag_;
     out.step_down = step_down_flag_;
-    out.step_up_rising = (!prev_up) && step_up_flag_;
     out.step_down_rising = (!prev_down) && step_down_flag_;
     return out;
 }
 
-std::optional<MainController::StepEdgeInfo> MainController::find_first_step_edge_on_prediction(
-    const MPCPrediction& prediction,
+double MainController::advance_path_u_by_distance(const SplineD& path, const double start_u, const double distance) const {
+    const double resolution = std::max(1e-3, nav_params_.step_path_sample_resolution);
+    const int steps = std::max(1, static_cast<int>(std::ceil(std::max(0.0, distance) / resolution)));
+    double u = std::clamp(start_u, 0.0, 1.0);
+    Eigen::Vector2d prev = path.evaluate(u);
+    double travelled = 0.0;
+
+    for (int i = 1; i <= steps && u < 1.0; ++i) {
+        const double next_u = std::min(1.0, start_u + (1.0 - start_u) * static_cast<double>(i) / static_cast<double>(steps));
+        const Eigen::Vector2d cur = path.evaluate(next_u);
+        travelled += (cur - prev).norm();
+        prev = cur;
+        u = next_u;
+        if (travelled >= distance) break;
+    }
+    return u;
+}
+
+std::optional<MainController::PathStepTarget> MainController::detect_step_target_on_path(
+    const SplineD& path,
+    const double start_u,
     const DirectionMap& direction_map
 ) const {
-    const size_t n = std::min(prediction.path_map.size(), prediction.v_pred.size());
-    for (size_t i = 0; i < n; ++i) {
-        const Eigen::Vector2d g = direction_map.map_coord_to_grid(prediction.path_map[i]);
+    const double lookahead_u = advance_path_u_by_distance(path, start_u, nav_params_.step_path_lookahead_distance);
+    const double resolution = std::max(1e-3, nav_params_.step_path_sample_resolution);
+    const int samples = std::max(1, static_cast<int>(std::ceil(nav_params_.step_path_lookahead_distance / resolution)));
+
+    for (int i = 0; i <= samples; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(samples);
+        const double u = start_u + (lookahead_u - start_u) * t;
+        const Eigen::Vector2d pos = path.evaluate(u);
+        const Eigen::Vector2d tangent = path.derivative(u, 1);
+        if (tangent.norm() < ANGLE_EPSILON) continue;
+
+        const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
         if (!direction_map.is_valid_coord(Eigen::Vector2i(
             static_cast<int>(std::floor(g.x())),
             static_cast<int>(std::floor(g.y()))))
         ) continue;
 
         const Eigen::Vector2d dir = direction_map.interpolate(g);
-        if (dir.norm() < nav_params_.step_edge_norm_threshold) continue;
+        const double norm = dir.norm();
+        if (norm < nav_params_.step_edge_norm_threshold) continue;
 
-        StepEdgeInfo edge;
-        edge.pos_map = prediction.path_map[i];
-        edge.dir_map = dir;
-        edge.v_pred = prediction.v_pred[i];
-        return edge;
+        const double dot = dir.normalized().dot(tangent.normalized());
+        if (dot <= nav_params_.step_detect_dot_threshold) continue;
+
+        PathStepTarget target;
+        target.path_version = path_version_;
+        target.path_u = u;
+        target.release_u = advance_path_u_by_distance(path, u, nav_params_.step_release_distance);
+        target.pos_map = pos;
+        target.dir_map = dir;
+        return target;
     }
+
     return std::nullopt;
+}
+
+bool MainController::is_same_step_target(const PathStepTarget& lhs, const PathStepTarget& rhs) const {
+    if (lhs.path_version != rhs.path_version) return false;
+    return (lhs.pos_map - rhs.pos_map).norm() <= nav_params_.step_target_match_distance;
+}
+
+void MainController::clear_step_up_decision() {
+    const bool had_latch = latched_step_target_.has_value();
+    pending_step_target_detection_ = std::nullopt;
+    pending_step_target_on_count_ = 0;
+    latched_step_target_ = std::nullopt;
+    latched_step_up_mode_ = std::nullopt;
+    pending_step_runup_target_ = std::nullopt;
+    debug_step_preview_path_map_ = std::nullopt;
+    if (had_latch) {
+        RCLCPP_DEBUG(logger_, "StepUp decision cleared (had active latch)");
+    }
+}
+
+void MainController::update_step_up_state_for_path_change(const bool has_new_path) {
+    if (!has_new_path) return;
+    path_version_++;
+    clear_step_up_decision();
+}
+
+void MainController::update_step_up_release(const SplineD& path, const double current_u) {
+    (void)path;
+    if (!latched_step_target_) return;
+    if (latched_step_target_->path_version != path_version_) {
+        RCLCPP_INFO(logger_, "StepUp released: path version changed (target_v=%d != cur_v=%d)", latched_step_target_->path_version, path_version_);
+        clear_step_up_decision();
+        return;
+    }
+    if (current_u >= latched_step_target_->release_u) {
+        RCLCPP_INFO(logger_, "StepUp released: passed step (u=%.3f >= release_u=%.3f)", current_u, latched_step_target_->release_u);
+        clear_step_up_decision();
+    }
+}
+
+double MainController::step_target_speed(const ChassisMode mode) const {
+    if (mode == ChassisMode::STEP_UP_JUMP) {
+        return mpc_controller_->params().follow.terrain_limits.step_vel_jump;
+    }
+    if (mode == ChassisMode::STEP_UP_LEG) {
+        return mpc_controller_->params().follow.terrain_limits.step_vel_leg;
+    }
+    return 0.0;
+}
+
+std::optional<MainController::StepPreviewEvaluation> MainController::evaluate_step_preview_candidate(
+    MPCSolver& preview_controller,
+    const ControlInput& input,
+    const SplineD& path,
+    const PathStepTarget& target,
+    const double start_u,
+    const ChassisMode preview_mode
+) {
+    if (!input.final_cost_map || !input.masked_direction_map) return std::nullopt;
+
+    const auto preview = preview_controller.preview_follow(
+        path,
+        start_u,
+        input.chassis_pose_map,
+        input.chassis_state,
+        last_cmd_,
+        preview_mode
+    );
+    if (!preview) {
+        RCLCPP_DEBUG(logger_, "StepUp preview %s: solver failed", mode_label(preview_mode));
+        return std::nullopt;
+    }
+
+    const auto& pred = *preview;
+    std::optional<size_t> hit_index;
+    double best_dist = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < pred.path_map.size(); ++i) {
+        const double dist = (pred.path_map[i] - target.pos_map).norm();
+        if (dist < best_dist) {
+            best_dist = dist;
+            hit_index = i;
+        }
+    }
+    if (!hit_index || best_dist > nav_params_.step_preview_hit_distance) {
+        RCLCPP_DEBUG(
+            logger_, "StepUp preview %s: miss target (best_dist=%.2f > %.2f)",
+            mode_label(preview_mode), best_dist, nav_params_.step_preview_hit_distance
+        );
+        return std::nullopt;
+    }
+
+    const Eigen::Vector2d heading(std::cos(pred.headings[*hit_index]), std::sin(pred.headings[*hit_index]));
+    const double heading_error = std::abs(angle_between(heading, target.dir_map.normalized()));
+    const double predicted_speed = pred.v_pred[*hit_index];
+    const double target_speed = step_target_speed(preview_mode);
+    const double speed_error = std::abs(predicted_speed - target_speed);
+    if (speed_error > nav_params_.step_preview_speed_error_threshold) {
+        RCLCPP_DEBUG(
+            logger_, "StepUp preview %s: v_hit=%.2f target_v=%.2f speed_err=%.2f > %.2f",
+            mode_label(preview_mode), predicted_speed, target_speed,
+            speed_error, nav_params_.step_preview_speed_error_threshold
+        );
+        return std::nullopt;
+    }
+    if (heading_error > nav_params_.step_preview_heading_error_threshold) {
+        RCLCPP_DEBUG(
+            logger_, "StepUp preview %s: v_hit=%.2f heading_err=%.2f > %.2f",
+            mode_label(preview_mode), predicted_speed,
+            heading_error, nav_params_.step_preview_heading_error_threshold
+        );
+        return std::nullopt;
+    }
+
+    RCLCPP_DEBUG(
+        logger_, "StepUp preview %s: hit_idx=%zu dist=%.2f v_hit=%.2f target_v=%.2f heading_err=%.2f",
+        mode_label(preview_mode), *hit_index, best_dist, predicted_speed, target_speed, heading_error
+    );
+
+    StepPreviewEvaluation evaluation;
+    evaluation.mode = preview_mode;
+    evaluation.hit_index = *hit_index;
+    evaluation.predicted_speed = predicted_speed;
+    evaluation.speed_error = speed_error;
+    evaluation.heading_error = heading_error;
+    evaluation.score = nav_params_.step_preview_speed_error_weight * speed_error + nav_params_.step_preview_heading_error_weight * heading_error;
+    evaluation.path_map = pred.path_map;
+    return evaluation;
+}
+
+std::optional<MainController::PathStepTarget> MainController::try_latch_step_up_target(
+    const SplineD& path,
+    const double current_u,
+    const DirectionMap& direction_map
+) {
+    const auto detected_target = detect_step_target_on_path(path, current_u, direction_map);
+    if (!detected_target) {
+        pending_step_target_detection_ = std::nullopt;
+        pending_step_target_on_count_ = 0;
+        debug_step_preview_path_map_ = std::nullopt;
+        return std::nullopt;
+    }
+
+    if (pending_step_target_detection_ && is_same_step_target(*pending_step_target_detection_, *detected_target)) {
+        pending_step_target_on_count_++;
+        RCLCPP_DEBUG(
+            logger_, "StepUp spatial latch count=%d/%d at u=%.3f (%.2f, %.2f)",
+            pending_step_target_on_count_, nav_params_.step_latch_threshold,
+            detected_target->path_u, detected_target->pos_map.x(), detected_target->pos_map.y()
+        );
+    } else {
+        pending_step_target_detection_ = detected_target;
+        pending_step_target_on_count_ = 1;
+        RCLCPP_DEBUG(
+            logger_, "StepUp new target detected at u=%.3f (%.2f, %.2f) path_version=%d",
+            detected_target->path_u, detected_target->pos_map.x(), detected_target->pos_map.y(),
+            detected_target->path_version
+        );
+    }
+
+    if (pending_step_target_on_count_ < nav_params_.step_latch_threshold) {
+        return std::nullopt;
+    }
+
+    RCLCPP_INFO(
+        logger_, "StepUp target latched at u=%.3f (%.2f, %.2f) path_version=%d",
+        pending_step_target_detection_->path_u,
+        pending_step_target_detection_->pos_map.x(),
+        pending_step_target_detection_->pos_map.y(),
+        pending_step_target_detection_->path_version
+    );
+
+    PathStepTarget target = *pending_step_target_detection_;
+    pending_step_target_detection_ = std::nullopt;
+    pending_step_target_on_count_ = 0;
+    debug_step_preview_path_map_ = std::nullopt;
+    return target;
+}
+
+void MainController::finalize_step_up_mode_selection(
+    const ControlInput& input,
+    std::optional<StepPreviewEvaluation> leg_eval,
+    std::optional<StepPreviewEvaluation> jump_eval
+) {
+    const Eigen::Vector2d pos = input.chassis_pose_map.head<2>();
+    if (register_step_up_attempt_and_should_cancel(pos)) {
+        RCLCPP_ERROR(logger_, "StepUp failsafe: cancel current follow task");
+        pending_cancel_follow_task_ = true;
+        clear_step_up_decision();
+        return;
+    }
+
+    if (leg_eval && jump_eval) {
+        const bool pick_leg = leg_eval->score <= jump_eval->score;
+        latched_step_up_mode_ = pick_leg ? leg_eval->mode : jump_eval->mode;
+        debug_step_preview_path_map_ = pick_leg ? leg_eval->path_map : jump_eval->path_map;
+        RCLCPP_INFO(
+            logger_, "StepUp mode=%-4s chosen (leg_score=%.3f jump_score=%.3f v_hit=%.2f/%.2f speed_err=%.2f/%.2f heading_err=%.2f/%.2f)",
+            pick_leg ? "LEG" : "JUMP",
+            leg_eval->score, jump_eval->score,
+            leg_eval->predicted_speed, jump_eval->predicted_speed,
+            leg_eval->speed_error, jump_eval->speed_error,
+            leg_eval->heading_error, jump_eval->heading_error
+        );
+        return;
+    }
+    if (leg_eval) {
+        latched_step_up_mode_ = leg_eval->mode;
+        debug_step_preview_path_map_ = leg_eval->path_map;
+        RCLCPP_INFO(
+            logger_, "StepUp mode=LEG only (jump infeasible, v_hit=%.2f speed_err=%.2f heading_err=%.2f)",
+            leg_eval->predicted_speed, leg_eval->speed_error, leg_eval->heading_error
+        );
+        return;
+    }
+    if (jump_eval) {
+        latched_step_up_mode_ = jump_eval->mode;
+        debug_step_preview_path_map_ = jump_eval->path_map;
+        RCLCPP_INFO(
+            logger_, "StepUp mode=JUMP only (leg infeasible, v_hit=%.2f speed_err=%.2f heading_err=%.2f)",
+            jump_eval->predicted_speed, jump_eval->speed_error, jump_eval->heading_error
+        );
+        return;
+    }
+
+    RCLCPP_INFO(logger_, "StepUp both LEG and JUMP infeasible -> STEP_RUNUP");
+    const PathStepTarget runup_target = *latched_step_target_;
+    pending_step_runup_ = true;
+    clear_step_up_decision();
+    pending_step_runup_target_ = runup_target;
 }
 
 void MainController::clear_step_up_attempt_history() {
@@ -1038,12 +1293,14 @@ bool MainController::is_step_runup_segment_feasible(
 }
 
 std::optional<Eigen::Vector2d> MainController::select_step_runup_point(const ControlInput& input) const {
-    if (!pending_step_runup_edge_ || !input.masked_global_cost_map) {
+    if (!pending_step_runup_target_ || !input.masked_global_cost_map) {
         return std::nullopt;
     }
 
-    const Eigen::Vector2d step_pos = pending_step_runup_edge_->pos_map;
-    const Eigen::Vector2d step_dir = pending_step_runup_edge_->dir_map;
+    const CostMap& runup_cost_map = *input.masked_global_cost_map;
+
+    const Eigen::Vector2d step_pos = pending_step_runup_target_->pos_map;
+    const Eigen::Vector2d step_dir = pending_step_runup_target_->dir_map;
     if (step_dir.norm() < ANGLE_EPSILON) return std::nullopt;
 
     const Eigen::Vector2d robot_pos = input.chassis_pose_map.head<2>();
@@ -1071,15 +1328,15 @@ std::optional<Eigen::Vector2d> MainController::select_step_runup_point(const Con
             const Eigen::Vector2d ray = rotate_vec(approach_dir, angle);
             const Eigen::Vector2d candidate = step_pos + ray * radius;
 
-            const Eigen::Vector2d g = input.masked_global_cost_map->map_coord_to_grid(candidate);
-            if (!input.masked_global_cost_map->is_valid_coord(g)) continue;
+            const Eigen::Vector2d g = runup_cost_map.map_coord_to_grid(candidate);
+            if (!runup_cost_map.is_valid_coord(g)) continue;
 
-            const double cost = input.masked_global_cost_map->interpolate(g);
+            const double cost = runup_cost_map.interpolate(g);
             if (cost >= nav_params_.step_runup_cost_threshold) continue;
-            if (!is_step_runup_segment_feasible(*input.masked_global_cost_map, candidate, step_pos)) continue;
+            if (!is_step_runup_segment_feasible(runup_cost_map, candidate, step_pos)) continue;
 
             const auto robot_path_cost = path_integral_cost01(
-                *input.masked_global_cost_map,
+                runup_cost_map,
                 robot_pos,
                 candidate,
                 nav_params_.step_runup_path_integral_resolution
