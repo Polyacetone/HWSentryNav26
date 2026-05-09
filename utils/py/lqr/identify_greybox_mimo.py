@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Grey-box system identification for wheel-leg balanced robot dynamics.
 
 This script identifies a physics-informed model mapping (v_cmd, w_cmd) → (v_act, w_act)

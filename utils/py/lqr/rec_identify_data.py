@@ -87,6 +87,8 @@ def main() -> int:
     st_t: List[float] = []
     st_v: List[float] = []
     st_w: List[float] = []
+    st_leg_h: List[float] = []
+    st_leg_psi: List[float] = []
     st_s: List[float] = []
     st_yaw: List[float] = []
     st_pitch: List[float] = []
@@ -137,6 +139,8 @@ def main() -> int:
             st_t.append(float(t))
             st_v.append(float(msg.velocity))
             st_w.append(float(msg.omega))
+            st_leg_h.append(float(msg.leg_h))
+            st_leg_psi.append(float(msg.leg_psi))
 
             # Query odom<-chassis_link exactly on primary timeline samples.
             s_meas = float("nan")
@@ -201,6 +205,8 @@ def main() -> int:
     t_st = np.asarray(st_t, dtype=float)
     v_meas = np.asarray(st_v, dtype=float)
     w_meas = np.asarray(st_w, dtype=float)
+    leg_h_meas = np.asarray(st_leg_h, dtype=float)
+    leg_psi_meas = np.asarray(st_leg_psi, dtype=float)
     s_meas = np.asarray(st_s, dtype=float)
     yaw_meas = np.asarray(st_yaw, dtype=float)
     pitch_meas = np.asarray(st_pitch, dtype=float)
@@ -208,6 +214,8 @@ def main() -> int:
     t_st = t_st[order_st]
     v_meas = v_meas[order_st]
     w_meas = w_meas[order_st]
+    leg_h_meas = leg_h_meas[order_st]
+    leg_psi_meas = leg_psi_meas[order_st]
     s_meas = s_meas[order_st]
     yaw_meas = yaw_meas[order_st]
     pitch_meas = pitch_meas[order_st]
@@ -253,6 +261,8 @@ def main() -> int:
         t=t,
         v_meas=v_meas,
         w_meas=w_meas,
+        leg_h_meas=leg_h_meas,
+        leg_psi_meas=leg_psi_meas,
         s_meas=s_meas,
         yaw_meas=yaw_meas,
         pitch_meas=pitch_meas,
@@ -266,8 +276,8 @@ def main() -> int:
         print("matplotlib 不可用，仅保存数据：", str(npz_path))
         return 0
 
-    fig = plt.figure(figsize=(12, 14))
-    ax1 = fig.add_subplot(5, 1, 1)
+    fig = plt.figure(figsize=(12, 18))
+    ax1 = fig.add_subplot(7, 1, 1)
     ax1.plot(t, v_cmd, "k--", linewidth=1.0, label="v_cmd")
     ax1.plot(t, v_meas, "b", linewidth=1.2, label="v_meas")
     ax1.set_ylabel("v [m/s]")
@@ -275,31 +285,43 @@ def main() -> int:
     ax1.legend(loc="best")
     ax1.set_title(f"Recorded (tag={tag})")
 
-    ax2 = fig.add_subplot(5, 1, 2)
+    ax2 = fig.add_subplot(7, 1, 2)
     ax2.plot(t, w_cmd, "k--", linewidth=1.0, label="omega_cmd")
     ax2.plot(t, w_meas, "b", linewidth=1.2, label="omega_meas")
     ax2.set_ylabel("omega [rad/s]")
     ax2.grid(True, alpha=0.25)
     ax2.legend(loc="best")
 
-    ax3 = fig.add_subplot(5, 1, 3)
-    ax3.plot(t, s_meas, "g", linewidth=1.2, label="s_meas")
-    ax3.set_ylabel("s [m]")
+    ax3 = fig.add_subplot(7, 1, 3)
+    ax3.plot(t, leg_h_meas, "b", linewidth=1.2, label="leg_h_meas")
+    ax3.set_ylabel("leg_h [m]")
     ax3.grid(True, alpha=0.25)
     ax3.legend(loc="best")
 
-    ax4 = fig.add_subplot(5, 1, 4)
-    ax4.plot(t, yaw_meas, "m", linewidth=1.2, label="yaw_meas")
-    ax4.set_ylabel("yaw [rad]")
+    ax4 = fig.add_subplot(7, 1, 4)
+    ax4.plot(t, leg_psi_meas, "b", linewidth=1.2, label="leg_psi_meas")
+    ax4.set_ylabel("leg_psi [rad]")
     ax4.grid(True, alpha=0.25)
     ax4.legend(loc="best")
 
-    ax5 = fig.add_subplot(5, 1, 5)
-    ax5.plot(t, pitch_meas, "c", linewidth=1.2, label="pitch_meas")
-    ax5.set_xlabel("t [s]")
-    ax5.set_ylabel("pitch [rad]")
+    ax5 = fig.add_subplot(7, 1, 5)
+    ax5.plot(t, s_meas, "g", linewidth=1.2, label="s_meas")
+    ax5.set_ylabel("s [m]")
     ax5.grid(True, alpha=0.25)
     ax5.legend(loc="best")
+
+    ax6 = fig.add_subplot(7, 1, 6)
+    ax6.plot(t, yaw_meas, "m", linewidth=1.2, label="yaw_meas")
+    ax6.set_ylabel("yaw [rad]")
+    ax6.grid(True, alpha=0.25)
+    ax6.legend(loc="best")
+
+    ax7 = fig.add_subplot(7, 1, 7)
+    ax7.plot(t, pitch_meas, "c", linewidth=1.2, label="pitch_meas")
+    ax7.set_xlabel("t [s]")
+    ax7.set_ylabel("pitch [rad]")
+    ax7.grid(True, alpha=0.25)
+    ax7.legend(loc="best")
 
     fig.tight_layout()
     fig.savefig(png_path, dpi=160)

@@ -105,7 +105,7 @@
             alpha_max: 7.0 # 正常跟随最大 domega_cmd/dt (rad/s²)
             a_lat_max: 2.8 # 正常跟随最大侧向加速度 |v_act*omega_act| (m/s²)
           leg:
-            acc_max: 1.6 # LEG 模式最大 dv_cmd/dt (m/s²)
+            acc_max: 1.5 # LEG 模式最大 dv_cmd/dt (m/s²)
             alpha_max: 7.0 # LEG 模式最大 domega_cmd/dt (rad/s²)
             a_lat_max: 1.5 # LEG 模式最大侧向加速度，适应伸腿后的重心变化 (m/s²)
           jump:
