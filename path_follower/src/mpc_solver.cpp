@@ -82,6 +82,163 @@ inline double clamp_derivative(double x, double lo, double hi) {
     return (x > lo && x < hi) ? 1.0 : 0.0;
 }
 
+inline double smooth_sgn(double x, double eps) {
+    return std::tanh(x / std::max(eps, 1e-6));
+}
+
+inline double smooth_sgn_deriv(double x, double eps) {
+    const double s = smooth_sgn(x, eps);
+    return (1.0 - s * s) / std::max(eps, 1e-6);
+}
+
+inline double clamp_lpv_rho(double rho, double rho_clip) {
+    return std::clamp(rho, -rho_clip, rho_clip);
+}
+
+inline double lpv_schedule_z(double leg_h, double leg_psi) {
+    return leg_h * std::cos(leg_psi);
+}
+
+double schedule_rho_from_state(const ChassisMotionState& chassis_state, const LPVKinematicModelParams& model_params) {
+    const double z = lpv_schedule_z(chassis_state.leg_h, chassis_state.leg_psi);
+    return clamp_lpv_rho((z - model_params.z_ref) / std::max(model_params.z_scale, 1e-6), model_params.rho_clip);
+}
+
+void zoh_v_matrices(
+    double a00,
+    double a01,
+    double a10,
+    double a11,
+    double b0,
+    double b1,
+    double g0,
+    double g1,
+    double dt,
+    double& ad00,
+    double& ad01,
+    double& ad10,
+    double& ad11,
+    double& bd0,
+    double& bd1,
+    double& gd0,
+    double& gd1
+) {
+    const double m00 = a00 * dt;
+    const double m01 = a01 * dt;
+    const double m10 = a10 * dt;
+    const double m11 = a11 * dt;
+    const double tr_m = m00 + m11;
+    const double det_m = m00 * m11 - m01 * m10;
+    const double disc = tr_m * tr_m - 4.0 * det_m;
+    constexpr double eps = 1e-12;
+
+    double alpha = 0.0;
+    double beta = 0.0;
+    if (disc > eps) {
+        const double s = std::sqrt(disc);
+        const double lam1 = 0.5 * (tr_m + s);
+        const double lam2 = 0.5 * (tr_m - s);
+        const double e1 = std::exp(lam1);
+        const double e2 = std::exp(lam2);
+        beta = (e1 - e2) / (lam1 - lam2);
+        alpha = e1 - beta * lam1;
+    } else if (disc < -eps) {
+        const double p = 0.5 * tr_m;
+        const double q = 0.5 * std::sqrt(-disc);
+        const double ep = std::exp(p);
+        beta = ep * std::sin(q) / q;
+        alpha = ep * (std::cos(q) - p * std::sin(q) / q);
+    } else {
+        const double lam = 0.5 * tr_m;
+        const double el = std::exp(lam);
+        beta = el;
+        alpha = el * (1.0 - lam);
+    }
+
+    ad00 = alpha + beta * m00;
+    ad01 = beta * m01;
+    ad10 = beta * m10;
+    ad11 = alpha + beta * m11;
+
+    const double det_a = a00 * a11 - a01 * a10;
+    const double c = alpha - 1.0;
+    double g00 = 0.0;
+    double g01 = 0.0;
+    double g10 = 0.0;
+    double g11 = 0.0;
+    if (std::abs(det_a) > 1e-10) {
+        const double inv_det = 1.0 / det_a;
+        g00 = c * a11 * inv_det + beta * dt;
+        g01 = c * (-a01) * inv_det;
+        g10 = c * (-a10) * inv_det;
+        g11 = c * a00 * inv_det + beta * dt;
+    } else {
+        g00 = dt + 0.5 * dt * dt * a00;
+        g01 = 0.5 * dt * dt * a01;
+        g10 = 0.5 * dt * dt * a10;
+        g11 = dt + 0.5 * dt * dt * a11;
+    }
+
+    bd0 = g00 * b0 + g01 * b1;
+    bd1 = g10 * b0 + g11 * b1;
+    gd0 = g00 * g0 + g01 * g1;
+    gd1 = g10 * g0 + g11 * g1;
+}
+
+LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params, double rho) {
+    LPVDiscreteModel model;
+    model.rho = clamp_lpv_rho(rho, params.rho_clip);
+
+    const double a00 = params.ca00 + model.rho * params.dca00;
+    const double a01 = params.ca01 + model.rho * params.dca01;
+    const double a10 = params.ca10 + model.rho * params.dca10;
+    const double a11 = params.ca11 + model.rho * params.dca11;
+    const double b0 = params.cb0 + model.rho * params.dcb0;
+    const double b1 = params.cb1 + model.rho * params.dcb1;
+
+    zoh_v_matrices(
+        a00, a01, a10, a11, b0, b1, params.gxh, params.gv, MPC_DT,
+        model.ad00, model.ad01, model.ad10, model.ad11,
+        model.bd0, model.bd1, model.gd0, model.gd1
+    );
+
+    const double lam = std::max(params.w_lam0 + model.rho * params.w_lam1, 1e-5);
+    const double kw = params.w_k0 + model.rho * params.w_k1;
+    const double cf = params.w_cf0 + model.rho * params.w_cf1;
+    model.alpha_w = std::exp(-lam * MPC_DT);
+    const double integ_w = (1.0 - model.alpha_w) / lam;
+    model.beta_w = integ_w * kw;
+    model.gamma_w = integ_w * cf;
+    model.sgn_eps = params.sgn_eps;
+    model.cf1 = params.cf1;
+    model.cf2 = params.cf2;
+    return model;
+}
+
+struct LPVNonlinearEval {
+    double nl;
+    double dnl_dv;
+    double dnl_dw;
+    double sw;
+    double dsw_dw;
+};
+
+LPVNonlinearEval evaluate_lpv_nonlinear(double v, double w, const LPVDiscreteModel& model) {
+    const double sv = smooth_sgn(v, model.sgn_eps);
+    const double dsv = smooth_sgn_deriv(v, model.sgn_eps);
+    const double sw = smooth_sgn(w, model.sgn_eps);
+    const double dsw = smooth_sgn_deriv(w, model.sgn_eps);
+    const double absw = std::abs(w);
+    const double dabsw = signum(w);
+    return {
+        .nl = model.cf1 * sv + model.cf2 * v * absw,
+        .dnl_dv = model.cf1 * dsv + model.cf2 * absw,
+        .dnl_dw = model.cf2 * v * dabsw,
+        .sw = sw,
+        .dsw_dw = dsw,
+    };
+}
+
 Eigen::Vector2d apply_goal_deadzone(const Eigen::Vector2d& delta, double deadzone) {
     if (deadzone <= 0.0) return delta;
 
@@ -95,17 +252,8 @@ Eigen::Vector2d apply_goal_deadzone(const Eigen::Vector2d& delta, double deadzon
     return delta * (mag / dist);
 }
 
-inline double sabs(double x) {
-    return std::sqrt(x * x + PWR_EPS2);
-}
-
-inline double smooth_sgn(double x, double eps) {
-    return std::tanh(x / std::max(eps, 1e-6));
-}
-
-inline double smooth_sgn_deriv(double x, double eps) {
-    const double s = smooth_sgn(x, eps);
-    return (1.0 - s * s) / std::max(eps, 1e-6);
+inline double sabs(double x, double eps2) {
+    return std::sqrt(x * x + eps2);
 }
 
 inline double wrap_pi(double a) {
@@ -116,10 +264,12 @@ inline double relu(double x) {
     return smooth_relu_eval(x).value;
 }
 
-inline double predict_power(double v, double w, double a, double alpha) {
-    return PWR_C[0] + PWR_C[1] * v * a + PWR_C[2] * w * alpha + PWR_C[3] * a * a + PWR_C[4] * alpha * alpha
-        + PWR_C[5] * sabs(v) + PWR_C[6] * sabs(w) + PWR_C[7] * v * v + PWR_C[8] * w * w + PWR_C[9] * sabs(a)
-        + PWR_C[10] * sabs(alpha) + PWR_C[11] * sabs(v * w);
+inline double predict_power(const PowerModelParams& power_model, double v, double w, double a, double alpha) {
+    const double eps2 = power_model.smooth_abs_eps * power_model.smooth_abs_eps;
+    const auto& c = power_model.coeffs;
+    return c[0] + c[1] * v * a + c[2] * w * alpha + c[3] * a * a + c[4] * alpha * alpha
+        + c[5] * sabs(v, eps2) + c[6] * sabs(w, eps2) + c[7] * v * v + c[8] * w * w + c[9] * sabs(a, eps2)
+        + c[10] * sabs(alpha, eps2) + c[11] * sabs(v * w, eps2);
 }
 
 struct PowerEval {
@@ -128,22 +278,23 @@ struct PowerEval {
     double dw;
 };
 
-inline PowerEval predict_power_eval_vw(double v, double w) {
-    const double sabs_v = sabs(v);
-    const double sabs_w = sabs(w);
+inline PowerEval predict_power_eval_vw(const PowerModelParams& power_model, double v, double w) {
+    const double eps2 = power_model.smooth_abs_eps * power_model.smooth_abs_eps;
+    const auto& c = power_model.coeffs;
+    const double sabs_v = sabs(v, eps2);
+    const double sabs_w = sabs(w, eps2);
     const double vw = v * w;
-    const double sabs_vw = sabs(vw);
+    const double sabs_vw = sabs(vw, eps2);
 
     const double dsabs_v = v / sabs_v;
     const double dsabs_w = w / sabs_w;
     const double dsabs_vw_dvw = vw / sabs_vw;
 
     PowerEval out {};
-    out.value = PWR_C[0] + PWR_C[5] * sabs_v + PWR_C[6] * sabs_w + PWR_C[7] * v * v + PWR_C[8] * w * w
-        + PWR_C[11] * sabs_vw;
+    out.value = c[0] + c[5] * sabs_v + c[6] * sabs_w + c[7] * v * v + c[8] * w * w + c[11] * sabs_vw;
 
-    out.dv = PWR_C[5] * dsabs_v + 2.0 * PWR_C[7] * v + PWR_C[11] * dsabs_vw_dvw * w;
-    out.dw = PWR_C[6] * dsabs_w + 2.0 * PWR_C[8] * w + PWR_C[11] * dsabs_vw_dvw * v;
+    out.dv = c[5] * dsabs_v + 2.0 * c[7] * v + c[11] * dsabs_vw_dvw * w;
+    out.dw = c[6] * dsabs_w + 2.0 * c[8] * w + c[11] * dsabs_vw_dvw * v;
     return out;
 }
 
@@ -433,18 +584,16 @@ DirSample eval_dir_bilinear(const DirectionMapGridView& grid, const GridInfo& in
 //  共享动力学模型
 // ════════════════════════════════════════════════════════════════
 
-StateVec mpc_dynamics(const StateVec& x, const ControlVec& u) {
+StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const LPVDiscreteModel& model) {
     const double theta = x(ix::THETA);
     const double xh = x(ix::XH), v = x(ix::V), w = x(ix::W);
     const double dv = x(ix::DV), dw = x(ix::DW);
 
-    const double sv = smooth_sgn(v, SGN_EPS);
-    const double sw = smooth_sgn(w, SGN_EPS);
-    const double nl = CF1 * sv + CF2 * v * std::abs(w);
+    const auto nl_eval = evaluate_lpv_nonlinear(v, w, model);
 
-    const double xh1 = A00 * xh + A01 * v + A03 * dv + GNL_XH * nl;
-    const double v1 = A10 * xh + A11 * v + A13 * dv + GNL_V * nl;
-    const double w1 = A22 * w + A24 * dw - GAMMA_W * CF3 * sw;
+    const double xh1 = model.ad00 * xh + model.ad01 * v + model.bd0 * dv + model.gd0 * nl_eval.nl;
+    const double v1 = model.ad10 * xh + model.ad11 * v + model.bd1 * dv + model.gd1 * nl_eval.nl;
+    const double w1 = model.alpha_w * w + model.beta_w * dw - model.gamma_w * nl_eval.sw;
 
     const double dt = MPC_DT;
     const double theta1 = theta + (w + w1) * (dt * 0.5);
@@ -464,36 +613,25 @@ StateVec mpc_dynamics(const StateVec& x, const ControlVec& u) {
     return xn;
 }
 
-void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, MatXX& fx, MatXU& fu) {
+void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const LPVDiscreteModel& model, MatXX& fx, MatXU& fu) {
     const double theta = x(ix::THETA);
     const double xh = x(ix::XH), v = x(ix::V), w = x(ix::W);
     const double dv = x(ix::DV), dw = x(ix::DW);
     const double dt = MPC_DT, h = dt * 0.5;
 
-    const double sv = smooth_sgn(v, SGN_EPS);
-    const double dsv = smooth_sgn_deriv(v, SGN_EPS);
-    const double sw = smooth_sgn(w, SGN_EPS);
-    const double dsw = smooth_sgn_deriv(w, SGN_EPS);
-    const double absw = std::abs(w);
-    const double dabsw = (w >= 0) ? 1.0 : -1.0;
+    const auto nl_eval = evaluate_lpv_nonlinear(v, w, model);
 
-    const double nl = CF1 * sv + CF2 * v * absw;
-    const double dnl_dv = CF1 * dsv + CF2 * absw;
-    const double dnl_dw = CF2 * v * dabsw;
-
-    // Greybox next states
-    const double v1 = A10 * xh + A11 * v + A13 * dv + GNL_V * nl;
-    const double w1 = A22 * w + A24 * dw - GAMMA_W * CF3 * sw;
+    const double v1 = model.ad10 * xh + model.ad11 * v + model.bd1 * dv + model.gd1 * nl_eval.nl;
+    const double w1 = model.alpha_w * w + model.beta_w * dw - model.gamma_w * nl_eval.sw;
     const double theta1 = theta + (w + w1) * h;
 
-    // Derivatives of greybox model
-    const double dvn_dxh = A10;
-    const double dvn_dv = A11 + GNL_V * dnl_dv;
-    const double dvn_dw = GNL_V * dnl_dw;
-    const double dvn_ddv = A13;
+    const double dvn_dxh = model.ad10;
+    const double dvn_dv = model.ad11 + model.gd1 * nl_eval.dnl_dv;
+    const double dvn_dw = model.gd1 * nl_eval.dnl_dw;
+    const double dvn_ddv = model.bd1;
 
-    const double dwn_dw = A22 - GAMMA_W * CF3 * dsw;
-    const double dwn_ddw = A24;
+    const double dwn_dw = model.alpha_w - model.gamma_w * nl_eval.dsw_dw;
+    const double dwn_ddw = model.beta_w;
 
     const double dth1_dth = 1.0;
     const double dth1_dw = (1.0 + dwn_dw) * h;
@@ -526,10 +664,10 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, MatXX& f
     fx(ix::THETA, ix::W) = dth1_dw;
     fx(ix::THETA, ix::DW) = dth1_ddw;
 
-    fx(ix::XH, ix::XH) = A00;
-    fx(ix::XH, ix::V) = A01 + GNL_XH * dnl_dv;
-    fx(ix::XH, ix::W) = GNL_XH * dnl_dw;
-    fx(ix::XH, ix::DV) = A03;
+    fx(ix::XH, ix::XH) = model.ad00;
+    fx(ix::XH, ix::V) = model.ad01 + model.gd0 * nl_eval.dnl_dv;
+    fx(ix::XH, ix::W) = model.gd0 * nl_eval.dnl_dw;
+    fx(ix::XH, ix::DV) = model.bd0;
 
     fx(ix::V, ix::XH) = dvn_dxh;
     fx(ix::V, ix::V) = dvn_dv;
@@ -556,6 +694,7 @@ FollowProblem::FollowProblem(
     const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
     double prediction_dt,
+    double schedule_rho,
     const DirectionMapGridView& dir_grid,
     const GridInfo& dir_info,
     const ArclengthTable& arclength_table,
@@ -569,6 +708,7 @@ FollowProblem::FollowProblem(
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
     prediction_dt_(prediction_dt),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     arc_table_(arclength_table),
@@ -578,13 +718,13 @@ FollowProblem::FollowProblem(
     target_ey_(target_ey) {}
 
 StateVec FollowProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    StateVec xn = mpc_dynamics(x, u);
+    StateVec xn = mpc_dynamics(x, u, model_);
     xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, ref_cps_);
     return xn;
 }
 
 void FollowProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, dfx, dfu);
+    mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
 
     const auto adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, ref_cps_);
     const double dout_din = clamp_derivative(adv.u_next_extrap, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
@@ -793,7 +933,7 @@ namespace {
         out.jx(13, ix::PATH_U) = -terminal_w.q_v_final * relu_vfinal.deriv * dvdec_ds * ds_dpathu;
 
         if (p.energy.enable) {
-            const auto pwr = predict_power_eval_vw(v_act, w_act);
+            const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
             const double thr = std::max(p.energy.threshold, 1.0);
             const double beta = std::max(p.energy.softplus_beta, 1e-6);
             const double excess = (pwr.value - rfr_pwr_limit) / thr;
@@ -1013,6 +1153,7 @@ StopProblem::StopProblem(
     const MPCParams& params,
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
+    double schedule_rho,
     const DirectionMapGridView& dir_grid,
     const GridInfo& dir_info,
     double remaining_energy,
@@ -1021,17 +1162,18 @@ StopProblem::StopProblem(
     p_(params),
     cost_grid_(cost_grid),
     cost_info_(cost_info),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec StopProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    return mpc_dynamics(x, u);
+    return mpc_dynamics(x, u, model_);
 }
 
 void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, dfx, dfu);
+    mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
 }
 
 ControlVec StopProblem::u_lower() const {
@@ -1098,7 +1240,7 @@ StopResidualVec stop_residual_impl(
     }
 
     if (p.energy.enable) {
-        const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+        const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
@@ -1174,6 +1316,7 @@ HoldProblem::HoldProblem(
     const MPCParams& params,
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
+    double schedule_rho,
     const DirectionMapGridView& dir_grid,
     const GridInfo& dir_info,
     double remaining_energy,
@@ -1183,17 +1326,18 @@ HoldProblem::HoldProblem(
     p_(params),
     cost_grid_(cost_grid),
     cost_info_(cost_info),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec HoldProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    return mpc_dynamics(x, u);
+    return mpc_dynamics(x, u, model_);
 }
 
 void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, dfx, dfu);
+    mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
 }
 
 ControlVec HoldProblem::u_lower() const {
@@ -1263,7 +1407,7 @@ HoldResidualVec hold_residual_impl(
     r(11) = env_w.step * dir_norm;
 
     if (p.energy.enable) {
-        const double pwr = predict_power(v_act, w_act, 0.0, 0.0);
+        const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
@@ -1441,26 +1585,35 @@ void MPCSolver::set_energy_state(double remaining_energy, double rfr_pwr_limit) 
     rfr_pwr_limit_ = rfr_pwr_limit;
 }
 
-void MPCSolver::update_observer(double v_act, double w_act) {
+void MPCSolver::update_observer(const ChassisMotionState& chassis_state) {
+    const double v_act = chassis_state.velocity;
+    const double w_act = chassis_state.omega;
+    const double rho_cur = schedule_rho_from_state(chassis_state, params_.kinematic_model);
     if (!observer_initialized_) {
-        x_h_hat_ = XH0;
+        x_h_hat_ = params_.kinematic_model.xh0_bias + params_.kinematic_model.xh0_psi * chassis_state.leg_psi
+            + params_.kinematic_model.xh0_v * v_act;
         prev_v_act_ = v_act;
         prev_w_act_ = w_act;
+        prev_schedule_rho_ = rho_cur;
         observer_initialized_ = true;
         return;
     }
-    const double sv_prev = std::tanh(prev_v_act_ / SGN_EPS);
-    const double nl_prev = CF1 * sv_prev + CF2 * prev_v_act_ * std::abs(prev_w_act_);
-    const double xh_pred = A00 * x_h_hat_ + A01 * prev_v_act_ + A03 * last_cmd_.x() + GNL_XH * nl_prev;
-    const double v_pred = A10 * x_h_hat_ + A11 * prev_v_act_ + A13 * last_cmd_.x() + GNL_V * nl_prev;
-    x_h_hat_ = xh_pred + OBS_L * (v_act - v_pred);
+    const auto model = build_lpv_discrete_model(params_.kinematic_model, 0.5 * (prev_schedule_rho_ + rho_cur));
+    const auto nl_eval = evaluate_lpv_nonlinear(prev_v_act_, prev_w_act_, model);
+    const double xh_pred = model.ad00 * x_h_hat_ + model.ad01 * prev_v_act_ + model.bd0 * last_cmd_.x() + model.gd0 * nl_eval.nl;
+    const double v_pred = model.ad10 * x_h_hat_ + model.ad11 * prev_v_act_ + model.bd1 * last_cmd_.x() + model.gd1 * nl_eval.nl;
+    const double psi_proxy_pred = params_.kinematic_model.psi_bias + params_.kinematic_model.psi_gain * xh_pred
+        + params_.kinematic_model.psi_v * v_pred;
+    x_h_hat_ = xh_pred + params_.kinematic_model.obs_lv * (v_act - v_pred)
+        + params_.kinematic_model.obs_lpsi * (chassis_state.leg_psi - psi_proxy_pred);
     prev_v_act_ = v_act;
     prev_w_act_ = w_act;
+    prev_schedule_rho_ = rho_cur;
 }
 
 StateVec MPCSolver::make_initial_state(
     const Eigen::Vector3d& pose,
-    const Eigen::Vector2d& status,
+    const ChassisMotionState& chassis_state,
     const Eigen::Vector2d& cmd_clamped,
     double path_u
 ) const {
@@ -1469,8 +1622,8 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::Y) = pose.y();
     x0(ix::THETA) = pose.z();
     x0(ix::XH) = x_h_hat_;
-    x0(ix::V) = status.x();
-    x0(ix::W) = status.y();
+    x0(ix::V) = chassis_state.velocity;
+    x0(ix::W) = chassis_state.omega;
     x0(ix::DV) = cmd_clamped.x();
     x0(ix::DW) = cmd_clamped.y();
     x0(ix::PATH_U) = path_u;
@@ -1496,7 +1649,7 @@ MPCPrediction MPCSolver::extract_prediction(const StateVec* xs, int n) {
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_follow(
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
-    const Eigen::Vector2d& chassis_status,
+    const ChassisMotionState& chassis_state,
     const CostMap& cost_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
@@ -1525,19 +1678,20 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
             last_cmd_.x(),
-            chassis_status.x(),
+            chassis_state.velocity,
             params_.follow.start_command.vel_cmd_act_gap_max,
             follow_motion_lim.acc_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
-            chassis_status.y(),
+            chassis_state.omega,
             params_.follow.start_command.omega_cmd_act_gap_max,
             follow_motion_lim.alpha_max,
             MPC_DT
         )
     );
+    const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
 
     const auto& arc = [&]() -> const ArclengthTable& {
         const int ns = params_.follow.terminal_limits.slow_down_num_samples;
@@ -1568,7 +1722,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const GridInfo ci = make_grid_info(cost_map);
     const DirectionMapGridView dg(direction_map);
     const GridInfo di = make_grid_info(direction_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, u0);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     FollowProblem prob_center(
         ref_cps,
@@ -1576,6 +1730,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         step_cost_grids_cache_,
         ci,
         pred_dt,
+        schedule_rho,
         dg,
         di,
         arc,
@@ -1601,6 +1756,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             step_cost_grids_cache_,
             ci,
             pred_dt,
+            schedule_rho,
             dg,
             di,
             arc,
@@ -1615,6 +1771,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             step_cost_grids_cache_,
             ci,
             pred_dt,
+            schedule_rho,
             dg,
             di,
             arc,
@@ -1671,34 +1828,35 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_stop(
     const Eigen::Vector3d& chassis_pose_map,
-    const Eigen::Vector2d& chassis_status,
+    const ChassisMotionState& chassis_state,
     const CostMap& cost_map,
     const DirectionMap& direction_map
 ) {
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
             last_cmd_.x(),
-            chassis_status.x(),
+            chassis_state.velocity,
             params_.stop.start_command.vel_cmd_act_gap_max,
             params_.stop.motion_constraints.acc_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
-            chassis_status.y(),
+            chassis_state.omega,
             params_.stop.start_command.omega_cmd_act_gap_max,
             params_.stop.motion_constraints.alpha_max,
             MPC_DT
         )
     );
+    const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
     const DirectionMapGridView dg(direction_map);
     const GridInfo di = make_grid_info(direction_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, 0.0);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    StopProblem prob(params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);
+    StopProblem prob(params_, cg, ci, schedule_rho, dg, di, remaining_energy_, rfr_pwr_limit_);
     initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;
@@ -1716,34 +1874,35 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_hold(
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
-    const Eigen::Vector2d& chassis_status,
+    const ChassisMotionState& chassis_state,
     const CostMap& cost_map,
     const DirectionMap& direction_map
 ) {
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
             last_cmd_.x(),
-            chassis_status.x(),
+            chassis_state.velocity,
             params_.hold.start_command.vel_cmd_act_gap_max,
             params_.hold.motion_constraints.acc_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
-            chassis_status.y(),
+            chassis_state.omega,
             params_.hold.start_command.omega_cmd_act_gap_max,
             params_.hold.motion_constraints.alpha_max,
             MPC_DT
         )
     );
+    const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
     const DirectionMapGridView dg(direction_map);
     const GridInfo di = make_grid_info(direction_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_status, cmd0, 0.0);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    HoldProblem prob(goal_map, params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);
+    HoldProblem prob(goal_map, params_, cg, ci, schedule_rho, dg, di, remaining_energy_, rfr_pwr_limit_);
     initialize_primal_trajectory(hold_solver_, prob, x0, hold_warm_);
 
     fddp::SolverOptions opts;

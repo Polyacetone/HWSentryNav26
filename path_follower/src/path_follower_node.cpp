@@ -97,7 +97,7 @@ private:
     bool path_updated_ = false;
     bool fixed_goal_ = false;
     Eigen::Vector2d fixed_goal_pos_ = Eigen::Vector2d::Zero();
-    Eigen::Vector2d chassis_status_ = Eigen::Vector2d::Zero();
+    ChassisMotionState chassis_state_ {};
     uint8_t chassis_leg_mode_ = 4;
     uint8_t comp_stage_ = 4;
     double rfr_pwr_limit_ = 90.0;
@@ -291,6 +291,52 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .enable = declare_parameter<bool>("mpc.multi_hypothesis.enable"),
             .lateral_offset = declare_parameter<double>("mpc.multi_hypothesis.lateral_offset"),
             .target_ey_penalty = declare_parameter<double>("mpc.multi_hypothesis.target_ey_penalty")
+        },
+        .kinematic_model = {
+            .z_ref = declare_parameter<double>("kinematic_model.z_ref"),
+            .z_scale = declare_parameter<double>("kinematic_model.z_scale"),
+            .rho_clip = declare_parameter<double>("kinematic_model.rho_clip"),
+            .sgn_eps = declare_parameter<double>("kinematic_model.sgn_eps"),
+            .ca00 = declare_parameter<double>("kinematic_model.ca00"),
+            .ca01 = declare_parameter<double>("kinematic_model.ca01"),
+            .ca10 = declare_parameter<double>("kinematic_model.ca10"),
+            .ca11 = declare_parameter<double>("kinematic_model.ca11"),
+            .cb0 = declare_parameter<double>("kinematic_model.cb0"),
+            .cb1 = declare_parameter<double>("kinematic_model.cb1"),
+            .dca00 = declare_parameter<double>("kinematic_model.dca00"),
+            .dca01 = declare_parameter<double>("kinematic_model.dca01"),
+            .dca10 = declare_parameter<double>("kinematic_model.dca10"),
+            .dca11 = declare_parameter<double>("kinematic_model.dca11"),
+            .dcb0 = declare_parameter<double>("kinematic_model.dcb0"),
+            .dcb1 = declare_parameter<double>("kinematic_model.dcb1"),
+            .gxh = declare_parameter<double>("kinematic_model.gxh"),
+            .gv = declare_parameter<double>("kinematic_model.gv"),
+            .cf1 = declare_parameter<double>("kinematic_model.cf1"),
+            .cf2 = declare_parameter<double>("kinematic_model.cf2"),
+            .w_lam0 = declare_parameter<double>("kinematic_model.w_lam0"),
+            .w_k0 = declare_parameter<double>("kinematic_model.w_k0"),
+            .w_cf0 = declare_parameter<double>("kinematic_model.w_cf0"),
+            .w_lam1 = declare_parameter<double>("kinematic_model.w_lam1"),
+            .w_k1 = declare_parameter<double>("kinematic_model.w_k1"),
+            .w_cf1 = declare_parameter<double>("kinematic_model.w_cf1"),
+            .xh0_bias = declare_parameter<double>("kinematic_model.xh0_bias"),
+            .xh0_psi = declare_parameter<double>("kinematic_model.xh0_psi"),
+            .xh0_v = declare_parameter<double>("kinematic_model.xh0_v"),
+            .psi_bias = declare_parameter<double>("kinematic_model.psi_bias"),
+            .psi_gain = declare_parameter<double>("kinematic_model.psi_gain"),
+            .psi_v = declare_parameter<double>("kinematic_model.psi_v"),
+            .obs_lv = declare_parameter<double>("kinematic_model.obs_lv"),
+            .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi")
+        },
+        .power_model = {
+            .smooth_abs_eps = declare_parameter<double>("power_model.smooth_abs_eps"),
+            .coeffs = [this]() {
+                std::array<double, PWR_N> coeffs {};
+                for (int i = 0; i < PWR_N; ++i) {
+                    coeffs[static_cast<size_t>(i)] = declare_parameter<double>("power_model.c" + std::to_string(i));
+                }
+                return coeffs;
+            }()
         }
     };
 
@@ -497,8 +543,10 @@ void PathFollowerNode::control_points_callback(const interfaces::msg::GlobalPath
 }
 
 void PathFollowerNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
-    chassis_status_.x() = msg->velocity;
-    chassis_status_.y() = msg->omega;
+    chassis_state_.velocity = msg->velocity;
+    chassis_state_.omega = msg->omega;
+    chassis_state_.leg_h = msg->leg_h;
+    chassis_state_.leg_psi = msg->leg_psi;
     chassis_leg_mode_ = msg->leg_mode;
     rfr_pwr_limit_ = static_cast<double>(msg->rfr_pwr_limit);
     remaining_energy_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_supercap) + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_filtered_;
@@ -645,7 +693,7 @@ void PathFollowerNode::control_timer_callback() {
         .fixed_goal = fixed_goal_,
         .fixed_goal_pos = fixed_goal_pos_,
         .chassis_pose_map = chassis_pose_map,
-        .chassis_status = chassis_status_,
+        .chassis_state = chassis_state_,
         .remaining_energy = remaining_energy_filtered_,
         .rfr_pwr_limit = rfr_pwr_limit_,
         .chassis_leg_mode = chassis_leg_mode_,

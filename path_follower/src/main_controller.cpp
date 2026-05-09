@@ -231,7 +231,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     mpc_controller_->set_last_cmd(last_cmd_);
 
     // 0. 更新隐藏状态观测器（在 MPC 求解之前）
-    mpc_controller_->update_observer(input.chassis_status.x(), input.chassis_status.y());
+    mpc_controller_->update_observer(input.chassis_state);
 
     // 0.5 更新能量状态
     mpc_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
@@ -426,7 +426,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     // 调用 MPC
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_follow(
-        *input.global_path, input.chassis_pose_map, input.chassis_status,
+        *input.global_path, input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, input.per_step_cost_maps, input.prediction_dt,
         *input.masked_direction_map,
         latched_step_up_mode_
@@ -536,7 +536,7 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
 
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_stop(
-        input.chassis_pose_map, input.chassis_status,
+        input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {
@@ -747,7 +747,7 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_hold(
         *recovery_goal_map_,
-        input.chassis_pose_map, input.chassis_status,
+        input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {
@@ -792,7 +792,7 @@ ControlOutput MainController::execute_step_runup(const ControlInput& input) {
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_hold(
         *step_runup_goal_map_,
-        input.chassis_pose_map, input.chassis_status,
+        input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {
@@ -843,7 +843,7 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_hold(
         input.fixed_goal_pos,
-        input.chassis_pose_map, input.chassis_status,
+        input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, *input.masked_direction_map
     );
     if (!result) {

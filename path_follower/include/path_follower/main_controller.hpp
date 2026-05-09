@@ -29,8 +29,8 @@ struct ControlInput {
     Eigen::Vector2d fixed_goal_pos;    // fixed 目标位置 (map)
 
     // ─── 底盘状态 ───
-    Eigen::Vector3d chassis_pose_map;  // (x, y, theta) in map
-    Eigen::Vector2d chassis_status;    // (v_act, ω_act)
+    Eigen::Vector3d chassis_pose_map;    // (x, y, theta) in map
+    ChassisMotionState chassis_state;    // (v_act, ω_act, leg_h, leg_psi)
 
     // ─── 能量状态 ───
     double remaining_energy;     // 电容剩余可用电量 (J)

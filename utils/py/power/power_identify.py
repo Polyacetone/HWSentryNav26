@@ -22,7 +22,7 @@
   c₁₁·|v·ω|: 平移-偏航耦合功率（离心效应、差速转向）
 
 辨识方法：
-    1. 低通滤波 + 降采样到 MPC 频率
+  1. 低通滤波 + 降采样到 MPC 频率
   2. 数值微分得 a=dv/dt, α=dω/dt
   3. 构建特征矩阵 Φ (线性回归)
   4. 可选 Ridge/Lasso 正则化
@@ -541,40 +541,17 @@ def plot_results(series_list: List[PowerSeries], coeffs: np.ndarray,
     print(f"  plots saved to {plot_dir}")
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  C++ Code Generation
-# ════════════════════════════════════════════════════════════════════════════════
-
-def generate_cpp_snippet(coeffs: np.ndarray) -> str:
-    """Generate C++ code snippet for MPC power prediction."""
-    lines = []
-    lines.append("// ──── Auto-generated power model coefficients ────")
-    lines.append("// P(v, w, a, alpha) = c[0]")
-    lines.append("//   + c[1]*v*a + c[2]*w*alpha")
-    lines.append("//   + c[3]*a*a + c[4]*alpha*alpha")
-    lines.append("//   + c[5]*fabs(v) + c[6]*fabs(w)")
-    lines.append("//   + c[7]*v*v + c[8]*w*w")
-    lines.append("//   + c[9]*fabs(a) + c[10]*fabs(alpha)")
-    lines.append("//   + c[11]*fabs(v*w)")
-    lines.append("")
-    lines.append(f"static constexpr int kPowerModelNumCoeffs = {N_FEATURES};")
-    lines.append("static constexpr double kPowerModelCoeffs[kPowerModelNumCoeffs] = {")
+def generate_power_model_yaml(coeffs: np.ndarray) -> str:
+    lines = [
+        "/**:",
+        "  ros__parameters:",
+        "    power_model:",
+        "      # Smooth absolute value epsilon: |x| ~= sqrt(x^2 + smooth_abs_eps^2)",
+        f"      smooth_abs_eps: {SGN_EPS}",
+        "      # P = c0 + c1*v*a + c2*w*alpha + c3*a^2 + c4*alpha^2 + c5*|v| + c6*|w| + c7*v^2 + c8*w^2 + c9*|a| + c10*|alpha| + c11*|v*w|",
+    ]
     for i, c in enumerate(coeffs):
-        comma = "," if i < len(coeffs) - 1 else ""
-        lines.append(f"    {c:18.10e}{comma}  // c{i}: {FEATURE_NAMES[i]}")
-    lines.append("};")
-    lines.append("")
-    lines.append("inline double predict_chassis_power(")
-    lines.append("    double v, double w, double a, double alpha) {")
-    lines.append("    const auto* c = kPowerModelCoeffs;")
-    lines.append("    return c[0]")
-    lines.append("        + c[1]*v*a + c[2]*w*alpha")
-    lines.append("        + c[3]*a*a + c[4]*alpha*alpha")
-    lines.append("        + c[5]*std::fabs(v) + c[6]*std::fabs(w)")
-    lines.append("        + c[7]*v*v + c[8]*w*w")
-    lines.append("        + c[9]*std::fabs(a) + c[10]*std::fabs(alpha)")
-    lines.append("        + c[11]*std::fabs(v*w);")
-    lines.append("}")
+        lines.append(f"      c{i}: {float(c)} # {FEATURE_NAMES[i]}")
     return "\n".join(lines)
 
 
@@ -677,10 +654,9 @@ def main() -> int:
     txt_path.write_text(model_text)
     print(f"Text:  {txt_path}")
 
-    # Save C++ snippet
-    cpp_path = out_dir / "power_model_snippet.hpp"
-    cpp_path.write_text(generate_cpp_snippet(coeffs))
-    print(f"C++:   {cpp_path}")
+    yaml_path = out_dir / "power_model.yaml"
+    yaml_path.write_text(generate_power_model_yaml(coeffs))
+    print(f"YAML:  {yaml_path}")
 
     # Save per-file CSV
     csv_path = out_dir / "per_file_metrics.csv"

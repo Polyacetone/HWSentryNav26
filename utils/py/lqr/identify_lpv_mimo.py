@@ -914,6 +914,52 @@ def format_matrix(mat: np.ndarray) -> str:
     return "\n".join("  [" + ", ".join(f"{v: .10e}" for v in row) + "]" for row in mat)
 
 
+def generate_kinematic_model_yaml(params: np.ndarray, sched: Dict[str, float]) -> str:
+    obs = observer_gains(params)
+    lines = [
+        "/**:",
+        "  ros__parameters:",
+        "    kinematic_model:",
+        "      # LPV scheduling: rho = clip((leg_h*cos(leg_psi) - z_ref) / z_scale, -rho_clip, rho_clip)",
+        f"      z_ref: {sched['z_ref']}",
+        f"      z_scale: {sched['z_scale']}",
+        f"      rho_clip: {sched['rho_clip']}",
+        "      # Smooth sign approximation epsilon used in tanh(x / sgn_eps)",
+        f"      sgn_eps: {SGN_EPS}",
+        "",
+        "      # [x_h_dot, v_dot]^T = (Ac0 + rho*Ac1)[x_h, v]^T + (Bc0 + rho*Bc1) dv + Gnl*nl",
+    ]
+    for name in ["ca00", "ca01", "ca10", "ca11", "cb0", "cb1"]:
+        lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
+    lines.extend([
+        "",
+        "      # Rho slopes for the continuous-time LPV matrices",
+    ])
+    for name in ["dca00", "dca01", "dca10", "dca11", "dcb0", "dcb1"]:
+        lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
+    lines.extend([
+        "",
+        "      # Nonlinear term: nl = cf1*tanh(v/sgn_eps) + cf2*v*abs(w)",
+    ])
+    for name in ["gxh", "gv", "cf1", "cf2"]:
+        lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
+    lines.extend([
+        "",
+        "      # Yaw channel: w_dot = -(w_lam0 + rho*w_lam1) * w + (w_k0 + rho*w_k1) * dw - (w_cf0 + rho*w_cf1) * tanh(w/sgn_eps)",
+    ])
+    for name in ["w_lam0", "w_k0", "w_cf0", "w_lam1", "w_k1", "w_cf1"]:
+        lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
+    lines.extend([
+        "",
+        "      # Hidden-state initialization / leg_psi proxy observer",
+    ])
+    for name in ["xh0_bias", "xh0_psi", "xh0_v", "psi_bias", "psi_gain", "psi_v"]:
+        lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
+    lines.append(f"      obs_lv: {float(obs['L_v'])}")
+    lines.append(f"      obs_lpsi: {float(obs['L_psi'])}")
+    return "\n".join(lines)
+
+
 def save_model_txt(
     out_path: Path,
     params: np.ndarray,
@@ -1190,12 +1236,15 @@ def main() -> int:
     save_model_txt(out_dir / f"model_lpv_{MPC_RATE_HZ}hz.txt", params, loss_value, sched, agg, results)
     save_metrics_csv(out_dir / "per_file_metrics.csv", results)
     save_npz(out_dir / f"model_lpv_{MPC_RATE_HZ}hz.npz", params, sched, agg)
+    yaml_str = generate_kinematic_model_yaml(params, sched)
+    (out_dir / "kinematic_model.yaml").write_text(yaml_str + "\n", encoding="utf-8")
     generate_plots(series, results, plots_dir)
 
     print("Done")
     print(f"  result_dir: {out_dir}")
     print(f"  model_txt:  {out_dir / f'model_lpv_{MPC_RATE_HZ}hz.txt'}")
     print(f"  metrics:    {out_dir / 'per_file_metrics.csv'}")
+    print(f"  YAML:       {out_dir / 'kinematic_model.yaml'}")
     print(f"  plots:      {plots_dir}")
     print(f"  aggregate:  rmse_v={agg['rmse_v']:.5f}, rmse_w={agg['rmse_w']:.5f}, r2_v={agg['r2_v']:.4f}, r2_w={agg['r2_w']:.4f}")
     return 0

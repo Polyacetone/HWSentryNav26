@@ -20,48 +20,7 @@ constexpr int MPC_HORIZON = 30;
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
-
-// ── ZOH-discretized model constants (auto-generated) ──
-constexpr int    MODEL_NX  = 5;
-constexpr double SGN_EPS   = 0.05;
-constexpr double CF1       = 0.05395388664337549;
-constexpr double CF2       = -0.2612581657757263;
-constexpr double CF3       = -0.0016352542898623189;
-constexpr double XH0       = -0.16272485279540086;
-// v-subsystem (2×2 ZOH via matrix exponential)
-constexpr double A00       = 0.9050820941524629;
-constexpr double A01       = -0.22022152377276474;
-constexpr double A03       = 0.11784132905511124;
-constexpr double A10       = 0.06214640496109394;
-constexpr double A11       = 1.017312448183584;
-constexpr double A13       = 0.048401077957935405;
-// nonlinear gains (ZOH): Gnl = G·[0;1]
-constexpr double GNL_XH    = -0.005573573656084681;
-constexpr double GNL_V     = 0.050490173067102684;
-// ω-channel (1st-order ZOH exact): pole = exp(-dt/τ) = 0.512244 (positive!)
-constexpr double A22       = 0.5122441476172463;
-constexpr double A24       = 0.48775585238275365;
-constexpr double GAMMA_W   = 0.03645661084749873;
-// hidden-state observer gain (target pole = 0.6)
-constexpr double OBS_L     = 4.909086766055995;
-
-// ── Power model coefficients (auto-generated from identification) ──
 constexpr int PWR_N = 12;
-constexpr double PWR_EPS2 = 0.05 * 0.05;
-constexpr double PWR_C[PWR_N] = {
-    2.1819886751e-00,  // c0: 1 (bias)
-    3.7554288560e+01,  // c1: v·a
-    9.0037590352e-01,  // c2: ω·α
-    3.7473397433e+00,  // c3: a²
-    5.3351521229e-02,  // c4: α²
-    1.3085009538e+01,  // c5: |v|
-    3.7559074150e+00,  // c6: |ω|
-    7.7240176266e+00,  // c7: v²
-    2.8778608500e-01,  // c8: ω²
-    1.0022176768e+01,  // c9: |a|
-    0.0000000000e+00,  // c10: |α|
-    4.7233251821e+00  // c11: |v·ω|
-};
 
 // 弧长查找表类型
 constexpr int ARCLENGTH_TABLE_SIZE = 128;
@@ -136,6 +95,78 @@ struct MPCFollowTerrainWeights {
 
 struct MPCFollowEnvironmentWeights {
     double obstacle;
+};
+
+struct ChassisMotionState {
+    double velocity = 0.0;
+    double omega = 0.0;
+    double leg_h = 0.0;
+    double leg_psi = 0.0;
+};
+
+struct LPVKinematicModelParams {
+    double z_ref = 0.0;
+    double z_scale = 1.0;
+    double rho_clip = 1.5;
+    double sgn_eps = 0.05;
+
+    double ca00 = 0.0;
+    double ca01 = 0.0;
+    double ca10 = 0.0;
+    double ca11 = 0.0;
+    double cb0 = 0.0;
+    double cb1 = 0.0;
+
+    double dca00 = 0.0;
+    double dca01 = 0.0;
+    double dca10 = 0.0;
+    double dca11 = 0.0;
+    double dcb0 = 0.0;
+    double dcb1 = 0.0;
+
+    double gxh = 0.0;
+    double gv = 0.0;
+    double cf1 = 0.0;
+    double cf2 = 0.0;
+
+    double w_lam0 = 0.0;
+    double w_k0 = 0.0;
+    double w_cf0 = 0.0;
+    double w_lam1 = 0.0;
+    double w_k1 = 0.0;
+    double w_cf1 = 0.0;
+
+    double xh0_bias = 0.0;
+    double xh0_psi = 0.0;
+    double xh0_v = 0.0;
+    double psi_bias = 0.0;
+    double psi_gain = 1.0;
+    double psi_v = 0.0;
+    double obs_lv = 0.0;
+    double obs_lpsi = 0.0;
+};
+
+struct PowerModelParams {
+    double smooth_abs_eps = 0.05;
+    std::array<double, PWR_N> coeffs {};
+};
+
+struct LPVDiscreteModel {
+    double rho = 0.0;
+    double ad00 = 1.0;
+    double ad01 = 0.0;
+    double ad10 = 0.0;
+    double ad11 = 1.0;
+    double bd0 = 0.0;
+    double bd1 = 0.0;
+    double gd0 = 0.0;
+    double gd1 = 0.0;
+    double alpha_w = 1.0;
+    double beta_w = 0.0;
+    double gamma_w = 0.0;
+    double sgn_eps = 0.05;
+    double cf1 = 0.0;
+    double cf2 = 0.0;
 };
 
 struct MPCFollowTerminalLimits {
@@ -270,6 +301,8 @@ struct MPCParams {
 
     EnergyParams energy;
     MultiHypothesisParams mh_params;
+    LPVKinematicModelParams kinematic_model;
+    PowerModelParams power_model;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -335,16 +368,6 @@ using ControlVec = Eigen::Matrix<double, MPC_NU, 1>;
 using MatXX = Eigen::Matrix<double, MPC_NX, MPC_NX>;
 using MatXU = Eigen::Matrix<double, MPC_NX, MPC_NU>;
 
-/// 通用离散动力学，车辆状态按模型推进，PATH_U 默认保持不变。
-StateVec mpc_dynamics(const StateVec& x, const ControlVec& u);
-
-/// 动力学雅可比: fx = ∂f/∂x, fu = ∂f/∂u
-void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu);
-
-// ═══════════════════════════════════════════════════════════════
-//  FDDP Problem 类型 — Follow
-// ═══════════════════════════════════════════════════════════════
-
 class FollowProblem {
 public:
     FollowProblem(
@@ -353,6 +376,7 @@ public:
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
         double prediction_dt,
+        double schedule_rho,
         const DirectionMapGridView& dir_grid,
         const GridInfo& dir_info,
         const ArclengthTable& arclength_table,
@@ -391,6 +415,7 @@ private:
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
     double prediction_dt_;
+    LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     const ArclengthTable& arc_table_;
@@ -410,6 +435,7 @@ public:
         const MPCParams& params,
         const CostMapGridView& cost_grid,
         const GridInfo& cost_info,
+        double schedule_rho,
         const DirectionMapGridView& dir_grid,
         const GridInfo& dir_info,
         double remaining_energy,
@@ -441,6 +467,7 @@ private:
     const MPCParams& p_;
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
+    LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     double remaining_energy_;
@@ -458,6 +485,7 @@ public:
         const MPCParams& params,
         const CostMapGridView& cost_grid,
         const GridInfo& cost_info,
+        double schedule_rho,
         const DirectionMapGridView& dir_grid,
         const GridInfo& dir_info,
         double remaining_energy,
@@ -490,6 +518,7 @@ private:
     const MPCParams& p_;
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
+    LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     double remaining_energy_;
@@ -534,7 +563,7 @@ public:
     void set_last_cmd(const Eigen::Vector2d& cmd);
     void reset_warm_start();
 
-    void update_observer(double v_act, double w_act);
+    void update_observer(const ChassisMotionState& chassis_state);
     void set_energy_state(double remaining_energy, double rfr_pwr_limit);
 
     [[nodiscard]] double hidden_state_estimate() const {
@@ -544,7 +573,7 @@ public:
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_follow(
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,
-        const Eigen::Vector2d& chassis_status,
+        const ChassisMotionState& chassis_state,
         const CostMap& cost_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
@@ -554,7 +583,7 @@ public:
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(
         const Eigen::Vector3d& chassis_pose_map,
-        const Eigen::Vector2d& chassis_status,
+        const ChassisMotionState& chassis_state,
         const CostMap& cost_map,
         const DirectionMap& direction_map
     );
@@ -562,7 +591,7 @@ public:
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_hold(
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
-        const Eigen::Vector2d& chassis_status,
+        const ChassisMotionState& chassis_state,
         const CostMap& cost_map,
         const DirectionMap& direction_map
     );
@@ -600,6 +629,7 @@ private:
     double x_h_hat_ = 0.0;
     double prev_v_act_ = 0.0;
     double prev_w_act_ = 0.0;
+    double prev_schedule_rho_ = 0.0;
     bool observer_initialized_ = false;
 
     // ── Energy state ──
@@ -609,7 +639,7 @@ private:
     // ── 辅助 ──
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,
-        const Eigen::Vector2d& status,
+        const ChassisMotionState& chassis_state,
         const Eigen::Vector2d& cmd_clamped,
         double path_u
     ) const;
