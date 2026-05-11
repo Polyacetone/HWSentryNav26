@@ -67,6 +67,7 @@ struct MPCMotionConstraintWeights {
 struct MPCFollowModeProfile {
     MPCCommandBounds command_bounds;
     MPCMotionConstraints motion_constraints;
+    double lpv_rho;
 };
 
 struct MPCFollowModeProfiles {
@@ -110,24 +111,46 @@ struct ChassisMotionState {
     double leg_psi = 0.0;
 };
 
-struct GreyboxKinematicModelParams {
+struct LPVKinematicModelParams {
+    double z_ref = 0.0;
+    double z_scale = 1.0;
+    double rho_clip = 1.5;
     double sgn_eps = 0.05;
 
-    double a11 = 0.0;
-    double a12 = 0.0;
-    double a21 = 0.0;
-    double a22 = 0.0;
-    double b1 = 0.0;
-    double b2 = 0.0;
+    double ca00 = 0.0;
+    double ca01 = 0.0;
+    double ca10 = 0.0;
+    double ca11 = 0.0;
+    double cb0 = 0.0;
+    double cb1 = 0.0;
 
+    double dca00 = 0.0;
+    double dca01 = 0.0;
+    double dca10 = 0.0;
+    double dca11 = 0.0;
+    double dcb0 = 0.0;
+    double dcb1 = 0.0;
+
+    double gxh = 0.0;
+    double gv = 0.0;
     double cf1 = 0.0;
     double cf2 = 0.0;
 
-    double tau_w = 1.0;
-    double cf3 = 0.0;
+    double w_lam0 = 0.0;
+    double w_k0 = 0.0;
+    double w_cf0 = 0.0;
+    double w_lam1 = 0.0;
+    double w_k1 = 0.0;
+    double w_cf1 = 0.0;
 
-    double xh0 = 0.0;
-    double obs_l = 0.0;
+    double xh0_bias = 0.0;
+    double xh0_psi = 0.0;
+    double xh0_v = 0.0;
+    double psi_bias = 0.0;
+    double psi_gain = 1.0;
+    double psi_v = 0.0;
+    double obs_lv = 0.0;
+    double obs_lpsi = 0.0;
 };
 
 struct PowerModelParams {
@@ -135,7 +158,8 @@ struct PowerModelParams {
     std::array<double, PWR_N> coeffs {};
 };
 
-struct GreyboxDiscreteModel {
+struct LPVDiscreteModel {
+    double rho = 0.0;
     double ad00 = 1.0;
     double ad01 = 0.0;
     double ad10 = 0.0;
@@ -299,7 +323,7 @@ struct MPCParams {
     EnergyParams energy;
     MultiHypothesisParams mh_params;
     MPCStepPreviewWeights step_preview;
-    GreyboxKinematicModelParams kinematic_model;
+    LPVKinematicModelParams kinematic_model;
     PowerModelParams power_model;
 };
 
@@ -375,6 +399,7 @@ public:
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
         double prediction_dt,
+        double schedule_rho,
         const DirectionMapGridView& dir_grid,
         const GridInfo& dir_info,
         const ArclengthTable& arclength_table,
@@ -413,7 +438,7 @@ private:
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
     double prediction_dt_;
-    GreyboxDiscreteModel model_ {};
+    LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     const ArclengthTable& arc_table_;
@@ -436,6 +461,7 @@ public:
     StepPreviewProblem(
         const std::vector<Eigen::Vector2d>& ref_control_points,
         const MPCParams& params,
+        double schedule_rho,
         std::optional<ChassisMode> preview_mode
     );
 
@@ -463,7 +489,7 @@ public:
 private:
     const std::vector<Eigen::Vector2d>& ref_cps_;
     const MPCParams& p_;
-    GreyboxDiscreteModel model_ {};
+    LPVDiscreteModel model_ {};
     std::optional<ChassisMode> preview_mode_;
 };
 
@@ -477,6 +503,7 @@ public:
         const MPCParams& params,
         const CostMapGridView& cost_grid,
         const GridInfo& cost_info,
+        double schedule_rho,
         const DirectionMapGridView& dir_grid,
         const GridInfo& dir_info,
         double remaining_energy,
@@ -508,7 +535,7 @@ private:
     const MPCParams& p_;
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
-    GreyboxDiscreteModel model_ {};
+    LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     double remaining_energy_;
@@ -526,6 +553,7 @@ public:
         const MPCParams& params,
         const CostMapGridView& cost_grid,
         const GridInfo& cost_info,
+        double schedule_rho,
         const DirectionMapGridView& dir_grid,
         const GridInfo& dir_info,
         double remaining_energy,
@@ -558,7 +586,7 @@ private:
     const MPCParams& p_;
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
-    GreyboxDiscreteModel model_ {};
+    LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     double remaining_energy_;
@@ -665,9 +693,10 @@ private:
             const StateVec& initial_state,
             const std::vector<Eigen::Vector2d>& ref_cps,
             const MPCParams& params,
+            double schedule_rho,
             std::optional<ChassisMode> preview_mode
         ) : x0(initial_state),
-            problem(ref_cps, params, preview_mode) {}
+            problem(ref_cps, params, schedule_rho, preview_mode) {}
     };
 
     MPCParams params_;
@@ -701,6 +730,7 @@ private:
     double x_h_hat_ = 0.0;
     double prev_v_act_ = 0.0;
     double prev_w_act_ = 0.0;
+    double prev_schedule_rho_ = 0.0;
     bool observer_initialized_ = false;
 
     // ── Energy state ──

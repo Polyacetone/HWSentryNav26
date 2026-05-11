@@ -91,6 +91,31 @@ inline double smooth_sgn_deriv(double x, double eps) {
     return (1.0 - s * s) / std::max(eps, 1e-6);
 }
 
+inline double clamp_lpv_rho(double rho, double rho_clip) {
+    return std::clamp(rho, -rho_clip, rho_clip);
+}
+
+inline double lpv_schedule_z(double leg_h, double leg_psi) {
+    return leg_h * std::cos(leg_psi);
+}
+
+double schedule_rho_from_state(const ChassisMotionState& chassis_state, const LPVKinematicModelParams& model_params) {
+    const double z = lpv_schedule_z(chassis_state.leg_h, chassis_state.leg_psi);
+    return clamp_lpv_rho((z - model_params.z_ref) / std::max(model_params.z_scale, 1e-6), model_params.rho_clip);
+}
+
+double select_follow_schedule_rho(
+    const MPCFollowParams& params,
+    std::optional<ChassisMode> latched_step_up_mode,
+    const ChassisMotionState& chassis_state,
+    const LPVKinematicModelParams& model_params
+) {
+    if (is_latched_follow_step_mode(latched_step_up_mode)) {
+        return clamp_lpv_rho(select_follow_mode_profile(params, latched_step_up_mode).lpv_rho, model_params.rho_clip);
+    }
+    return schedule_rho_from_state(chassis_state, model_params);
+}
+
 void zoh_v_matrices(
     double a00,
     double a01,
@@ -98,6 +123,8 @@ void zoh_v_matrices(
     double a11,
     double b0,
     double b1,
+    double g0,
+    double g1,
     double dt,
     double& ad00,
     double& ad01,
@@ -166,29 +193,41 @@ void zoh_v_matrices(
 
     bd0 = g00 * b0 + g01 * b1;
     bd1 = g10 * b0 + g11 * b1;
-    gd0 = g01;
-    gd1 = g11;
+    gd0 = g00 * g0 + g01 * g1;
+    gd1 = g10 * g0 + g11 * g1;
 }
 
-GreyboxDiscreteModel build_greybox_discrete_model(const GreyboxKinematicModelParams& params) {
-    GreyboxDiscreteModel model;
+LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params, double rho) {
+    LPVDiscreteModel model;
+    model.rho = clamp_lpv_rho(rho, params.rho_clip);
+
+    const double a00 = params.ca00 + model.rho * params.dca00;
+    const double a01 = params.ca01 + model.rho * params.dca01;
+    const double a10 = params.ca10 + model.rho * params.dca10;
+    const double a11 = params.ca11 + model.rho * params.dca11;
+    const double b0 = params.cb0 + model.rho * params.dcb0;
+    const double b1 = params.cb1 + model.rho * params.dcb1;
+
     zoh_v_matrices(
-        params.a11, params.a12, params.a21, params.a22, params.b1, params.b2, MPC_DT,
+        a00, a01, a10, a11, b0, b1, params.gxh, params.gv, MPC_DT,
         model.ad00, model.ad01, model.ad10, model.ad11,
         model.bd0, model.bd1, model.gd0, model.gd1
     );
 
-    const double inv_tau = 1.0 / std::max(std::abs(params.tau_w), 1e-4);
-    model.alpha_w = std::exp(-inv_tau * MPC_DT);
-    model.beta_w = 1.0 - model.alpha_w;
-    model.gamma_w = model.beta_w / inv_tau * params.cf3;
+    const double lam = std::max(params.w_lam0 + model.rho * params.w_lam1, 1e-5);
+    const double kw = params.w_k0 + model.rho * params.w_k1;
+    const double cf = params.w_cf0 + model.rho * params.w_cf1;
+    model.alpha_w = std::exp(-lam * MPC_DT);
+    const double integ_w = (1.0 - model.alpha_w) / lam;
+    model.beta_w = integ_w * kw;
+    model.gamma_w = integ_w * cf;
     model.sgn_eps = params.sgn_eps;
     model.cf1 = params.cf1;
     model.cf2 = params.cf2;
     return model;
 }
 
-struct GreyboxNonlinearEval {
+struct LPVNonlinearEval {
     double nl;
     double dnl_dv;
     double dnl_dw;
@@ -196,7 +235,7 @@ struct GreyboxNonlinearEval {
     double dsw_dw;
 };
 
-GreyboxNonlinearEval evaluate_greybox_nonlinear(double v, double w, const GreyboxDiscreteModel& model) {
+LPVNonlinearEval evaluate_lpv_nonlinear(double v, double w, const LPVDiscreteModel& model) {
     const double sv = smooth_sgn(v, model.sgn_eps);
     const double dsv = smooth_sgn_deriv(v, model.sgn_eps);
     const double sw = smooth_sgn(w, model.sgn_eps);
@@ -557,12 +596,12 @@ DirSample eval_dir_bilinear(const DirectionMapGridView& grid, const GridInfo& in
 //  共享动力学模型
 // ════════════════════════════════════════════════════════════════
 
-StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const GreyboxDiscreteModel& model) {
+StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const LPVDiscreteModel& model) {
     const double theta = x(ix::THETA);
     const double xh = x(ix::XH), v = x(ix::V), w = x(ix::W);
     const double dv = x(ix::DV), dw = x(ix::DW);
 
-    const auto nl_eval = evaluate_greybox_nonlinear(v, w, model);
+    const auto nl_eval = evaluate_lpv_nonlinear(v, w, model);
 
     const double xh1 = model.ad00 * xh + model.ad01 * v + model.bd0 * dv + model.gd0 * nl_eval.nl;
     const double v1 = model.ad10 * xh + model.ad11 * v + model.bd1 * dv + model.gd1 * nl_eval.nl;
@@ -586,13 +625,13 @@ StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const GreyboxDiscr
     return xn;
 }
 
-void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const GreyboxDiscreteModel& model, MatXX& fx, MatXU& fu) {
+void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const LPVDiscreteModel& model, MatXX& fx, MatXU& fu) {
     const double theta = x(ix::THETA);
     const double xh = x(ix::XH), v = x(ix::V), w = x(ix::W);
     const double dv = x(ix::DV), dw = x(ix::DW);
     const double dt = MPC_DT, h = dt * 0.5;
 
-    const auto nl_eval = evaluate_greybox_nonlinear(v, w, model);
+    const auto nl_eval = evaluate_lpv_nonlinear(v, w, model);
 
     const double v1 = model.ad10 * xh + model.ad11 * v + model.bd1 * dv + model.gd1 * nl_eval.nl;
     const double w1 = model.alpha_w * w + model.beta_w * dw - model.gamma_w * nl_eval.sw;
@@ -668,6 +707,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
     double prediction_dt,
+    double schedule_rho,
     const DirectionMapGridView& dir_grid,
     const GridInfo& dir_info,
     const ArclengthTable& arclength_table,
@@ -681,7 +721,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
     prediction_dt_(prediction_dt),
-    model_(build_greybox_discrete_model(params.kinematic_model)),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     arc_table_(arclength_table),
@@ -1201,10 +1241,11 @@ Eigen::Matrix<double, STEP_PREVIEW_RESIDUAL_DIM, 1> step_preview_residual_impl(
 StepPreviewProblem::StepPreviewProblem(
     const std::vector<Eigen::Vector2d>& ref_control_points,
     const MPCParams& params,
+    double schedule_rho,
     std::optional<ChassisMode> preview_mode
 ): ref_cps_(ref_control_points),
    p_(params),
-   model_(build_greybox_discrete_model(params.kinematic_model)),
+   model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
    preview_mode_(preview_mode) {}
 
 StateVec StepPreviewProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
@@ -1269,6 +1310,7 @@ StopProblem::StopProblem(
     const MPCParams& params,
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
+    double schedule_rho,
     const DirectionMapGridView& dir_grid,
     const GridInfo& dir_info,
     double remaining_energy,
@@ -1277,7 +1319,7 @@ StopProblem::StopProblem(
     p_(params),
     cost_grid_(cost_grid),
     cost_info_(cost_info),
-    model_(build_greybox_discrete_model(params.kinematic_model)),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
@@ -1431,6 +1473,7 @@ HoldProblem::HoldProblem(
     const MPCParams& params,
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
+    double schedule_rho,
     const DirectionMapGridView& dir_grid,
     const GridInfo& dir_info,
     double remaining_energy,
@@ -1440,7 +1483,7 @@ HoldProblem::HoldProblem(
     p_(params),
     cost_grid_(cost_grid),
     cost_info_(cost_info),
-    model_(build_greybox_discrete_model(params.kinematic_model)),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
@@ -1706,20 +1749,27 @@ void MPCSolver::set_energy_state(double remaining_energy, double rfr_pwr_limit) 
 void MPCSolver::update_observer(const ChassisMotionState& chassis_state) {
     const double v_act = chassis_state.velocity;
     const double w_act = chassis_state.omega;
+    const double rho_cur = schedule_rho_from_state(chassis_state, params_.kinematic_model);
     if (!observer_initialized_) {
-        x_h_hat_ = params_.kinematic_model.xh0;
+        x_h_hat_ = params_.kinematic_model.xh0_bias + params_.kinematic_model.xh0_psi * chassis_state.leg_psi
+            + params_.kinematic_model.xh0_v * v_act;
         prev_v_act_ = v_act;
         prev_w_act_ = w_act;
+        prev_schedule_rho_ = rho_cur;
         observer_initialized_ = true;
         return;
     }
-    const auto model = build_greybox_discrete_model(params_.kinematic_model);
-    const auto nl_eval = evaluate_greybox_nonlinear(prev_v_act_, prev_w_act_, model);
+    const auto model = build_lpv_discrete_model(params_.kinematic_model, 0.5 * (prev_schedule_rho_ + rho_cur));
+    const auto nl_eval = evaluate_lpv_nonlinear(prev_v_act_, prev_w_act_, model);
     const double xh_pred = model.ad00 * x_h_hat_ + model.ad01 * prev_v_act_ + model.bd0 * last_cmd_.x() + model.gd0 * nl_eval.nl;
     const double v_pred = model.ad10 * x_h_hat_ + model.ad11 * prev_v_act_ + model.bd1 * last_cmd_.x() + model.gd1 * nl_eval.nl;
-    x_h_hat_ = xh_pred + params_.kinematic_model.obs_l * (v_act - v_pred);
+    const double psi_proxy_pred = params_.kinematic_model.psi_bias + params_.kinematic_model.psi_gain * xh_pred
+        + params_.kinematic_model.psi_v * v_pred;
+    x_h_hat_ = xh_pred + params_.kinematic_model.obs_lv * (v_act - v_pred)
+        + params_.kinematic_model.obs_lpsi * (chassis_state.leg_psi - psi_proxy_pred);
     prev_v_act_ = v_act;
     prev_w_act_ = w_act;
+    prev_schedule_rho_ = rho_cur;
 }
 
 void MPCSolver::reset_observer() {
@@ -1790,8 +1840,15 @@ MPCSolver::PreviewContext MPCSolver::make_preview_context(
             MPC_DT
         )
     );
+    const double schedule_rho = select_follow_schedule_rho(
+        params_.follow,
+        preview_mode_opt,
+        chassis_state,
+        params_.kinematic_model
+    );
+
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, path_u);
-    return PreviewContext(x0, ref_cps, params_, preview_mode_opt);
+    return PreviewContext(x0, ref_cps, params_, schedule_rho, preview_mode_opt);
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_follow(
@@ -1840,6 +1897,13 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             MPC_DT
         )
     );
+    const double schedule_rho = select_follow_schedule_rho(
+        params_.follow,
+        latched_step_up_mode,
+        chassis_state,
+        params_.kinematic_model
+    );
+
     const auto& arc = [&]() -> const ArclengthTable& {
         const int ns = params_.follow.terminal_limits.slow_down_num_samples;
         if (prev_arc_samples_ != ns || !same_cps(prev_ref_control_points_, ref_cps)) {
@@ -1877,6 +1941,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         step_cost_grids_cache_,
         ci,
         pred_dt,
+        schedule_rho,
         dg,
         di,
         arc,
@@ -1902,6 +1967,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             step_cost_grids_cache_,
             ci,
             pred_dt,
+            schedule_rho,
             dg,
             di,
             arc,
@@ -1916,6 +1982,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             step_cost_grids_cache_,
             ci,
             pred_dt,
+            schedule_rho,
             dg,
             di,
             arc,
@@ -2018,13 +2085,15 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             MPC_DT
         )
     );
+    const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
+
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
     const DirectionMapGridView dg(direction_map);
     const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    StopProblem prob(params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);
+    StopProblem prob(params_, cg, ci, schedule_rho, dg, di, remaining_energy_, rfr_pwr_limit_);
     initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;
@@ -2062,13 +2131,15 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             MPC_DT
         )
     );
+    const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
+
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
     const DirectionMapGridView dg(direction_map);
     const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    HoldProblem prob(goal_map, params_, cg, ci, dg, di, remaining_energy_, rfr_pwr_limit_);
+    HoldProblem prob(goal_map, params_, cg, ci, schedule_rho, dg, di, remaining_energy_, rfr_pwr_limit_);
     initialize_primal_trajectory(hold_solver_, prob, x0, hold_warm_);
 
     fddp::SolverOptions opts;
