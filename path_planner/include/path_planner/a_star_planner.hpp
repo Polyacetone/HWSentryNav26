@@ -14,7 +14,7 @@ public:
     explicit AStarPlanner(
         const double direction_weight,
         const double obstacle_weight,
-        const double step_weight,                         // penalty for stepping (based on direction field magnitude)
+        const double step_weight,
         const int downsampled_waypoint_max_interval,
         const int feasible_threshold
     );

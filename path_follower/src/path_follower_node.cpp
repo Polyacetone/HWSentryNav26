@@ -145,8 +145,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                         .acc_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.motion_constraints.acc_max"),
                         .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.motion_constraints.alpha_max"),
                         .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles.normal.motion_constraints.a_lat_max")
-                    },
-                    .lpv_rho = 0.0 // normal 跟随仍使用实测状态调度，此值仅作占位
+                    }
                 },
                 .leg = {
                     .command_bounds = {
@@ -159,8 +158,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                         .acc_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.motion_constraints.acc_max"),
                         .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.motion_constraints.alpha_max"),
                         .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles.leg.motion_constraints.a_lat_max")
-                    },
-                    .lpv_rho = declare_parameter<double>("mpc.follow.mode_profiles.leg.lpv_rho")
+                    }
                 },
                 .jump = {
                     .command_bounds = {
@@ -173,8 +171,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                         .acc_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.motion_constraints.acc_max"),
                         .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.motion_constraints.alpha_max"),
                         .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles.jump.motion_constraints.a_lat_max")
-                    },
-                    .lpv_rho = declare_parameter<double>("mpc.follow.mode_profiles.jump.lpv_rho")
+                    }
                 }
             },
             .tracking_weights = {
@@ -326,40 +323,19 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .lat_acc = declare_parameter<double>("mpc.step_preview.lat_acc")
         },
         .kinematic_model = {
-            .z_ref = declare_parameter<double>("kinematic_model.z_ref"),
-            .z_scale = declare_parameter<double>("kinematic_model.z_scale"),
-            .rho_clip = declare_parameter<double>("kinematic_model.rho_clip"),
             .sgn_eps = declare_parameter<double>("kinematic_model.sgn_eps"),
-            .ca00 = declare_parameter<double>("kinematic_model.ca00"),
-            .ca01 = declare_parameter<double>("kinematic_model.ca01"),
-            .ca10 = declare_parameter<double>("kinematic_model.ca10"),
-            .ca11 = declare_parameter<double>("kinematic_model.ca11"),
-            .cb0 = declare_parameter<double>("kinematic_model.cb0"),
-            .cb1 = declare_parameter<double>("kinematic_model.cb1"),
-            .dca00 = declare_parameter<double>("kinematic_model.dca00"),
-            .dca01 = declare_parameter<double>("kinematic_model.dca01"),
-            .dca10 = declare_parameter<double>("kinematic_model.dca10"),
-            .dca11 = declare_parameter<double>("kinematic_model.dca11"),
-            .dcb0 = declare_parameter<double>("kinematic_model.dcb0"),
-            .dcb1 = declare_parameter<double>("kinematic_model.dcb1"),
-            .gxh = declare_parameter<double>("kinematic_model.gxh"),
-            .gv = declare_parameter<double>("kinematic_model.gv"),
+            .a11 = declare_parameter<double>("kinematic_model.a11"),
+            .a12 = declare_parameter<double>("kinematic_model.a12"),
+            .a21 = declare_parameter<double>("kinematic_model.a21"),
+            .a22 = declare_parameter<double>("kinematic_model.a22"),
+            .b1 = declare_parameter<double>("kinematic_model.b1"),
+            .b2 = declare_parameter<double>("kinematic_model.b2"),
             .cf1 = declare_parameter<double>("kinematic_model.cf1"),
             .cf2 = declare_parameter<double>("kinematic_model.cf2"),
-            .w_lam0 = declare_parameter<double>("kinematic_model.w_lam0"),
-            .w_k0 = declare_parameter<double>("kinematic_model.w_k0"),
-            .w_cf0 = declare_parameter<double>("kinematic_model.w_cf0"),
-            .w_lam1 = declare_parameter<double>("kinematic_model.w_lam1"),
-            .w_k1 = declare_parameter<double>("kinematic_model.w_k1"),
-            .w_cf1 = declare_parameter<double>("kinematic_model.w_cf1"),
-            .xh0_bias = declare_parameter<double>("kinematic_model.xh0_bias"),
-            .xh0_psi = declare_parameter<double>("kinematic_model.xh0_psi"),
-            .xh0_v = declare_parameter<double>("kinematic_model.xh0_v"),
-            .psi_bias = declare_parameter<double>("kinematic_model.psi_bias"),
-            .psi_gain = declare_parameter<double>("kinematic_model.psi_gain"),
-            .psi_v = declare_parameter<double>("kinematic_model.psi_v"),
-            .obs_lv = declare_parameter<double>("kinematic_model.obs_lv"),
-            .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi")
+            .tau_w = declare_parameter<double>("kinematic_model.tau_w"),
+            .cf3 = declare_parameter<double>("kinematic_model.cf3"),
+            .xh0 = declare_parameter<double>("kinematic_model.xh0"),
+            .obs_l = declare_parameter<double>("kinematic_model.obs_l")
         },
         .power_model = {
             .smooth_abs_eps = declare_parameter<double>("power_model.smooth_abs_eps"),

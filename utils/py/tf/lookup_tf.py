@@ -13,10 +13,10 @@ class TF2LookupNode(Node):
     def lookup_transform(self):
         try:
             transform: TransformStamped = self.tf_buffer.lookup_transform(
-                'map', 'chassis_link', rclpy.time.Time()
+                'map', 'imu_world', rclpy.time.Time()
             )
             self.get_logger().info(
-                f'Found transform from chassis_link to map: \n'
+                f'Found transform from imu_world to map: \n'
                 f'translation={transform.transform.translation}\n'
                 f'rotation={transform.transform.rotation}\n\n'
             )

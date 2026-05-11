@@ -172,6 +172,7 @@ private:
     ControlOutput execute_step_runup(const ControlInput& input);
     void sync_mpc_context(const ControlInput& input);
     void reset_all_mpc_warm_start();
+    void reset_all_mpc_observer();
 
     void on_state_transition(FsmState prev, FsmState next);
     void update_recovery_goal_if_needed(const ControlInput& input);
@@ -286,6 +287,7 @@ private:
 
     // ─── 复活检测（底盘 Dead -> Mature） ───
     bool last_cycle_chassis_dead_ = false;
+    uint8_t last_leg_mode_ = 0;
 
     // ─── 上台阶失败兜底状态 ───
     std::deque<Eigen::Vector2d> step_up_attempt_positions_;  // 仅保存最近 N 次

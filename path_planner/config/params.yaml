@@ -40,7 +40,7 @@
       step_detection_samples_per_meter: 10.0 # 台阶扫描采样密度（物理米）
       warmup:
         obstacle_weight: 0.5 # Warmup阶段避障权重
-        direction_weight: 5.0 # Warmup阶段台阶方向对齐权重
+        direction_weight: 6.0 # Warmup阶段台阶方向对齐权重
         step_weight: 0.25 # Warmup阶段台阶位置惩罚
         start_end_weight: 15.0 # Warmup阶段起终点保持权重，避免过刚性
         smoothness_weight: 0.005 # Warmup阶段小权重二阶平滑，抑制局部抖动
@@ -58,7 +58,7 @@
           speed_gate_threshold: 0.15 # 小速度区域下调曲率惩罚 (m)
       main:
         obstacle_weight: 0.5 # Main阶段避障权重
-        direction_weight: 5.0 # Main阶段台阶方向对齐权重
+        direction_weight: 6.0 # Main阶段台阶方向对齐权重
         step_weight: 0.25 # Main阶段台阶位置惩罚
         start_end_weight: 15.0 # Main阶段起终点保持权重
         smoothness_weight: 0.005 # Main阶段保留更小的二阶平滑，避免与显式曲率约束打架

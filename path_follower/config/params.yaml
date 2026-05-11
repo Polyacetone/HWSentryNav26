@@ -49,15 +49,15 @@
         off_count_threshold: 3 # 连续未检测到台阶轨迹的次数才清除 step_down_flag
 
       step_up_flag:
-        path_lookahead_distance: 3.0 # 沿路径向前扫查台阶目标的固定距离 (m)
+        path_lookahead_distance: 2.5 # 沿路径向前扫查台阶目标的固定距离 (m)
         path_sample_resolution: 0.05 # 沿路径采样分辨率 (m)
         target_match_distance: 0.4 # 连续检测时视为同一台阶目标的位置阈值 (m)
         latch_threshold: 3 # 连续检测到同一台阶目标的次数才锁存
-        release_distance: 0.5 # 通过台阶后释放锁存的最小滞回距离 (m)
+        release_distance: 0.3 # 通过台阶后释放锁存的最小滞回距离 (m)
 
       step_up_preview:
         preview_hit_distance: 0.4 # 长预测命中已锁存台阶目标的位置阈值 (m)
-        preview_speed_error_threshold: 0.5 # 候选方案命中台阶处的速度误差阈值 (m/s)
+        preview_speed_error_threshold: 1.0 # 候选方案命中台阶处的速度误差阈值 (m/s)
         preview_heading_error_threshold: 0.6 # 候选方案命中台阶处的姿态对齐误差阈值 (rad)
         preview_speed_error_weight: 1.0 # 候选方案比较时的速度误差权重
         preview_heading_error_weight: 1.0 # 候选方案比较时的姿态误差权重
@@ -131,7 +131,6 @@
               acc_max: 1.5 # LEG 模式最大 dv_cmd/dt (m/s²)
               alpha_max: 7.0 # LEG 模式最大 domega_cmd/dt (rad/s²)
               a_lat_max: 1.5 # LEG 模式最大侧向加速度，适应伸腿后的重心变化 (m/s²)
-            lpv_rho: 0.95 # LEG 预览使用固定腿构型调度量
           jump:
             command_bounds:
               vel_max: 2.4 # JUMP 模式最大速度 (m/s)
@@ -142,7 +141,6 @@
               acc_max: 1.8 # JUMP 模式最大 dv_cmd/dt (m/s²)
               alpha_max: 7.0 # JUMP 模式最大 domega_cmd/dt (rad/s²)
               a_lat_max: 2.8 # JUMP 模式最大侧向加速度 |v_act*omega_act| (m/s²)
-            lpv_rho: -0.87 # JUMP 预览使用固定腿构型调度量
         tracking_weights:
           q_y: 0.4 # 横向误差权重
           q_theta: 0.2 # 航向误差权重
@@ -157,7 +155,7 @@
           alpha_limit: 20.0 # 角速度指令变化率超限惩罚
           lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         terrain_limits:
-          step_vel_jump: 2.2 # JUMP 模式上台阶目标速度 (m/s)
+          step_vel_jump: 10.0 # JUMP 模式上台阶目标速度 (m/s)
           step_vel_leg: 1.4 # LEG 模式上台阶目标速度 (m/s)
           step_vel_deadzone: 0.4 # 上台阶速度惩罚死区 (m/s)
         terrain_weights:
@@ -178,10 +176,10 @@
 
       step_preview:
         q_y: 0.6 # 上台阶预览路径横向偏差权重
-        q_theta: 0.4 # 上台阶预览航向偏差权重
+        q_theta: 0.2 # 上台阶预览航向偏差权重
         q_u: 1.0 # 上台阶预览进度鼓励权重
-        r_dv: 0.6 # 上台阶预览指令平滑权重（线速度）
-        r_domega: 0.2 # 上台阶预览指令平滑权重（角速度）
+        r_dv: 0.2 # 上台阶预览指令平滑权重（线速度）
+        r_domega: 0.1 # 上台阶预览指令平滑权重（角速度）
         acc_limit: 20.0 # 上台阶预览加速度约束惩罚权重
         alpha_limit: 20.0 # 上台阶预览角加速度约束惩罚权重
         lat_acc: 20.0 # 上台阶预览侧向加速度约束惩罚权重
@@ -271,7 +269,7 @@
         path_integral_resolution: 0.05 # 从当前位置到候选点的路径积分（用于计算代价和）采样精度 (m)
         goal_timeout: 4.0 # 目标点超时时长，超时后重新选择 (s)
       exit:
-        safe_hold_time: 0.5 # 安全区域保持时间 (s)
+        safe_hold_time: 1.0 # 安全区域保持时间 (s)
       stuck:
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.4 # 指令速度超过该值才开始检测 (m/s)

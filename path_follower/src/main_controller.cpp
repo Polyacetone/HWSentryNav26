@@ -24,10 +24,10 @@ const char* mode_label(ChassisMode m) {
     }
 }
 
-inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_status) {
-    // leg_mode: 2:Flight, 4:Mature
-    // comp_status: 4:比赛中
-    return (leg_mode != 2u && leg_mode != 4u) || comp_status != 4u;
+inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_stage) {
+    // leg_mode: 0:Dead, 1:Recovery, 6:Abnormal, 7:Transition → chassis dead
+    // comp_stage: 4:比赛中
+    return leg_mode == 0u || leg_mode == 1u || leg_mode == 6u || leg_mode == 7u || comp_stage != 4u;
 }
 
 }
@@ -235,10 +235,20 @@ void MainController::reset_all_mpc_warm_start() {
     preview_jump_controller_->reset_warm_start();
 }
 
+void MainController::reset_all_mpc_observer() {
+    mpc_controller_->reset_observer();
+    preview_leg_controller_->reset_observer();
+    preview_jump_controller_->reset_observer();
+}
+
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
 ControlOutput MainController::update(const ControlInput& input) {
     const bool chassis_dead = is_chassis_dead(input.chassis_leg_mode, input.comp_stage);
+
+    // 检测 leg_mode 上升沿进入 4(Mature)，每次进入都重置龙伯格观测器
+    const bool entered_mature = !chassis_dead && input.chassis_leg_mode == 4u && last_leg_mode_ != 4u;
+    last_leg_mode_ = input.chassis_leg_mode;
 
     // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM。
     if (chassis_dead) {
@@ -251,9 +261,16 @@ ControlOutput MainController::update(const ControlInput& input) {
 
         last_cmd_ = Eigen::Vector2d::Zero();
         reset_all_mpc_warm_start();
+        reset_all_mpc_observer();
         stuck_active_ = false;
         recovery_safe_since_ = std::nullopt;
         return out;
+    }
+
+    // 每次进入 Mature(4) 重置观测器，确保从干净状态开始
+    if (entered_mature) {
+        RCLCPP_INFO(logger_, "Mature entered (leg_mode=4): resetting Luenberger observer");
+        reset_all_mpc_observer();
     }
 
     const bool just_revived = last_cycle_chassis_dead_;
