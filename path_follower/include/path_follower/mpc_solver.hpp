@@ -17,7 +17,6 @@ namespace path_follower {
 // ═══════════════════════════════════════════════════════════════
 
 constexpr int MPC_HORIZON = 30;
-constexpr int MPC_STEP_PREVIEW_HORIZON = 80;
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
@@ -72,8 +71,10 @@ struct MPCFollowModeProfile {
 
 struct MPCFollowModeProfiles {
     MPCFollowModeProfile normal;
-    MPCFollowModeProfile leg;
-    MPCFollowModeProfile jump;
+    MPCFollowModeProfile leg_up;
+    MPCFollowModeProfile jump_up;
+    MPCFollowModeProfile leg_down;
+    MPCFollowModeProfile jump_down;
 };
 
 struct MPCFollowTrackingWeights {
@@ -90,8 +91,7 @@ struct MPCFollowCommandWeights {
 };
 
 struct MPCFollowTerrainLimits {
-    double step_vel_jump;
-    double step_vel_leg;
+    std::array<double, 4> step_speed_levels;
     double step_vel_deadzone;
 };
 
@@ -213,23 +213,13 @@ struct MPCStopCommandWeights {
     double r_domega;
 };
 
-struct MPCStopTerrainLimits {
-    double step_vel_stop;
-    double step_vel_deadzone_stop;
-};
-
-struct MPCStopTerrainWeights {
-    double step_vel_weight_stop;
-    double direction;
-};
-
 struct MPCStopEnvironmentWeights {
     double obstacle;
 };
 
 struct MPCStopTerminalWeights {
     double obstacle_terminal;
-    double step_terminal;
+    double step_terminal = 0.0; // 停止模式下台阶由 step_cost_layer 转为障碍物处理，此字段保留但未使用
 };
 
 struct MPCStopParams {
@@ -238,8 +228,6 @@ struct MPCStopParams {
     MPCMotionConstraints motion_constraints;
     MPCStopCommandWeights command_weights;
     MPCMotionConstraintWeights motion_constraint_weights;
-    MPCStopTerrainLimits terrain_limits;
-    MPCStopTerrainWeights terrain_weights;
     MPCStopEnvironmentWeights environment_weights;
     MPCStopTerminalWeights terminal_weights;
 };
@@ -292,19 +280,11 @@ struct MultiHypothesisParams {
     double target_ey_penalty;
 };
 
-// ═══════════════════════════════════════════════════════════════
-//  StepPreviewProblem 独立参数
-// ═══════════════════════════════════════════════════════════════
+struct ActiveStepMode {
+    ChassisMode mode = ChassisMode::NORMAL;
+    double target_velocity = 0.0;
 
-struct MPCStepPreviewWeights {
-    double q_y;
-    double q_theta;
-    double q_u;
-    double r_dv;
-    double r_domega;
-    double acc_limit;
-    double alpha_limit;
-    double lat_acc;
+    bool operator==(const ActiveStepMode&) const = default;
 };
 
 /// MPC 预测轨迹
@@ -322,7 +302,6 @@ struct MPCParams {
 
     EnergyParams energy;
     MultiHypothesisParams mh_params;
-    MPCStepPreviewWeights step_preview;
     LPVKinematicModelParams kinematic_model;
     PowerModelParams power_model;
 };
@@ -405,7 +384,7 @@ public:
         const ArclengthTable& arclength_table,
         double remaining_energy,
         double rfr_pwr_limit,
-        std::optional<ChassisMode> latched_step_up_mode,
+        std::optional<ActiveStepMode> active_step_mode,
         double target_ey = 0.0
     );
 
@@ -444,54 +423,11 @@ private:
     const ArclengthTable& arc_table_;
     double remaining_energy_;
     double rfr_pwr_limit_;
-    std::optional<ChassisMode> latched_step_up_mode_;
+    std::optional<ActiveStepMode> active_step_mode_;
     double target_ey_;
 };
 
 using FollowProblem = FollowProblemT<MPC_HORIZON>;
-
-// ═══════════════════════════════════════════════════════════════
-//  StepPreviewProblem — 上台阶候选预评估
-//  使用简化代价：仅包含路径跟踪、进度鼓励、指令平滑、运动学约束
-//  不含避障、台阶对齐、台阶限速、终点减速、能量约束
-// ═══════════════════════════════════════════════════════════════
-
-class StepPreviewProblem {
-public:
-    StepPreviewProblem(
-        const std::vector<Eigen::Vector2d>& ref_control_points,
-        const MPCParams& params,
-        double schedule_rho,
-        std::optional<ChassisMode> preview_mode
-    );
-
-    StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
-    void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
-
-    double running_cost(int k, const StateVec& x, const ControlVec& u) const;
-    void running_cost_derivatives(
-        int k,
-        const StateVec& x,
-        const ControlVec& u,
-        StateVec& lx,
-        ControlVec& lu,
-        MatXX& lxx,
-        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
-        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
-    ) const;
-
-    double terminal_cost(const StateVec& x) const;
-    void terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const;
-
-    ControlVec u_lower() const;
-    ControlVec u_upper() const;
-
-private:
-    const std::vector<Eigen::Vector2d>& ref_cps_;
-    const MPCParams& p_;
-    LPVDiscreteModel model_ {};
-    std::optional<ChassisMode> preview_mode_;
-};
 
 // ═══════════════════════════════════════════════════════════════
 //  FDDP Problem 类型 — Stop
@@ -504,8 +440,6 @@ public:
         const CostMapGridView& cost_grid,
         const GridInfo& cost_info,
         double schedule_rho,
-        const DirectionMapGridView& dir_grid,
-        const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit
     );
@@ -536,8 +470,6 @@ private:
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
     LPVDiscreteModel model_ {};
-    const DirectionMapGridView& dir_grid_;
-    GridInfo dir_info_;
     double remaining_energy_;
     double rfr_pwr_limit_;
 };
@@ -616,12 +548,6 @@ struct Dims<path_follower::HoldProblem> {
     static constexpr int NU = path_follower::MPC_NU;
     static constexpr int N = path_follower::MPC_HORIZON;
 };
-template<>
-struct Dims<path_follower::StepPreviewProblem> {
-    static constexpr int NX = path_follower::MPC_NX;
-    static constexpr int NU = path_follower::MPC_NU;
-    static constexpr int N = path_follower::MPC_STEP_PREVIEW_HORIZON;
-};
 }
 
 namespace path_follower {
@@ -653,23 +579,13 @@ public:
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
         const DirectionMap& direction_map,
-        std::optional<ChassisMode> latched_step_up_mode
-    );
-
-    std::expected<MPCPrediction, std::string> preview_follow(
-        const SplineD& global_path,
-        double path_u,
-        const Eigen::Vector3d& chassis_pose_map,
-        const ChassisMotionState& chassis_state,
-        const Eigen::Vector2d& cmd_seed,
-        ChassisMode preview_mode
+        std::optional<ActiveStepMode> active_step_mode
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
-        const CostMap& cost_map,
-        const DirectionMap& direction_map
+        const CostMap& cost_map
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_hold(
@@ -685,20 +601,6 @@ public:
     }
 
 private:
-    struct PreviewContext {
-        StateVec x0;
-        StepPreviewProblem problem;
-
-        PreviewContext(
-            const StateVec& initial_state,
-            const std::vector<Eigen::Vector2d>& ref_cps,
-            const MPCParams& params,
-            double schedule_rho,
-            std::optional<ChassisMode> preview_mode
-        ) : x0(initial_state),
-            problem(ref_cps, params, schedule_rho, preview_mode) {}
-    };
-
     MPCParams params_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
@@ -707,12 +609,10 @@ private:
     fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
-    fddp::Solver<StepPreviewProblem> step_preview_leg_solver_;
-    fddp::Solver<StepPreviewProblem> step_preview_jump_solver_;
     bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
-    std::optional<ChassisMode> last_follow_mode_;
+    std::optional<ActiveStepMode> last_follow_mode_;
 
     // 多假设 solver（左/右偏移，仅用于 solve_follow）
     fddp::Solver<FollowProblem> follow_solver_left_;
@@ -743,14 +643,6 @@ private:
         const ChassisMotionState& chassis_state,
         const Eigen::Vector2d& cmd_clamped,
         double path_u
-    ) const;
-    PreviewContext make_preview_context(
-        const SplineD& global_path,
-        double path_u,
-        const Eigen::Vector3d& chassis_pose_map,
-        const ChassisMotionState& chassis_state,
-        const Eigen::Vector2d& cmd_seed,
-        ChassisMode preview_mode
     ) const;
     static MPCPrediction extract_prediction(const StateVec* xs, size_t n);
 };

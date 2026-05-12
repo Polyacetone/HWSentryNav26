@@ -92,6 +92,7 @@ struct StageSolveParams {
     double obstacle_weight;
     double direction_weight;
     double step_weight;
+    double prohibited_direction_weight;
     double start_end_weight;
     double smoothness_weight;
     int max_iterations;
@@ -415,6 +416,86 @@ private:
     const double step_norm_transition_;
 };
 
+class ProhibitedDirectionCostFunction : public ceres::CostFunction {
+public:
+    ProhibitedDirectionCostFunction(
+        const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
+        const ubs::UniformBSplineCeresEvaluator<Spline>& vel_evaluator,
+        const CostMap& cost_map,
+        const DirectionMap& direction_map,
+        double weight,
+        double dot_threshold
+    ):
+        pos_evaluator_(pos_evaluator),
+        vel_evaluator_(vel_evaluator),
+        cost_map_(cost_map),
+        direction_map_(direction_map),
+        weight_(weight),
+        dot_threshold_(dot_threshold) {
+        mutable_parameter_block_sizes()->clear();
+        for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; ++i) {
+            mutable_parameter_block_sizes()->push_back(2);
+        }
+        set_num_residuals(1);
+    }
+
+    bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override {
+        Eigen::Vector2d pos;
+        Eigen::Vector2d vel;
+        pos_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], pos.data());
+        vel_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], vel.data());
+
+        const double score = direction_map_.prohibited_direction_score(pos, vel, dot_threshold_);
+        residuals[0] = weight_ * score;
+
+        if (jacobians) {
+            const auto score_at = [&](const Eigen::Vector2d& query_pos, const Eigen::Vector2d& query_vel) {
+                return direction_map_.prohibited_direction_score(query_pos, query_vel, dot_threshold_);
+            };
+
+            const double xp = score_at(pos + Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0), vel);
+            const double xm = score_at(pos - Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0), vel);
+            const double yp = score_at(pos + Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID), vel);
+            const double ym = score_at(pos - Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID), vel);
+            const Eigen::Vector2d d_score_d_pos(
+                (xp - xm) / (2.0 * FINITE_DIFF_STEP_GRID),
+                (yp - ym) / (2.0 * FINITE_DIFF_STEP_GRID)
+            );
+
+            const double vxp = score_at(pos, vel + Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
+            const double vxm = score_at(pos, vel - Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
+            const double vyp = score_at(pos, vel + Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
+            const double vym = score_at(pos, vel - Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
+            const Eigen::Vector2d d_score_d_vel(
+                (vxp - vxm) / (2.0 * FINITE_DIFF_STEP_GRID),
+                (vyp - vym) / (2.0 * FINITE_DIFF_STEP_GRID)
+            );
+
+            for (size_t i = 0; i < vel_evaluator_.ControlPointsSupport; ++i) {
+                if (!jacobians[i]) {
+                    continue;
+                }
+
+                const double basis_pos = pos_evaluator_.basisVals_[i];
+                const double basis_vel = vel_evaluator_.basisVals_[i];
+                const Eigen::Vector2d jac = basis_pos * d_score_d_pos + basis_vel * d_score_d_vel;
+                jacobians[i][0] = weight_ * jac.x();
+                jacobians[i][1] = weight_ * jac.y();
+            }
+        }
+
+        return true;
+    }
+
+private:
+    const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
+    const ubs::UniformBSplineCeresEvaluator<Spline> vel_evaluator_;
+    [[maybe_unused]] const CostMap& cost_map_;
+    const DirectionMap& direction_map_;
+    const double weight_;
+    const double dot_threshold_;
+};
+
 class StepFieldMagnitudeCostFunction : public ceres::CostFunction {
 public:
     StepFieldMagnitudeCostFunction(
@@ -599,6 +680,7 @@ std::expected<void, std::string> solve_stage(
     const StageSolveParams& params,
     double step_norm_threshold,
     double step_norm_transition,
+    double step_mode_dot_threshold,
     const Eigen::Vector2d& start_grid,
     const Eigen::Vector2d& goal_grid
 ) {
@@ -650,6 +732,21 @@ std::expected<void, std::string> solve_stage(
                     params.step_weight,
                     step_norm_threshold,
                     step_norm_transition
+                ),
+                nullptr,
+                parameter_pointers
+            );
+        }
+
+        if (params.prohibited_direction_weight > 0.0) {
+            problem.AddResidualBlock(
+                new ProhibitedDirectionCostFunction(
+                    pos_evaluator,
+                    vel_evaluator,
+                    cost_map,
+                    direction_map,
+                    params.prohibited_direction_weight,
+                    step_mode_dot_threshold
                 ),
                 nullptr,
                 parameter_pointers
@@ -758,6 +855,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         .obstacle_weight = params_.warmup.obstacle_weight,
         .direction_weight = params_.warmup.direction_weight,
         .step_weight = params_.warmup.step_weight,
+        .prohibited_direction_weight = params_.warmup.prohibited_direction_weight,
         .start_end_weight = params_.warmup.start_end_weight,
         .smoothness_weight = params_.warmup.smoothness_weight,
         .max_iterations = params_.warmup.max_iterations,
@@ -772,6 +870,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
             warmup_params,
             params_.step_norm_threshold,
             params_.step_norm_transition,
+            params_.step_mode_dot_threshold,
             start_grid,
             goal_grid
         );
@@ -791,6 +890,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         .obstacle_weight = params_.main.obstacle_weight,
         .direction_weight = params_.main.direction_weight,
         .step_weight = params_.main.step_weight,
+        .prohibited_direction_weight = params_.main.prohibited_direction_weight,
         .start_end_weight = params_.main.start_end_weight,
         .smoothness_weight = params_.main.smoothness_weight,
         .max_iterations = params_.main.max_iterations,
@@ -836,6 +936,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
                 main_params,
                 params_.step_norm_threshold,
                 params_.step_norm_transition,
+                params_.step_mode_dot_threshold,
                 start_grid,
                 goal_grid
             );

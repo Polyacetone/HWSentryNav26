@@ -1,5 +1,77 @@
 #include <path_planner/nav_map.hpp>
 
+#include <algorithm>
+#include <stdexcept>
+
+namespace {
+
+constexpr uint8_t STEP_MODE_FORBIDDEN = 0;
+
+uint8_t extract_up_mode(uint8_t step_mode) {
+    return step_mode & 0b11;
+}
+
+uint8_t extract_down_mode(uint8_t step_mode) {
+    return (step_mode >> 2) & 0b11;
+}
+
+bool is_step_direction_pixel(const cv::Vec3b& val) {
+    const bool zero = val[0] == 0 && val[1] == 0;
+    const bool neutral = val[0] == 128 && val[1] == 128;
+    return !(zero || neutral);
+}
+
+std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> convert_direction_map(const cv::Mat& mat) {
+    if (mat.type() != CV_8UC3) {
+        throw std::runtime_error("Direction map must be of type CV_8UC3");
+    }
+
+    std::vector<Eigen::Vector2d> dir_vec;
+    std::vector<uint8_t> step_mode_vec;
+    dir_vec.reserve(static_cast<size_t>(mat.cols) * static_cast<size_t>(mat.rows));
+    step_mode_vec.reserve(static_cast<size_t>(mat.cols) * static_cast<size_t>(mat.rows));
+
+    for (int y = 0; y < mat.rows; y++) {
+        for (int x = 0; x < mat.cols; x++) {
+            const cv::Vec3b val = mat.at<cv::Vec3b>(y, x);
+            if (is_step_direction_pixel(val)) {
+                const Eigen::Vector2d dir(val[0] - 128.0, val[1] - 128.0);
+                dir_vec.emplace_back(dir / 128.0);
+                step_mode_vec.push_back(val[2]);
+            } else {
+                dir_vec.emplace_back(0.0, 0.0);
+                step_mode_vec.push_back(0);
+            }
+        }
+    }
+
+    return {std::move(dir_vec), std::move(step_mode_vec)};
+}
+
+double prohibited_direction_score_impl(const Eigen::Vector2d& step_dir, uint8_t step_mode, const Eigen::Vector2d& move_dir, double dot_threshold) {
+    if (step_dir.squaredNorm() <= 1e-12 || move_dir.squaredNorm() <= 1e-12) {
+        return 0.0;
+    }
+
+    const Eigen::Vector2d normalized_step_dir = step_dir.normalized();
+    const Eigen::Vector2d normalized_move_dir = move_dir.normalized();
+    const double alignment = normalized_move_dir.dot(normalized_step_dir);
+    const double clamped_threshold = std::clamp(dot_threshold, 0.0, 1.0);
+    const double denom = std::max(1.0 - clamped_threshold, 1e-6);
+
+    if (alignment > clamped_threshold && extract_up_mode(step_mode) == STEP_MODE_FORBIDDEN) {
+        return std::clamp((alignment - clamped_threshold) / denom, 0.0, 1.0);
+    }
+
+    if (alignment < -clamped_threshold && extract_down_mode(step_mode) == STEP_MODE_FORBIDDEN) {
+        return std::clamp((-alignment - clamped_threshold) / denom, 0.0, 1.0);
+    }
+
+    return 0.0;
+}
+
+} // namespace
+
 namespace path_planner {
 CostMap::CostMap(
     const int width,
@@ -77,33 +149,32 @@ Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
     return sum_grad / samples;
 }
 
-std::vector<Eigen::Vector2d> convert_direction_map(const cv::Mat& mat) {
-    if (mat.type() != CV_8UC2) {
-        throw std::runtime_error("Direction map must be of type CV_8UC2");
-    }
-    std::vector<Eigen::Vector2d> vec;
-    vec.reserve(static_cast<size_t>(mat.cols) * static_cast<size_t>(mat.rows));
-    for (int y = 0; y < mat.rows; y++) {
-        for (int x = 0; x < mat.cols; x++) {
-            cv::Vec2b val = mat.at<cv::Vec2b>(y, x);
-            if ((val[0] == 0 && val[1] == 0) || (val[0] == 128 && val[1] == 128)) {
-                vec.emplace_back(0, 0);
-            } else {
-                Eigen::Vector2d dir(val[0] - 128, val[1] - 128);
-                vec.emplace_back(dir / 128.0);
-            }
-        }
-    }
-    return vec;
-}
-
 DirectionMap::DirectionMap(const cv::Mat& direction_map, double resolution, double origin_x, double origin_y):
-    width(direction_map.cols),
-    height(direction_map.rows),
+    DirectionMap(
+        direction_map.cols,
+        direction_map.rows,
+        resolution,
+        origin_x,
+        origin_y,
+        convert_direction_map(direction_map)
+    ) {}
+
+DirectionMap::DirectionMap(int width, int height, double resolution, double origin_x, double origin_y,
+    std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> data_pair):
+    width(width),
+    height(height),
     resolution(resolution),
     origin_x(origin_x),
     origin_y(origin_y),
-    data(convert_direction_map(direction_map)) {}
+    data(std::move(data_pair.first)),
+    step_mode_data(std::move(data_pair.second)) {
+    if (static_cast<int>(this->data.size()) != width * height) {
+        throw std::runtime_error("DirectionMap data size does not match width*height");
+    }
+    if (static_cast<int>(this->step_mode_data.size()) != width * height) {
+        throw std::runtime_error("DirectionMap step_mode_data size does not match width*height");
+    }
+}
 
 Eigen::Vector2d DirectionMap::map_coord_to_grid(const Eigen::Vector2d& map_coord) const {
     return {(map_coord.x() - origin_x) / resolution, (map_coord.y() - origin_y) / resolution};
@@ -126,6 +197,17 @@ Eigen::Vector2d DirectionMap::at(const Eigen::Vector2i& grid_coord) const {
     else return {0, 0};
 }
 
+uint8_t DirectionMap::step_mode_at(const Eigen::Vector2i& grid_coord) const {
+    if (is_valid_coord(grid_coord)) return step_mode_data[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
+    return 0;
+}
+
+uint8_t DirectionMap::step_mode_at(const Eigen::Vector2d& grid_coord) const {
+    if (!is_valid_coord(grid_coord)) return 0;
+    const Eigen::Array2i floored = grid_coord.array().floor().template cast<int>();
+    return step_mode_at(Eigen::Vector2i(floored.x(), floored.y()));
+}
+
 Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) const {
     if (!is_valid_coord(grid_coord)) return {0, 0};
     const int x0 = static_cast<int>(grid_coord.x()), y0 = static_cast<int>(grid_coord.y());
@@ -133,5 +215,60 @@ Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) con
     const double dx = grid_coord.x() - x0, dy = grid_coord.y() - y0;
     return (1 - dx) * (1 - dy) * at({x0, y0}) + dx * (1 - dy) * at({x1, y0}) +
         (1 - dx) * dy * at({x0, y1}) + dx * dy * at({x1, y1});
+}
+
+// 检查插值点4个角是否完全被方向场覆盖且双向禁止。
+// 跳过无方向场的角点（台阶边缘插值时可能只有部分角点在台阶内），
+// 只要有一个台阶内的角点允许某个方向穿越，则判定为可通行。
+bool DirectionMap::is_fully_prohibited(const Eigen::Vector2d& grid_coord) const {
+    if (!is_valid_coord(grid_coord)) return false;
+
+    const int x0 = static_cast<int>(grid_coord.x());
+    const int y0 = static_cast<int>(grid_coord.y());
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+
+    for (const Eigen::Vector2i &sample : {Eigen::Vector2i{x0, y0}, Eigen::Vector2i{x1, y0}, Eigen::Vector2i{x0, y1}, Eigen::Vector2i{x1, y1}}) {
+        const Eigen::Vector2d dir = at(sample);
+        if (dir.squaredNorm() <= 1e-12) continue; // 该角点无台阶方向场，跳过
+        const uint8_t mode = step_mode_at(sample);
+        if (extract_up_mode(mode) == STEP_MODE_FORBIDDEN && extract_down_mode(mode) == STEP_MODE_FORBIDDEN) {
+            return true; // 台阶区域内双向禁止 → 该点不可通行
+        }
+    }
+
+    return false;
+}
+
+double DirectionMap::prohibited_direction_score(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
+    return prohibited_direction_score_impl(at(grid_coord), step_mode_at(grid_coord), move_dir, dot_threshold);
+}
+
+double DirectionMap::prohibited_direction_score(const Eigen::Vector2d& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
+    if (!is_valid_coord(grid_coord) || move_dir.squaredNorm() <= 1e-12) return 0.0;
+
+    const int x0 = static_cast<int>(grid_coord.x());
+    const int y0 = static_cast<int>(grid_coord.y());
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+    const double dx = grid_coord.x() - x0;
+    const double dy = grid_coord.y() - y0;
+
+    const struct Sample {
+        Eigen::Vector2i coord;
+        double weight;
+    } samples[] = {
+        {{x0, y0}, (1 - dx) * (1 - dy)},
+        {{x1, y0}, dx * (1 - dy)},
+        {{x0, y1}, (1 - dx) * dy},
+        {{x1, y1}, dx * dy},
+    };
+
+    double max_score = 0.0;
+    for (const auto& sample : samples) {
+        if (sample.weight <= 0.0) continue;
+        max_score = std::max(max_score, prohibited_direction_score(sample.coord, move_dir, dot_threshold) * sample.weight);
+    }
+    return std::clamp(max_score, 0.0, 1.0);
 }
 }

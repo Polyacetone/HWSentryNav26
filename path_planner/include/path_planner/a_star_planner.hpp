@@ -15,6 +15,8 @@ public:
         const double direction_weight,
         const double obstacle_weight,
         const double step_weight,
+        const double prohibited_direction_weight,
+        const double step_mode_dot_threshold,
         const int downsampled_waypoint_max_interval,
         const int feasible_threshold
     );
@@ -39,7 +41,7 @@ private:
     const std::vector<Eigen::Vector2i> directions_ = {
         {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
     };
-    const double direction_weight_, obstacle_weight_, step_weight_;
+    const double direction_weight_, obstacle_weight_, step_weight_, prohibited_direction_weight_, step_mode_dot_threshold_;
     const int downsampled_waypoint_max_interval_, feasible_threshold_;
 };
 } // namespace path_planner

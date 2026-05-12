@@ -3,10 +3,10 @@
 #include <memory>
 #include <optional>
 #include <vector>
-#include <deque>
 
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
+#include <cstdint>
 
 #include <path_follower/chassis_mode.hpp>
 #include <path_follower/state_machine.hpp>
@@ -76,7 +76,6 @@ struct ControlOutput {
     std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
-    std::optional<std::vector<Eigen::Vector2d>> step_preview_path_map;
 
     // ─── 有效性 ───
     bool valid = false;                 // false 时 Node 不应发布指令
@@ -105,37 +104,12 @@ struct NavigationParams {
     double step_path_sample_resolution;   // 沿路径采样分辨率 (m)
     double step_target_match_distance;    // 连续检测时视为同一台阶目标的位置阈值 (m)
     int step_latch_threshold;             // 连续检测到同一台阶目标的次数才锁存
-    double step_preview_hit_distance;     // 长预测命中已锁存台阶目标的位置阈值 (m)
-    double step_preview_speed_error_threshold;
-    double step_preview_heading_error_threshold;
-    double step_preview_speed_error_weight;
-    double step_preview_heading_error_weight;
     double step_release_distance;
-
-    // 上台阶失败兜底（防止在 Dead↔Follow 恢复循环中卡死）
-    bool step_up_failsafe_enable;
-    int step_up_failsafe_similar_attempts;   // 连续相近位置出现次数阈值
-    double step_up_failsafe_similar_dist;    // 位置相近判定距离 (m)
 
     // Follow 路标点无进度检测（防止在障碍物前蠕动不前）
     bool no_progress_enable;
     double no_progress_landmark_spacing;     // 路标点间距 (m)
     double no_progress_timeout;              // 无进度超时 (s)
-
-    // 上台阶助跑点搜索参数
-    double step_runup_radius_min;               // 采样半径下界 (m)，以台阶边缘点 A 为圆心
-    double step_runup_radius_max;               // 采样半径上界 (m)，以台阶边缘点 A 为圆心
-    double step_runup_angle_half_range;         // 扇区半角 (rad)，以台阶边缘点 A 的方向为扇区中心，逆时针为正
-    int step_runup_radius_samples;              // 半径维采样数
-    int step_runup_angle_samples;               // 角度维采样数
-    double step_runup_cost_threshold;           // 助跑点代价阈值（0~255），超过则认为不可行
-    double step_runup_path_integral_resolution; // 助跑点到台阶边缘点 A 连线的路径积分采样分辨率 (m)
-    int step_runup_line_check_samples;          // 助跑点到台阶边缘点 A 连线的代价检查采样数（用于取最大代价）
-    double step_runup_cost_weight;              // 助跑点代价权重（0~1），用于与距离/角度成本加权求和，选取总成本最低的点
-    double step_runup_step_dist_weight;         // 助跑点到台阶边缘点 A 的距离权重（0~1），用于与代价/角度成本加权求和
-    double step_runup_angle_weight;             // 助跑点与台阶边缘点 A 的连线与台阶边缘方向夹角权重（0~1），用于与距离/代价成本加权求和
-    double step_runup_robot_dist_weight;        // 助跑点到机器人当前位置的距离权重（0~1），用于与代价/角度成本加权求和，鼓励选择更靠近机器人的助跑点，避免过长的助跑路径
-    double step_runup_robot_path_cost_weight;   // 助跑点到机器人当前位置的路径代价权重（0~1），用于与距离/角度成本加权求和，鼓励选择路径代价更低的助跑点，避免过于复杂的助跑路径
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -169,7 +143,6 @@ private:
     ControlOutput execute_recovery(const ControlInput& input);
     ControlOutput execute_stuck_reverse(const ControlInput& input);
     ControlOutput execute_fixed(const ControlInput& input);
-    ControlOutput execute_step_runup(const ControlInput& input);
     void sync_mpc_context(const ControlInput& input);
     void reset_all_mpc_warm_start();
     void reset_all_mpc_observer();
@@ -181,13 +154,12 @@ private:
     bool update_recovery_safe_flag(const ControlInput& input);
     void recompute_follow_landmarks(const SplineD& path);
     bool check_no_progress(const ControlInput& input);
-    std::optional<Eigen::Vector2d> select_step_runup_point(const ControlInput& input) const;
-    bool is_step_runup_segment_feasible(const CostMap& cost_map, const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const;
 
     // ─── 工具函数 ───
     struct StepDetectResult {
         bool step_down_rising = false;
         bool step_down = false;
+        std::optional<ActiveStepMode> step_down_command;
     };
 
     struct PathStepTarget {
@@ -196,16 +168,6 @@ private:
         double release_u = 0.0;
         Eigen::Vector2d pos_map = Eigen::Vector2d::Zero();
         Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
-    };
-
-    struct StepPreviewEvaluation {
-        ChassisMode mode = ChassisMode::NORMAL;
-        size_t hit_index = 0;
-        double predicted_speed = 0.0;
-        double speed_error = 0.0;
-        double heading_error = 0.0;
-        double score = 0.0;
-        std::vector<Eigen::Vector2d> path_map;
     };
 
     StepDetectResult detect_steps_on_prediction_with_edges(
@@ -220,27 +182,15 @@ private:
     double advance_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
     bool is_same_step_target(const PathStepTarget& lhs, const PathStepTarget& rhs) const;
     void clear_step_up_decision();
+    void clear_step_down_state();
     void update_step_up_state_for_path_change(bool has_new_path);
     void update_step_up_release(const SplineD& path, double current_u);
-    std::optional<StepPreviewEvaluation> evaluate_step_preview_candidate(
-        MPCSolver& preview_controller,
-        const ControlInput& input,
-        const SplineD& path,
-        const PathStepTarget& target,
-        double start_u,
-        ChassisMode preview_mode
-    );
-    double step_target_speed(ChassisMode mode) const;
     std::optional<PathStepTarget> try_latch_step_up_target(const SplineD& path, double current_u, const DirectionMap& direction_map);
-    void finalize_step_up_mode_selection(
-        const ControlInput& input,
-        std::optional<StepPreviewEvaluation> leg_eval,
-        std::optional<StepPreviewEvaluation> jump_eval
-    );
-
-    void clear_step_up_attempt_history();
-    void clear_step_up_attempt_history_if_needed(bool has_path, bool has_new_path);
-    bool register_step_up_attempt_and_should_cancel(const Eigen::Vector2d& pos_map);
+    std::optional<ActiveStepMode> build_step_up_command(const PathStepTarget& target, const DirectionMap& direction_map) const;
+    std::optional<ActiveStepMode> build_step_down_command(const Eigen::Vector2d& pos_map, const DirectionMap& direction_map) const;
+    double step_speed_from_level(uint8_t speed_level) const;
+    std::optional<ActiveStepMode> current_active_step_mode() const;
+    bool is_step_active() const;
 
     static double wrap_pi(double a) {
         return std::atan2(std::sin(a), std::cos(a));
@@ -249,8 +199,6 @@ private:
     // ─── 核心组件 ───
     std::unique_ptr<StateMachine> control_fsm_;
     std::shared_ptr<MPCSolver> mpc_controller_;
-    std::shared_ptr<MPCSolver> preview_leg_controller_;
-    std::shared_ptr<MPCSolver> preview_jump_controller_;
     rclcpp::Logger logger_;
 
     // ─── 参数 ───
@@ -262,9 +210,6 @@ private:
     std::optional<Eigen::Vector2d> recovery_goal_map_;
     std::optional<std::chrono::steady_clock::time_point> recovery_goal_set_time_;
     std::optional<std::chrono::steady_clock::time_point> recovery_safe_since_;
-    std::optional<PathStepTarget> pending_step_runup_target_;
-    std::optional<Eigen::Vector2d> step_runup_goal_map_;
-    std::optional<std::vector<Eigen::Vector2d>> debug_step_preview_path_map_;
     FsmState last_fsm_state_ = FsmState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     int path_version_ = 0;
@@ -278,22 +223,17 @@ private:
     int step_down_on_count_ = 0;
     int step_down_off_count_ = 0;
     bool step_down_flag_ = false;
+    std::optional<ActiveStepMode> step_down_command_;
 
     // ─── 上台阶目标锁存与模式决策 ───
     std::optional<PathStepTarget> pending_step_target_detection_;
     int pending_step_target_on_count_ = 0;
     std::optional<PathStepTarget> latched_step_target_;
-    std::optional<ChassisMode> latched_step_up_mode_;
+    std::optional<ActiveStepMode> latched_step_up_command_;
 
     // ─── 复活检测（底盘 Dead -> Mature） ───
     bool last_cycle_chassis_dead_ = false;
     uint8_t last_leg_mode_ = 0;
-
-    // ─── 上台阶失败兜底状态 ───
-    std::deque<Eigen::Vector2d> step_up_attempt_positions_;  // 仅保存最近 N 次
-    bool pending_cancel_follow_task_ = false;                // 由 FOLLOW 内检测触发，下一周期执行取消
-    bool pending_step_runup_ = false;
-    bool step_runup_done_ = false;
 
     // ─── Follow 路标点无进度检测状态 ───
     std::vector<double> follow_landmarks_u_;                 // 每隔 ~landmark_spacing 的路径参数 u

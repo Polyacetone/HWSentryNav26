@@ -83,6 +83,7 @@ private:
     bool enable_debug_;
     int occupied_threshold_;
     double on_step_threshold_;
+    double step_mode_dot_threshold_;
     bool replan_enable_;
     int replan_local_cost_threshold_;
     bool start_prediction_enable_;
@@ -120,6 +121,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     enable_debug_ = declare_parameter<bool>("debug.enable");
     occupied_threshold_ = (int)declare_parameter<int>("occupied_threshold");
     on_step_threshold_ = declare_parameter<double>("on_step_threshold");
+    step_mode_dot_threshold_ = declare_parameter<double>("step_mode_dot_threshold");
     replan_enable_ = declare_parameter<bool>("replan.enable");
     replan_local_cost_threshold_ = (int)declare_parameter<int>("replan.local_cost_threshold");
     start_prediction_enable_ = declare_parameter<bool>("start_prediction.enable");
@@ -140,17 +142,21 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         declare_parameter<double>("path_planner.direction_weight"),
         declare_parameter<double>("path_planner.obstacle_weight"),
         declare_parameter<double>("path_planner.step_weight"),
+        declare_parameter<double>("path_planner.prohibited_direction_weight"),
+        step_mode_dot_threshold_,
         declare_parameter<int>("path_planner.downsampled_waypoint_max_interval"),
         declare_parameter<int>("path_planner.feasible_threshold")
     );
     const BSplineOptimizer::Params path_optimizer_params{
         .step_norm_threshold = declare_parameter<double>("path_optimizer.step_norm_threshold"),
         .step_norm_transition = declare_parameter<double>("path_optimizer.step_norm_transition"),
+        .step_mode_dot_threshold = step_mode_dot_threshold_,
         .step_detection_samples_per_meter = declare_parameter<double>("path_optimizer.step_detection_samples_per_meter"),
         .warmup = {
             .obstacle_weight = declare_parameter<double>("path_optimizer.warmup.obstacle_weight"),
             .direction_weight = declare_parameter<double>("path_optimizer.warmup.direction_weight"),
             .step_weight = declare_parameter<double>("path_optimizer.warmup.step_weight"),
+            .prohibited_direction_weight = declare_parameter<double>("path_optimizer.warmup.prohibited_direction_weight"),
             .start_end_weight = declare_parameter<double>("path_optimizer.warmup.start_end_weight"),
             .smoothness_weight = declare_parameter<double>("path_optimizer.warmup.smoothness_weight"),
             .samples_per_meter = declare_parameter<double>("path_optimizer.warmup.samples_per_meter"),
@@ -172,6 +178,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
             .obstacle_weight = declare_parameter<double>("path_optimizer.main.obstacle_weight"),
             .direction_weight = declare_parameter<double>("path_optimizer.main.direction_weight"),
             .step_weight = declare_parameter<double>("path_optimizer.main.step_weight"),
+            .prohibited_direction_weight = declare_parameter<double>("path_optimizer.main.prohibited_direction_weight"),
             .start_end_weight = declare_parameter<double>("path_optimizer.main.start_end_weight"),
             .smoothness_weight = declare_parameter<double>("path_optimizer.main.smoothness_weight"),
             .samples_per_meter = declare_parameter<double>("path_optimizer.main.samples_per_meter"),
@@ -225,7 +232,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
                 return;
             }
 
-            const auto cv_ptr = cv_bridge::toCvShare(msg, msg->encoding);
+            const auto cv_ptr = cv_bridge::toCvShare(msg, "8UC3");
             global_direction_map_ = std::make_shared<DirectionMap>(
                 cv_ptr->image,
                 global_cost_map_->resolution,
@@ -278,7 +285,8 @@ bool PathPlannerNode::is_map_point_feasible(const CostMap& cost_map, const Direc
     if (!cost_map.is_valid_coord(cost_grid) || !direction_map.is_valid_coord(dir_grid)) return false;
 
     return cost_map.interpolate(cost_grid) < occupied_threshold_ &&
-        direction_map.interpolate(dir_grid).norm() < on_step_threshold_;
+        direction_map.interpolate(dir_grid).norm() < on_step_threshold_ &&
+        !direction_map.is_fully_prohibited(dir_grid);
 }
 
 void PathPlannerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {

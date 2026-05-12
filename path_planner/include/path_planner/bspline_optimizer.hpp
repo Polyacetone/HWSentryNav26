@@ -28,6 +28,7 @@ public:
         double obstacle_weight;
         double direction_weight;
         double step_weight;
+        double prohibited_direction_weight;
         double start_end_weight;
         double smoothness_weight;
         double samples_per_meter;
@@ -41,6 +42,7 @@ public:
         double obstacle_weight;
         double direction_weight;
         double step_weight;
+        double prohibited_direction_weight;
         double start_end_weight;
         double smoothness_weight;
         double samples_per_meter;
@@ -58,6 +60,7 @@ public:
     struct Params {
         double step_norm_threshold;
         double step_norm_transition;
+        double step_mode_dot_threshold;
         double step_detection_samples_per_meter;
         WarmupParams warmup;
         MainParams main;

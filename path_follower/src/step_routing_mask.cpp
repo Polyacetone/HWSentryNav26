@@ -104,7 +104,8 @@ void StepRoutingMask::update(const std::optional<SplineD>& global_path) {
         base_direction_map_->resolution,
         base_direction_map_->origin_x,
         base_direction_map_->origin_y,
-        std::move(masked_dir_data)
+        std::move(masked_dir_data),
+        base_direction_map_->step_mode_data
     );
 }
 

@@ -14,19 +14,22 @@ namespace {
 
 const MPCFollowModeProfile& select_follow_mode_profile(
     const MPCFollowParams& params,
-    std::optional<ChassisMode> latched_step_up_mode
+    std::optional<ActiveStepMode> active_step_mode
 ) {
-    if (latched_step_up_mode == ChassisMode::STEP_UP_LEG) {
-        return params.mode_profiles.leg;
+    if (!active_step_mode) {
+        return params.mode_profiles.normal;
     }
-    if (latched_step_up_mode == ChassisMode::STEP_UP_JUMP) {
-        return params.mode_profiles.jump;
+    switch (active_step_mode->mode) {
+        case ChassisMode::STEP_UP_LEG: return params.mode_profiles.leg_up;
+        case ChassisMode::STEP_UP_JUMP: return params.mode_profiles.jump_up;
+        case ChassisMode::STEP_DOWN_LEG: return params.mode_profiles.leg_down;
+        case ChassisMode::STEP_DOWN_JUMP: return params.mode_profiles.jump_down;
+        default: return params.mode_profiles.normal;
     }
-    return params.mode_profiles.normal;
 }
 
-bool is_latched_follow_step_mode(std::optional<ChassisMode> latched_step_up_mode) {
-    return latched_step_up_mode == ChassisMode::STEP_UP_LEG || latched_step_up_mode == ChassisMode::STEP_UP_JUMP;
+bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) {
+    return active_step_mode.has_value() && active_step_mode->mode != ChassisMode::NORMAL;
 }
 
 inline double sq(double x) {
@@ -106,12 +109,12 @@ double schedule_rho_from_state(const ChassisMotionState& chassis_state, const LP
 
 double select_follow_schedule_rho(
     const MPCFollowParams& params,
-    std::optional<ChassisMode> latched_step_up_mode,
+    std::optional<ActiveStepMode> active_step_mode,
     const ChassisMotionState& chassis_state,
     const LPVKinematicModelParams& model_params
 ) {
-    if (is_latched_follow_step_mode(latched_step_up_mode)) {
-        return clamp_lpv_rho(select_follow_mode_profile(params, latched_step_up_mode).lpv_rho, model_params.rho_clip);
+    if (is_active_follow_step_mode(active_step_mode)) {
+        return clamp_lpv_rho(select_follow_mode_profile(params, active_step_mode).lpv_rho, model_params.rho_clip);
     }
     return schedule_rho_from_state(chassis_state, model_params);
 }
@@ -713,7 +716,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     const ArclengthTable& arclength_table,
     double remaining_energy,
     double rfr_pwr_limit,
-    std::optional<ChassisMode> latched_step_up_mode,
+    std::optional<ActiveStepMode> active_step_mode,
     double target_ey
 ):
     ref_cps_(ref_control_points),
@@ -727,7 +730,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     arc_table_(arclength_table),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
-    latched_step_up_mode_(latched_step_up_mode),
+    active_step_mode_(active_step_mode),
     target_ey_(target_ey) {}
 
 template<int Horizon>
@@ -749,13 +752,13 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_lower() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, latched_step_up_mode_).command_bounds;
+    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
     return ControlVec(command_bounds.vel_min, command_bounds.omega_min);
 }
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_upper() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, latched_step_up_mode_).command_bounds;
+    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
     return ControlVec(command_bounds.vel_max, command_bounds.omega_max);
 }
 
@@ -781,19 +784,18 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const DirectionMapGridView& dg,
     const GridInfo& di,
     double rfr_pwr_limit,
-    std::optional<ChassisMode> latched_step_up_mode,
+    std::optional<ActiveStepMode> active_step_mode,
     double target_ey
 ) {
     const auto& follow = p.follow;
     const auto& tracking_w = follow.tracking_weights;
     const auto& command_w = follow.command_weights;
     const auto& motion_w = follow.motion_constraint_weights;
-    const auto& terrain_lim = follow.terrain_limits;
     const auto& terrain_w = follow.terrain_weights;
     const auto& env_w = follow.environment_weights;
     const auto& terminal_lim = follow.terminal_limits;
     const auto& terminal_w = follow.terminal_weights;
-    const auto& motion_lim = select_follow_mode_profile(follow, latched_step_up_mode).motion_constraints;
+    const auto& motion_lim = select_follow_mode_profile(follow, active_step_mode).motion_constraints;
 
     FollowResidualLinearization out;
     out.r.setZero();
@@ -930,12 +932,12 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(11, ix::Y) = terrain_w.direction * sign_cross * dcross_dy;
     out.jx(11, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
 
-    if (dir_norm_sq > 1e-10 && is_latched_follow_step_mode(latched_step_up_mode)) {
-        const double target_vel = (latched_step_up_mode == ChassisMode::STEP_UP_JUMP) ? terrain_lim.step_vel_jump : terrain_lim.step_vel_leg;
+    if (dir_norm_sq > 1e-10 && is_active_follow_step_mode(active_step_mode)) {
+        const double target_vel = active_step_mode->target_velocity;
         const double v_err = v_act - target_vel;
         const double abs_v_err = std::abs(v_err);
         const double sign_v_err = signum(v_err);
-        const auto relu_vstep = smooth_relu_eval(abs_v_err - terrain_lim.step_vel_deadzone);
+        const auto relu_vstep = smooth_relu_eval(abs_v_err - follow.terrain_limits.step_vel_deadzone);
         out.r(12) = terrain_w.step_vel_weight * dir_norm * relu_vstep.value;
         out.jx(12, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep.value;
         out.jx(12, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep.value;
@@ -977,7 +979,7 @@ FollowResidualVec follow_residual_impl(
     const DirectionMapGridView& dg,
     const GridInfo& di,
     double rfr_pwr_limit,
-    std::optional<ChassisMode> latched_step_up_mode,
+    std::optional<ActiveStepMode> active_step_mode,
     double target_ey
 ) {
     return follow_residual_linearized_impl(
@@ -991,7 +993,7 @@ FollowResidualVec follow_residual_impl(
         dg,
         di,
         rfr_pwr_limit,
-        latched_step_up_mode,
+        active_step_mode,
         target_ey
     ).r;
 }
@@ -1110,7 +1112,7 @@ double FollowProblemT<Horizon>::running_cost(int k, const StateVec& x, const Con
         dir_grid_,
         dir_info_,
         rfr_pwr_limit_,
-        latched_step_up_mode_,
+        active_step_mode_,
         target_ey_
     ));
 }
@@ -1138,7 +1140,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
         dir_grid_,
         dir_info_,
         rfr_pwr_limit_,
-        latched_step_up_mode_,
+        active_step_mode_,
         target_ey_
     );
 
@@ -1168,141 +1170,6 @@ void FollowProblemT<Horizon>::terminal_cost_derivatives(const StateVec&, StateVe
 template class FollowProblemT<MPC_HORIZON>;
 
 // ════════════════════════════════════════════════════════════════
-//  StepPreviewProblem
-// ════════════════════════════════════════════════════════════════
-
-namespace {
-
-constexpr int STEP_PREVIEW_RESIDUAL_DIM = 8;
-
-Eigen::Matrix<double, STEP_PREVIEW_RESIDUAL_DIM, 1> step_preview_residual_impl(
-    const StateVec& x,
-    const ControlVec& u,
-    const std::vector<Eigen::Vector2d>& ref_cps,
-    const MPCParams& p,
-    std::optional<ChassisMode> preview_mode
-) {
-    const auto& w = p.step_preview;
-    const auto& motion_lim = select_follow_mode_profile(p.follow, preview_mode).motion_constraints;
-
-    Eigen::Matrix<double, STEP_PREVIEW_RESIDUAL_DIM, 1> r;
-    r.setZero();
-
-    const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
-    const double v_act = x(ix::V), w_act = x(ix::W);
-    const double v_cmd = u(0), w_cmd = u(1);
-    const double dv_cmd = v_cmd - x(ix::DV);
-    const double dw_cmd = w_cmd - x(ix::DW);
-
-    const double uc_raw = x(ix::PATH_U);
-    const double uc = clamp_path_u_extrapolated(uc_raw);
-
-    Eigen::Vector2d pr, d1, d2;
-    eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
-
-    const double thetar = std::atan2(d1.y(), d1.x());
-    const double sin_r = std::sin(thetar);
-    const double cos_r = std::cos(thetar);
-
-    const double ex = px - pr.x();
-    const double ey_w = py - pr.y();
-    const double ey = -ex * sin_r + ey_w * cos_r;
-    const double etheta = wrap_pi(theta - thetar);
-
-    // Path tracking
-    r(0) = std::sqrt(w.q_y) * ey;
-    r(1) = std::sqrt(w.q_theta) * etheta;
-
-    // Progress
-    const auto u_adv = advance_u_progress_extrapolated_with_jacobian(uc_raw, x, ref_cps);
-    const double u_next_extrap = u_adv.u_next_extrap;
-    const double u_progress = std::min(1.0, u_next_extrap);
-    const auto relu_progress = smooth_relu_eval(1.0 - u_progress);
-    r(2) = std::sqrt(w.q_u) * relu_progress.value;
-
-    // Command smoothness
-    r(3) = std::sqrt(w.r_dv) * dv_cmd;
-    r(4) = std::sqrt(w.r_domega) * dw_cmd;
-
-    // Motion constraints
-    const double dv_lim = motion_lim.acc_max * MPC_DT;
-    const double dw_lim = motion_lim.alpha_max * MPC_DT;
-    const double a_lat = std::abs(v_act * w_act);
-
-    r(5) = std::sqrt(w.acc_limit) * smooth_relu_eval(std::abs(dv_cmd) - dv_lim).value;
-    r(6) = std::sqrt(w.alpha_limit) * smooth_relu_eval(std::abs(dw_cmd) - dw_lim).value;
-    r(7) = std::sqrt(w.lat_acc) * smooth_relu_eval(a_lat - motion_lim.a_lat_max).value;
-
-    return r;
-}
-
-} // anonymous namespace
-
-StepPreviewProblem::StepPreviewProblem(
-    const std::vector<Eigen::Vector2d>& ref_control_points,
-    const MPCParams& params,
-    double schedule_rho,
-    std::optional<ChassisMode> preview_mode
-): ref_cps_(ref_control_points),
-   p_(params),
-   model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-   preview_mode_(preview_mode) {}
-
-StateVec StepPreviewProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    StateVec xn = mpc_dynamics(x, u, model_);
-    xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, ref_cps_);
-    return xn;
-}
-
-void StepPreviewProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
-    mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
-
-    const auto adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, ref_cps_);
-    const double dout_din = clamp_derivative(adv.u_next_extrap, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
-    dfx.row(ix::PATH_U) = (dout_din * adv.du_next_dx).transpose();
-    dfu.row(ix::PATH_U).setZero();
-}
-
-double StepPreviewProblem::running_cost(int, const StateVec& x, const ControlVec& u) const {
-    return residual_cost(step_preview_residual_impl(x, u, ref_cps_, p_, preview_mode_));
-}
-
-void StepPreviewProblem::running_cost_derivatives(
-    int,
-    const StateVec& x,
-    const ControlVec& u,
-    StateVec& lx,
-    ControlVec& lu,
-    MatXX& lxx,
-    Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
-    Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
-) const {
-    auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
-        return step_preview_residual_impl(xv, uv, ref_cps_, p_, preview_mode_);
-    };
-    gauss_newton_running_derivatives<STEP_PREVIEW_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
-}
-
-double StepPreviewProblem::terminal_cost(const StateVec&) const {
-    return 0.0;
-}
-
-void StepPreviewProblem::terminal_cost_derivatives(const StateVec&, StateVec& lfx, MatXX& lfxx) const {
-    lfx.setZero();
-    lfxx.setZero();
-}
-
-ControlVec StepPreviewProblem::u_lower() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, preview_mode_).command_bounds;
-    return ControlVec(command_bounds.vel_min, command_bounds.omega_min);
-}
-
-ControlVec StepPreviewProblem::u_upper() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, preview_mode_).command_bounds;
-    return ControlVec(command_bounds.vel_max, command_bounds.omega_max);
-}
-
-// ════════════════════════════════════════════════════════════════
 //  StopProblem
 // ════════════════════════════════════════════════════════════════
 
@@ -1311,8 +1178,6 @@ StopProblem::StopProblem(
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
     double schedule_rho,
-    const DirectionMapGridView& dir_grid,
-    const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit
 ):
@@ -1320,8 +1185,6 @@ StopProblem::StopProblem(
     cost_grid_(cost_grid),
     cost_info_(cost_info),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-    dir_grid_(dir_grid),
-    dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
@@ -1352,33 +1215,22 @@ StopResidualVec stop_residual_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    const DirectionMapGridView& dg,
-    const GridInfo& di,
     double rfr_pwr_limit
 ) {
     const auto& stop = p.stop;
     const auto& motion_lim = stop.motion_constraints;
     const auto& command_w = stop.command_weights;
     const auto& motion_w = stop.motion_constraint_weights;
-    const auto& terrain_lim = stop.terrain_limits;
-    const auto& terrain_w = stop.terrain_weights;
     const auto& env_w = stop.environment_weights;
 
     StopResidualVec r = StopResidualVec::Zero();
-    const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
+    const double px = x(ix::X), py = x(ix::Y);
     const double v_act = x(ix::V), w_act = x(ix::W);
     const double v_cmd = u(0), w_cmd = u(1);
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
-    const auto ds = eval_dir_bilinear(dg, di, px, py);
-    const double dir_norm_sq = ds.value.squaredNorm();
-    const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
-    const Eigen::Vector2d dir_unit = ds.value / dir_norm;
-    const Eigen::Vector2d heading(std::cos(theta), std::sin(theta));
-    const double cross = heading.x() * ds.value.y() - heading.y() * ds.value.x();
-    const double cos_th = heading.dot(dir_unit);
     const double a_lat = std::abs(v_act * w_act);
 
     const double dv_lim = motion_lim.acc_max * MPC_DT;
@@ -1391,10 +1243,8 @@ StopResidualVec stop_residual_impl(
     r(5) = motion_w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
     r(6) = motion_w.lat_acc * relu(a_lat - motion_lim.a_lat_max);
     r(7) = env_w.obstacle * cs.value / 255.0;
-    r(8) = terrain_w.direction * dir_norm * std::abs(cross);
-    if (dir_norm_sq > 1e-10 && cos_th > 0.0) {
-        r(9) = terrain_w.step_vel_weight_stop * dir_norm * relu(std::abs(v_act - terrain_lim.step_vel_stop) - terrain_lim.step_vel_deadzone_stop);
-    }
+    r(8) = motion_w.acc_limit * relu(std::abs(v_act));
+    r(9) = motion_w.alpha_limit * relu(std::abs(w_act));
 
     if (p.energy.enable) {
         const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
@@ -1415,17 +1265,13 @@ StopTerminalResidualVec stop_terminal_residual_impl(
     const StateVec& x,
     const MPCParams& p,
     const CostMapGridView& cost_grid,
-    const GridInfo& cost_info,
-    const DirectionMapGridView& dir_grid,
-    const GridInfo& dir_info
+    const GridInfo& cost_info
 ) {
     StopTerminalResidualVec r = StopTerminalResidualVec::Zero();
     const auto& w = p.stop.terminal_weights;
     const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
-    const auto ds = eval_dir_bilinear(dir_grid, dir_info, x(ix::X), x(ix::Y));
-    const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     r(0) = w.obstacle_terminal * cs.value / 255.0;
-    r(1) = w.step_terminal * dir_norm;
+    r(1) = 0.0; // stop 模式不区分台阶，此槽位保留（STOP_TERMINAL_RESIDUAL_DIM=2 不变）
     return r;
 }
 
@@ -1433,7 +1279,7 @@ StopTerminalResidualVec stop_terminal_residual_impl(
 
 double StopProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     (void)k;
-    return residual_cost(stop_residual_impl(x, u, p_, cost_grid_, cost_info_, dir_grid_, dir_info_, rfr_pwr_limit_));
+    return residual_cost(stop_residual_impl(x, u, p_, cost_grid_, cost_info_, rfr_pwr_limit_));
 }
 
 void StopProblem::running_cost_derivatives(
@@ -1448,18 +1294,18 @@ void StopProblem::running_cost_derivatives(
 ) const {
     (void)k;
     auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
-        return stop_residual_impl(xv, uv, p_, cost_grid_, cost_info_, dir_grid_, dir_info_, rfr_pwr_limit_);
+        return stop_residual_impl(xv, uv, p_, cost_grid_, cost_info_, rfr_pwr_limit_);
     };
     gauss_newton_running_derivatives<STOP_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
 }
 
 double StopProblem::terminal_cost(const StateVec& x) const {
-    return residual_cost(stop_terminal_residual_impl(x, p_, cost_grid_, cost_info_, dir_grid_, dir_info_));
+    return residual_cost(stop_terminal_residual_impl(x, p_, cost_grid_, cost_info_));
 }
 
 void StopProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const {
     auto residual_fn = [&](const StateVec& xv) {
-        return stop_terminal_residual_impl(xv, p_, cost_grid_, cost_info_, dir_grid_, dir_info_);
+        return stop_terminal_residual_impl(xv, p_, cost_grid_, cost_info_);
     };
     gauss_newton_terminal_derivatives<STOP_TERMINAL_RESIDUAL_DIM>(residual_fn, x, lfx, lfxx);
 }
@@ -1715,7 +1561,7 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 } // anonymous namespace
 
 MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
-    step_cost_grids_cache_.reserve(MPC_STEP_PREVIEW_HORIZON + 1);
+    step_cost_grids_cache_.reserve(MPC_HORIZON + 1);
 }
 
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
@@ -1734,10 +1580,6 @@ void MPCSolver::reset_warm_start() {
         follow_solver_right_.us[k].setZero();
         stop_solver_.us[k].setZero();
         hold_solver_.us[k].setZero();
-    }
-    for (size_t k = 0; k < MPC_STEP_PREVIEW_HORIZON; ++k) {
-        step_preview_leg_solver_.us[k].setZero();
-        step_preview_jump_solver_.us[k].setZero();
     }
 }
 
@@ -1813,44 +1655,6 @@ MPCPrediction MPCSolver::extract_prediction(const StateVec* xs, const size_t n) 
     return pred;
 }
 
-MPCSolver::PreviewContext MPCSolver::make_preview_context(
-    const SplineD& global_path,
-    const double path_u,
-    const Eigen::Vector3d& chassis_pose_map,
-    const ChassisMotionState& chassis_state,
-    const Eigen::Vector2d& cmd_seed,
-    const ChassisMode preview_mode
-) const {
-    const auto& ref_cps = global_path.getControlPoints();
-    const auto preview_mode_opt = std::optional<ChassisMode>(preview_mode);
-    const auto& follow_mode_profile = select_follow_mode_profile(params_.follow, preview_mode_opt);
-    const Eigen::Vector2d cmd0(
-        clamp_prev_cmd(
-            cmd_seed.x(),
-            chassis_state.velocity,
-            params_.follow.start_command.vel_cmd_act_gap_max,
-            follow_mode_profile.motion_constraints.acc_max,
-            MPC_DT
-        ),
-        clamp_prev_cmd(
-            cmd_seed.y(),
-            chassis_state.omega,
-            params_.follow.start_command.omega_cmd_act_gap_max,
-            follow_mode_profile.motion_constraints.alpha_max,
-            MPC_DT
-        )
-    );
-    const double schedule_rho = select_follow_schedule_rho(
-        params_.follow,
-        preview_mode_opt,
-        chassis_state,
-        params_.kinematic_model
-    );
-
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, path_u);
-    return PreviewContext(x0, ref_cps, params_, schedule_rho, preview_mode_opt);
-}
-
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_follow(
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
@@ -1859,11 +1663,11 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
     const DirectionMap& direction_map,
-    std::optional<ChassisMode> latched_step_up_mode
+    std::optional<ActiveStepMode> active_step_mode
 ) {
     const auto& ref_cps = global_path.getControlPoints();
     const bool path_changed = !same_cps(prev_ref_control_points_, ref_cps);
-    const bool mode_changed = last_follow_mode_ != latched_step_up_mode;
+    const bool mode_changed = last_follow_mode_ != active_step_mode;
     const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
     const double u0 = project_to_spline_u_extrapolated(
         global_path,
@@ -1880,7 +1684,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     }
     last_u_ = u0;
 
-    const auto& follow_mode_profile = select_follow_mode_profile(params_.follow, latched_step_up_mode);
+    const auto& follow_mode_profile = select_follow_mode_profile(params_.follow, active_step_mode);
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
             last_cmd_.x(),
@@ -1899,7 +1703,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     );
     const double schedule_rho = select_follow_schedule_rho(
         params_.follow,
-        latched_step_up_mode,
+        active_step_mode,
         chassis_state,
         params_.kinematic_model
     );
@@ -1947,7 +1751,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         arc,
         remaining_energy_,
         rfr_pwr_limit_,
-        latched_step_up_mode,
+        active_step_mode,
         0.0
     );
 
@@ -1973,7 +1777,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             arc,
             remaining_energy_,
             rfr_pwr_limit_,
-            latched_step_up_mode,
+            active_step_mode,
             +params_.mh_params.lateral_offset
         );
         FollowProblem prob_right(
@@ -1988,7 +1792,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             arc,
             remaining_energy_,
             rfr_pwr_limit_,
-            latched_step_up_mode,
+            active_step_mode,
             -params_.mh_params.lateral_offset
         );
 
@@ -2032,42 +1836,16 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     }
 
     follow_warm_ = true;
-    last_follow_mode_ = latched_step_up_mode;
+    last_follow_mode_ = active_step_mode;
     const Eigen::Vector2d cmd(follow_solver_.us[0](0), follow_solver_.us[0](1));
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob_center, follow_solver_, x0)};
 }
 
-std::expected<MPCPrediction, std::string> MPCSolver::preview_follow(
-    const SplineD& global_path,
-    double path_u,
-    const Eigen::Vector3d& chassis_pose_map,
-    const ChassisMotionState& chassis_state,
-    const Eigen::Vector2d& cmd_seed,
-    ChassisMode preview_mode
-) {
-    if (preview_mode != ChassisMode::STEP_UP_LEG && preview_mode != ChassisMode::STEP_UP_JUMP) {
-        return std::unexpected("preview_follow requires STEP_UP_LEG or STEP_UP_JUMP mode");
-    }
-
-    auto ctx = make_preview_context(global_path, path_u, chassis_pose_map, chassis_state, cmd_seed, preview_mode);
-
-    auto& solver = (preview_mode == ChassisMode::STEP_UP_LEG) ? step_preview_leg_solver_ : step_preview_jump_solver_;
-    initialize_primal_trajectory(solver, ctx.problem, ctx.x0, false);
-
-    fddp::SolverOptions opts;
-    opts.max_iters = 80;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
-    solver.solve(ctx.problem, opts);
-    return rollout_prediction(ctx.problem, solver, ctx.x0);
-}
-
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_stop(
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
-    const CostMap& cost_map,
-    const DirectionMap& direction_map
+    const CostMap& cost_map
 ) {
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -2089,11 +1867,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const DirectionMapGridView dg(direction_map);
-    const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    StopProblem prob(params_, cg, ci, schedule_rho, dg, di, remaining_energy_, rfr_pwr_limit_);
+    StopProblem prob(params_, cg, ci, schedule_rho, remaining_energy_, rfr_pwr_limit_);
     initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;

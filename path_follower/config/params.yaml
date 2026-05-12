@@ -1,152 +1,146 @@
 /**:
   ros__parameters:
-    control_points_sub_topic: "/path_planner/control_points"
-    global_direction_map_sub_topic: "/map_server/global_direction_map"
-    global_cost_map_sub_topic: "/map_server/global_cost_map"
-    local_cost_map_sub_topic: "/map_server/local_cost_map"
-    predicted_cost_maps_sub_topic: "/map_server/predicted_cost_maps"
-    comp_stage_sub_topic: "/serial_bridge/comp_stage"
-    chassis_status_sub_topic: "/serial_bridge/chassis_status"
-    spin_cmd_sub_topic: "/decision/spin_cmd"
-    chassis_cmd_pub_topic: "/path_follower/chassis_cmd"
-    follower_state_pub_topic: "/path_follower/state"
+    control_points_sub_topic: "/path_planner/control_points" # B样条控制点
+    global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局台阶地图（8UC3: B=方向X, G=方向Y, A=台阶模式alpha）
+    global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图（OccupancyGrid）
+    local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图
+    predicted_cost_maps_sub_topic: "/map_server/predicted_cost_maps" # 预测代价地图序列
+    comp_stage_sub_topic: "/serial_bridge/comp_stage" # 比赛阶段
+    chassis_status_sub_topic: "/serial_bridge/chassis_status" # 底盘状态（速度、腿模式等）
+    spin_cmd_sub_topic: "/decision/spin_cmd" # 小陀螺指令
+    chassis_cmd_pub_topic: "/path_follower/chassis_cmd" # 底盘控制指令（velocity + omega + mode）
+    follower_state_pub_topic: "/path_follower/state" # 跟随器FSM状态
 
     debug:
-      enable: true
-      predicted_path_pub_topic: "/path_follower/debug/predicted_path"
-      step_preview_path_pub_topic: "/path_follower/debug/step_preview_path"
-      v_pred_pub_topic: "/path_follower/debug/v_pred"
-      w_pred_pub_topic: "/path_follower/debug/w_pred"
-      final_cost_map_pub_topic: "/path_follower/debug/final_cost_map"
+      enable: true # 是否启用调试发布
+      predicted_path_pub_topic: "/path_follower/debug/predicted_path" # MPC预测路径
+      v_pred_pub_topic: "/path_follower/debug/v_pred" # MPC预测线速度序列
+      w_pred_pub_topic: "/path_follower/debug/w_pred" # MPC预测角速度序列
+      final_cost_map_pub_topic: "/path_follower/debug/final_cost_map" # 最终融合代价地图
 
     misc:
-      stop_threshold_dist: 0.5 # 停止距离 (m)
-      stop_threshold_u: 0.99 # 停止样条参数u (0~1)
+      stop_threshold_dist: 0.5 # 到达目标判定距离 (m)
+      stop_threshold_u: 0.99 # 到达目标判定样条参数u
       remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
 
     prediction:
-      use_predicted_cost_maps: true # 若启用，follow模式使用预测的代价地图进行避障
+      use_predicted_cost_maps: true # follow模式是否使用预测代价地图（多步预测的障碍物轨迹）
 
     step_mask:
-      path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积阈值，>= 认为路径经过台阶（触发掩码）
-      full_effect_radius: 0.4 # 掩码满强度半径 (m)：<= 该距离 alpha=1（cost 全擦除，dir 全保留）
-      cutoff_radius: 0.8 # 掩码截止半径 (m)：>= 该距离 alpha=0（cost 全保留，dir 全擦除）
-      length_num_samples: 100 # 路径长度估计采样数
+      path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积 >= 该值，认为路径经过台阶（触发掩码软擦除）
+      full_effect_radius: 0.4 # 掩码满强度半径 (m)：<= 该距离内 alpha=1（cost 全擦除，dir 全保留）
+      cutoff_radius: 0.8 # 掩码截止半径 (m)：>= 该距离内 alpha=0（cost 全保留，dir 全擦除）
+      length_num_samples: 100 # 路径弧长估计采样数
 
     follow_proj_guard:
-      proj_dist_max: 2.0 # 当前位置到样条投影点距离过大则取消 (m)
-      proj_cost_max: 240.0 # 当前位置到投影点连线最大障碍物代价超过则取消 (0~255)
-      proj_cost_samples: 20 # 连线最大代价估计采样数
+      proj_dist_max: 2.0 # 当前位置到样条投影点距离 > 该值则取消follow (m)
+      proj_cost_max: 240.0 # 投影连线最大障碍物代价 > 该值则取消follow (0~255)
+      proj_cost_samples: 20 # 连线代价估计采样数
 
     step_ahead_flag:
       step_detection:
-        detect_norm_threshold: 0.8 # 方向场模长阈值，>=该值认为经过台阶区域
-        detect_dot_threshold: 0.5 # 朝向与方向场点积阈值；< -dot_threshold 为下台阶，> dot_threshold 为上台阶
-        edge_norm_threshold: 0.8 # 台阶边缘判定方向场模长阈值（上台阶空间检测使用）
+        detect_norm_threshold: 0.8 # 方向场模长 >= 该值认为经过台阶区域
+        detect_dot_threshold: 0.5 # 朝向与方向场点积阈值：< -dot 为下台阶，> dot 为上台阶
+        edge_norm_threshold: 0.8 # 上台阶边缘检测的方向场模长阈值
 
       step_down_flag:
-        on_count_threshold: 3 # 连续检测到台阶轨迹的次数才设置 step_down_flag
-        off_count_threshold: 3 # 连续未检测到台阶轨迹的次数才清除 step_down_flag
+        on_count_threshold: 3 # 连续检测到下台阶的帧数阈值，超过才设置 step_down_flag
+        off_count_threshold: 3 # 连续未检测到的帧数阈值，超过才清除 step_down_flag
 
       step_up_flag:
-        path_lookahead_distance: 2.5 # 沿路径向前扫查台阶目标的固定距离 (m)
+        path_lookahead_distance: 2.5 # 沿路径向前扫查台阶目标的距离 (m)
         path_sample_resolution: 0.05 # 沿路径采样分辨率 (m)
-        target_match_distance: 0.4 # 连续检测时视为同一台阶目标的位置阈值 (m)
-        latch_threshold: 3 # 连续检测到同一台阶目标的次数才锁存
-        release_distance: 0.3 # 通过台阶后释放锁存的最小滞回距离 (m)
-
-      step_up_preview:
-        preview_hit_distance: 0.4 # 长预测命中已锁存台阶目标的位置阈值 (m)
-        preview_speed_error_threshold: 1.0 # 候选方案命中台阶处的速度误差阈值 (m/s)
-        preview_heading_error_threshold: 0.6 # 候选方案命中台阶处的姿态对齐误差阈值 (rad)
-        preview_speed_error_weight: 1.0 # 候选方案比较时的速度误差权重
-        preview_heading_error_weight: 1.0 # 候选方案比较时的姿态误差权重
-
-    step_runup:
-      radius_min: 1.0 # 采样半径下界 (m)，以台阶边缘点 A 为圆心
-      radius_max: 2.0 # 采样半径上界 (m)，以台阶边缘点 A 为圆心
-      angle_half_range: 0.26 # 扇区半角 (rad)
-      radius_samples: 8 # 采样半径数
-      angle_samples: 8 # 每个半径的采样角度数
-      cost_threshold: 50.0 # 候选点插值代价上限 (0~255)，>= 则剔除
-      path_integral_resolution: 0.05 # robot->candidate 路径代价积分采样分辨率 (m)，用于软约束
-      line_check_samples: 20 # candidate->A 连线可通行性硬约束采样数（任一点 >= cost_threshold 则剔除）
-      selection_weights:
-        cost: 1.0 # 终点插值代价 (cost/255)
-        step_dist: 1.0 # 距离台阶项 (1/r)
-        angle: 1.0 # 偏离 approach_dir 的角度误差 (rad)
-        robot_dist: 0.2 # robot->candidate 欧氏距离 (m)
-        robot_path_cost: 0.3 # robot->candidate 代价积分（软约束，越大越不优）
-
-    step_up_failsafe:
-      enable: false # 若启用，在路径跟随模式下如果连续多次检测到相近的位置但未能成功上台阶，则取消本次路径跟随任务
-      similar_attempts: 5 # 连续相近位置出现次数阈值
-      similar_dist: 2.0 # 位置相近判定距离 (m)
+        target_match_distance: 0.4 # 连续检测视为同一台阶目标的位置阈值 (m)
+        latch_threshold: 3 # 连续检测到同一台阶目标的次数阈值，超过才锁存
+        release_distance: 0.3 # 通过台阶后释放锁存的滞回距离 (m)
 
     follow_no_progress_guard:
-      enable: true # 若启用，在路径跟随模式下如果超时未推进最高路标点则取消任务
-      landmark_spacing: 1.0 # 路标点间距 (m)，路径沿弧长每隔该距离设一个路标点
-      timeout: 6.0 # 无进度超时 (s)，超时未更新最高路标点则认为卡住，取消follow任务
+      enable: true # 是否启用路标点无进度检测（超时未推进则取消follow）
+      landmark_spacing: 1.0 # 路标点沿弧长间隔 (m)
+      timeout: 6.0 # 无进度超时 (s)
 
     state_machine:
-      follow_to_spin_vel_max: 0.2 # STOPPING->SPIN 的退出判定：|v_cmd| < 该阈值 (m/s)
-      spin_to_follow_omega_max: 0.6 # STOPPING->FOLLOW 的退出判定：|omega_cmd| < 该阈值 (rad/s)
-      to_idle_vel_max: 0.2 # STOPPING->IDLE/FIXED 的退出判定：|v_cmd| < 该阈值 (m/s)
-      to_idle_omega_max: 0.6 # STOPPING->IDLE/FIXED 的退出判定：|omega_cmd| < 该阈值 (rad/s)
-      stopping_timeout: 1.0 # 停止状态超时 (s)，超过该时间仍未切出停止则强制切出
+      follow_to_spin_vel_max: 0.2 # STOPPING→SPIN 退出判定：|v_cmd| < 该值 (m/s)
+      spin_to_follow_omega_max: 0.6 # STOPPING→FOLLOW 退出判定：|omega_cmd| < 该值 (rad/s)
+      to_idle_vel_max: 0.2 # STOPPING→IDLE/FIXED 退出判定：|v_cmd| < 该值 (m/s)
+      to_idle_omega_max: 0.6 # STOPPING→IDLE/FIXED 退出判定：|omega_cmd| < 该值 (rad/s)
+      stopping_timeout: 1.0 # STOPPING 状态超时 (s)，超时强制切出
 
     mpc:
       energy:
-        enable: true # 是否启用能量约束
-        threshold: 600.0 # 电容能量惩罚阈值(J)，低于此值开始惩罚
+        enable: true # 是否启用能量约束（电容电量不足时限制功率）
+        threshold: 600.0 # 电容能量惩罚阈值 (J)，低于此值开始惩罚
         weight: 6.0 # 能量软约束权重
-        softplus_beta: 20.0 # softplus斜率(越大越接近硬折线惩罚)
+        softplus_beta: 20.0 # softplus斜率，越大越接近硬折线惩罚
       multi_hypothesis:
-        enable: false # 是否启用多假设求解
-        lateral_offset: 1.0 # 横向偏移量 (m)，左/右求解器的 target_ey
-        target_ey_penalty: 1.0 # 候选解比较时对非中心 target_ey 的固定附加代价系数，实际附加项为 penalty * target_ey^2
+        enable: false # 是否启用多假设求解（左/右偏移的备选路径）
+        lateral_offset: 1.0 # 横向偏移量 (m)
+        target_ey_penalty: 1.0 # 非中心target_ey的固定附加代价系数
 
       follow:
         start_command:
-          vel_cmd_act_gap_max: 1.5 # 线速度指令与实际速度允许差值上限 (m/s)
-          omega_cmd_act_gap_max: 3.0 # 角速度指令与实际角速度允许差值上限 (rad/s)
+          vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
+          omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
         mode_profiles:
           normal:
             command_bounds:
-              vel_max: 2.4 # 最大速度 (m/s)
-              vel_min: -1.2 # 最小速度 (m/s)
-              omega_max: 7.2 # 最大角速度 (rad/s)
-              omega_min: -7.2 # 最小角速度 (rad/s)
+              vel_max: 2.4 # 线速度上限 (m/s)
+              vel_min: -1.2 # 线速度下限 (m/s）
+              omega_max: 7.2 # 角速度上限 (rad/s)
+              omega_min: -7.2 # 角速度下限 (rad/s)
             motion_constraints:
-              acc_max: 1.8 # 正常跟随最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # 正常跟随最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 2.8 # 正常跟随最大侧向加速度 |v_act*omega_act| (m/s²)
-          leg:
+              acc_max: 1.8  # 最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+            lpv_rho: -0.87 # 常规构型调度量
+          leg_up:
             command_bounds:
-              vel_max: 1.5 # LEG 模式最大速度 (m/s)
-              vel_min: -1.2 # LEG 模式最小速度 (m/s)
-              omega_max: 7.2 # LEG 模式最大角速度 (rad/s)
-              omega_min: -7.2 # LEG 模式最小角速度 (rad/s)
+              vel_max: 1.5 # 线速度上限 (m/s)
+              vel_min: -1.2 # 线速度下限 (m/s）
+              omega_max: 7.2 # 角速度上限 (rad/s)
+              omega_min: -7.2 # 角速度下限 (rad/s)
             motion_constraints:
-              acc_max: 1.5 # LEG 模式最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # LEG 模式最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 1.5 # LEG 模式最大侧向加速度，适应伸腿后的重心变化 (m/s²)
-            lpv_rho: 0.95 # LEG 预览使用固定腿构型调度量
-          jump:
+              acc_max: 1.5 # 最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 1.5 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+            lpv_rho: 0.95 # 伸腿上台阶构型调度量
+          jump_up:
             command_bounds:
-              vel_max: 2.4 # JUMP 模式最大速度 (m/s)
-              vel_min: -1.2 # JUMP 模式最小速度 (m/s)
-              omega_max: 7.2 # JUMP 模式最大角速度 (rad/s)
-              omega_min: -7.2 # JUMP 模式最小角速度 (rad/s)
+              vel_max: 2.4 # 线速度上限 (m/s)
+              vel_min: -1.2 # 线速度下限 (m/s）
+              omega_max: 7.2 # 角速度上限 (rad/s)
+              omega_min: -7.2 # 角速度下限 (rad/s)
             motion_constraints:
-              acc_max: 1.8 # JUMP 模式最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # JUMP 模式最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 2.8 # JUMP 模式最大侧向加速度 |v_act*omega_act| (m/s²)
-            lpv_rho: -0.87 # JUMP 预览使用固定腿构型调度量
+              acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+            lpv_rho: -0.87 # 跳跃上台阶构型调度量
+          leg_down:
+            command_bounds:
+              vel_max: 1.4 # 线速度上限 (m/s)
+              vel_min: -1.2 # 线速度下限 (m/s）
+              omega_max: 7.2 # 角速度上限 (rad/s)
+              omega_min: -7.2 # 角速度下限 (rad/s)
+            motion_constraints:
+              acc_max: 1.5 # 最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 1.5 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+            lpv_rho: -0.87 # 伸腿下台阶构型调度量
+          jump_down:
+            command_bounds:
+              vel_max: 2.0 # 线速度上限 (m/s)
+              vel_min: -1.2 # 线速度下限 (m/s）
+              omega_max: 7.2 # 角速度上限 (rad/s)
+              omega_min: -7.2 # 角速度下限 (rad/s)
+            motion_constraints:
+              acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+              a_lat_max: 2.4 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+            lpv_rho: -0.87 # 跳跃下台阶构型调度量
         tracking_weights:
-          q_y: 0.4 # 横向误差权重
+          q_y: 0.4  # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u: 1.0 # 进度项权重
+          q_u: 1.0  # 进度项权重（鼓励沿路径前进）
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
@@ -157,125 +151,107 @@
           alpha_limit: 20.0 # 角速度指令变化率超限惩罚
           lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         terrain_limits:
-          step_vel_jump: 10.0 # JUMP 模式上台阶目标速度 (m/s)
-          step_vel_leg: 1.4 # LEG 模式上台阶目标速度 (m/s)
-          step_vel_deadzone: 0.4 # 上台阶速度惩罚死区 (m/s)
+          step_speed_levels: [0.8, 1.1, 1.4, 1.8] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
+          step_vel_deadzone: 0.4 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
         terrain_weights:
-          step_vel_weight: 1.0 # 锁存后台阶区域速度目标权重
-          direction: 1.0 # 台阶方向对齐权重
+          step_vel_weight: 1.0 # 锁存后台阶区域速度目标惩罚权重
+          direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
-          obstacle: 1.0 # 避障权重（全局+局部）
+          obstacle: 1.0 # 避障权重（全局+局部融合代价）
         terminal_limits:
           slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
           slow_down_target_vel: 0.3 # 终点减速目标速度 (m/s)
           slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
         terminal_weights:
-          q_v_final: 0.2 # 终点减速权重
+          q_v_final: 0.2 # 终点减速权重（鼓励到达终点时减速）
         projection:
-          num_samples: 50 # 投影到样条参数u时的采样数
-          search_window: 0.1 # 局部搜索窗口大小 (0~1)
-          local_search_lazy_distance: 0.1 # 如果局部搜索到的点与当前位置距离小于该值，则认为找到了合适的投影点 (m)
-
-      step_preview:
-        q_y: 0.6 # 上台阶预览路径横向偏差权重
-        q_theta: 0.2 # 上台阶预览航向偏差权重
-        q_u: 1.0 # 上台阶预览进度鼓励权重
-        r_dv: 0.2 # 上台阶预览指令平滑权重（线速度）
-        r_domega: 0.1 # 上台阶预览指令平滑权重（角速度）
-        acc_limit: 20.0 # 上台阶预览加速度约束惩罚权重
-        alpha_limit: 20.0 # 上台阶预览角加速度约束惩罚权重
-        lat_acc: 20.0 # 上台阶预览侧向加速度约束惩罚权重
+          num_samples: 50 # 投影到样条参数u的采样数
+          search_window: 0.1 # 局部搜索窗口 (0~1)
+          local_search_lazy_distance: 0.1 # 局部搜索找到合适投影点的距离阈值 (m)
 
       stop:
         command_bounds:
-          vel_max: 2.4 # 最大线速度硬约束 (m/s)
-          vel_min: 0.0 # 最小线速度硬约束 (m/s)
-          omega_max: 12.5 # 最大角速度硬约束 (rad/s)
-          omega_min: -12.5 # 最小角速度硬约束 (rad/s)
+          vel_max: 2.4 # 线速度上限 (m/s)
+          vel_min: 0.0  # 线速度下限 (m/s，停止模式不允许倒车）
+          omega_max: 12.5 # 角速度上限 (rad/s)
+          omega_min: -12.5 # 角速度下限 (rad/s)
         start_command:
-          vel_cmd_act_gap_max: 1.5 # 线速度指令与实际速度允许差值上限 (m/s)
-          omega_cmd_act_gap_max: 3.0 # 角速度指令与实际角速度允许差值上限 (rad/s)
+          vel_cmd_act_gap_max: 1.5
+          omega_cmd_act_gap_max: 3.0
         motion_constraints:
-          acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-          a_lat_max: 2.4 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+          acc_max: 1.8
+          alpha_max: 7.0
+          a_lat_max: 2.4
         command_weights:
           q_v: 0.6 # 线速度正则
           q_omega: 0.6 # 角速度正则
           r_dv: 0.8 # 线速度指令平滑
           r_domega: 0.2 # 角速度指令平滑
         motion_constraint_weights:
-          acc_limit: 20.0 # 速度指令变化率超限惩罚
-          alpha_limit: 20.0 # 角速度指令变化率超限惩罚
-          lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
-        terrain_limits:
-          step_vel_stop: 1.2 # STOP 模式上台阶目标速度 (m/s)
-          step_vel_deadzone_stop: 0.6 # STOP 模式上台阶速度惩罚死区 (m/s)
-        terrain_weights:
-          step_vel_weight_stop: 1.0 # STOP 模式上台阶速度目标权重
-          direction: 3.0 # 在台阶上要求朝向与台阶方向对齐
+          acc_limit: 20.0
+          alpha_limit: 20.0
+          lat_acc: 20.0
         environment_weights:
-          obstacle: 6.0 # 避障惩罚
+          obstacle: 6.0 # 避障惩罚（台阶区域已转为障碍物）
         terminal_weights:
           obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
-          step_terminal: 10.0 # 终端台阶惩罚（防止停在台阶上）
 
       hold:
         command_bounds:
-          vel_max: 1.2 # 最大线速度硬约束 (m/s)
-          vel_min: -1.2 # 最小线速度硬约束 (m/s)
-          omega_max: 1.6 # 最大角速度硬约束 (rad/s)
-          omega_min: -1.6 # 最小角速度硬约束 (rad/s)
+          vel_max: 1.2
+          vel_min: -1.2
+          omega_max: 1.6
+          omega_min: -1.6
         start_command:
-          vel_cmd_act_gap_max: 1.5 # 线速度指令与实际速度允许差值上限 (m/s)
-          omega_cmd_act_gap_max: 3.0 # 角速度指令与实际角速度允许差值上限 (rad/s)
+          vel_cmd_act_gap_max: 1.5
+          omega_cmd_act_gap_max: 3.0
         motion_constraints:
-          acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-          a_lat_max: 2.4 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+          acc_max: 1.8
+          alpha_max: 7.0
+          a_lat_max: 2.4
         goal_weights:
           q_goal_xy: 0.3 # 每步目标点吸引（x/y误差）
           q_goal_theta: 0.2 # 朝向目标点
           goal_deadzone: 0.2 # 目标吸引死区半径，进入后不再因目标位置误差来回抽动 (m)
-        command_weights: 
-          r_v: 0.02 # 线速度正则
-          r_omega: 0.08 # 角速度正则
-          r_dv: 0.8 # 线速度平滑
-          r_domega: 0.2 # 角速度平滑
+        command_weights:
+          r_v: 0.02
+          r_omega: 0.08
+          r_dv: 0.8
+          r_domega: 0.2
         motion_constraint_weights:
-          acc_limit: 20.0 # 速度指令变化率超限惩罚
-          alpha_limit: 20.0 # 角速度指令变化率超限惩罚
-          lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
+          acc_limit: 20.0
+          alpha_limit: 20.0
+          lat_acc: 20.0
         environment_weights:
           obstacle: 6.0 # 全程避障惩罚
           step: 6.0 # 全程台阶惩罚（视为不可通行）
         terminal_weights:
-          q_goal_xy_terminal: 3.0 # 终端目标点吸引（x/y误差）
+          q_goal_xy_terminal: 3.0 # 终端目标点吸引
           obstacle_terminal: 12.0 # 终端避障惩罚
           step_terminal: 12.0 # 终端台阶惩罚
 
     recovery:
-      enable: true # 是否启用恢复功能
+      enable: true # 是否启用危险恢复功能
       hazard:
-        cost_threshold: 30.0 # >= 认为在危险区域 (0~255)
-        step_norm_threshold: 0.06 # >= 认为在危险台阶区域 (0~1)
+        cost_threshold: 30.0 # 当前位置代价 >= 该值认为在危险区域 (0~255)
+        step_norm_threshold: 0.06 # 当前位置方向场模长 >= 该值认为在危险台阶区域
       safe:
-        cost_threshold: 5.0 # < 认为可通行
-        step_norm_threshold: 0.01 # < 认为可通行
+        cost_threshold: 5.0 # 当前位置代价 < 该值认为可通行
+        step_norm_threshold: 0.01 # 当前位置方向场模长 < 该值认为可通行
       search:
         recovery_cost_threshold: 20.0 # 候选点插值代价上限，超过则不作为恢复目标
-        radius_min: 0.5 # 搜索半径范围下界 (m)
-        radius_max: 1.5 # 搜索半径范围上界 (m)
-        radius_samples: 5 # 搜索半径采样数
-        angle_samples: 36 # 每个半径上的搜索角度采样数
-        path_integral_resolution: 0.05 # 从当前位置到候选点的路径积分（用于计算代价和）采样精度 (m)
-        goal_timeout: 4.0 # 目标点超时时长，超时后重新选择 (s)
+        radius_min: 0.5 # 搜索半径下界 (m)
+        radius_max: 1.5 # 搜索半径上界 (m)
+        radius_samples: 5 # 半径采样数
+        angle_samples: 36 # 角度采样数
+        path_integral_resolution: 0.05 # 路径积分采样精度 (m)
+        goal_timeout: 4.0 # 目标点超时 (s)，超时后重新搜索
       exit:
-        safe_hold_time: 1.0 # 安全区域保持时间 (s)
+        safe_hold_time: 1.0 # 安全区域保持时间，超过后才退出恢复 (s)
       stuck:
         enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.4 # 指令速度超过该值才开始检测 (m/s)
-        timeout: 2.0 # 持续时间阈值 (s)
-        max_displacement: 0.2 # 位移小于该值则判定卡住 (m)
+        timeout: 2.0 # 卡住判定持续时间阈值 (s)
+        max_displacement: 0.2 # 位移小于该值判定卡住 (m)
         reverse_speed: 0.5 # 倒车速度 (m/s)
-        reverse_duration: 2.0 # 倒车时间 (s)
+        reverse_duration: 2.0 # 倒车持续时间 (s)

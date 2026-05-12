@@ -24,7 +24,6 @@ struct StFixed;
 struct StFollow;
 struct StSpin;
 struct StStopping;
-struct StStepRunup;
 struct StStuckReverse;
 struct StHazardRecovery;
 
@@ -122,39 +121,6 @@ struct StFixed final : sc::state<StFixed, Machine> {
     }
 };
 
-struct StStepRunup final : sc::state<StStepRunup, Machine> {
-    using reactions = sc::custom_reaction<EvUpdate>;
-
-    explicit StStepRunup(my_context ctx) : sc::state<StStepRunup, Machine>(ctx) {
-        auto& m = context<Machine>();
-        m.active_state = FsmState::STEP_RUNUP;
-        RCLCPP_INFO(m.logger, "FSM -> STEP_RUNUP");
-    }
-
-    sc::result react(const EvUpdate& ev) {
-        auto& m = context<Machine>();
-        const auto& in = ev.input;
-
-        if (in.is_stuck) {
-            m.reverse_start_time = in.stamp;
-            return transit<StStuckReverse>();
-        }
-        if (in.has_new_path) {
-            return transit<StFollow>();
-        }
-        if (in.step_runup_done) {
-            return transit<StFollow>();
-        }
-        if (!in.has_path) {
-            m.stopping_dest = DestState::IDLE;
-            m.stopping_start_time = in.stamp;
-            return transit<StStopping>();
-        }
-
-        return discard_event();
-    }
-};
-
 struct StFollow final : sc::state<StFollow, Machine> {
     using reactions = sc::custom_reaction<EvUpdate>;
 
@@ -187,10 +153,7 @@ struct StFollow final : sc::state<StFollow, Machine> {
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
-        if (in.step_runup_requested) {
-            return transit<StStepRunup>();
-        }
-        if (in.spin_requested && in.spin_high_priority) {
+        if (in.spin_requested && in.spin_high_priority && !in.step_active) {
             m.stopping_dest = DestState::SPIN;
             m.stopping_start_time = in.stamp;
             return transit<StStopping>();

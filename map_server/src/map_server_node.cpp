@@ -21,6 +21,37 @@
 #include <map_server/object_tracker.hpp>
 
 namespace map_server {
+
+namespace {
+
+void load_nav_map_channels_or_exit(
+    const rclcpp::Logger& logger,
+    const std::string& nav_map_path,
+    cv::Mat& global_direction_map,
+    cv::Mat& global_cost_map,
+    int& map_size_x,
+    int& map_size_y
+) {
+    cv::Mat nav_map = cv::imread(nav_map_path, cv::IMREAD_UNCHANGED);
+    if (nav_map.empty()) {
+        RCLCPP_FATAL(logger, "Failed to load global navmap from %s", nav_map_path.c_str());
+        std::exit(EXIT_FAILURE);
+    }
+    if (nav_map.type() != CV_8UC4) {
+        RCLCPP_FATAL(logger, "Global navmap %s must be BGRA PNG (CV_8UC4), but got type=%d channels=%d", nav_map_path.c_str(), nav_map.type(), nav_map.channels());
+        std::exit(EXIT_FAILURE);
+    }
+
+    map_size_x = nav_map.cols;
+    map_size_y = nav_map.rows;
+    std::vector<cv::Mat> channels;
+    cv::split(nav_map, channels);
+    cv::merge(std::array{channels[0], channels[1], channels[3]}, global_direction_map);
+    global_cost_map = channels[2];
+}
+
+} // namespace
+
 class MapServerNode: public rclcpp::Node {
 public:
     explicit MapServerNode(const rclcpp::NodeOptions& options);
@@ -222,17 +253,8 @@ void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::Sh
         nav_map_filename = declare_parameter<std::string>("global_map.blue_nav_map_filename");
     }
     std::string nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + nav_map_filename;
-    cv::Mat nav_map = cv::imread(nav_map_path, cv::IMREAD_COLOR);
-    if (nav_map.empty()) {
-        RCLCPP_FATAL(get_logger(), "Failed to load global navmap from %s", nav_map_path.c_str());
-        std::exit(EXIT_FAILURE);
-    }
-    map_size_x_ = nav_map.cols, map_size_y_ = nav_map.rows;
-    std::vector<cv::Mat> channels;
-    cv::split(nav_map, channels);
-    cv::merge(std::array{channels[0], channels[1]}, global_direction_map_); // 前两个通道表示台阶方向
-    global_cost_map_ = channels[2]; // 第三个通道表示代价地图
-    RCLCPP_INFO(get_logger(), "Loaded global navmap (%s) with size_x=%d, size_y=%d", msg->robot_color ? "RED" : "BLUE", nav_map.cols, nav_map.rows);
+    load_nav_map_channels_or_exit(get_logger(), nav_map_path, global_direction_map_, global_cost_map_, map_size_x_, map_size_y_);
+    RCLCPP_INFO(get_logger(), "Loaded global navmap (%s) as RGBA with size_x=%d, size_y=%d", msg->robot_color ? "RED" : "BLUE", map_size_x_, map_size_y_);
 }
 
 void MapServerNode::timer_callback() {
@@ -244,17 +266,8 @@ void MapServerNode::timer_callback() {
             global_nav_map_initialized_ = true;
             std::string default_nav_map_filename = declare_parameter<std::string>("global_map.default_nav_map_filename");
             std::string default_nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + default_nav_map_filename;
-            cv::Mat nav_map = cv::imread(default_nav_map_path, cv::IMREAD_COLOR);
-            if (nav_map.empty()) {
-                RCLCPP_FATAL(get_logger(), "Failed to load default global navmap from %s", default_nav_map_path.c_str());
-                std::exit(EXIT_FAILURE);
-            }
-            map_size_x_ = nav_map.cols, map_size_y_ = nav_map.rows;
-            std::vector<cv::Mat> channels;
-            cv::split(nav_map, channels);
-            cv::merge(std::array{channels[0], channels[1]}, global_direction_map_); // 前两个通道表示台阶方向
-            global_cost_map_ = channels[2]; // 第三个通道表示代价地图
-            RCLCPP_INFO(get_logger(), "Loaded global navmap (default) with size_x=%d, size_y=%d", nav_map.cols, nav_map.rows);
+            load_nav_map_channels_or_exit(get_logger(), default_nav_map_path, global_direction_map_, global_cost_map_, map_size_x_, map_size_y_);
+            RCLCPP_INFO(get_logger(), "Loaded default global navmap as RGBA with size_x=%d, size_y=%d", map_size_x_, map_size_y_);
         }
         return;
     }
@@ -653,7 +666,7 @@ void MapServerNode::pub_direction_map(
     const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher
 ) const {
     sensor_msgs::msg::Image::SharedPtr direction_map_msg = cv_bridge::CvImage(
-        std_msgs::msg::Header(), "8UC2", direction_map
+        std_msgs::msg::Header(), "8UC3", direction_map
     ).toImageMsg();
     direction_map_msg->header.stamp = stamp;
     direction_map_msg->header.frame_id = "map";

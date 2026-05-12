@@ -1,81 +1,97 @@
 /**:
   ros__parameters:
-    global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局方向地图订阅话题
-    global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图订阅话题
-    local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图订阅话题（用于与全局融合规划/重规划）
+    # ── 话题 ──
+    global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局台阶地图订阅话题（8UC3: B=方向X, G=方向Y, A=台阶模式alpha）
+    global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图订阅话题（OccupancyGrid）
+    local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图订阅话题（与全局融合用于重规划）
     goal_sub_topic: "/decision/nav_goal" # 目标点订阅话题
-    chassis_status_sub_topic: "/serial_bridge/chassis_status" # 底盘状态，用于获取当前速度
-    control_points_pub_topic: "/path_planner/control_points" # 优化后路径的B样条控制点发布话题
-    optimized_path_pub_topic: "/path_planner/optimized_path" # 优化后路径的采样点发布话题
-    occupied_threshold: 50 # 如果起点/目标点所在格子的代价值大于该阈值，则认为起点/目标点不可达
-    on_step_threshold: 0.1 # 如果起点/目标点所在格子的方向场模长大于该阈值，则认为起点/目标点在台阶上不可达
+    chassis_status_sub_topic: "/serial_bridge/chassis_status" # 底盘状态，用于获取当前速度做起点预测
+    control_points_pub_topic: "/path_planner/control_points" # B样条控制点发布话题
+    optimized_path_pub_topic: "/path_planner/optimized_path" # 优化后路径采样点发布话题
 
+    # ── 可行性判定 ──
+    occupied_threshold: 50 # 格子代价值 > 该值则认为不可通行（0~255）
+    on_step_threshold: 0.1 # 格子方向场模长 > 该值则认为在台阶上不可达
+    step_mode_dot_threshold: 0.3 # 移动方向与台阶方向场点积阈值，超过该值判定为上/下台阶并检查alpha禁止位
+
+    # ── 调试 ──
     debug:
       enable: true # 是否启用调试模式
       rough_path_pub_topic: "/path_planner/debug/rough_path" # A*原始路径发布话题
 
+    # ── 重规划 ──
     replan:
-      enable: false # 是否启用定时重规划
-      timer_period: 0.2 # 定时重规划的周期（单位：秒）
-      local_cost_threshold: 100 # 如果局部代价地图上全局路径经过的代价值大于该阈值，则触发重规划
+      enable: false # 是否启用定时重规划（根据局部代价地图触发的避障重规划）
+      timer_period: 0.2 # 定时重规划周期 (s)
+      local_cost_threshold: 100 # 局部代价超过该值触发重规划 (0~255)
 
+    # ── 起点预测 ──
     start_prediction:
-      enable: true # 是否启用起点预测（刹车距离 + 规划延迟）
-      max_accel: 2.0 # 最大减速度(>0)，用于估计刹车距离（单位：m/s^2）
-      planning_delay: 0.2 # A* + B样条期望耗时（单位：s）
-      min_speed: 0.3 # 低于该速度不进行起点前推（单位：m/s）
-      collision_check_step: 0.05 # 预测起点直线可达性采样间隔（单位：m）
+      enable: true # 是否启用起点预测（考虑刹车距离+规划延迟，提前规划起点）
+      max_accel: 2.0 # 最大减速度 (>0)，用于估计刹车距离 (m/s²)
+      planning_delay: 0.2 # A* + B样条期望耗时 (s)
+      min_speed: 0.3 # 低于该速度不进行起点前推 (m/s)
+      collision_check_step: 0.05 # 预测起点直线可达性采样间隔 (m)
 
+    # ── A* 规划器 ──
     path_planner:
-      skip_distance: 0.5 # 如果目标点距离当前点小于该值，则跳过A*并直接构造近距离B样条初值进行优化（单位：米）
-      direction_weight: 6.0 # 方向代价权重
-      obstacle_weight: 4.0 # 障碍物代价权重
-      step_weight: 0.6 # 经过台阶惩罚（基于方向场模长）
-      downsampled_waypoint_max_interval: 5 # 对规划后的轨迹进行降采样，降采样后路径点之间的最大间隔（以格子为单位）
-      feasible_threshold: 100 # 超过该阈值的格子被视为不可通行
+      skip_distance: 0.5 # 目标距离 < 该值时跳过A*，直接构造B样条初值进行优化 (m)
+      direction_weight: 6.0 # 偏离台阶方向场的代价权重（鼓励顺着台阶方向移动）
+      obstacle_weight: 4.0 # 障碍物代价权重（0~255 映射到 cost）
+      step_weight: 0.6 # 经过台阶区域的惩罚权重（基于方向场模长，被禁止方向会跳过此惩罚）
+      prohibited_direction_weight: 200.0 # alpha标记禁止方向上穿越台阶的高额惩罚权重
+      downsampled_waypoint_max_interval: 5 # 路径降采样后点间最大间隔（栅格单位）
+      feasible_threshold: 100 # 代价 <= 该值的格子视为可通行 (0~255)
 
+    # ── B样条优化器 ──
     path_optimizer:
       step_norm_threshold: 0.01 # 台阶方向场模长阈值（>=该值视为台阶区域）
-      step_norm_transition: 0.05 # smoothstep 过渡宽度（避免硬阈值带来的不稳定）
-      step_detection_samples_per_meter: 10.0 # 台阶扫描采样密度（物理米）
+      step_norm_transition: 0.05 # smoothstep过渡宽度，避免台阶判定硬切换
+      step_detection_samples_per_meter: 10.0 # 台阶扫描采样密度 (/m)
+
+      # ── Warmup 阶段：粗调，使样条大致符合路径形状 ──
       warmup:
-        obstacle_weight: 0.5 # Warmup阶段避障权重
-        direction_weight: 6.0 # Warmup阶段台阶方向对齐权重
-        step_weight: 0.25 # Warmup阶段台阶位置惩罚
-        start_end_weight: 15.0 # Warmup阶段起终点保持权重，避免过刚性
-        smoothness_weight: 0.005 # Warmup阶段小权重二阶平滑，抑制局部抖动
-        samples_per_meter: 10.0 # Warmup阶段优化采样密度（物理米）
-        max_iterations: 60 # Warmup阶段最大迭代次数
-        max_curvature: 1.2 # Warmup阶段统一曲率上限 (1/m)
+        obstacle_weight: 0.5 # 避障权重
+        direction_weight: 6.0 # 台阶方向对齐权重（cross product惩罚偏离方向场）
+        step_weight: 0.25 # 台阶位置惩罚（鼓励避开台阶区域）
+        prohibited_direction_weight: 30.0 # alpha标记禁止方向上穿越台阶的软惩罚
+        start_end_weight: 15.0 # 起终点位置保持权重
+        smoothness_weight: 0.005 # 二阶平滑正则（抑制局部抖动）
+        samples_per_meter: 10.0 # 优化采样密度 (/m)
+        max_iterations: 60 # 最大迭代次数
+        max_curvature: 1.2 # 统一曲率上限 (1/m)
         length_penalty:
-          weight: 0.06 # Warmup阶段最小化|d1|^2，缩短路径并促使u分布更均匀
+          weight: 0.06 # 路径长度惩罚（最小化|d1|²，促进u均匀分布）
         curvature:
-          base_weight: 0.1 # 低曲率基础惩罚权重，抑制直道zigzag
+          base_weight: 0.1 # 低曲率基础惩罚（抑制直道zigzag）
           base_beta: 4.0 # 基础惩罚平滑斜率
-          limit_weight: 15.0 # 超曲率上限惩罚权重
+          limit_weight: 15.0 # 超曲率上限惩罚
           limit_beta: 16.0 # 超限惩罚平滑斜率
-          min_speed_epsilon: 0.05 # 曲率计算速度保护阈值 (m)
-          speed_gate_threshold: 0.15 # 小速度区域下调曲率惩罚 (m)
+          min_speed_epsilon: 0.05 # 曲率计算时速度保护的epsilon (m)
+          speed_gate_threshold: 0.15 # 低速区下调曲率惩罚的gate (m)
+
+      # ── Main 阶段：精调，基于台阶检测区间施加变曲率约束 ──
       main:
-        obstacle_weight: 0.5 # Main阶段避障权重
-        direction_weight: 6.0 # Main阶段台阶方向对齐权重
-        step_weight: 0.25 # Main阶段台阶位置惩罚
-        start_end_weight: 15.0 # Main阶段起终点保持权重
-        smoothness_weight: 0.005 # Main阶段保留更小的二阶平滑，避免与显式曲率约束打架
-        samples_per_meter: 10.0 # Main阶段优化采样密度（物理米）
-        max_iterations: 60 # Main阶段单轮最大迭代次数
-        max_refinement_iterations: 0 # 台阶扫描-优化耦合的最大重建轮数
+        obstacle_weight: 0.5 # 避障权重
+        direction_weight: 6.0 # 台阶方向对齐权重
+        step_weight: 0.25 # 台阶位置惩罚
+        prohibited_direction_weight: 30.0 # alpha标记禁止方向上穿越台阶的软惩罚
+        start_end_weight: 15.0 # 起终点位置保持权重
+        smoothness_weight: 0.005 # 二阶平滑正则
+        samples_per_meter: 10.0 # 优化采样密度 (/m)
+        max_iterations: 60 # 单轮最大迭代次数
+        max_refinement_iterations: 0 # 台阶扫描-优化耦合的最大重建轮数（0=不迭代）
         near_max_curvature: 0.4 # 台阶附近曲率上限，对齐MPC侧向加速度约束 (1/m)
         far_max_curvature: 1.2 # 远离台阶时曲率上限 (1/m)
         step_extension_distance: 1.0 # 台阶检测区间前后扩展距离 (m)
-        step_transition_distance: 1.0 # 近远曲率限制平滑过渡距离 (m)
-        interval_iou_threshold: 0.85 # 连续两轮台阶区间IoU达到该值认为收敛
+        step_transition_distance: 1.0 # 近/远曲率限制平滑过渡距离 (m)
+        interval_iou_threshold: 0.85 # 连续两轮台阶区间IoU>=该值认为收敛，停止迭代
         length_penalty:
-          weight: 0.06 # Main阶段最小化|d1|^2，防止过度压短导致贴障碍
+          weight: 0.06 # 路径长度惩罚
         curvature:
-          base_weight: 0.1 # 低曲率基础惩罚权重，抑制zigzag
+          base_weight: 0.1 # 低曲率基础惩罚
           base_beta: 4.0 # 基础惩罚平滑斜率
-          limit_weight: 15.0 # 超曲率上限惩罚权重
+          limit_weight: 15.0 # 超曲率上限惩罚
           limit_beta: 16.0 # 超限惩罚平滑斜率
-          min_speed_epsilon: 0.05 # 曲率计算速度保护阈值 (m)
-          speed_gate_threshold: 0.15 # 小速度区域下调曲率惩罚 (m)
+          min_speed_epsilon: 0.05 # 曲率计算速度保护epsilon (m)
+          speed_gate_threshold: 0.15 # 低速区下调曲率惩罚gate (m)
