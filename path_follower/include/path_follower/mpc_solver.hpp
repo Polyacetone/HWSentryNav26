@@ -16,7 +16,8 @@ namespace path_follower {
 //  MPC 编译期常量
 // ═══════════════════════════════════════════════════════════════
 
-constexpr int MPC_HORIZON = 30;
+constexpr int MPC_HORIZON = 30; // MPC 预测步数
+constexpr int STEP_RUNUP_ROLLOUT_HORIZON = 80; // 台阶助跑 rollout 步数
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
@@ -206,6 +207,12 @@ struct MPCFollowParams {
     MPCFollowProjection projection;
 };
 
+struct MPCStepRunupRolloutParams {
+    MPCFollowTrackingWeights tracking_weights;
+    MPCFollowCommandWeights command_weights;
+    MPCMotionConstraintWeights motion_constraint_weights;
+};
+
 struct MPCStopCommandWeights {
     double q_v;
     double q_omega;
@@ -295,8 +302,17 @@ struct MPCPrediction {
     std::vector<double> w_pred;
 };
 
+struct StepArrivalRollout {
+    bool reached_target = false;
+    double arrival_velocity = 0.0;
+    double target_velocity = 0.0;
+    double deficit = 0.0;
+    MPCPrediction prediction;
+};
+
 struct MPCParams {
     MPCFollowParams follow;
+    MPCStepRunupRolloutParams step_runup_rollout;
     MPCStopParams stop;
     MPCHoldParams hold;
 
@@ -429,6 +445,48 @@ private:
 
 using FollowProblem = FollowProblemT<MPC_HORIZON>;
 
+template<int Horizon>
+class StepRunupRolloutProblemT {
+public:
+    StepRunupRolloutProblemT(
+        const std::vector<Eigen::Vector2d>& ref_control_points,
+        const MPCParams& params,
+        double schedule_rho,
+        const ArclengthTable& arclength_table,
+        const ActiveStepMode& active_step_mode
+    );
+
+    StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
+    void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
+
+    double running_cost(int k, const StateVec& x, const ControlVec& u) const;
+    void running_cost_derivatives(
+        int k,
+        const StateVec& x,
+        const ControlVec& u,
+        StateVec& lx,
+        ControlVec& lu,
+        MatXX& lxx,
+        Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+        Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
+    ) const;
+
+    double terminal_cost(const StateVec& x) const;
+    void terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const;
+
+    ControlVec u_lower() const;
+    ControlVec u_upper() const;
+
+private:
+    const std::vector<Eigen::Vector2d>& ref_cps_;
+    const MPCParams& p_;
+    LPVDiscreteModel model_ {};
+    const ArclengthTable& arc_table_;
+    ActiveStepMode active_step_mode_;
+};
+
+using StepRunupRolloutProblem = StepRunupRolloutProblemT<STEP_RUNUP_ROLLOUT_HORIZON>;
+
 // ═══════════════════════════════════════════════════════════════
 //  FDDP Problem 类型 — Stop
 // ═══════════════════════════════════════════════════════════════
@@ -543,6 +601,12 @@ struct Dims<path_follower::StopProblem> {
     static constexpr int N = path_follower::MPC_HORIZON;
 };
 template<>
+struct Dims<path_follower::StepRunupRolloutProblem> {
+    static constexpr int NX = path_follower::MPC_NX;
+    static constexpr int NU = path_follower::MPC_NU;
+    static constexpr int N = path_follower::STEP_RUNUP_ROLLOUT_HORIZON;
+};
+template<>
 struct Dims<path_follower::HoldProblem> {
     static constexpr int NX = path_follower::MPC_NX;
     static constexpr int NU = path_follower::MPC_NU;
@@ -596,6 +660,15 @@ public:
         const DirectionMap& direction_map
     );
 
+    std::expected<StepArrivalRollout, std::string> rollout_step_arrival(
+        const SplineD& global_path,
+        const Eigen::Vector3d& chassis_pose_map,
+        const ChassisMotionState& chassis_state,
+        double initial_path_u,
+        const ActiveStepMode& active_step_mode,
+        double target_path_u
+    );
+
     [[nodiscard]] const MPCParams& params() const {
         return params_;
     }
@@ -607,6 +680,7 @@ private:
 
     // 主 FDDP solver（中心假设）
     fddp::Solver<FollowProblem> follow_solver_;
+    fddp::Solver<StepRunupRolloutProblem> step_runup_rollout_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
     bool follow_warm_ = false;

@@ -762,6 +762,48 @@ ControlVec FollowProblemT<Horizon>::u_upper() const {
     return ControlVec(command_bounds.vel_max, command_bounds.omega_max);
 }
 
+template<int Horizon>
+StepRunupRolloutProblemT<Horizon>::StepRunupRolloutProblemT(
+    const std::vector<Eigen::Vector2d>& ref_control_points,
+    const MPCParams& params,
+    double schedule_rho,
+    const ArclengthTable& arclength_table,
+    const ActiveStepMode& active_step_mode
+):
+    ref_cps_(ref_control_points),
+    p_(params),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
+    arc_table_(arclength_table),
+    active_step_mode_(active_step_mode) {}
+
+template<int Horizon>
+StateVec StepRunupRolloutProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
+    StateVec xn = mpc_dynamics(x, u, model_);
+    xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, ref_cps_);
+    return xn;
+}
+
+template<int Horizon>
+void StepRunupRolloutProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
+    mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
+    const auto adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, ref_cps_);
+    const double dout_din = clamp_derivative(adv.u_next_extrap, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+    dfx.row(ix::PATH_U) = (dout_din * adv.du_next_dx).transpose();
+    dfu.row(ix::PATH_U).setZero();
+}
+
+template<int Horizon>
+ControlVec StepRunupRolloutProblemT<Horizon>::u_lower() const {
+    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
+    return ControlVec(command_bounds.vel_min, command_bounds.omega_min);
+}
+
+template<int Horizon>
+ControlVec StepRunupRolloutProblemT<Horizon>::u_upper() const {
+    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
+    return ControlVec(command_bounds.vel_max, command_bounds.omega_max);
+}
+
 namespace {
 
 constexpr int FOLLOW_RESIDUAL_DIM = 15;
@@ -998,6 +1040,63 @@ FollowResidualVec follow_residual_impl(
     ).r;
 }
 
+constexpr int STEP_RUNUP_ROLLOUT_RESIDUAL_DIM = 10;
+using StepRunupRolloutResidualVec = Eigen::Matrix<double, STEP_RUNUP_ROLLOUT_RESIDUAL_DIM, 1>;
+
+StepRunupRolloutResidualVec step_runup_rollout_residual_impl(
+    const StateVec& x,
+    const ControlVec& u,
+    const std::vector<Eigen::Vector2d>& ref_cps,
+    const ArclengthTable&,
+    const MPCParams& p,
+    const ActiveStepMode& active_step_mode
+) {
+    const auto& weights = p.step_runup_rollout;
+    const auto& motion_lim = select_follow_mode_profile(p.follow, active_step_mode).motion_constraints;
+
+    StepRunupRolloutResidualVec r = StepRunupRolloutResidualVec::Zero();
+
+    const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
+    const double v_act = x(ix::V);
+    const double w_act = x(ix::W);
+    const double v_cmd = u(0);
+    const double w_cmd = u(1);
+    const double dv_cmd = v_cmd - x(ix::DV);
+    const double dw_cmd = w_cmd - x(ix::DW);
+
+    const double uc = clamp_path_u_extrapolated(x(ix::PATH_U));
+    Eigen::Vector2d pr, d1, d2;
+    eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+    const double thetar = std::atan2(d1.y(), d1.x());
+    const double sin_r = std::sin(thetar);
+    const double cos_r = std::cos(thetar);
+    const double etheta = wrap_pi(theta - thetar);
+
+    const double ex = px - pr.x(), ey_w = py - pr.y();
+    const double ey = -ex * sin_r + ey_w * cos_r;
+
+    const auto u_adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, ref_cps);
+    const double u_progress = std::min(1.0, u_adv.u_next_extrap);
+    const auto relu_progress = smooth_relu_eval(1.0 - u_progress);
+
+    const double dv_lim = motion_lim.acc_max * MPC_DT;
+    const double dw_lim = motion_lim.alpha_max * MPC_DT;
+    const double a_lat = std::abs(v_act * w_act);
+
+    r(0) = weights.tracking_weights.q_y * ey;
+    r(1) = weights.tracking_weights.q_theta * etheta;
+    r(2) = weights.tracking_weights.q_u * relu_progress.value;
+    r(3) = weights.command_weights.r_v * v_cmd;
+    r(4) = weights.command_weights.r_omega * w_cmd;
+    r(5) = weights.command_weights.r_dv * dv_cmd;
+    r(6) = weights.command_weights.r_domega * dw_cmd;
+    r(7) = weights.motion_constraint_weights.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
+    r(8) = weights.motion_constraint_weights.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
+    r(9) = weights.motion_constraint_weights.lat_acc * relu(a_lat - motion_lim.a_lat_max);
+
+    return r;
+}
+
 AdvanceUProgressEval
 advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps) {
     AdvanceUProgressEval out {};
@@ -1168,6 +1267,43 @@ void FollowProblemT<Horizon>::terminal_cost_derivatives(const StateVec&, StateVe
 }
 
 template class FollowProblemT<MPC_HORIZON>;
+
+template<int Horizon>
+double StepRunupRolloutProblemT<Horizon>::running_cost(int k, const StateVec& x, const ControlVec& u) const {
+    (void)k;
+    return residual_cost(step_runup_rollout_residual_impl(x, u, ref_cps_, arc_table_, p_, active_step_mode_));
+}
+
+template<int Horizon>
+void StepRunupRolloutProblemT<Horizon>::running_cost_derivatives(
+    int k,
+    const StateVec& x,
+    const ControlVec& u,
+    StateVec& lx,
+    ControlVec& lu,
+    MatXX& lxx,
+    Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
+    Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
+) const {
+    (void)k;
+    auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
+        return step_runup_rollout_residual_impl(xv, uv, ref_cps_, arc_table_, p_, active_step_mode_);
+    };
+    gauss_newton_running_derivatives<STEP_RUNUP_ROLLOUT_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
+}
+
+template<int Horizon>
+double StepRunupRolloutProblemT<Horizon>::terminal_cost(const StateVec&) const {
+    return 0.0;
+}
+
+template<int Horizon>
+void StepRunupRolloutProblemT<Horizon>::terminal_cost_derivatives(const StateVec&, StateVec& lfx, MatXX& lfxx) const {
+    lfx.setZero();
+    lfxx.setZero();
+}
+
+template class StepRunupRolloutProblemT<STEP_RUNUP_ROLLOUT_HORIZON>;
 
 // ════════════════════════════════════════════════════════════════
 //  StopProblem
@@ -1653,6 +1789,92 @@ MPCPrediction MPCSolver::extract_prediction(const StateVec* xs, const size_t n) 
         pred.w_pred.push_back(xs[i](ix::W));
     }
     return pred;
+}
+
+std::expected<StepArrivalRollout, std::string> MPCSolver::rollout_step_arrival(
+    const SplineD& global_path,
+    const Eigen::Vector3d& chassis_pose_map,
+    const ChassisMotionState& chassis_state,
+    const double initial_path_u,
+    const ActiveStepMode& active_step_mode,
+    const double target_path_u
+) {
+    const auto& ref_cps = global_path.getControlPoints();
+    if (ref_cps.size() < 3) {
+        return std::unexpected(std::string("global_path has insufficient control points"));
+    }
+
+    const std::optional<ActiveStepMode> active_mode = active_step_mode;
+    const auto& follow_mode_profile = select_follow_mode_profile(params_.follow, active_mode);
+    const double schedule_rho = select_follow_schedule_rho(
+        params_.follow,
+        active_mode,
+        chassis_state,
+        params_.kinematic_model
+    );
+
+    const Eigen::Vector2d cmd0(
+        clamp_prev_cmd(
+            last_cmd_.x(),
+            chassis_state.velocity,
+            params_.follow.start_command.vel_cmd_act_gap_max,
+            follow_mode_profile.motion_constraints.acc_max,
+            MPC_DT
+        ),
+        clamp_prev_cmd(
+            last_cmd_.y(),
+            chassis_state.omega,
+            params_.follow.start_command.omega_cmd_act_gap_max,
+            follow_mode_profile.motion_constraints.alpha_max,
+            MPC_DT
+        )
+    );
+
+    const auto& arc = [&]() -> const ArclengthTable& {
+        const int ns = params_.follow.terminal_limits.slow_down_num_samples;
+        if (prev_arc_samples_ != ns || !same_cps(prev_ref_control_points_, ref_cps)) {
+            prev_arclength_table_ = build_arclength_table(ref_cps, ns);
+            prev_ref_control_points_ = ref_cps;
+            prev_arc_samples_ = ns;
+        }
+        return prev_arclength_table_;
+    }();
+
+    StateVec x = make_initial_state(chassis_pose_map, chassis_state, cmd0, initial_path_u);
+    StepRunupRolloutProblem prob(ref_cps, params_, schedule_rho, arc, active_step_mode);
+
+    initialize_primal_trajectory(step_runup_rollout_solver_, prob, x, false);
+    fddp::SolverOptions opts;
+    opts.max_iters = 80;
+    opts.tol_grad = 1e-6;
+    opts.tol_cost = 1e-8;
+    step_runup_rollout_solver_.solve(prob, opts);
+
+    StepArrivalRollout rollout;
+    rollout.target_velocity = active_step_mode.target_velocity;
+    rollout.prediction.path_map.reserve(STEP_RUNUP_ROLLOUT_HORIZON + 1);
+    rollout.prediction.headings.reserve(STEP_RUNUP_ROLLOUT_HORIZON + 1);
+    rollout.prediction.v_pred.reserve(STEP_RUNUP_ROLLOUT_HORIZON + 1);
+    rollout.prediction.w_pred.reserve(STEP_RUNUP_ROLLOUT_HORIZON + 1);
+
+    for (int k = 0; k <= STEP_RUNUP_ROLLOUT_HORIZON; ++k) {
+        const StateVec& xk = step_runup_rollout_solver_.xs[static_cast<size_t>(k)];
+        if (!xk.allFinite()) {
+            return std::unexpected(std::string("rollout produced non-finite state"));
+        }
+        rollout.prediction.path_map.emplace_back(xk(ix::X), xk(ix::Y));
+        rollout.prediction.headings.push_back(xk(ix::THETA));
+        rollout.prediction.v_pred.push_back(xk(ix::V));
+        rollout.prediction.w_pred.push_back(xk(ix::W));
+
+        if (!rollout.reached_target && xk(ix::PATH_U) >= target_path_u) {
+            rollout.reached_target = true;
+            rollout.arrival_velocity = xk(ix::V);
+        }
+    }
+
+    rollout.deficit = std::max(0.0, rollout.target_velocity - rollout.arrival_velocity);
+    return rollout;
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_follow(

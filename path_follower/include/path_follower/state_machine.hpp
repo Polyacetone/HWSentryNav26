@@ -71,6 +71,7 @@ enum class FsmState : uint8_t {
     HAZARD_RECOVERY = 5,  // 危险恢复（向安全点移动）
     STUCK_REVERSE = 6,    // 倒车脱困
     FIXED = 7,            // 固定在目标点位（持续 MPC 保持位置）
+    STEP_RUNUP = 8,       // 台阶助跑：先退到起跑点，再回 FOLLOW
 };
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
@@ -83,6 +84,8 @@ struct FsmInput {
     bool fixed_goal_flag = false;
     bool reach_goal = false;
     bool step_active = false;
+    bool step_runup_requested = false;
+    bool step_runup_completed = false;
 
     // 外部请求
     bool spin_requested = false;

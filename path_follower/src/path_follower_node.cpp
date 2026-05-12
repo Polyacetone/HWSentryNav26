@@ -69,6 +69,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_step_rollout_path_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -122,6 +123,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.w_pred_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("debug.final_cost_map_pub_topic"), 1);
+        debug_step_rollout_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.step_rollout_path_pub_topic"), 1);
     }
 
     const auto load_follow_mode_profile = [this](const std::string& name, const double lpv_rho) {
@@ -199,6 +201,24 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow.projection.num_samples")),
                 .proj_search_window = declare_parameter<double>("mpc.follow.projection.search_window"),
                 .local_search_lazy_distance = declare_parameter<double>("mpc.follow.projection.local_search_lazy_distance")
+            }
+        },
+        .step_runup_rollout = {
+            .tracking_weights = {
+                .q_y = declare_parameter<double>("step.runup.mpc_weights.tracking.q_y"),
+                .q_theta = declare_parameter<double>("step.runup.mpc_weights.tracking.q_theta"),
+                .q_u = declare_parameter<double>("step.runup.mpc_weights.tracking.q_u")
+            },
+            .command_weights = {
+                .r_v = declare_parameter<double>("step.runup.mpc_weights.command.r_v"),
+                .r_omega = declare_parameter<double>("step.runup.mpc_weights.command.r_omega"),
+                .r_dv = declare_parameter<double>("step.runup.mpc_weights.command.r_dv"),
+                .r_domega = declare_parameter<double>("step.runup.mpc_weights.command.r_domega")
+            },
+            .motion_constraint_weights = {
+                .acc_limit = declare_parameter<double>("step.runup.mpc_weights.motion.acc_limit"),
+                .alpha_limit = declare_parameter<double>("step.runup.mpc_weights.motion.alpha_limit"),
+                .lat_acc = declare_parameter<double>("step.runup.mpc_weights.motion.lat_acc")
             }
         },
         .stop = {
@@ -375,24 +395,48 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     NavigationParams nav_params;
     nav_params.stop_threshold_dist = declare_parameter<double>("misc.stop_threshold_dist");
     nav_params.stop_threshold_u = declare_parameter<double>("misc.stop_threshold_u");
+    nav_params.follow_proj_guard = {
+        .dist_max = declare_parameter<double>("follow_proj_guard.dist_max"),
+        .cost_max = declare_parameter<double>("follow_proj_guard.cost_max"),
+        .cost_samples = static_cast<int>(declare_parameter<int>("follow_proj_guard.cost_samples"))
+    };
+    nav_params.step_detection = {
+        .detect_norm_threshold = declare_parameter<double>("step.detection.detect_norm_threshold"),
+        .detect_dot_threshold = declare_parameter<double>("step.detection.detect_dot_threshold"),
+        .path_sample_resolution = declare_parameter<double>("step.detection.path_sample_resolution"),
+        .target_match_distance = declare_parameter<double>("step.detection.target_match_distance"),
+        .latch_threshold = static_cast<int>(declare_parameter<int>("step.detection.latch_threshold")),
+        .release_distance = declare_parameter<double>("step.detection.release_distance"),
+        .lookahead = {
+            .rollout_length_filter_alpha = declare_parameter<double>("step.detection.lookahead.rollout_length_filter_alpha"),
+            .fixed_extension_distance = declare_parameter<double>("step.detection.lookahead.fixed_extension_distance"),
+            .min_distance = declare_parameter<double>("step.detection.lookahead.min_distance")
+        }
+    };
+    nav_params.step_runup = {
+        .velocity_deficit_threshold = declare_parameter<double>("step.runup.velocity_deficit_threshold"),
+        .goal_tolerance = declare_parameter<double>("step.runup.goal_tolerance"),
+        .search = {
+            .radius_min = declare_parameter<double>("step.runup.search.radius_min"),
+            .radius_max = declare_parameter<double>("step.runup.search.radius_max"),
+            .radius_samples = static_cast<int>(declare_parameter<int>("step.runup.search.radius_samples")),
+            .sector_half_angle_rad = declare_parameter<double>("step.runup.search.sector_half_angle_rad"),
+            .angle_samples = static_cast<int>(declare_parameter<int>("step.runup.search.angle_samples")),
+            .candidate_cost_max = declare_parameter<double>("step.runup.search.candidate_cost_max"),
+            .line_cost_max = declare_parameter<double>("step.runup.search.line_cost_max"),
+            .safe_step_norm_threshold = declare_parameter<double>("step.runup.search.safe_step_norm_threshold"),
+            .path_integral_resolution = declare_parameter<double>("step.runup.search.path_integral_resolution"),
+            .path_integral_cost_weight = declare_parameter<double>("step.runup.search.path_integral_cost_weight"),
+            .path_integral_step_weight = declare_parameter<double>("step.runup.search.path_integral_step_weight"),
+            .radius_preference_weight = declare_parameter<double>("step.runup.search.radius_preference_weight")
+        }
+    };
 
-    nav_params.follow_proj_dist_max = declare_parameter<double>("follow_proj_guard.proj_dist_max");
-    nav_params.follow_proj_cost_max = declare_parameter<double>("follow_proj_guard.proj_cost_max");
-    nav_params.follow_proj_cost_samples = static_cast<int>(declare_parameter<int>("follow_proj_guard.proj_cost_samples"));
-    nav_params.step_detect_norm_threshold = declare_parameter<double>("step_ahead_flag.step_detection.detect_norm_threshold");
-    nav_params.step_detect_dot_threshold = declare_parameter<double>("step_ahead_flag.step_detection.detect_dot_threshold");
-    nav_params.step_edge_norm_threshold = declare_parameter<double>("step_ahead_flag.step_detection.edge_norm_threshold");
-    nav_params.step_on_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.step_down_flag.on_count_threshold"));
-    nav_params.step_off_count_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.step_down_flag.off_count_threshold"));
-    nav_params.step_path_lookahead_distance = declare_parameter<double>("step_ahead_flag.step_up_flag.path_lookahead_distance");
-    nav_params.step_path_sample_resolution = declare_parameter<double>("step_ahead_flag.step_up_flag.path_sample_resolution");
-    nav_params.step_target_match_distance = declare_parameter<double>("step_ahead_flag.step_up_flag.target_match_distance");
-    nav_params.step_latch_threshold = static_cast<int>(declare_parameter<int>("step_ahead_flag.step_up_flag.latch_threshold"));
-    nav_params.step_release_distance = declare_parameter<double>("step_ahead_flag.step_up_flag.release_distance");
-
-    nav_params.no_progress_enable = declare_parameter<bool>("follow_no_progress_guard.enable");
-    nav_params.no_progress_landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing");
-    nav_params.no_progress_timeout = declare_parameter<double>("follow_no_progress_guard.timeout");
+    nav_params.no_progress_guard = {
+        .enable = declare_parameter<bool>("follow_no_progress_guard.enable"),
+        .landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing"),
+        .timeout = declare_parameter<double>("follow_no_progress_guard.timeout")
+    };
 
     // ─── 创建 MainController ───
     nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
@@ -716,6 +760,9 @@ void PathFollowerNode::control_timer_callback() {
         if (enable_debug_) {
             if (output.predicted_path_map) {
                 debug_predicted_path_pub_->publish(path_to_nav_msg(*output.predicted_path_map));
+            }
+            if (output.step_rollout_path_map) {
+                debug_step_rollout_path_pub_->publish(path_to_nav_msg(*output.step_rollout_path_map));
             }
             if (output.predicted_v && output.predicted_w) {
                 std_msgs::msg::Float64 v_msg, w_msg;
