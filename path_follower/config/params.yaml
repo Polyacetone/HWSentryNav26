@@ -55,12 +55,10 @@
         goal_tolerance: 0.2 # 助跑点到达判定距离 (m)
         mpc_weights:
           tracking:
-            q_y: 0.6 # 横向误差权重
+            q_y: 0.4 # 横向误差权重
             q_theta: 0.2 # 航向误差权重
             q_u: 1.0 # 进度项权重（鼓励沿路径前进）
           command:
-            r_v: 0.01 # 线速度正则
-            r_omega: 0.01 # 角速度正则
             r_dv: 0.2 # 线速度平滑
             r_domega: 0.1 # 角速度平滑
           motion:
@@ -179,9 +177,9 @@
           lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         terrain_limits:
           step_speed_levels: [1.0, 1.6, 2.2, 2.8] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
-          step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
+          step_vel_deadzone: 0.3 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
         terrain_weights:
-          step_vel_weight: 1.0 # 锁存后台阶区域速度目标惩罚权重
+          step_vel_weight: 0.8 # 锁存后台阶区域速度目标惩罚权重
           direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
           obstacle: 1.0 # 避障权重（全局+局部融合代价）

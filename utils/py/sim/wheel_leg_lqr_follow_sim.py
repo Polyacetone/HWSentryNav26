@@ -109,7 +109,7 @@ class SimConfig:
 
     # --- 初始位姿（世界坐标） ---
     INIT_X: float = 3.0
-    INIT_Y: float = 5.5
+    INIT_Y: float = 3.5
     INIT_THETA: float = 0.0
 
     # --- 指令限幅（目标值） ---

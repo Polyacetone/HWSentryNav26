@@ -453,6 +453,9 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
                 const auto runup = needs_runup
                     ? evaluate_step_runup(input, *input.global_path, u0, *step_target, *step_command)
                     : StepRunupDecision {};
+                if (needs_runup && runup.debug_rollout_path_map) {
+                    out.step_rollout_path_map = runup.debug_rollout_path_map;
+                }
                 if (runup.cancel_path) {
                     RCLCPP_WARN(
                         logger_,
@@ -472,7 +475,6 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
                     step_runup_context_ = runup.context;
                     step_runup_request_pending_ = true;
                     step_runup_goal_reached_ = false;
-                    out.step_rollout_path_map = runup.debug_rollout_path_map;
                     RCLCPP_INFO(
                         logger_,
                         "Step run-up requested: mode=%s deficit=%.2f target_v=%.2f arrival_v=%.2f current_v=%.2f step_u=%.3f goal=(%.2f, %.2f)",

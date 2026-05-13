@@ -17,7 +17,7 @@ namespace path_follower {
 // ═══════════════════════════════════════════════════════════════
 
 constexpr int MPC_HORIZON = 30; // MPC 预测步数
-constexpr int STEP_RUNUP_ROLLOUT_HORIZON = 80; // 台阶助跑 rollout 步数
+constexpr int STEP_RUNUP_ROLLOUT_HORIZON = 60; // 台阶助跑 rollout 步数
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
@@ -207,9 +207,14 @@ struct MPCFollowParams {
     MPCFollowProjection projection;
 };
 
+struct MPCStepRunupRolloutCommandWeights {
+    double r_dv;
+    double r_domega;
+};
+
 struct MPCStepRunupRolloutParams {
     MPCFollowTrackingWeights tracking_weights;
-    MPCFollowCommandWeights command_weights;
+    MPCStepRunupRolloutCommandWeights command_weights;
     MPCMotionConstraintWeights motion_constraint_weights;
 };
 

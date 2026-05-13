@@ -1040,7 +1040,7 @@ FollowResidualVec follow_residual_impl(
     ).r;
 }
 
-constexpr int STEP_RUNUP_ROLLOUT_RESIDUAL_DIM = 10;
+constexpr int STEP_RUNUP_ROLLOUT_RESIDUAL_DIM = 8;
 using StepRunupRolloutResidualVec = Eigen::Matrix<double, STEP_RUNUP_ROLLOUT_RESIDUAL_DIM, 1>;
 
 StepRunupRolloutResidualVec step_runup_rollout_residual_impl(
@@ -1086,13 +1086,11 @@ StepRunupRolloutResidualVec step_runup_rollout_residual_impl(
     r(0) = weights.tracking_weights.q_y * ey;
     r(1) = weights.tracking_weights.q_theta * etheta;
     r(2) = weights.tracking_weights.q_u * relu_progress.value;
-    r(3) = weights.command_weights.r_v * v_cmd;
-    r(4) = weights.command_weights.r_omega * w_cmd;
-    r(5) = weights.command_weights.r_dv * dv_cmd;
-    r(6) = weights.command_weights.r_domega * dw_cmd;
-    r(7) = weights.motion_constraint_weights.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
-    r(8) = weights.motion_constraint_weights.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
-    r(9) = weights.motion_constraint_weights.lat_acc * relu(a_lat - motion_lim.a_lat_max);
+    r(3) = weights.command_weights.r_dv * dv_cmd;
+    r(4) = weights.command_weights.r_domega * dw_cmd;
+    r(5) = weights.motion_constraint_weights.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
+    r(6) = weights.motion_constraint_weights.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
+    r(7) = weights.motion_constraint_weights.lat_acc * relu(a_lat - motion_lim.a_lat_max);
 
     return r;
 }
@@ -1845,7 +1843,7 @@ std::expected<StepArrivalRollout, std::string> MPCSolver::rollout_step_arrival(
 
     initialize_primal_trajectory(step_runup_rollout_solver_, prob, x, false);
     fddp::SolverOptions opts;
-    opts.max_iters = 80;
+    opts.max_iters = 160;
     opts.tol_grad = 1e-6;
     opts.tol_cost = 1e-8;
     step_runup_rollout_solver_.solve(prob, opts);
@@ -1978,7 +1976,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     );
 
     fddp::SolverOptions opts;
-    opts.max_iters = 80;
+    opts.max_iters = 120;
     opts.tol_grad = 1e-6;
     opts.tol_cost = 1e-8;
 

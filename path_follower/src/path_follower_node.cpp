@@ -210,8 +210,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .q_u = declare_parameter<double>("step.runup.mpc_weights.tracking.q_u")
             },
             .command_weights = {
-                .r_v = declare_parameter<double>("step.runup.mpc_weights.command.r_v"),
-                .r_omega = declare_parameter<double>("step.runup.mpc_weights.command.r_omega"),
                 .r_dv = declare_parameter<double>("step.runup.mpc_weights.command.r_dv"),
                 .r_domega = declare_parameter<double>("step.runup.mpc_weights.command.r_domega")
             },
