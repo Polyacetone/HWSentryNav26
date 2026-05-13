@@ -67,6 +67,7 @@ struct ControlOutput {
     double velocity = 0.0;
     double omega = 0.0;
     ChassisMode mode = ChassisMode::NORMAL;
+    uint8_t step_dist_cm = 0;
 
     // ─── 状态信息 ───
     FsmState fsm_state = FsmState::IDLE;
@@ -102,8 +103,8 @@ struct StepDetectionParams {
     double detect_dot_threshold;
     double path_sample_resolution;
     double target_match_distance;
+    double rollout_match_distance;
     int latch_threshold;
-    double release_distance;
     StepLookaheadParams lookahead;
 };
 
@@ -196,8 +197,16 @@ private:
 
     struct PathStepTarget {
         int path_version = 0;
-        double path_u = 0.0;
-        double release_u = 0.0;
+        double enter_u = 0.0;
+        double exit_u = 0.0;
+        Eigen::Vector2d enter_pos_map = Eigen::Vector2d::Zero();
+        Eigen::Vector2d exit_pos_map = Eigen::Vector2d::Zero();
+        Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
+        StepDirection direction = StepDirection::UP;
+    };
+
+    struct StepTargetObservation {
+        double distance_from_start = 0.0;
         Eigen::Vector2d pos_map = Eigen::Vector2d::Zero();
         Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
         StepDirection direction = StepDirection::UP;
@@ -223,15 +232,23 @@ private:
         double start_u,
         const DirectionMap& direction_map
     ) const;
+    std::optional<StepTargetObservation> detect_step_target_on_rollout(
+        const std::vector<Eigen::Vector2d>& rollout_path_map,
+        const DirectionMap& direction_map
+    ) const;
     static double prediction_path_length(const MPCPrediction& prediction);
     void update_step_lookahead_distance(const MPCPrediction& prediction);
     [[nodiscard]] double current_step_lookahead_distance() const;
     double advance_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
     bool is_same_step_target(const PathStepTarget& lhs, const PathStepTarget& rhs) const;
+    bool is_same_step_target(const PathStepTarget& target, const StepTargetObservation& observation) const;
     void clear_step_state();
     void clear_step_runup_state(bool clear_last_completed_target = false);
     void update_step_state_for_path_change(bool has_new_path);
     void update_step_release(const SplineD& path, double current_u);
+    void extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map);
+    [[nodiscard]] bool is_currently_inside_active_step(double current_u) const;
+    [[nodiscard]] uint8_t compute_step_distance_cm(const ControlInput& input, double current_u, const MPCPrediction& prediction) const;
     std::optional<PathStepTarget> try_latch_step_target(const SplineD& path, double current_u, const DirectionMap& direction_map);
     std::optional<ActiveStepMode> build_step_command(const PathStepTarget& target, const DirectionMap& direction_map) const;
     StepRunupDecision evaluate_step_runup(

@@ -24,6 +24,18 @@ inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_stage) {
     return leg_mode == 0u || leg_mode == 1u || leg_mode == 6u || leg_mode == 7u || comp_stage != 4u;
 }
 
+inline bool is_step_mode(const ChassisMode mode) {
+    switch (mode) {
+        case ChassisMode::STEP_UP_LEG:
+        case ChassisMode::STEP_UP_JUMP:
+        case ChassisMode::STEP_DOWN_LEG:
+        case ChassisMode::STEP_DOWN_JUMP:
+            return true;
+        default:
+            return false;
+    }
+}
+
 }
 
 namespace {
@@ -248,7 +260,7 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     // 每次进入 Mature(4) 重置观测器，确保从干净状态开始
     if (entered_mature) {
-        RCLCPP_INFO(logger_, "Mature entered (leg_mode=4): resetting Luenberger observer");
+        RCLCPP_DEBUG(logger_, "Mature entered (leg_mode=4): resetting Luenberger observer");
         reset_all_mpc_observer();
     }
 
@@ -401,6 +413,9 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         mpc_controller_->params().follow.projection.local_search_lazy_distance
     );
     last_reference_u_ = u0;
+    if (input.masked_direction_map) {
+        extend_active_step_exit(*input.global_path, *input.masked_direction_map);
+    }
     update_step_release(*input.global_path, u0);
 
     // 路径跟随任务取消条件（投影守卫）
@@ -472,8 +487,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
                     RCLCPP_WARN(
                         logger_,
                         "Follow cancel: step run-up failed for target at (%.2f, %.2f)",
-                        step_target->pos_map.x(),
-                        step_target->pos_map.y()
+                        step_target->enter_pos_map.x(),
+                        step_target->enter_pos_map.y()
                     );
                     out.velocity = 0.0;
                     out.omega = 0.0;
@@ -487,15 +502,15 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
                     step_runup_context_ = runup.context;
                     step_runup_request_pending_ = true;
                     step_runup_goal_reached_ = false;
-                    RCLCPP_INFO(
+                    RCLCPP_DEBUG(
                         logger_,
-                        "Step run-up requested: mode=%s deficit=%.2f target_v=%.2f arrival_v=%.2f current_v=%.2f step_u=%.3f goal=(%.2f, %.2f)",
+                        "Step run-up requested: mode=%s deficit=%.2f target_v=%.2f arrival_v=%.2f current_v=%.2f enter_u=%.3f goal=(%.2f, %.2f)",
                         mode_label(step_command->mode),
                         runup.context->velocity_deficit,
                         step_command->target_velocity,
                         runup.context->predicted_arrival_velocity,
                         input.chassis_state.velocity,
-                        step_target->path_u,
+                        step_target->enter_u,
                         runup.context->goal_map.x(),
                         runup.context->goal_map.y()
                     );
@@ -511,14 +526,14 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
                 step_locked_path_ = input.global_path;
                 step_locked_fixed_goal_ = input.fixed_goal;
                 step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
-                RCLCPP_INFO(
+                RCLCPP_DEBUG(
                     logger_,
                     "Step command latched: dir=%s mode=%s target_v=%.2f at (%.2f, %.2f)",
                     step_target->direction == StepDirection::UP ? "UP" : "DOWN",
                     mode_label(step_command->mode),
                     step_command->target_velocity,
-                    step_target->pos_map.x(),
-                    step_target->pos_map.y()
+                    step_target->enter_pos_map.x(),
+                    step_target->enter_pos_map.y()
                 );
             } else {
                 RCLCPP_WARN(logger_, "StepUp target latched but alpha mode forbids traversal");
@@ -532,6 +547,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
     }
 
+    auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_follow(
         *input.global_path, input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, input.per_step_cost_maps, input.prediction_dt,
@@ -541,6 +557,11 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
         return out;
+    }
+
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     }
 
     const auto& [cmd, prediction] = *result;
@@ -558,7 +579,20 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     out.predicted_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
+    out.step_dist_cm = compute_step_distance_cm(input, u0, prediction);
     out.valid = true;
+
+    if (active_step_target_) {
+        RCLCPP_DEBUG(
+            logger_,
+            "step: mode=%s step_dist=%d u=%.3f enter=%.3f exit=%.3f inside=%d",
+            mode_label(active_step_command_ ? active_step_command_->mode : ChassisMode::NORMAL),
+            out.step_dist_cm, u0,
+            active_step_target_->enter_u, active_step_target_->exit_u,
+            (u0 >= active_step_target_->enter_u && u0 < active_step_target_->exit_u) ? 1 : 0
+        );
+    }
+
     return out;
 }
 
@@ -572,6 +606,7 @@ ControlOutput MainController::execute_step_runup(const ControlInput& input) {
         return out;
     }
 
+    auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_hold(
         step_runup_context_->goal_map,
         input.chassis_pose_map,
@@ -582,6 +617,11 @@ ControlOutput MainController::execute_step_runup(const ControlInput& input) {
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(StepRunup) solve failed: %s", result.error().c_str());
         return out;
+    }
+
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(StepRunup) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -608,6 +648,7 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     ControlOutput out;
     if (!input.final_cost_map) return out;
 
+    auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_stop(
         input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map
@@ -615,6 +656,11 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Stop) solve failed: %s", result.error().c_str());
         return out;
+    }
+
+    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -813,8 +859,6 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
     if (solve_ms > MPC_DT * 500.0) {
         RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
-    } else {
-        RCLCPP_DEBUG(logger_, "MPCSolver(Recovery) solve time: %.2f ms", solve_ms);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -859,8 +903,6 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
     if (solve_ms > MPC_DT * 500.0) {
         RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
-    } else {
-        RCLCPP_DEBUG(logger_, "MPCSolver(Fixed) solve time: %.2f ms", solve_ms);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -889,6 +931,53 @@ double MainController::advance_path_u_by_distance(const SplineD& path, const dou
         if (travelled >= distance) break;
     }
     return u;
+}
+
+std::optional<MainController::StepTargetObservation> MainController::detect_step_target_on_rollout(
+    const std::vector<Eigen::Vector2d>& rollout_path_map,
+    const DirectionMap& direction_map
+) const {
+    if (rollout_path_map.empty()) return std::nullopt;
+
+    double travelled = 0.0;
+    Eigen::Vector2d prev = rollout_path_map.front();
+    for (size_t i = 0; i < rollout_path_map.size(); ++i) {
+        const Eigen::Vector2d& pos = rollout_path_map[i];
+        if (i > 0) {
+            travelled += (pos - prev).norm();
+            prev = pos;
+        }
+
+        Eigen::Vector2d tangent = Eigen::Vector2d::Zero();
+        if (i + 1 < rollout_path_map.size()) {
+            tangent = rollout_path_map[i + 1] - pos;
+        } else if (i > 0) {
+            tangent = pos - rollout_path_map[i - 1];
+        }
+        if (tangent.norm() < ANGLE_EPSILON) continue;
+
+        const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
+        if (!direction_map.is_valid_coord(Eigen::Vector2i(
+            static_cast<int>(std::floor(g.x())),
+            static_cast<int>(std::floor(g.y()))))
+        ) continue;
+
+        const Eigen::Vector2d dir = direction_map.interpolate(g);
+        const double norm = dir.norm();
+        if (norm < nav_params_.step_detection.detect_norm_threshold) continue;
+
+        const double dot = dir.normalized().dot(tangent.normalized());
+        if (std::abs(dot) <= nav_params_.step_detection.detect_dot_threshold) continue;
+
+        return StepTargetObservation {
+            .distance_from_start = travelled,
+            .pos_map = pos,
+            .dir_map = dir,
+            .direction = dot > 0.0 ? StepDirection::UP : StepDirection::DOWN,
+        };
+    }
+
+    return std::nullopt;
 }
 
 double MainController::prediction_path_length(const MPCPrediction& prediction) {
@@ -922,6 +1011,11 @@ std::optional<MainController::PathStepTarget> MainController::detect_step_target
     const double lookahead_u = advance_path_u_by_distance(path, start_u, lookahead_distance);
     const double resolution = std::max(1e-3, nav_params_.step_detection.path_sample_resolution);
     const int samples = std::max(1, static_cast<int>(std::ceil(lookahead_distance / resolution)));
+    bool inside_step_region = false;
+    double enter_u = 0.0;
+    Eigen::Vector2d enter_pos = Eigen::Vector2d::Zero();
+    Eigen::Vector2d enter_dir = Eigen::Vector2d::Zero();
+    StepDirection enter_direction = StepDirection::UP;
 
     for (int i = 0; i <= samples; ++i) {
         const double t = static_cast<double>(i) / static_cast<double>(samples);
@@ -938,19 +1032,45 @@ std::optional<MainController::PathStepTarget> MainController::detect_step_target
 
         const Eigen::Vector2d dir = direction_map.interpolate(g);
         const double norm = dir.norm();
-        if (norm < nav_params_.step_detection.detect_norm_threshold) continue;
 
-        const double dot = dir.normalized().dot(tangent.normalized());
-        const double abs_dot = std::abs(dot);
-        if (abs_dot <= nav_params_.step_detection.detect_dot_threshold) continue;
+        if (norm >= nav_params_.step_detection.detect_norm_threshold) {
+            const double dot = dir.normalized().dot(tangent.normalized());
+            if (std::abs(dot) <= nav_params_.step_detection.detect_dot_threshold) {
+                if (!inside_step_region) continue;
+                continue;
+            }
+            if (inside_step_region) continue;
+
+            inside_step_region = true;
+            enter_u = u;
+            enter_pos = pos;
+            enter_dir = dir;
+            enter_direction = dot > 0.0 ? StepDirection::UP : StepDirection::DOWN;
+            continue;
+        }
+
+        if (!inside_step_region) continue;
 
         PathStepTarget target;
         target.path_version = path_version_;
-        target.path_u = u;
-        target.release_u = advance_path_u_by_distance(path, u, nav_params_.step_detection.release_distance);
-        target.pos_map = pos;
-        target.dir_map = dir;
-        target.direction = dot > 0.0 ? StepDirection::UP : StepDirection::DOWN;
+        target.enter_u = enter_u;
+        target.exit_u = u;
+        target.enter_pos_map = enter_pos;
+        target.exit_pos_map = pos;
+        target.dir_map = enter_dir;
+        target.direction = enter_direction;
+        return target;
+    }
+
+    if (inside_step_region) {
+        PathStepTarget target;
+        target.path_version = path_version_;
+        target.enter_u = enter_u;
+        target.exit_u = lookahead_u;
+        target.enter_pos_map = enter_pos;
+        target.exit_pos_map = path.evaluate(lookahead_u);
+        target.dir_map = enter_dir;
+        target.direction = enter_direction;
         return target;
     }
 
@@ -960,7 +1080,12 @@ std::optional<MainController::PathStepTarget> MainController::detect_step_target
 bool MainController::is_same_step_target(const PathStepTarget& lhs, const PathStepTarget& rhs) const {
     if (lhs.path_version != rhs.path_version) return false;
     if (lhs.direction != rhs.direction) return false;
-    return (lhs.pos_map - rhs.pos_map).norm() <= nav_params_.step_detection.target_match_distance;
+    return (lhs.enter_pos_map - rhs.enter_pos_map).norm() <= nav_params_.step_detection.target_match_distance;
+}
+
+bool MainController::is_same_step_target(const PathStepTarget& target, const StepTargetObservation& observation) const {
+    if (target.direction != observation.direction) return false;
+    return (target.enter_pos_map - observation.pos_map).norm() <= nav_params_.step_detection.rollout_match_distance;
 }
 
 void MainController::clear_step_state() {
@@ -997,14 +1122,101 @@ void MainController::update_step_release(const SplineD& path, const double curre
     (void)path;
     if (!active_step_target_) return;
     if (active_step_target_->path_version != path_version_) {
-        RCLCPP_INFO(logger_, "Step released: path version changed (target_v=%d != cur_v=%d)", active_step_target_->path_version, path_version_);
+        RCLCPP_DEBUG(logger_, "Step released: path version changed (target_v=%d != cur_v=%d)", active_step_target_->path_version, path_version_);
         clear_step_state();
         return;
     }
-    if (current_u >= active_step_target_->release_u) {
-        RCLCPP_INFO(logger_, "Step released: passed step (u=%.3f >= release_u=%.3f)", current_u, active_step_target_->release_u);
+    if (current_u >= active_step_target_->exit_u) {
+        RCLCPP_DEBUG(
+            logger_,
+            "Step released: passed step (u=%.3f >= exit_u=%.3f)",
+            current_u,
+            active_step_target_->exit_u
+        );
         clear_step_state();
     }
+}
+
+void MainController::extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map) {
+    if (!active_step_target_) return;
+    if (path_version_ != active_step_target_->path_version) return;
+
+    const double resolution = std::max(1e-3, nav_params_.step_detection.path_sample_resolution);
+    const double lookahead_dist = current_step_lookahead_distance();
+    const double scan_start_u = active_step_target_->exit_u + 1e-4;
+    const double scan_end_u = advance_path_u_by_distance(path, scan_start_u, lookahead_dist);
+    if (scan_end_u <= scan_start_u) return;
+
+    const int samples = std::max(1, static_cast<int>(std::ceil(lookahead_dist / resolution)));
+    double farthest_step_u = -1.0;
+    Eigen::Vector2d farthest_step_pos = Eigen::Vector2d::Zero();
+
+    for (int i = 0; i <= samples; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(samples);
+        const double u = scan_start_u + (scan_end_u - scan_start_u) * t;
+        if (u <= active_step_target_->exit_u) continue;
+
+        const Eigen::Vector2d pos = path.evaluate(u);
+        const Eigen::Vector2d tangent = path.derivative(u, 1);
+        if (tangent.norm() < ANGLE_EPSILON) continue;
+
+        const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
+        if (!direction_map.is_valid_coord(Eigen::Vector2i(
+            static_cast<int>(std::floor(g.x())),
+            static_cast<int>(std::floor(g.y()))))
+        ) continue;
+
+        const Eigen::Vector2d dir = direction_map.interpolate(g);
+        if (dir.norm() < nav_params_.step_detection.detect_norm_threshold) continue;
+
+        const double dot = dir.normalized().dot(tangent.normalized());
+        if (std::abs(dot) <= nav_params_.step_detection.detect_dot_threshold) continue;
+
+        const StepDirection sample_dir = dot > 0.0 ? StepDirection::UP : StepDirection::DOWN;
+        if (sample_dir != active_step_target_->direction) continue;
+
+        farthest_step_u = u;
+        farthest_step_pos = pos;
+    }
+
+    if (farthest_step_u > active_step_target_->exit_u) {
+        active_step_target_->exit_u = farthest_step_u;
+        active_step_target_->exit_pos_map = farthest_step_pos;
+    }
+}
+
+bool MainController::is_currently_inside_active_step(const double current_u) const {
+    return active_step_target_ && current_u >= active_step_target_->enter_u && current_u < active_step_target_->exit_u;
+}
+
+uint8_t MainController::compute_step_distance_cm(
+    const ControlInput& input,
+    const double current_u,
+    const MPCPrediction& prediction
+) const {
+    if (!active_step_command_ || !is_step_mode(active_step_command_->mode)) {
+        return 0;
+    }
+    if (!input.masked_direction_map) {
+        return 255;
+    }
+    if (is_currently_inside_active_step(current_u)) {
+        return 0;
+    }
+
+    const auto observed = detect_step_target_on_rollout(prediction.path_map, *input.masked_direction_map);
+    if (!observed) {
+        return 255;
+    }
+    if (active_step_target_ && !is_same_step_target(*active_step_target_, *observed)) {
+        return 255;
+    }
+    if (observed->distance_from_start > 2.55) {
+        return 255;
+    }
+
+    const int64_t rounded_cm = std::lround(observed->distance_from_start * 100.0);
+    return static_cast<uint8_t>(std::clamp<int64_t>(rounded_cm, 0, 255));
 }
 
 std::optional<MainController::PathStepTarget> MainController::try_latch_step_target(
@@ -1021,30 +1233,22 @@ std::optional<MainController::PathStepTarget> MainController::try_latch_step_tar
 
     if (pending_step_target_detection_ && is_same_step_target(*pending_step_target_detection_, *detected_target)) {
         pending_step_target_on_count_++;
-        RCLCPP_DEBUG(
-            logger_, "Step spatial latch count=%d/%d at u=%.3f (%.2f, %.2f)",
-            pending_step_target_on_count_, nav_params_.step_detection.latch_threshold,
-            detected_target->path_u, detected_target->pos_map.x(), detected_target->pos_map.y()
-        );
+        pending_step_target_detection_ = detected_target;
     } else {
         pending_step_target_detection_ = detected_target;
         pending_step_target_on_count_ = 1;
-        RCLCPP_DEBUG(
-            logger_, "StepUp new target detected at u=%.3f (%.2f, %.2f) path_version=%d",
-            detected_target->path_u, detected_target->pos_map.x(), detected_target->pos_map.y(),
-            detected_target->path_version
-        );
     }
 
     if (pending_step_target_on_count_ < nav_params_.step_detection.latch_threshold) {
         return std::nullopt;
     }
 
-    RCLCPP_INFO(
-        logger_, "Step target latched at u=%.3f (%.2f, %.2f) path_version=%d dir=%s",
-        pending_step_target_detection_->path_u,
-        pending_step_target_detection_->pos_map.x(),
-        pending_step_target_detection_->pos_map.y(),
+    RCLCPP_DEBUG(
+        logger_, "Step target latched: enter_u=%.3f exit_u=%.3f at (%.2f, %.2f) path_version=%d dir=%s",
+        pending_step_target_detection_->enter_u,
+        pending_step_target_detection_->exit_u,
+        pending_step_target_detection_->enter_pos_map.x(),
+        pending_step_target_detection_->enter_pos_map.y(),
         pending_step_target_detection_->path_version,
         pending_step_target_detection_->direction == StepDirection::UP ? "UP" : "DOWN"
     );
@@ -1069,7 +1273,7 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
         input.chassis_state,
         current_u,
         step_command,
-        target.path_u
+        target.enter_u
     );
     if (!rollout) {
         RCLCPP_WARN(logger_, "Step run-up rollout failed: %s", rollout.error().c_str());
@@ -1088,7 +1292,7 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
         int best_idx = -1;
         double best_dist = std::numeric_limits<double>::infinity();
         for (size_t i = 0; i < rollout->prediction.path_map.size(); ++i) {
-            const double d = (rollout->prediction.path_map[i] - target.pos_map).squaredNorm();
+            const double d = (rollout->prediction.path_map[i] - target.enter_pos_map).squaredNorm();
             if (d < best_dist) {
                 best_dist = d;
                 best_idx = static_cast<int>(i);
@@ -1096,7 +1300,7 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
         }
         return best_idx;
     }();
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
         logger_,
         "Step run-up rollout: idx=%d arrival_v=%.2f target_v=%.2f deficit=%.2f current_v=%.2f",
         maybe_index,
@@ -1110,8 +1314,8 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
         RCLCPP_WARN(
             logger_,
             "Step run-up loop detected at (%.2f, %.2f), cancelling path",
-            target.pos_map.x(),
-            target.pos_map.y()
+            target.enter_pos_map.x(),
+            target.enter_pos_map.y()
         );
         decision.cancel_path = true;
         return decision;
@@ -1140,8 +1344,8 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
         RCLCPP_WARN(
             logger_,
             "Step run-up requested but no valid run-up goal found at target (%.2f, %.2f)",
-            target.pos_map.x(),
-            target.pos_map.y()
+            target.enter_pos_map.x(),
+            target.enter_pos_map.y()
         );
         decision.cancel_path = true;
         return decision;
@@ -1187,7 +1391,7 @@ std::optional<Eigen::Vector2d> MainController::find_step_runup_goal(
             const double angle = -nav_params_.step_runup.search.sector_half_angle_rad
                 + 2.0 * nav_params_.step_runup.search.sector_half_angle_rad * at;
             const Eigen::Vector2d dir = rotate_vector(backward_dir, angle);
-            const Eigen::Vector2d candidate = target.pos_map + dir * radius;
+            const Eigen::Vector2d candidate = target.enter_pos_map + dir * radius;
 
             const auto field = RecoveryGoalPlanner::sample_fields(*input.final_cost_map, *input.masked_direction_map, candidate);
             if (!field) continue;
@@ -1233,7 +1437,7 @@ double MainController::step_speed_from_level(const uint8_t speed_level) const {
 }
 
 std::optional<ActiveStepMode> MainController::build_step_command(const PathStepTarget& target, const DirectionMap& direction_map) const {
-    const auto mode_info = direction_map.step_mode_info_at(direction_map.map_coord_to_grid(target.pos_map));
+    const auto mode_info = direction_map.step_mode_info_at(direction_map.map_coord_to_grid(target.enter_pos_map));
     const StepTraversalMode mode = target.direction == StepDirection::UP ? mode_info.up_mode : mode_info.down_mode;
     const uint8_t speed_level = target.direction == StepDirection::UP ? mode_info.up_speed_level : mode_info.down_speed_level;
     if (!is_step_traversal_allowed(mode)) {

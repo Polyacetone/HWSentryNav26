@@ -645,10 +645,6 @@ class CostMap2D:
 
 class DirectionMap2D:
     def __init__(self, msg: Image, resolution: float, origin_x: float, origin_y: float):
-        if msg.encoding not in ("8UC2", "8UC2; compressed"):
-            # map_server/path_planner 期望 8UC2；这里不强制卡死，尽量运行
-            pass
-
         self.width = int(msg.width)
         self.height = int(msg.height)
         self.resolution = float(resolution)
@@ -656,21 +652,37 @@ class DirectionMap2D:
         self.origin_y = float(origin_y)
 
         raw = np.frombuffer(msg.data, dtype=np.uint8)
+
+        # map_server 现在发布 8UC3：B=dx, G=dy, R=step_mode
+        # 兼容旧版 8UC2
+        if msg.encoding in ("8UC3", "8UC3; compressed"):
+            nch = 3
+        elif msg.encoding in ("8UC2", "8UC2; compressed"):
+            nch = 2
+        else:
+            total_pixels = int(msg.width) * int(msg.height)
+            if total_pixels > 0 and raw.size % total_pixels == 0:
+                nch = raw.size // total_pixels
+            else:
+                raise ValueError(f"Unsupported direction map encoding: {msg.encoding}")
+
         if msg.step <= 0:
             raise ValueError("DirectionMap image step is invalid")
         if raw.size < int(msg.step) * int(msg.height):
             raise ValueError("DirectionMap image data too short")
 
         row_bytes = int(msg.step)
-        pixels_per_row = int(msg.width) * 2
+        pixels_per_row = int(msg.width) * nch
         mat = raw.reshape((int(msg.height), row_bytes))[:, :pixels_per_row]
-        pix = mat.reshape((int(msg.height), int(msg.width), 2))
+        pix = mat.reshape((int(msg.height), int(msg.width), nch))
 
+        # direction is always in the first 2 channels
         p0 = pix[:, :, 0]
         p1 = pix[:, :, 1]
         mask_zero = ((p0 == 0) & (p1 == 0)) | ((p0 == 128) & (p1 == 128))
 
-        vec = (pix.astype(np.float32) - 128.0) / 128.0
+        vec = pix[:, :, :2].astype(np.float32)
+        vec = (vec - 128.0) / 128.0
         vec[mask_zero, :] = 0.0
         self.data = vec  # (H,W,2)
 
@@ -1397,8 +1409,14 @@ class WheelLegLqrFollowSimNode(Node):
         msg = ChassisStatus()
         msg.velocity = float(self.dyn.v)
         msg.omega = float(self.dyn.omega)
+        msg.leg_h = float((self.params.l_l + self.params.l_r) / 2.0)
+        msg.leg_psi = float(
+            (self.dyn.state[self.dyn.IDX_THETA_L_L]
+             + self.dyn.state[self.dyn.IDX_THETA_L_R]) / 2.0
+        )
         msg.leg_mode = 4
         msg.remaining_energy_supercap = int(np.clip(self._energy, -32768, 32767))
+        msg.remaining_energy_buffercap = 0
         msg.curr_chassis_pwr = int(np.clip(self._current_power, -32768, 32767))
         msg.rfr_pwr_limit = int(np.clip(self.cfg.RFR_PWR_LIMIT, -32768, 32767))
         self.status_pub.publish(msg)

@@ -406,8 +406,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .detect_dot_threshold = declare_parameter<double>("step.detection.detect_dot_threshold"),
         .path_sample_resolution = declare_parameter<double>("step.detection.path_sample_resolution"),
         .target_match_distance = declare_parameter<double>("step.detection.target_match_distance"),
+        .rollout_match_distance = declare_parameter<double>("step.detection.rollout_match_distance"),
         .latch_threshold = static_cast<int>(declare_parameter<int>("step.detection.latch_threshold")),
-        .release_distance = declare_parameter<double>("step.detection.release_distance"),
         .lookahead = {
             .rollout_length_filter_alpha = declare_parameter<double>("step.detection.lookahead.rollout_length_filter_alpha"),
             .fixed_extension_distance = declare_parameter<double>("step.detection.lookahead.fixed_extension_distance"),
@@ -789,6 +789,7 @@ void PathFollowerNode::publish_chassis_cmd(const ControlOutput& output) {
     msg.velocity = static_cast<float>(output.velocity);
     msg.omega = static_cast<float>(output.omega);
     msg.mode = static_cast<uint8_t>(output.mode);
+    msg.step_dist = output.step_dist_cm;
     chassis_cmd_pub_->publish(msg);
 }
 
