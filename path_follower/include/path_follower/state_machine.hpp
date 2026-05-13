@@ -16,6 +16,7 @@ struct TransitionParams {
     double to_idle_vel_max;          // →Idle: |v| 须低于
     double to_idle_omega_max;        // →Idle: |ω| 须低于
     double stopping_timeout;         // Stopping 状态超时 (s)，超过该时间仍未切出停止则强制切出
+    double wait_replan_timeout;      // WAIT_REPLAN 等待新路径超时 (s)
 };
 
 // 危险恢复参数
@@ -72,6 +73,8 @@ enum class FsmState : uint8_t {
     STUCK_REVERSE = 6,    // 倒车脱困
     FIXED = 7,            // 固定在目标点位（持续 MPC 保持位置）
     STEP_RUNUP = 8,       // 台阶助跑：先退到起跑点，再回 FOLLOW
+    WAIT_REPLAN = 9,      // 助跑完成后等待 path_planner 重规划
+    STEPPING = 10,        // 正在上下台阶，不允许外部任务打断
 };
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
@@ -113,6 +116,9 @@ struct FsmOutput {
 
     // HAZARD_RECOVERY 完成标记
     bool recovery_finished = false;
+
+    // 请求 path_planner 立即重规划
+    bool request_replan = false;
 };
 
 // ═══════════════════════ 统一控制状态机 ═════════════════════

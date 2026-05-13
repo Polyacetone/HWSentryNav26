@@ -22,7 +22,7 @@ namespace path_follower {
 struct ControlInput {
     // ─── 路径 ───
     std::optional<SplineD> global_path;
-    bool path_updated;
+    bool path_updated;  // 本周期是否收到路径更新（包括空路径）
 
     // ─── fixed 目标 ───
     bool fixed_goal;                   // 当前目标为 fixed 类型
@@ -71,6 +71,7 @@ struct ControlOutput {
     // ─── 状态信息 ───
     FsmState fsm_state = FsmState::IDLE;
     bool consume_global_path = false;   // 通知 Node 消费当前全局路径，并据此重建台阶擦除地图
+    bool request_replan = false;        // 通知 Node 向 path_planner 发布一次重规划触发
 
     // ─── 调试 ───
     std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;
@@ -285,6 +286,10 @@ private:
     int pending_step_target_on_count_ = 0;
     std::optional<PathStepTarget> active_step_target_;
     std::optional<ActiveStepMode> active_step_command_;
+    std::optional<SplineD> step_locked_path_;
+    bool step_locked_fixed_goal_ = false;
+    Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
+    bool deferred_external_path_update_ = false;
     bool step_runup_request_pending_ = false;
     bool step_runup_goal_reached_ = false;
     std::optional<StepRunupContext> step_runup_context_;

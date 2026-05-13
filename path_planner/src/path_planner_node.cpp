@@ -10,6 +10,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <interfaces/msg/nav_goal.hpp>
 #include <interfaces/msg/global_path.hpp>
 #include <interfaces/msg/chassis_status.hpp>
@@ -59,12 +60,13 @@ public:
     explicit PathPlannerNode(const rclcpp::NodeOptions& options);
 
 private:
-    enum class ReplanReason { GOAL_UPDATE, OBSTACLE };
+    enum class ReplanReason { GOAL_UPDATE, OBSTACLE, EXTERNAL_TRIGGER };
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<interfaces::msg::NavGoal>::SharedPtr goal_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr replan_trigger_sub_;
     rclcpp::Publisher<interfaces::msg::GlobalPath>::SharedPtr control_points_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
@@ -260,6 +262,18 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         [this](const interfaces::msg::ChassisStatus::SharedPtr msg) { chassis_status_ = msg; }
     );
 
+    replan_trigger_sub_ = create_subscription<std_msgs::msg::Empty>(
+        declare_parameter<std::string>("replan_trigger_sub_topic"), 1,
+        [this](const std_msgs::msg::Empty::SharedPtr) {
+            if (!last_goal_map_) {
+                RCLCPP_WARN(get_logger(), "Received external replan trigger, but no goal is available yet");
+                return;
+            }
+            RCLCPP_INFO(get_logger(), "Received external replan trigger, replanning from current pose");
+            plan_and_publish_to_goal(*last_goal_map_, last_goal_fixed_, ReplanReason::EXTERNAL_TRIGGER);
+        }
+    );
+
     goal_sub_ = create_subscription<interfaces::msg::NavGoal>(
         declare_parameter<std::string>("goal_sub_topic"), 1,
         [this](const interfaces::msg::NavGoal::SharedPtr msg) { goal_callback(msg); }
@@ -407,10 +421,17 @@ void PathPlannerNode::replan_timer_callback() {
 }
 
 void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, bool fixed, const ReplanReason reason) {
+    const char* reason_label = reason == ReplanReason::GOAL_UPDATE
+        ? "goal update"
+        : (reason == ReplanReason::OBSTACLE ? "obstacle" : "external trigger");
+    const bool use_merged_cost_map = replan_enable_ || reason == ReplanReason::EXTERNAL_TRIGGER;
+
     if (!merged_cost_map_ || !global_direction_map_) {
-        RCLCPP_WARN(get_logger(), "Map not ready yet! (%s)", reason == ReplanReason::GOAL_UPDATE ? "goal update" : "obstacle");
+        RCLCPP_WARN(get_logger(), "Map not ready yet! (%s)", reason_label);
         return;
     }
+
+    const CostMap& planning_cost_map = use_merged_cost_map ? *merged_cost_map_ : *global_cost_map_;
 
     tf2::Transform chassis_to_map;
     try {
@@ -472,7 +493,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
 
     RCLCPP_INFO(
         get_logger(), "Planning (%s): Src(%.2f, %.2f) -> Dst(%.2f, %.2f) %s",
-        reason == ReplanReason::GOAL_UPDATE ? "goal update" : "obstacle",
+        reason_label,
         start_map.x(), start_map.y(), goal_map.x(), goal_map.y(),
         fixed ? "[FIXED]" : ""
     );
@@ -483,7 +504,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     const auto optimize_and_publish = [&](const std::vector<Eigen::Vector2d>& init_path) {
         std::vector<Eigen::Vector2d> control_points, optimized_path;
         const auto optimize_result = path_optimizer_->optimize(
-            replan_enable_ ? *merged_cost_map_ : *global_cost_map_,
+            planning_cost_map,
             *global_direction_map_,
             init_path,
             start_grid,
@@ -518,7 +539,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     }
 
     const auto plan_result = path_planner_->search_path(
-        replan_enable_ ? *merged_cost_map_ : *global_cost_map_,
+        planning_cost_map,
         *global_direction_map_,
         start_grid.cast<int>(),
         goal_grid.cast<int>()

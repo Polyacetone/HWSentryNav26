@@ -27,6 +27,8 @@ struct StStopping;
 struct StStuckReverse;
 struct StHazardRecovery;
 struct StStepRunup;
+struct StWaitReplan;
+struct StStepping;
 
 struct Machine final : sc::state_machine<Machine, StIdle> {
     Machine(const FsmParams& p, rclcpp::Logger lg) : params(p), logger(lg) {}
@@ -40,6 +42,7 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
     DestState stopping_dest = DestState::IDLE;
     std::chrono::steady_clock::time_point stopping_start_time;
     std::chrono::steady_clock::time_point reverse_start_time;
+    std::chrono::steady_clock::time_point wait_replan_start_time;
 
     void clear_output() {
         output = {};
@@ -135,6 +138,10 @@ struct StFollow final : sc::state<StFollow, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
+        if (in.step_active) {
+            return transit<StStepping>();
+        }
+
         // 路径被取消/清空：FOLLOW 不应“卡死”在无路径状态。
         // 走 STOPPING 做平滑减速，并根据外部请求选择落点。
         if (!in.has_path) {
@@ -154,7 +161,7 @@ struct StFollow final : sc::state<StFollow, Machine> {
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
-        if (in.spin_requested && in.spin_high_priority && !in.step_active) {
+        if (in.spin_requested && in.spin_high_priority) {
             m.stopping_dest = DestState::SPIN;
             m.stopping_start_time = in.stamp;
             return transit<StStopping>();
@@ -173,6 +180,32 @@ struct StFollow final : sc::state<StFollow, Machine> {
         }
 
         return discard_event();
+    }
+};
+
+struct StStepping final : sc::state<StStepping, Machine> {
+    using reactions = sc::custom_reaction<EvUpdate>;
+
+    explicit StStepping(my_context ctx) : sc::state<StStepping, Machine>(ctx) {
+        auto& m = context<Machine>();
+        m.active_state = FsmState::STEPPING;
+        RCLCPP_INFO(m.logger, "FSM -> STEPPING");
+    }
+
+    sc::result react(const EvUpdate& ev) {
+        auto& m = context<Machine>();
+        const auto& in = ev.input;
+
+        if (in.step_active) {
+            return discard_event();
+        }
+
+        if (in.is_stuck) {
+            m.reverse_start_time = in.stamp;
+            return transit<StStuckReverse>();
+        }
+
+        return transit<StFollow>();
     }
 };
 
@@ -358,7 +391,41 @@ struct StStepRunup final : sc::state<StStepRunup, Machine> {
             m.stopping_start_time = in.stamp;
             return transit<StStopping>();
         }
-        if (in.has_new_path || in.step_runup_completed) {
+        if (in.step_runup_completed) {
+            m.wait_replan_start_time = in.stamp;
+            return transit<StWaitReplan>();
+        }
+        if (in.has_new_path) {
+            return transit<StFollow>();
+        }
+
+        return discard_event();
+    }
+};
+
+struct StWaitReplan final : sc::state<StWaitReplan, Machine> {
+    using reactions = sc::custom_reaction<EvUpdate>;
+
+    explicit StWaitReplan(my_context ctx) : sc::state<StWaitReplan, Machine>(ctx) {
+        auto& m = context<Machine>();
+        m.active_state = FsmState::WAIT_REPLAN;
+        m.output.consume_global_path = true;
+        m.output.request_replan = true;
+        RCLCPP_INFO(m.logger, "FSM -> WAIT_REPLAN");
+    }
+
+    sc::result react(const EvUpdate& ev) {
+        auto& m = context<Machine>();
+        const auto& in = ev.input;
+
+        if (in.has_new_path) {
+            return transit<StFollow>();
+        }
+
+        const bool timeout = std::chrono::duration<double>(in.stamp - m.wait_replan_start_time).count() > m.params.transition.wait_replan_timeout;
+        if (timeout) {
+            m.output.consume_global_path = true;
+            RCLCPP_WARN(m.logger, "WAIT_REPLAN timed out after %.2f s without a valid path", m.params.transition.wait_replan_timeout);
             return transit<StFollow>();
         }
 

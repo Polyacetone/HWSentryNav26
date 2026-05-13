@@ -254,16 +254,31 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     last_cycle_chassis_dead_ = false;
 
-    const FsmState prev_state = last_fsm_state_;
-    const bool had_step_runup_request = step_runup_request_pending_;
-    sync_mpc_context(input);
-
-    if (prev_state == FsmState::HAZARD_RECOVERY) {
-        update_recovery_goal_if_needed(input);
+    ControlInput effective_input = input;
+    const bool step_path_locked = active_step_command_.has_value() && step_locked_path_.has_value();
+    if (step_path_locked) {
+        if (input.path_updated || !input.global_path.has_value()) {
+            deferred_external_path_update_ = true;
+        }
+        effective_input.global_path = step_locked_path_;
+        effective_input.path_updated = false;
+        effective_input.fixed_goal = step_locked_fixed_goal_;
+        effective_input.fixed_goal_pos = step_locked_fixed_goal_pos_;
+    } else {
+        effective_input.path_updated = input.path_updated || deferred_external_path_update_;
+        deferred_external_path_update_ = false;
     }
 
-    const bool has_path = input.global_path.has_value();
-    const bool has_new_path = has_path && input.path_updated;
+    const FsmState prev_state = last_fsm_state_;
+    const bool had_step_runup_request = step_runup_request_pending_;
+    sync_mpc_context(effective_input);
+
+    if (prev_state == FsmState::HAZARD_RECOVERY) {
+        update_recovery_goal_if_needed(effective_input);
+    }
+
+    const bool has_path = effective_input.global_path.has_value();
+    const bool has_new_path = has_path && effective_input.path_updated;
 
     update_step_state_for_path_change(has_new_path);
     if (!has_path) {
@@ -271,11 +286,10 @@ ControlOutput MainController::update(const ControlInput& input) {
         clear_step_runup_state(true);
     }
 
-    step_runup_goal_reached_ = (prev_state == FsmState::STEP_RUNUP) && is_step_runup_goal_reached(input);
+    step_runup_goal_reached_ = (prev_state == FsmState::STEP_RUNUP) && is_step_runup_goal_reached(effective_input);
 
-    // 路标点重算：新路径到达时重新分割；路径消失时清空
     if (has_new_path) {
-        recompute_follow_landmarks(*input.global_path);
+        recompute_follow_landmarks(*effective_input.global_path);
         follow_max_landmark_idx_ = -1;
     } else if (!has_path) {
         follow_landmarks_u_.clear();
@@ -283,52 +297,49 @@ ControlOutput MainController::update(const ControlInput& input) {
     }
 
     bool cancel_follow_task_now = false;
-    // 路标点无进度检测：在 FOLLOW 模式下，若超时未推进最高路标点则取消任务
-    if (!cancel_follow_task_now && check_no_progress(input)) {
+    if (!cancel_follow_task_now && check_no_progress(effective_input)) {
         cancel_follow_task_now = true;
     }
-    const bool dist_reached = has_path && ((input.chassis_pose_map.head<2>() - input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
+    const bool dist_reached = has_path && ((effective_input.chassis_pose_map.head<2>() - effective_input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
     const bool u_reached = has_path && (last_reference_u_ > nav_params_.stop_threshold_u);
 
-    // 1. 组装 FSM 输入
     FsmInput fsm_input;
     fsm_input.has_path = cancel_follow_task_now ? false : has_path;
     fsm_input.has_new_path = cancel_follow_task_now ? false : has_new_path;
-    fsm_input.fixed_goal_flag = cancel_follow_task_now ? false : input.fixed_goal;
+    fsm_input.fixed_goal_flag = cancel_follow_task_now ? false : effective_input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
     fsm_input.step_active = is_step_active();
     fsm_input.step_runup_requested = step_runup_request_pending_;
     fsm_input.step_runup_completed = step_runup_goal_reached_;
-    fsm_input.spin_requested = input.spin_requested;
-    fsm_input.spin_high_priority = input.spin_high_priority;
+    fsm_input.spin_requested = effective_input.spin_requested;
+    fsm_input.spin_high_priority = effective_input.spin_high_priority;
     const bool hazard_allowed = (prev_state == FsmState::IDLE) || (prev_state == FsmState::SPIN)
         || (prev_state == FsmState::HAZARD_RECOVERY) || (prev_state == FsmState::STEP_RUNUP);
-    fsm_input.is_hazard = hazard_allowed && compute_is_hazard(input);
-    fsm_input.is_stuck = check_stuck(input);
-    fsm_input.is_recovery_safe = update_recovery_safe_flag(input);
-    // STOPPING 退出判定按“控制指令是否收敛到零”进行，而不是底盘实速
+    fsm_input.is_hazard = hazard_allowed && compute_is_hazard(effective_input);
+    fsm_input.is_stuck = check_stuck(effective_input);
+    fsm_input.is_recovery_safe = update_recovery_safe_flag(effective_input);
     fsm_input.velocity = last_cmd_.x();
     fsm_input.omega = last_cmd_.y();
-    fsm_input.stamp = input.stamp;
+    fsm_input.stamp = effective_input.stamp;
 
-    // 2. FSM 状态决策
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
     const FsmState state = fsm_output.state;
     on_state_transition(prev_state, state);
     last_fsm_state_ = state;
 
-    // 3. 根据 FSM 状态，执行对应的控制逻辑
     ControlOutput output;
     switch (state) {
-        case FsmState::IDLE: output = execute_idle(input); break;
-        case FsmState::FOLLOW: output = execute_follow(input); break;
-        case FsmState::SPIN: output = execute_spin(input); break;
-        case FsmState::STOPPING: output = execute_stop(input); break;
-        case FsmState::HAZARD_RECOVERY: output = execute_recovery(input); break;
-        case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(input); break;
-        case FsmState::FIXED: output = execute_fixed(input); break;
-        case FsmState::STEP_RUNUP: output = execute_step_runup(input); break;
-        case FsmState::DEAD: output = execute_idle(input); break;
+        case FsmState::IDLE: output = execute_idle(effective_input); break;
+        case FsmState::FOLLOW: output = execute_follow(effective_input); break;
+        case FsmState::SPIN: output = execute_spin(effective_input); break;
+        case FsmState::STOPPING: output = execute_stop(effective_input); break;
+        case FsmState::HAZARD_RECOVERY: output = execute_recovery(effective_input); break;
+        case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(effective_input); break;
+        case FsmState::FIXED: output = execute_fixed(effective_input); break;
+        case FsmState::STEP_RUNUP: output = execute_step_runup(effective_input); break;
+        case FsmState::WAIT_REPLAN: output = execute_stop(effective_input); break;
+        case FsmState::STEPPING: output = execute_follow(effective_input); break;
+        case FsmState::DEAD: output = execute_idle(effective_input); break;
     }
 
     if (had_step_runup_request && state != FsmState::STEP_RUNUP) {
@@ -337,13 +348,14 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     output.fsm_state = state;
     output.consume_global_path |= fsm_output.consume_global_path;
+    output.request_replan = fsm_output.request_replan;
     if (cancel_follow_task_now) {
         output.consume_global_path = true;
     }
     if (output.consume_global_path) {
         last_reference_u_ = 0.0;
         clear_step_state();
-        clear_step_runup_state(true);
+        clear_step_runup_state(state != FsmState::WAIT_REPLAN);
     }
 
     // 4. 同步已发布指令到 FSM / MPC，并在非 MPC 状态时重置 MPC 的 warm start
@@ -496,6 +508,9 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
                 active_step_target_ = *step_target;
                 active_step_command_ = *step_command;
+                step_locked_path_ = input.global_path;
+                step_locked_fixed_goal_ = input.fixed_goal;
+                step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
                 RCLCPP_INFO(
                     logger_,
                     "Step command latched: dir=%s mode=%s target_v=%.2f at (%.2f, %.2f)",
@@ -509,6 +524,12 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
                 RCLCPP_WARN(logger_, "StepUp target latched but alpha mode forbids traversal");
             }
         }
+    }
+
+    if (active_step_command_ && !step_locked_path_ && input.global_path) {
+        step_locked_path_ = input.global_path;
+        step_locked_fixed_goal_ = input.fixed_goal;
+        step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
     }
 
     const auto result = mpc_controller_->solve_follow(
@@ -609,12 +630,15 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
 void MainController::on_state_transition(const FsmState prev, const FsmState next) {
     if (prev == next) return;
 
+    const bool prev_follow_like = (prev == FsmState::FOLLOW) || (prev == FsmState::STEPPING);
+    const bool next_follow_like = (next == FsmState::FOLLOW) || (next == FsmState::STEPPING);
+
     // 离开 STUCK_REVERSE 或 HAZARD_RECOVERY 时，必须重置卡死检测
     if (prev == FsmState::STUCK_REVERSE || prev == FsmState::HAZARD_RECOVERY) {
         stuck_active_ = false;
     }
 
-    if (prev == FsmState::FOLLOW && next != FsmState::FOLLOW) {
+    if (prev_follow_like && !next_follow_like) {
         clear_step_state();
         last_reference_u_ = 0.0;
         follow_max_landmark_idx_ = -1;
@@ -628,7 +652,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         clear_step_runup_state();
     }
 
-    if (next == FsmState::FOLLOW && prev != FsmState::FOLLOW) {
+    if (next_follow_like && !prev_follow_like) {
         last_reference_u_ = 0.0;
     }
 
@@ -945,6 +969,9 @@ void MainController::clear_step_state() {
     pending_step_target_on_count_ = 0;
     active_step_target_ = std::nullopt;
     active_step_command_ = std::nullopt;
+    step_locked_path_ = std::nullopt;
+    step_locked_fixed_goal_ = false;
+    step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
     if (had_latch) {
         RCLCPP_DEBUG(logger_, "Step decision cleared (had active latch)");
     }

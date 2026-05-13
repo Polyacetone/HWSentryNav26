@@ -10,6 +10,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
@@ -65,6 +66,7 @@ private:
     rclcpp::Subscription<interfaces::msg::CompStage>::SharedPtr comp_stage_sub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::Publisher<interfaces::msg::FollowerState>::SharedPtr follower_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr replan_trigger_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_predicted_path_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
@@ -363,7 +365,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .spin_to_follow_omega_max = declare_parameter<double>("state_machine.spin_to_follow_omega_max"),
         .to_idle_vel_max = declare_parameter<double>("state_machine.to_idle_vel_max"),
         .to_idle_omega_max = declare_parameter<double>("state_machine.to_idle_omega_max"),
-        .stopping_timeout = declare_parameter<double>("state_machine.stopping_timeout")
+        .stopping_timeout = declare_parameter<double>("state_machine.stopping_timeout"),
+        .wait_replan_timeout = declare_parameter<double>("state_machine.wait_replan_timeout")
     };
     fsm_params.recovery = {
         .enable = declare_parameter<bool>("recovery.enable"),
@@ -522,6 +525,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
 
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("chassis_cmd_pub_topic"), 1);
     follower_state_pub_ = create_publisher<interfaces::msg::FollowerState>(declare_parameter<std::string>("follower_state_pub_topic"), 1);
+    replan_trigger_pub_ = create_publisher<std_msgs::msg::Empty>(declare_parameter<std::string>("replan_trigger_pub_topic"), 1);
     control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_DT), [this]() { control_timer_callback(); });
 }
 
@@ -529,6 +533,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
 
 void PathFollowerNode::control_points_callback(const interfaces::msg::GlobalPath::SharedPtr msg) {
     if (msg->x.size() < 3) {
+        path_updated_ = true;
         if (!msg->x.empty()) {
             RCLCPP_WARN(get_logger(), "Received insufficient control points (%zu), need at least 3!", msg->x.size());
         }
@@ -740,6 +745,10 @@ void PathFollowerNode::control_timer_callback() {
     interfaces::msg::FollowerState state_msg;
     state_msg.state = static_cast<uint8_t>(output.fsm_state);
     follower_state_pub_->publish(state_msg);
+
+    if (output.request_replan) {
+        replan_trigger_pub_->publish(std_msgs::msg::Empty {});
+    }
 
     // 处理路径消费请求：清空 spline 路径，并据此重建台阶擦除地图。
     // 若当前已进入 FIXED，只消费路径，不取消 fixed 目标标记。

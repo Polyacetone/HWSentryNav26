@@ -4,9 +4,9 @@
     publish_rate: 1.0 # odom->map发布频率，单位Hz
     robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，包含机器人颜色
     robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-    initial_transform_blue: [4.5, 5.4, 0.4, 0.0, 0.0, 0.0, 1.0] # 在蓝方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_red: [4.5, 5.4, 0.4, 0.0, 0.0, 0.0, 1.0] # 在红方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_default: [4.5, 5.4, 0.4, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_blue: [2.7, 3.2, 0.4, 0.0, 0.0, 0.0, 1.0] # 在蓝方启动时的初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_red: [2.7, 3.2, 0.4, 0.0, 0.0, 0.0, 1.0] # 在红方启动时的初始位姿，((x,y,z),(x,y,z,w))
+    initial_transform_default: [2.7, 3.2, 0.4, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
 
     perform_gicp_only_once: true # 是否只进行一次gicp配准（若为true，则在配准成功之后不再更新）
     map_cloud_filename: "pool.pcd" # 先验地图点云文件路径（为空就只发布初始位姿）

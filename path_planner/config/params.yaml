@@ -6,6 +6,7 @@
     local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图订阅话题（与全局融合用于重规划）
     goal_sub_topic: "/decision/nav_goal" # 目标点订阅话题
     chassis_status_sub_topic: "/serial_bridge/chassis_status" # 底盘状态，用于获取当前速度做起点预测
+    replan_trigger_sub_topic: "/path_follower/replan_trigger" # path_follower 主动请求重规划触发
     control_points_pub_topic: "/path_planner/control_points" # B样条控制点发布话题
     optimized_path_pub_topic: "/path_planner/optimized_path" # 优化后路径采样点发布话题
 

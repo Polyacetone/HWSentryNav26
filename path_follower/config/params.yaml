@@ -10,6 +10,7 @@
     spin_cmd_sub_topic: "/decision/spin_cmd" # 小陀螺指令
     chassis_cmd_pub_topic: "/path_follower/chassis_cmd" # 底盘控制指令（velocity + omega + mode）
     follower_state_pub_topic: "/path_follower/state" # 跟随器FSM状态
+    replan_trigger_pub_topic: "/path_follower/replan_trigger" # 助跑完成后触发 path_planner 立即重规划
 
     debug:
       enable: true # 是否启用调试发布
@@ -90,6 +91,7 @@
       to_idle_vel_max: 0.2 # STOPPING→IDLE/FIXED 退出判定：|v_cmd| < 该值 (m/s)
       to_idle_omega_max: 0.6 # STOPPING→IDLE/FIXED 退出判定：|omega_cmd| < 该值 (rad/s)
       stopping_timeout: 1.0 # STOPPING 状态超时 (s)，超时强制切出
+      wait_replan_timeout: 2.0 # WAIT_REPLAN 最长等待有效新路径时间 (s)
 
     mpc:
       energy:
