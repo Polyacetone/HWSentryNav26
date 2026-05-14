@@ -9,8 +9,8 @@ namespace path_follower {
 enum class StepTraversalMode : uint8_t {
     FORBIDDEN = 0,
     JUMP = 1,
-    LEG = 2,
-    RESERVED = 3,
+    LEG_SHORT = 2,
+    LEG_LONG = 3,
 };
 
 struct StepModeInfo {
@@ -30,10 +30,10 @@ constexpr StepModeInfo decode_step_mode(uint8_t step_mode) {
 }
 
 constexpr bool is_step_traversal_allowed(StepTraversalMode mode) {
-    return mode == StepTraversalMode::JUMP || mode == StepTraversalMode::LEG;
+    return mode == StepTraversalMode::JUMP || mode == StepTraversalMode::LEG_SHORT || mode == StepTraversalMode::LEG_LONG;
 }
 
-static_assert(decode_step_mode(0b11100110).up_mode == StepTraversalMode::LEG);
+static_assert(decode_step_mode(0b11100110).up_mode == StepTraversalMode::LEG_SHORT);
 static_assert(decode_step_mode(0b11100110).down_mode == StepTraversalMode::JUMP);
 static_assert(decode_step_mode(0b11100110).up_speed_level == 2);
 static_assert(decode_step_mode(0b11100110).down_speed_level == 3);

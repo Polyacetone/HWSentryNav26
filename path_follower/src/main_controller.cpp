@@ -24,11 +24,12 @@ constexpr uint8_t COMP_STAGE_MATCH = 4u;
 
 const char* mode_label(ChassisMode m) {
     switch (m) {
-        case ChassisMode::STEP_UP_LEG: return "LEG";
-        case ChassisMode::STEP_UP_JUMP: return "JUMP";
-        case ChassisMode::NORMAL: return "NORMAL";
-        case ChassisMode::STEP_DOWN_LEG: return "DOWN_LEG";
+        case ChassisMode::STEP_UP_LEG_SHORT: return "UP_LEG_SHORT";
+        case ChassisMode::STEP_UP_JUMP: return "UP_JUMP";
+        case ChassisMode::STEP_UP_LEG_LONG: return "UP_LEG_LONG";
+        case ChassisMode::STEP_DOWN_LEG_SHORT: return "DOWN_LEG_SHORT";
         case ChassisMode::STEP_DOWN_JUMP: return "DOWN_JUMP";
+        case ChassisMode::NORMAL: return "NORMAL";
         default: return "?";
     }
 }
@@ -55,9 +56,10 @@ ChassisControlState classify_chassis_control_state(const uint8_t leg_mode, const
 
 inline bool is_step_mode(const ChassisMode mode) {
     switch (mode) {
-        case ChassisMode::STEP_UP_LEG:
+        case ChassisMode::STEP_UP_LEG_SHORT:
         case ChassisMode::STEP_UP_JUMP:
-        case ChassisMode::STEP_DOWN_LEG:
+        case ChassisMode::STEP_UP_LEG_LONG:
+        case ChassisMode::STEP_DOWN_LEG_SHORT:
         case ChassisMode::STEP_DOWN_JUMP:
             return true;
         default:
@@ -1519,9 +1521,12 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
     const auto& profiles = mpc_controller_->params().follow.mode_profiles;
     const MPCMotionConstraints* motion = nullptr;
     switch (step_command.mode) {
-        case ChassisMode::STEP_UP_LEG: motion = &profiles.leg_up.motion_constraints; break;
-        case ChassisMode::STEP_UP_JUMP: motion = &profiles.jump_up.motion_constraints; break;
-        default: motion = &profiles.normal.motion_constraints; break;
+        case ChassisMode::STEP_UP_LEG_SHORT: motion = &profiles.up.short_leg.motion_constraints; break;
+        case ChassisMode::STEP_UP_JUMP:      motion = &profiles.up.jump.motion_constraints; break;
+        case ChassisMode::STEP_UP_LEG_LONG:  motion = &profiles.up.long_leg.motion_constraints; break;
+        case ChassisMode::STEP_DOWN_LEG_SHORT: motion = &profiles.down.short_leg.motion_constraints; break;
+        case ChassisMode::STEP_DOWN_JUMP:    motion = &profiles.down.jump.motion_constraints; break;
+        default:                             motion = &profiles.normal.motion_constraints; break;
     }
 
     const double required_distance = std::max(
@@ -1642,9 +1647,18 @@ std::optional<ActiveStepMode> MainController::build_step_command(const PathStepT
     return ActiveStepMode {
         .mode = [&]() {
             if (target.direction == StepDirection::UP) {
-                return mode == StepTraversalMode::LEG ? ChassisMode::STEP_UP_LEG : ChassisMode::STEP_UP_JUMP;
+                switch (mode) {
+                    case StepTraversalMode::LEG_LONG:  return ChassisMode::STEP_UP_LEG_LONG;
+                    case StepTraversalMode::LEG_SHORT: return ChassisMode::STEP_UP_LEG_SHORT;
+                    case StepTraversalMode::JUMP:      return ChassisMode::STEP_UP_JUMP;
+                    default:                           return ChassisMode::NORMAL;
+                }
             }
-            return mode == StepTraversalMode::LEG ? ChassisMode::STEP_DOWN_LEG : ChassisMode::STEP_DOWN_JUMP;
+            switch (mode) {
+                case StepTraversalMode::LEG_SHORT: return ChassisMode::STEP_DOWN_LEG_SHORT;
+                case StepTraversalMode::JUMP:      return ChassisMode::STEP_DOWN_JUMP;
+                default:                           return ChassisMode::NORMAL;
+            }
         }(),
         .target_velocity = step_speed_from_level(speed_level),
     };

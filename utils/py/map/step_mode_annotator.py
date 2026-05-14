@@ -11,10 +11,17 @@ import numpy as np
 from PIL import Image, ImageTk
 
 
-MODE_OPTIONS = [
+UP_MODE_OPTIONS = [
     ("禁止", 0),
     ("跳跃", 1),
-    ("伸腿", 2),
+    ("短伸腿", 2),
+    ("长伸腿", 3),
+]
+
+DOWN_MODE_OPTIONS = [
+    ("禁止", 0),
+    ("跳跃", 1),
+    ("短伸腿", 2),
 ]
 
 SPEED_OPTIONS = [
@@ -24,8 +31,10 @@ SPEED_OPTIONS = [
     ("4", 3),
 ]
 
-MODE_LABEL_TO_VALUE = {label: value for label, value in MODE_OPTIONS}
-MODE_VALUE_TO_LABEL = {value: label for label, value in MODE_OPTIONS}
+UP_MODE_LABEL_TO_VALUE = {label: value for label, value in UP_MODE_OPTIONS}
+UP_MODE_VALUE_TO_LABEL = {value: label for label, value in UP_MODE_OPTIONS}
+DOWN_MODE_LABEL_TO_VALUE = {label: value for label, value in DOWN_MODE_OPTIONS}
+DOWN_MODE_VALUE_TO_LABEL = {value: label for label, value in DOWN_MODE_OPTIONS}
 SPEED_LABEL_TO_VALUE = {label: value for label, value in SPEED_OPTIONS}
 SPEED_VALUE_TO_LABEL = {value: label for label, value in SPEED_OPTIONS}
 
@@ -75,9 +84,7 @@ def decode_annotation(alpha_value: int) -> tuple[StepAnnotation, bool]:
     up_speed = (alpha_value >> 4) & 0b11
     down_speed = (alpha_value >> 6) & 0b11
 
-    had_reserved_bits = up_mode == 0b11 or down_mode == 0b11
-    if up_mode == 0b11:
-        up_mode = 0
+    had_reserved_bits = down_mode == 0b11
     if down_mode == 0b11:
         down_mode = 0
 
@@ -118,8 +125,8 @@ class StepModeAnnotatorApp:
         self.highlight_job: str | None = None
         self._suspend_ui_events = False
 
-        self.up_mode_var = tk.StringVar(value=MODE_VALUE_TO_LABEL[0])
-        self.down_mode_var = tk.StringVar(value=MODE_VALUE_TO_LABEL[0])
+        self.up_mode_var = tk.StringVar(value=UP_MODE_VALUE_TO_LABEL[0])
+        self.down_mode_var = tk.StringVar(value=DOWN_MODE_VALUE_TO_LABEL[0])
         self.up_speed_var = tk.StringVar(value=SPEED_VALUE_TO_LABEL[0])
         self.down_speed_var = tk.StringVar(value=SPEED_VALUE_TO_LABEL[0])
         self.jump_var = tk.StringVar(value="1")
@@ -197,8 +204,8 @@ class StepModeAnnotatorApp:
 
         tk.Label(panel, text="标注", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(16, 0))
 
-        self.up_mode_box = self._create_labeled_combobox(panel, "上台阶模式", self.up_mode_var, [label for label, _ in MODE_OPTIONS])
-        self.down_mode_box = self._create_labeled_combobox(panel, "下台阶模式", self.down_mode_var, [label for label, _ in MODE_OPTIONS])
+        self.up_mode_box = self._create_labeled_combobox(panel, "上台阶模式", self.up_mode_var, [label for label, _ in UP_MODE_OPTIONS])
+        self.down_mode_box = self._create_labeled_combobox(panel, "下台阶模式", self.down_mode_var, [label for label, _ in DOWN_MODE_OPTIONS])
         self.up_speed_box = self._create_labeled_combobox(panel, "上台阶速度", self.up_speed_var, [label for label, _ in SPEED_OPTIONS])
         self.down_speed_box = self._create_labeled_combobox(panel, "下台阶速度", self.down_speed_var, [label for label, _ in SPEED_OPTIONS])
 
@@ -526,7 +533,7 @@ class StepModeAnnotatorApp:
         if region.has_mixed_alpha:
             info_lines.append("已有 alpha 不一致，已回填为占比最高的非零值")
         if region.had_reserved_bits:
-            info_lines.append("检测到保留模式位，已按禁止处理")
+            info_lines.append("下台阶检测到保留模式位(3)，已按禁止处理")
         if encode_annotation(region.annotation) == 0:
             info_lines.append("状态: 未设置（保存会被阻止）")
         self.region_info_label.config(text="\n".join(info_lines))
@@ -545,8 +552,8 @@ class StepModeAnnotatorApp:
     def _load_region_annotation_into_ui(self, annotation: StepAnnotation):
         self._suspend_ui_events = True
         try:
-            self.up_mode_var.set(MODE_VALUE_TO_LABEL.get(annotation.up_mode, MODE_VALUE_TO_LABEL[0]))
-            self.down_mode_var.set(MODE_VALUE_TO_LABEL.get(annotation.down_mode, MODE_VALUE_TO_LABEL[0]))
+            self.up_mode_var.set(UP_MODE_VALUE_TO_LABEL.get(annotation.up_mode, UP_MODE_VALUE_TO_LABEL[0]))
+            self.down_mode_var.set(DOWN_MODE_VALUE_TO_LABEL.get(annotation.down_mode, DOWN_MODE_VALUE_TO_LABEL[0]))
             self.up_speed_var.set(SPEED_VALUE_TO_LABEL.get(annotation.up_speed, SPEED_VALUE_TO_LABEL[0]))
             self.down_speed_var.set(SPEED_VALUE_TO_LABEL.get(annotation.down_speed, SPEED_VALUE_TO_LABEL[0]))
         finally:
@@ -587,8 +594,8 @@ class StepModeAnnotatorApp:
 
     def _annotation_from_ui(self) -> StepAnnotation:
         return StepAnnotation(
-            up_mode=MODE_LABEL_TO_VALUE[self.up_mode_var.get()],
-            down_mode=MODE_LABEL_TO_VALUE[self.down_mode_var.get()],
+            up_mode=UP_MODE_LABEL_TO_VALUE[self.up_mode_var.get()],
+            down_mode=DOWN_MODE_LABEL_TO_VALUE[self.down_mode_var.get()],
             up_speed=SPEED_LABEL_TO_VALUE[self.up_speed_var.get()],
             down_speed=SPEED_LABEL_TO_VALUE[self.down_speed_var.get()],
         )

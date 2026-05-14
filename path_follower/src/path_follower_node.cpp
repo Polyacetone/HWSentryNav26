@@ -160,10 +160,15 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             },
             .mode_profiles = {
                 .normal = load_follow_mode_profile("normal", declare_parameter<double>("mpc.follow.mode_profiles.normal.lpv_rho")),
-                .leg_up = load_follow_mode_profile("leg_up", declare_parameter<double>("mpc.follow.mode_profiles.leg_up.lpv_rho")),
-                .jump_up = load_follow_mode_profile("jump_up", declare_parameter<double>("mpc.follow.mode_profiles.jump_up.lpv_rho")),
-                .leg_down = load_follow_mode_profile("leg_down", declare_parameter<double>("mpc.follow.mode_profiles.leg_down.lpv_rho")),
-                .jump_down = load_follow_mode_profile("jump_down", declare_parameter<double>("mpc.follow.mode_profiles.jump_down.lpv_rho"))
+                .up = {
+                    .jump = load_follow_mode_profile("up.jump", declare_parameter<double>("mpc.follow.mode_profiles.up.jump.lpv_rho")),
+                    .short_leg = load_follow_mode_profile("up.short_leg", declare_parameter<double>("mpc.follow.mode_profiles.up.short_leg.lpv_rho")),
+                    .long_leg = load_follow_mode_profile("up.long_leg", declare_parameter<double>("mpc.follow.mode_profiles.up.long_leg.lpv_rho")),
+                },
+                .down = {
+                    .jump = load_follow_mode_profile("down.jump", declare_parameter<double>("mpc.follow.mode_profiles.down.jump.lpv_rho")),
+                    .short_leg = load_follow_mode_profile("down.short_leg", declare_parameter<double>("mpc.follow.mode_profiles.down.short_leg.lpv_rho")),
+                },
             },
             .tracking_weights = {
                 .q_y = declare_parameter<double>("mpc.follow.tracking_weights.q_y"),

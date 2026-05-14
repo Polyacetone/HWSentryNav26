@@ -72,10 +72,15 @@ struct MPCFollowModeProfile {
 
 struct MPCFollowModeProfiles {
     MPCFollowModeProfile normal;
-    MPCFollowModeProfile leg_up;
-    MPCFollowModeProfile jump_up;
-    MPCFollowModeProfile leg_down;
-    MPCFollowModeProfile jump_down;
+    struct {
+        MPCFollowModeProfile jump;
+        MPCFollowModeProfile short_leg;
+        MPCFollowModeProfile long_leg;
+    } up;
+    struct {
+        MPCFollowModeProfile jump;
+        MPCFollowModeProfile short_leg;
+    } down;
 };
 
 struct MPCFollowTrackingWeights {

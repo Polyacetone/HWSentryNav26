@@ -69,7 +69,7 @@
         goal_tolerance: 0.2 # 助跑点到达判定距离 (m)
         mpc_weights:
           tracking:
-            q_y: 0.4 # 横向误差权重
+            q_y: 0.5 # 横向误差权重
             q_theta: 0.2 # 航向误差权重
             q_u: 1.0 # 进度项权重（鼓励沿路径前进）
           command:
@@ -128,50 +128,63 @@
               alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
               a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
             lpv_rho: -0.87 # 常规构型调度量
-          leg_up:
-            command_bounds:
-              vel_max: 2.0 # 线速度上限 (m/s)
-              vel_min: -1.2 # 线速度下限 (m/s）
-              omega_max: 7.2 # 角速度上限 (rad/s)
-              omega_min: -7.2 # 角速度下限 (rad/s)
-            motion_constraints:
-              acc_max: 1.5 # 最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 1.5 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-            lpv_rho: 0.95 # 伸腿上台阶构型调度量
-          jump_up:
-            command_bounds:
-              vel_max: 2.4 # 线速度上限 (m/s)
-              vel_min: -1.2 # 线速度下限 (m/s）
-              omega_max: 7.2 # 角速度上限 (rad/s)
-              omega_min: -7.2 # 角速度下限 (rad/s)
-            motion_constraints:
-              acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-            lpv_rho: -0.87 # 跳跃上台阶构型调度量
-          leg_down:
-            command_bounds:
-              vel_max: 2.8 # 线速度上限 (m/s)
-              vel_min: -1.2 # 线速度下限 (m/s）
-              omega_max: 7.2 # 角速度上限 (rad/s)
-              omega_min: -7.2 # 角速度下限 (rad/s)
-            motion_constraints:
-              acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-            lpv_rho: -0.16 # 伸腿下台阶构型调度量
-          jump_down:
-            command_bounds:
-              vel_max: 2.4 # 线速度上限 (m/s)
-              vel_min: -1.2 # 线速度下限 (m/s）
-              omega_max: 7.2 # 角速度上限 (rad/s)
-              omega_min: -7.2 # 角速度下限 (rad/s)
-            motion_constraints:
-              acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-            lpv_rho: -0.16 # 跳跃下台阶构型调度量
+          up:
+            jump:
+              command_bounds:
+                vel_max: 2.4 # 线速度上限 (m/s)
+                vel_min: -1.2 # 线速度下限 (m/s）
+                omega_max: 7.2 # 角速度上限 (rad/s)
+                omega_min: -7.2 # 角速度下限 (rad/s)
+              motion_constraints:
+                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+                a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+              lpv_rho: -0.87 # 跳跃上台阶构型调度量
+            short_leg:
+              command_bounds:
+                vel_max: 2.4 # 线速度上限 (m/s)
+                vel_min: -1.2 # 线速度下限 (m/s）
+                omega_max: 7.2 # 角速度上限 (rad/s)
+                omega_min: -7.2 # 角速度下限 (rad/s)
+              motion_constraints:
+                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+                a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+              lpv_rho: -0.16 # 短伸腿上台阶构型调度量
+            long_leg:
+              command_bounds:
+                vel_max: 1.5 # 线速度上限 (m/s)
+                vel_min: -1.2 # 线速度下限 (m/s）
+                omega_max: 7.2 # 角速度上限 (rad/s)
+                omega_min: -7.2 # 角速度下限 (rad/s)
+              motion_constraints:
+                acc_max: 1.5 # 最大 dv_cmd/dt (m/s²)
+                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+                a_lat_max: 1.5 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+              lpv_rho: 0.95 # 长伸腿上台阶构型调度量（待标定）
+          down:
+            jump:
+              command_bounds:
+                vel_max: 2.4 # 线速度上限 (m/s)
+                vel_min: -1.2 # 线速度下限 (m/s）
+                omega_max: 7.2 # 角速度上限 (rad/s)
+                omega_min: -7.2 # 角速度下限 (rad/s)
+              motion_constraints:
+                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+                a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+              lpv_rho: -0.16 # 跳跃下台阶构型调度量
+            short_leg:
+              command_bounds:
+                vel_max: 2.8 # 线速度上限 (m/s)
+                vel_min: -1.2 # 线速度下限 (m/s）
+                omega_max: 7.2 # 角速度上限 (rad/s)
+                omega_min: -7.2 # 角速度下限 (rad/s)
+              motion_constraints:
+                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+                a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
+              lpv_rho: -0.16 # 短伸腿下台阶构型调度量
         tracking_weights:
           q_y: 0.4  # 横向误差权重
           q_theta: 0.2 # 航向误差权重

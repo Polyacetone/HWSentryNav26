@@ -20,10 +20,11 @@ const MPCFollowModeProfile& select_follow_mode_profile(
         return params.mode_profiles.normal;
     }
     switch (active_step_mode->mode) {
-        case ChassisMode::STEP_UP_LEG: return params.mode_profiles.leg_up;
-        case ChassisMode::STEP_UP_JUMP: return params.mode_profiles.jump_up;
-        case ChassisMode::STEP_DOWN_LEG: return params.mode_profiles.leg_down;
-        case ChassisMode::STEP_DOWN_JUMP: return params.mode_profiles.jump_down;
+        case ChassisMode::STEP_UP_LEG_SHORT: return params.mode_profiles.up.short_leg;
+        case ChassisMode::STEP_UP_JUMP: return params.mode_profiles.up.jump;
+        case ChassisMode::STEP_UP_LEG_LONG: return params.mode_profiles.up.long_leg;
+        case ChassisMode::STEP_DOWN_LEG_SHORT: return params.mode_profiles.down.short_leg;
+        case ChassisMode::STEP_DOWN_JUMP: return params.mode_profiles.down.jump;
         default: return params.mode_profiles.normal;
     }
 }
