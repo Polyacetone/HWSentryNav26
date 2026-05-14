@@ -192,11 +192,13 @@ private:
     ControlOutput execute_stuck_reverse(const ControlInput& input);
     ControlOutput execute_fixed(const ControlInput& input);
     ControlOutput execute_step_runup(const ControlInput& input);
-    void sync_mpc_context(const ControlInput& input);
+    void sync_mpc_context(const ControlInput& input, bool allow_observer_update);
     void reset_all_mpc_warm_start();
     void reset_all_mpc_observer();
+    void apply_held_command(ControlOutput& output) const;
+    void remember_command_output(const ControlOutput& output);
 
-    void on_state_transition(FsmState prev, FsmState next);
+    void on_state_transition(FsmState prev, FsmState next, bool allow_warm_start_reset);
     void update_recovery_goal_if_needed(const ControlInput& input);
     bool check_stuck(const ControlInput& input);
     bool compute_is_hazard(const ControlInput& input) const;
@@ -332,9 +334,11 @@ private:
     std::optional<PathStepTarget> last_completed_step_runup_target_;
     std::optional<std::vector<Eigen::Vector2d>> pending_step_rollout_path_map_;
 
-    // ─── 复活检测（底盘 Dead -> Mature） ───
-    bool last_cycle_chassis_dead_ = false;
-    uint8_t last_leg_mode_ = 0;
+    // ─── 最近一次实际下发到底盘的控制指令 ───
+    ControlOutput last_command_output_;
+    bool has_last_command_output_ = false;
+
+    bool last_cycle_chassis_controllable_ = false;
 
     // ─── Follow 路标点无进度检测状态 ───
     std::vector<double> follow_landmarks_u_;                 // 每隔 ~landmark_spacing 的路径参数 u

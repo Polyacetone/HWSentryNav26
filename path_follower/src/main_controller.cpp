@@ -7,6 +7,21 @@ namespace {
 
 constexpr double ANGLE_EPSILON = 1e-6;
 
+enum class ChassisControlState : uint8_t {
+    DEAD,
+    COMMAND_BLOCKED,
+    MATURE,
+};
+
+constexpr uint8_t LEG_MODE_DEAD = 0u;
+constexpr uint8_t LEG_MODE_RECOVERY = 1u;
+constexpr uint8_t LEG_MODE_FLIGHT = 2u;
+constexpr uint8_t LEG_MODE_JUMP = 3u;
+constexpr uint8_t LEG_MODE_MATURE = 4u;
+constexpr uint8_t LEG_MODE_STEP = 5u;
+constexpr uint8_t LEG_MODE_ABNORMAL = 6u;
+constexpr uint8_t COMP_STAGE_MATCH = 4u;
+
 const char* mode_label(ChassisMode m) {
     switch (m) {
         case ChassisMode::STEP_UP_LEG: return "LEG";
@@ -18,10 +33,24 @@ const char* mode_label(ChassisMode m) {
     }
 }
 
-inline bool is_chassis_dead(const uint8_t leg_mode, const uint8_t comp_stage) {
-    // leg_mode: 0:Dead, 1:Recovery, 6:Abnormal, 7:Transition → chassis dead
-    // comp_stage: 4:比赛中
-    return leg_mode == 0u || leg_mode == 1u || leg_mode == 6u || leg_mode == 7u || comp_stage != 4u;
+ChassisControlState classify_chassis_control_state(const uint8_t leg_mode, const uint8_t comp_stage) {
+    if (comp_stage != COMP_STAGE_MATCH) {
+        return ChassisControlState::DEAD;
+    }
+
+    switch (leg_mode) {
+        case LEG_MODE_DEAD:
+        case LEG_MODE_RECOVERY:
+        case LEG_MODE_ABNORMAL:
+            return ChassisControlState::DEAD;
+        case LEG_MODE_FLIGHT:
+        case LEG_MODE_JUMP:
+        case LEG_MODE_STEP:
+            return ChassisControlState::COMMAND_BLOCKED;
+        case LEG_MODE_MATURE:
+        default:
+            return ChassisControlState::MATURE;
+    }
 }
 
 inline bool is_step_mode(const ChassisMode mode) {
@@ -293,10 +322,12 @@ MainController::MainController(
     step_lookahead_distance_ = nav_params_.step_detection.lookahead.min_distance;
 }
 
-void MainController::sync_mpc_context(const ControlInput& input) {
+void MainController::sync_mpc_context(const ControlInput& input, const bool allow_observer_update) {
     mpc_controller_->set_last_cmd(last_cmd_);
 
-    mpc_controller_->update_observer(input.chassis_state);
+    if (allow_observer_update) {
+        mpc_controller_->update_observer(input.chassis_state);
+    }
 
     mpc_controller_->set_energy_state(input.remaining_energy, input.rfr_pwr_limit);
 }
@@ -307,6 +338,31 @@ void MainController::reset_all_mpc_warm_start() {
 
 void MainController::reset_all_mpc_observer() {
     mpc_controller_->reset_observer();
+}
+
+void MainController::apply_held_command(ControlOutput& output) const {
+    if (!has_last_command_output_) {
+        output.velocity = 0.0;
+        output.omega = 0.0;
+        output.mode = ChassisMode::NORMAL;
+        output.step_dist_cm = 0;
+        output.valid = true;
+        return;
+    }
+
+    output.velocity = last_command_output_.velocity;
+    output.omega = last_command_output_.omega;
+    output.mode = last_command_output_.mode;
+    output.step_dist_cm = last_command_output_.step_dist_cm;
+    output.valid = true;
+}
+
+void MainController::remember_command_output(const ControlOutput& output) {
+    last_command_output_.velocity = output.velocity;
+    last_command_output_.omega = output.omega;
+    last_command_output_.mode = output.mode;
+    last_command_output_.step_dist_cm = output.step_dist_cm;
+    has_last_command_output_ = true;
 }
 
 double MainController::project_path_u(const ControlInput& input, const SplineD& path, const double seed_u) const {
@@ -483,18 +539,20 @@ bool MainController::prepare_follow_step_behavior(const ControlInput& input, con
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
 ControlOutput MainController::update(const ControlInput& input) {
-    const bool chassis_dead = is_chassis_dead(input.chassis_leg_mode, input.comp_stage);
-
-    // 检测 leg_mode 上升沿进入 4(Mature)，每次进入都重置龙伯格观测器
-    const bool entered_mature = !chassis_dead && input.chassis_leg_mode == 4u && last_leg_mode_ != 4u;
-    last_leg_mode_ = input.chassis_leg_mode;
+    const ChassisControlState chassis_control_state = classify_chassis_control_state(input.chassis_leg_mode, input.comp_stage);
+    const bool chassis_dead = chassis_control_state == ChassisControlState::DEAD;
+    const bool command_blocked = chassis_control_state == ChassisControlState::COMMAND_BLOCKED;
+    const bool chassis_controllable = chassis_control_state == ChassisControlState::MATURE;
+    const bool entered_controllable = chassis_controllable && !last_cycle_chassis_controllable_;
+    last_cycle_chassis_controllable_ = chassis_controllable;
 
     // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM。
     if (chassis_dead) {
-        last_cycle_chassis_dead_ = true;
         ControlOutput out;
         out.velocity = 0.0;
         out.omega = 0.0;
+        out.mode = ChassisMode::NORMAL;
+        out.step_dist_cm = 0;
         out.fsm_state = FsmState::DEAD;
         out.valid = true;
 
@@ -503,16 +561,17 @@ ControlOutput MainController::update(const ControlInput& input) {
         reset_all_mpc_observer();
         stuck_active_ = false;
         recovery_safe_since_ = std::nullopt;
+        remember_command_output(out);
         return out;
     }
 
-    // 每次进入 Mature(4) 重置观测器，确保从干净状态开始
-    if (entered_mature) {
-        RCLCPP_DEBUG(logger_, "Mature entered (leg_mode=4): resetting Luenberger observer");
+    if (entered_controllable) {
+        RCLCPP_DEBUG(logger_, "Chassis entered mature control state: resetting Luenberger observer");
         reset_all_mpc_observer();
     }
-
-    last_cycle_chassis_dead_ = false;
+    if (command_blocked) {
+        reset_all_mpc_observer();
+    }
 
     ControlInput effective_input = input;
     const bool step_path_locked = active_step_command_.has_value() && step_locked_path_.has_value();
@@ -531,7 +590,7 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     const FsmState prev_state = last_fsm_state_;
     const bool had_step_runup_request = step_runup_request_pending_;
-    sync_mpc_context(effective_input);
+    sync_mpc_context(effective_input, chassis_controllable);
 
     if (prev_state == FsmState::HAZARD_RECOVERY) {
         update_recovery_goal_if_needed(effective_input);
@@ -566,14 +625,14 @@ ControlOutput MainController::update(const ControlInput& input) {
     }
 
     bool request_replan_now = false;
-    if (has_path && (prev_state == FsmState::FOLLOW || prev_state == FsmState::STEP_RUNUP)) {
+    if (!command_blocked && has_path && (prev_state == FsmState::FOLLOW || prev_state == FsmState::STEP_RUNUP)) {
         request_replan_now = check_follow_projection_guard(effective_input, *effective_input.global_path, current_u)
             || check_no_progress(effective_input, current_u)
             || ((prev_state == FsmState::FOLLOW) && check_step_block_replan(effective_input, *effective_input.global_path, current_u));
     }
 
     if (!request_replan_now && has_path && prev_state == FsmState::FOLLOW) {
-        request_replan_now = prepare_follow_step_behavior(effective_input, *effective_input.global_path, current_u);
+        request_replan_now = !command_blocked && prepare_follow_step_behavior(effective_input, *effective_input.global_path, current_u);
     }
 
     const bool dist_reached = has_path && ((effective_input.chassis_pose_map.head<2>() - effective_input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
@@ -592,31 +651,36 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.spin_high_priority = effective_input.spin_high_priority;
     const bool hazard_allowed = (prev_state == FsmState::IDLE) || (prev_state == FsmState::SPIN)
         || (prev_state == FsmState::HAZARD_RECOVERY) || (prev_state == FsmState::STEP_RUNUP);
-    fsm_input.is_hazard = hazard_allowed && compute_is_hazard(effective_input);
-    fsm_input.is_stuck = check_stuck(effective_input);
-    fsm_input.is_recovery_safe = update_recovery_safe_flag(effective_input);
+    fsm_input.is_hazard = !command_blocked && hazard_allowed && compute_is_hazard(effective_input);
+    fsm_input.is_stuck = !command_blocked && check_stuck(effective_input);
+    fsm_input.is_recovery_safe = !command_blocked && update_recovery_safe_flag(effective_input);
     fsm_input.velocity = last_cmd_.x();
     fsm_input.omega = last_cmd_.y();
     fsm_input.stamp = effective_input.stamp;
 
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
     const FsmState state = fsm_output.state;
-    on_state_transition(prev_state, state);
+    on_state_transition(prev_state, state, !command_blocked);
     last_fsm_state_ = state;
 
     ControlOutput output;
-    switch (state) {
-        case FsmState::IDLE: output = execute_idle(effective_input); break;
-        case FsmState::FOLLOW: output = execute_follow(effective_input); break;
-        case FsmState::SPIN: output = execute_spin(effective_input); break;
-        case FsmState::STOPPING: output = execute_stop(effective_input); break;
-        case FsmState::HAZARD_RECOVERY: output = execute_recovery(effective_input); break;
-        case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(effective_input); break;
-        case FsmState::FIXED: output = execute_fixed(effective_input); break;
-        case FsmState::STEP_RUNUP: output = execute_step_runup(effective_input); break;
-        case FsmState::WAIT_REPLAN: output = execute_stop(effective_input); break;
-        case FsmState::STEPPING: output = execute_follow(effective_input); break;
-        case FsmState::DEAD: output = execute_idle(effective_input); break;
+    const bool hold_last_output = command_blocked;
+    if (hold_last_output) {
+        apply_held_command(output);
+    } else {
+        switch (state) {
+            case FsmState::IDLE: output = execute_idle(effective_input); break;
+            case FsmState::FOLLOW: output = execute_follow(effective_input); break;
+            case FsmState::SPIN: output = execute_spin(effective_input); break;
+            case FsmState::STOPPING: output = execute_stop(effective_input); break;
+            case FsmState::HAZARD_RECOVERY: output = execute_recovery(effective_input); break;
+            case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(effective_input); break;
+            case FsmState::FIXED: output = execute_fixed(effective_input); break;
+            case FsmState::STEP_RUNUP: output = execute_step_runup(effective_input); break;
+            case FsmState::WAIT_REPLAN: output = execute_stop(effective_input); break;
+            case FsmState::STEPPING: output = execute_follow(effective_input); break;
+            case FsmState::DEAD: output = execute_idle(effective_input); break;
+        }
     }
 
     if (had_step_runup_request && state != FsmState::STEP_RUNUP) {
@@ -637,7 +701,8 @@ ControlOutput MainController::update(const ControlInput& input) {
     if (output.valid) {
         last_cmd_ = Eigen::Vector2d(output.velocity, output.omega);
         mpc_controller_->set_last_cmd(last_cmd_);
-        const bool non_mpc_state = (state == FsmState::IDLE) || (state == FsmState::SPIN) || (state == FsmState::STUCK_REVERSE);
+        remember_command_output(output);
+        const bool non_mpc_state = !hold_last_output && ((state == FsmState::IDLE) || (state == FsmState::SPIN) || (state == FsmState::STUCK_REVERSE));
         if (non_mpc_state) {
             reset_all_mpc_warm_start();
         }
@@ -802,7 +867,7 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     return out;
 }
 
-void MainController::on_state_transition(const FsmState prev, const FsmState next) {
+void MainController::on_state_transition(const FsmState prev, const FsmState next, const bool allow_warm_start_reset) {
     if (prev == next) return;
 
     const bool prev_follow_like = (prev == FsmState::FOLLOW) || (prev == FsmState::STEPPING);
@@ -817,7 +882,9 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         clear_step_state();
         last_reference_u_ = 0.0;
         follow_max_landmark_idx_ = -1;
-        mpc_controller_->reset_warm_start();
+        if (allow_warm_start_reset) {
+            mpc_controller_->reset_warm_start();
+        }
     }
 
     if (prev == FsmState::STEP_RUNUP && next != FsmState::STEP_RUNUP) {
@@ -850,7 +917,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
     // Hold 求解器由 HAZARD_RECOVERY / FIXED / STEP_RUNUP 共享，三者之间切换不应互相清空 warm start。
     const bool next_uses_hold = (next == FsmState::FIXED) || (next == FsmState::STEP_RUNUP);
     const bool prev_uses_hold = (prev == FsmState::FIXED) || (prev == FsmState::HAZARD_RECOVERY) || (prev == FsmState::STEP_RUNUP);
-    if (next_uses_hold && !prev_uses_hold) {
+    if (allow_warm_start_reset && next_uses_hold && !prev_uses_hold) {
         mpc_controller_->reset_warm_start();
     }
 }
