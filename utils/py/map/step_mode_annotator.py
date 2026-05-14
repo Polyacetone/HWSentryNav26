@@ -31,7 +31,7 @@ SPEED_VALUE_TO_LABEL = {value: label for label, value in SPEED_OPTIONS}
 
 BLINK_INTERVAL_MS = 450
 HIGHLIGHT_COLORS = ("#ffd54f", "#ff7043")
-MASK_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+MASK_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (1, 1))
 
 
 @dataclass

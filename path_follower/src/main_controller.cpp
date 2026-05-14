@@ -58,6 +58,83 @@ std::optional<double> max_cost_along_segment(
     return max_cost;
 }
 
+struct FollowStepBlockSampleStats {
+    int sample_count = 0;
+    int step_sample_count = 0;
+    int blocked_step_sample_count = 0;
+};
+
+std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
+    const NavigationParams& params,
+    const SplineD& path,
+    const double start_u,
+    const CostMap* const dynamic_cost_map,
+    const std::vector<const CostMap*>& dynamic_prediction_maps,
+    const DirectionMap& direction_map,
+    const bool using_predicted_cost_maps
+) {
+    const auto& p = params.step_block_replan;
+    const double lookahead_distance = std::max(0.0, p.lookahead_distance);
+    const double resolution = std::max(1e-3, p.sample_resolution);
+
+    FollowStepBlockSampleStats stats;
+    const int samples = using_predicted_cost_maps
+        ? static_cast<int>(dynamic_prediction_maps.size())
+        : std::max(1, static_cast<int>(std::ceil(lookahead_distance / resolution)) + 1);
+    if (samples <= 0) return stats;
+
+    auto advance_path_u = [&](const double distance) {
+        double u = std::clamp(start_u, 0.0, 1.0);
+        Eigen::Vector2d prev = path.evaluate(u);
+        const int sub_steps = std::max(1, static_cast<int>(std::ceil(std::max(0.0, distance) / resolution)));
+        double travelled = 0.0;
+        for (int step = 1; step <= sub_steps && u < 1.0; ++step) {
+            const double next_u = std::min(1.0, start_u + (1.0 - start_u) * static_cast<double>(step) / static_cast<double>(sub_steps));
+            const Eigen::Vector2d cur = path.evaluate(next_u);
+            travelled += (cur - prev).norm();
+            prev = cur;
+            u = next_u;
+            if (travelled >= distance) break;
+        }
+        return u;
+    };
+
+    for (int i = 0; i < samples; ++i) {
+        const double t = samples == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(samples - 1);
+        const double u = advance_path_u(lookahead_distance * t);
+
+        const Eigen::Vector2d pos = path.evaluate(u);
+        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(pos);
+        if (!direction_map.is_valid_coord(dir_grid)) return std::nullopt;
+
+        const double step_norm = direction_map.interpolate(dir_grid).norm();
+        const bool on_step = step_norm >= p.step_norm_threshold;
+
+        bool blocked_dynamic = false;
+        if (using_predicted_cost_maps) {
+            const CostMap* const cost_map = dynamic_prediction_maps[static_cast<size_t>(i)];
+            if (!cost_map) return std::nullopt;
+            const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
+            if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
+            blocked_dynamic = cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
+        } else if (dynamic_cost_map) {
+            const Eigen::Vector2d cost_grid = dynamic_cost_map->map_coord_to_grid(pos);
+            if (!dynamic_cost_map->is_valid_coord(cost_grid)) return std::nullopt;
+            blocked_dynamic = dynamic_cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
+        }
+
+        stats.sample_count++;
+        if (!on_step) continue;
+
+        stats.step_sample_count++;
+        if (blocked_dynamic) {
+            stats.blocked_step_sample_count++;
+        }
+    }
+
+    return stats;
+}
+
 }
 
 namespace {
@@ -232,6 +309,177 @@ void MainController::reset_all_mpc_observer() {
     mpc_controller_->reset_observer();
 }
 
+double MainController::project_path_u(const ControlInput& input, const SplineD& path, const double seed_u) const {
+    return project_to_spline_u_extrapolated(
+        path,
+        input.chassis_pose_map.head<2>(),
+        seed_u,
+        mpc_controller_->params().follow.projection.proj_num_samples,
+        mpc_controller_->params().follow.projection.proj_search_window,
+        mpc_controller_->params().follow.projection.local_search_lazy_distance
+    );
+}
+
+bool MainController::check_follow_projection_guard(const ControlInput& input, const SplineD& path, const double current_u) const {
+    const Eigen::Vector2d pos_map = input.chassis_pose_map.head<2>();
+    const Eigen::Vector2d proj_map = path.evaluate(current_u);
+    const double proj_dist = (proj_map - pos_map).norm();
+    if (nav_params_.follow_proj_guard.dist_max > 0.0 && proj_dist > nav_params_.follow_proj_guard.dist_max) {
+        RCLCPP_WARN(
+            logger_,
+            "Follow replan: projection too far (dist=%.2f m > %.2f m)",
+            proj_dist,
+            nav_params_.follow_proj_guard.dist_max
+        );
+        return true;
+    }
+
+    if (!input.masked_global_cost_map || nav_params_.follow_proj_guard.cost_max < 0.0 || nav_params_.follow_proj_guard.cost_max >= 255.0) {
+        return false;
+    }
+
+    const auto max_cost = max_cost_along_segment(
+        *input.masked_global_cost_map,
+        pos_map,
+        proj_map,
+        nav_params_.follow_proj_guard.cost_samples
+    );
+    if (!max_cost) {
+        RCLCPP_WARN(logger_, "Follow replan: projection segment out of masked_global_cost_map bounds");
+        return true;
+    }
+
+    if (*max_cost > nav_params_.follow_proj_guard.cost_max) {
+        RCLCPP_WARN(
+            logger_,
+            "Follow replan: projection segment cost too high (max_cost=%.1f > %.1f)",
+            *max_cost,
+            nav_params_.follow_proj_guard.cost_max
+        );
+        return true;
+    }
+
+    return false;
+}
+
+bool MainController::check_step_block_replan(const ControlInput& input, const SplineD& path, const double current_u) const {
+    const auto& p = nav_params_.step_block_replan;
+    if (!p.enable || !input.masked_direction_map) return false;
+
+    const auto stats = sample_step_block_replan_stats(
+        nav_params_,
+        path,
+        current_u,
+        input.current_dynamic_cost_map,
+        input.per_step_dynamic_cost_maps,
+        *input.masked_direction_map,
+        input.using_predicted_cost_maps
+    );
+    if (!stats || stats->step_sample_count == 0) {
+        return false;
+    }
+
+    if (!input.using_predicted_cost_maps) {
+        if (stats->blocked_step_sample_count > 0) {
+            RCLCPP_WARN(
+                logger_,
+                "Follow replan: detected blocked step ahead within %.2f m (blocked_step_samples=%d/%d)",
+                p.lookahead_distance,
+                stats->blocked_step_sample_count,
+                stats->step_sample_count
+            );
+            return true;
+        }
+        return false;
+    }
+
+    const double blocked_ratio = static_cast<double>(stats->blocked_step_sample_count) / static_cast<double>(stats->step_sample_count);
+    if (blocked_ratio >= p.predicted_obstacle_ratio_threshold) {
+        RCLCPP_WARN(
+            logger_,
+            "Follow replan: predicted blocked step ahead within %.2f m (ratio=%.2f >= %.2f)",
+            p.lookahead_distance,
+            blocked_ratio,
+            p.predicted_obstacle_ratio_threshold
+        );
+        return true;
+    }
+
+    return false;
+}
+
+bool MainController::prepare_follow_step_behavior(const ControlInput& input, const SplineD& path, const double current_u) {
+    if (!input.masked_direction_map) return false;
+
+    if (!active_step_target_ && !step_runup_request_pending_) {
+        if (const auto step_target = try_latch_step_target(path, current_u, *input.masked_direction_map)) {
+            const auto step_command = build_step_command(*step_target, *input.masked_direction_map);
+            if (step_command) {
+                const bool needs_runup = step_target->direction == StepDirection::UP;
+                const auto runup = needs_runup
+                    ? evaluate_step_runup(input, path, current_u, *step_target, *step_command)
+                    : StepRunupDecision {};
+                if (needs_runup && runup.debug_rollout_path_map) {
+                    pending_step_rollout_path_map_ = runup.debug_rollout_path_map;
+                }
+                if (runup.request_replan) {
+                    RCLCPP_WARN(
+                        logger_,
+                        "Follow replan: step run-up failed for target at (%.2f, %.2f)",
+                        step_target->enter_pos_map.x(),
+                        step_target->enter_pos_map.y()
+                    );
+                    return true;
+                }
+
+                if (runup.context) {
+                    step_runup_context_ = runup.context;
+                    step_runup_request_pending_ = true;
+                    step_runup_goal_reached_ = false;
+                    RCLCPP_DEBUG(
+                        logger_,
+                        "Step run-up requested: mode=%s deficit=%.2f target_v=%.2f arrival_v=%.2f current_v=%.2f enter_u=%.3f goal=(%.2f, %.2f)",
+                        mode_label(step_command->mode),
+                        runup.context->velocity_deficit,
+                        step_command->target_velocity,
+                        runup.context->predicted_arrival_velocity,
+                        input.chassis_state.velocity,
+                        step_target->enter_u,
+                        runup.context->goal_map.x(),
+                        runup.context->goal_map.y()
+                    );
+                    return false;
+                }
+
+                active_step_target_ = *step_target;
+                active_step_command_ = *step_command;
+                step_locked_path_ = input.global_path;
+                step_locked_fixed_goal_ = input.fixed_goal;
+                step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
+                RCLCPP_DEBUG(
+                    logger_,
+                    "Step command latched: dir=%s mode=%s target_v=%.2f at (%.2f, %.2f)",
+                    step_target->direction == StepDirection::UP ? "UP" : "DOWN",
+                    mode_label(step_command->mode),
+                    step_command->target_velocity,
+                    step_target->enter_pos_map.x(),
+                    step_target->enter_pos_map.y()
+                );
+            } else {
+                RCLCPP_WARN(logger_, "StepUp target latched but alpha mode forbids traversal");
+            }
+        }
+    }
+
+    if (active_step_command_ && !step_locked_path_ && input.global_path) {
+        step_locked_path_ = input.global_path;
+        step_locked_fixed_goal_ = input.fixed_goal;
+        step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
+    }
+
+    return false;
+}
+
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
 ControlOutput MainController::update(const ControlInput& input) {
@@ -308,21 +556,38 @@ ControlOutput MainController::update(const ControlInput& input) {
         follow_max_landmark_idx_ = -1;
     }
 
-    bool cancel_follow_task_now = false;
-    if (!cancel_follow_task_now && check_no_progress(effective_input)) {
-        cancel_follow_task_now = true;
+    const double current_u = has_path ? project_path_u(effective_input, *effective_input.global_path, last_reference_u_) : 0.0;
+    if (has_path) {
+        last_reference_u_ = current_u;
+        if (effective_input.masked_direction_map) {
+            extend_active_step_exit(*effective_input.global_path, *effective_input.masked_direction_map);
+        }
+        update_step_release(*effective_input.global_path, current_u);
     }
+
+    bool request_replan_now = false;
+    if (has_path && (prev_state == FsmState::FOLLOW || prev_state == FsmState::STEP_RUNUP)) {
+        request_replan_now = check_follow_projection_guard(effective_input, *effective_input.global_path, current_u)
+            || check_no_progress(effective_input, current_u)
+            || ((prev_state == FsmState::FOLLOW) && check_step_block_replan(effective_input, *effective_input.global_path, current_u));
+    }
+
+    if (!request_replan_now && has_path && prev_state == FsmState::FOLLOW) {
+        request_replan_now = prepare_follow_step_behavior(effective_input, *effective_input.global_path, current_u);
+    }
+
     const bool dist_reached = has_path && ((effective_input.chassis_pose_map.head<2>() - effective_input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
-    const bool u_reached = has_path && (last_reference_u_ > nav_params_.stop_threshold_u);
+    const bool u_reached = has_path && (current_u > nav_params_.stop_threshold_u);
 
     FsmInput fsm_input;
-    fsm_input.has_path = cancel_follow_task_now ? false : has_path;
-    fsm_input.has_new_path = cancel_follow_task_now ? false : has_new_path;
-    fsm_input.fixed_goal_flag = cancel_follow_task_now ? false : effective_input.fixed_goal;
+    fsm_input.has_path = has_path;
+    fsm_input.has_new_path = has_new_path;
+    fsm_input.fixed_goal_flag = effective_input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
     fsm_input.step_active = is_step_active();
     fsm_input.step_runup_requested = step_runup_request_pending_;
     fsm_input.step_runup_completed = step_runup_goal_reached_;
+    fsm_input.replan_requested = request_replan_now;
     fsm_input.spin_requested = effective_input.spin_requested;
     fsm_input.spin_high_priority = effective_input.spin_high_priority;
     const bool hazard_allowed = (prev_state == FsmState::IDLE) || (prev_state == FsmState::SPIN)
@@ -361,9 +626,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     output.fsm_state = state;
     output.consume_global_path |= fsm_output.consume_global_path;
     output.request_replan = fsm_output.request_replan;
-    if (cancel_follow_task_now) {
-        output.consume_global_path = true;
-    }
+    output.keep_goal_on_path_consume = output.request_replan || state == FsmState::WAIT_REPLAN;
     if (output.consume_global_path) {
         last_reference_u_ = 0.0;
         clear_step_state();
@@ -405,147 +668,13 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     ControlOutput out;
     if (!input.global_path || !input.final_cost_map || !input.masked_direction_map) return out;
 
-    // 投影当前位置到样条
-    const double u0 = project_to_spline_u_extrapolated(
-        *input.global_path, input.chassis_pose_map.head<2>(), last_reference_u_,
-        mpc_controller_->params().follow.projection.proj_num_samples,
-        mpc_controller_->params().follow.projection.proj_search_window,
-        mpc_controller_->params().follow.projection.local_search_lazy_distance
-    );
+    if (pending_step_rollout_path_map_) {
+        out.step_rollout_path_map = pending_step_rollout_path_map_;
+        pending_step_rollout_path_map_ = std::nullopt;
+    }
+
+    const double u0 = last_reference_u_;
     last_reference_u_ = u0;
-    if (input.masked_direction_map) {
-        extend_active_step_exit(*input.global_path, *input.masked_direction_map);
-    }
-    update_step_release(*input.global_path, u0);
-
-    // 路径跟随任务取消条件（投影守卫）
-    // 1) 投影距离过大：说明路径与当前位置严重不一致
-    // 2) 当前位置到投影点的连线最大障碍物代价过高：说明“接回路径”的直线路径可能不可通行
-    const Eigen::Vector2d pos_map = input.chassis_pose_map.head<2>();
-    const Eigen::Vector2d proj_map = input.global_path->evaluate(u0);
-    const double proj_dist = (proj_map - pos_map).norm();
-    if (nav_params_.follow_proj_guard.dist_max > 0.0 && proj_dist > nav_params_.follow_proj_guard.dist_max) {
-        RCLCPP_WARN(
-            logger_,
-            "Follow cancel: projection too far (dist=%.2f m > %.2f m)",
-            proj_dist, nav_params_.follow_proj_guard.dist_max
-        );
-        out.velocity = 0.0;
-        out.omega = 0.0;
-        out.consume_global_path = true;
-        out.valid = true;
-        reset_all_mpc_warm_start();
-        return out;
-    }
-
-    if (input.masked_global_cost_map && nav_params_.follow_proj_guard.cost_max >= 0.0 && nav_params_.follow_proj_guard.cost_max < 255.0) {
-        const auto max_cost = max_cost_along_segment(
-            *input.masked_global_cost_map,
-            pos_map,
-            proj_map,
-            nav_params_.follow_proj_guard.cost_samples
-        );
-
-        const double c = max_cost.value_or(255.0);
-        if (!max_cost) {
-            RCLCPP_ERROR(logger_, "Follow cancel: projection segment out of cost map bounds");
-            out.velocity = 0.0;
-            out.omega = 0.0;
-            out.consume_global_path = true;
-            out.valid = true;
-            reset_all_mpc_warm_start();
-            return out;
-        }
-
-        if (c > nav_params_.follow_proj_guard.cost_max) {
-            RCLCPP_WARN(
-                logger_,
-                "Follow cancel: projection segment cost too high (max_cost=%.1f > %.1f) using masked_global_cost_map",
-                c, nav_params_.follow_proj_guard.cost_max
-            );
-            out.velocity = 0.0;
-            out.omega = 0.0;
-            out.consume_global_path = true;
-            out.valid = true;
-            reset_all_mpc_warm_start();
-            return out;
-        }
-    }
-
-    if (!active_step_target_ && !step_runup_request_pending_) {
-        if (const auto step_target = try_latch_step_target(*input.global_path, u0, *input.masked_direction_map)) {
-            const auto step_command = build_step_command(*step_target, *input.masked_direction_map);
-            if (step_command) {
-                const bool needs_runup = step_target->direction == StepDirection::UP;
-                const auto runup = needs_runup
-                    ? evaluate_step_runup(input, *input.global_path, u0, *step_target, *step_command)
-                    : StepRunupDecision {};
-                if (needs_runup && runup.debug_rollout_path_map) {
-                    out.step_rollout_path_map = runup.debug_rollout_path_map;
-                }
-                if (runup.cancel_path) {
-                    RCLCPP_WARN(
-                        logger_,
-                        "Follow cancel: step run-up failed for target at (%.2f, %.2f)",
-                        step_target->enter_pos_map.x(),
-                        step_target->enter_pos_map.y()
-                    );
-                    out.velocity = 0.0;
-                    out.omega = 0.0;
-                    out.mode = ChassisMode::NORMAL;
-                    out.consume_global_path = true;
-                    out.valid = true;
-                    return out;
-                }
-
-                if (runup.context) {
-                    step_runup_context_ = runup.context;
-                    step_runup_request_pending_ = true;
-                    step_runup_goal_reached_ = false;
-                    RCLCPP_DEBUG(
-                        logger_,
-                        "Step run-up requested: mode=%s deficit=%.2f target_v=%.2f arrival_v=%.2f current_v=%.2f enter_u=%.3f goal=(%.2f, %.2f)",
-                        mode_label(step_command->mode),
-                        runup.context->velocity_deficit,
-                        step_command->target_velocity,
-                        runup.context->predicted_arrival_velocity,
-                        input.chassis_state.velocity,
-                        step_target->enter_u,
-                        runup.context->goal_map.x(),
-                        runup.context->goal_map.y()
-                    );
-                    out.velocity = 0.0;
-                    out.omega = 0.0;
-                    out.mode = ChassisMode::NORMAL;
-                    out.valid = true;
-                    return out;
-                }
-
-                active_step_target_ = *step_target;
-                active_step_command_ = *step_command;
-                step_locked_path_ = input.global_path;
-                step_locked_fixed_goal_ = input.fixed_goal;
-                step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
-                RCLCPP_DEBUG(
-                    logger_,
-                    "Step command latched: dir=%s mode=%s target_v=%.2f at (%.2f, %.2f)",
-                    step_target->direction == StepDirection::UP ? "UP" : "DOWN",
-                    mode_label(step_command->mode),
-                    step_command->target_velocity,
-                    step_target->enter_pos_map.x(),
-                    step_target->enter_pos_map.y()
-                );
-            } else {
-                RCLCPP_WARN(logger_, "StepUp target latched but alpha mode forbids traversal");
-            }
-        }
-    }
-
-    if (active_step_command_ && !step_locked_path_ && input.global_path) {
-        step_locked_path_ = input.global_path;
-        step_locked_fixed_goal_ = input.fixed_goal;
-        step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
-    }
 
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_follow(
@@ -698,6 +827,11 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         clear_step_runup_state();
     }
 
+    if (next == FsmState::WAIT_REPLAN) {
+        clear_step_state();
+        last_reference_u_ = 0.0;
+    }
+
     if (next_follow_like && !prev_follow_like) {
         last_reference_u_ = 0.0;
     }
@@ -723,11 +857,6 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
 
 void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
     const auto& p = fsm_params_.recovery;
-    if (!p.enable) {
-        recovery_goal_map_ = std::nullopt;
-        return;
-    }
-
     if (!input.masked_global_cost_map || !input.masked_direction_map) return;
 
     const bool need_new = (!recovery_goal_map_) || (!recovery_goal_set_time_) || (std::chrono::duration<double>(input.stamp - *recovery_goal_set_time_).count() >= p.goal_timeout);
@@ -759,8 +888,6 @@ void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
 
 bool MainController::check_stuck(const ControlInput& input) {
     const auto& p = fsm_params_.stuck;
-    if (!p.enable) return false;
-
     if (std::abs(last_cmd_.x()) < p.cmd_vel_threshold) {
         stuck_active_ = false;
         return false;
@@ -787,7 +914,7 @@ bool MainController::check_stuck(const ControlInput& input) {
 
 bool MainController::compute_is_hazard(const ControlInput& input) const {
     const auto& p = fsm_params_.recovery;
-    if (!p.enable || !input.masked_global_cost_map || !input.masked_direction_map) return false;
+    if (!input.masked_global_cost_map || !input.masked_direction_map) return false;
 
     // 注意：危险判断的 cost_map 使用的是 masked_global 而非 final，避免动态障碍物导致车进入危险恢复模式
     const auto sample = RecoveryGoalPlanner::sample_fields(
@@ -803,7 +930,7 @@ bool MainController::compute_is_hazard(const ControlInput& input) const {
 
 bool MainController::update_recovery_safe_flag(const ControlInput& input) {
     const auto& p = fsm_params_.recovery;
-    if (!p.enable || !input.final_cost_map || !input.masked_direction_map || !recovery_goal_map_) {
+    if (!input.final_cost_map || !input.masked_direction_map || !recovery_goal_map_) {
         recovery_safe_since_ = std::nullopt;
         return false;
     }
@@ -1215,7 +1342,8 @@ uint8_t MainController::compute_step_distance_cm(
         return 255;
     }
 
-    const int64_t rounded_cm = std::lround(observed->distance_from_start * 100.0);
+    const double adjusted_distance = observed->distance_from_start + nav_params_.step_dist_offset;
+    const int64_t rounded_cm = std::lround(adjusted_distance * 100.0);
     return static_cast<uint8_t>(std::clamp<int64_t>(rounded_cm, 0, 255));
 }
 
@@ -1317,7 +1445,7 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
             target.enter_pos_map.x(),
             target.enter_pos_map.y()
         );
-        decision.cancel_path = true;
+        decision.request_replan = true;
         return decision;
     }
 
@@ -1347,7 +1475,7 @@ MainController::StepRunupDecision MainController::evaluate_step_runup(
             target.enter_pos_map.x(),
             target.enter_pos_map.y()
         );
-        decision.cancel_path = true;
+        decision.request_replan = true;
         return decision;
     }
 
@@ -1467,8 +1595,6 @@ bool MainController::is_step_active() const {
 
 void MainController::recompute_follow_landmarks(const SplineD& path) {
     follow_landmarks_u_.clear();
-    if (!nav_params_.no_progress_guard.enable) return;
-
     const int N = 500;
     const double spacing = std::max(0.1, nav_params_.no_progress_guard.landmark_spacing);
     double arc = 0.0;
@@ -1491,28 +1617,16 @@ void MainController::recompute_follow_landmarks(const SplineD& path) {
     }
 }
 
-bool MainController::check_no_progress(const ControlInput& input) {
-    if (!nav_params_.no_progress_guard.enable) return false;
+bool MainController::check_no_progress(const ControlInput& input, const double current_u) {
     if (last_fsm_state_ != FsmState::FOLLOW) return false;
     if (follow_landmarks_u_.empty()) return false;
-
-    if (input.global_path) {
-        last_reference_u_ = project_to_spline_u_extrapolated(
-            *input.global_path,
-            input.chassis_pose_map.head<2>(),
-            last_reference_u_,
-            mpc_controller_->params().follow.projection.proj_num_samples,
-            mpc_controller_->params().follow.projection.proj_search_window,
-            mpc_controller_->params().follow.projection.local_search_lazy_distance
-        );
-    }
 
     const int n = static_cast<int>(follow_landmarks_u_.size());
 
     // 寻找当前 u 能覆盖的最高路标点索引
     int new_max = follow_max_landmark_idx_;
     for (int i = std::max(0, new_max + 1); i < n; i++) {
-        if (last_reference_u_ >= follow_landmarks_u_[static_cast<size_t>(i)]) {
+        if (current_u >= follow_landmarks_u_[static_cast<size_t>(i)]) {
             new_max = i;
         } else {
             break;
@@ -1530,8 +1644,8 @@ bool MainController::check_no_progress(const ControlInput& input) {
     if (elapsed >= nav_params_.no_progress_guard.timeout) {
         const double landmark_u = follow_max_landmark_idx_ >= 0 ? follow_landmarks_u_[static_cast<size_t>(follow_max_landmark_idx_)] : -1.0;
         RCLCPP_WARN(logger_,
-            "Follow no-progress: stuck at landmark %d/%d (landmark_u=%.3f, progress_u=%.3f) for %.1fs, cancelling task",
-            follow_max_landmark_idx_, n - 1, landmark_u, last_reference_u_, elapsed);
+            "Follow replan: no progress at landmark %d/%d (landmark_u=%.3f, progress_u=%.3f) for %.1fs",
+            follow_max_landmark_idx_, n - 1, landmark_u, current_u, elapsed);
         return true;
     }
     return false;

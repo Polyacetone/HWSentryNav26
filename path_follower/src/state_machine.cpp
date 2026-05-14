@@ -43,6 +43,7 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
     std::chrono::steady_clock::time_point stopping_start_time;
     std::chrono::steady_clock::time_point reverse_start_time;
     std::chrono::steady_clock::time_point wait_replan_start_time;
+    bool replan_after_recovery = false;
 
     void clear_output() {
         output = {};
@@ -141,6 +142,10 @@ struct StFollow final : sc::state<StFollow, Machine> {
         if (in.step_active) {
             return transit<StStepping>();
         }
+        if (in.replan_requested) {
+            m.wait_replan_start_time = in.stamp;
+            return transit<StWaitReplan>();
+        }
 
         // 路径被取消/清空：FOLLOW 不应“卡死”在无路径状态。
         // 走 STOPPING 做平滑减速，并根据外部请求选择落点。
@@ -158,6 +163,7 @@ struct StFollow final : sc::state<StFollow, Machine> {
         }
 
         if (in.is_stuck) {
+            m.replan_after_recovery = true;
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
@@ -201,6 +207,7 @@ struct StStepping final : sc::state<StStepping, Machine> {
         }
 
         if (in.is_stuck) {
+            m.replan_after_recovery = false;
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
@@ -228,6 +235,7 @@ struct StSpin final : sc::state<StSpin, Machine> {
             return transit<StHazardRecovery>();
         }
         if (in.is_stuck) {
+            m.replan_after_recovery = false;
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
@@ -261,6 +269,7 @@ struct StStopping final : sc::state<StStopping, Machine> {
         const auto& in = ev.input;
 
         if (in.is_stuck) {
+            m.replan_after_recovery = false;
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
@@ -302,8 +311,6 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
 
         const double elapsed = std::chrono::duration<double>(in.stamp - m.reverse_start_time).count();
         if (elapsed > m.params.stuck.reverse_duration) {
-            // 脱困链条固定为：倒车 -> HazardRecovery
-            m.output.consume_global_path = true;
             return transit<StHazardRecovery>();
         }
 
@@ -325,11 +332,18 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
         const auto& in = ev.input;
 
         if (in.is_stuck) {
+            m.replan_after_recovery = false;
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
         if (in.is_recovery_safe) {
             m.output.recovery_finished = true;
+
+            if (m.replan_after_recovery) {
+                m.replan_after_recovery = false;
+                m.wait_replan_start_time = in.stamp;
+                return transit<StWaitReplan>();
+            }
 
             const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
 
@@ -379,10 +393,16 @@ struct StStepRunup final : sc::state<StStepRunup, Machine> {
             return transit<StStopping>();
         }
 
+        if (in.replan_requested) {
+            m.wait_replan_start_time = in.stamp;
+            return transit<StWaitReplan>();
+        }
+
         if (in.is_hazard) {
             return transit<StHazardRecovery>();
         }
         if (in.is_stuck) {
+            m.replan_after_recovery = true;
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
@@ -426,7 +446,12 @@ struct StWaitReplan final : sc::state<StWaitReplan, Machine> {
         if (timeout) {
             m.output.consume_global_path = true;
             RCLCPP_WARN(m.logger, "WAIT_REPLAN timed out after %.2f s without a valid path", m.params.transition.wait_replan_timeout);
-            return transit<StFollow>();
+
+            const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.fixed_goal_flag));
+            if (should_spin) {
+                return transit<StSpin>();
+            }
+            return transit<StIdle>();
         }
 
         return discard_event();

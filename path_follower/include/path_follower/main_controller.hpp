@@ -50,9 +50,12 @@ struct ControlInput {
     const CostMap* const final_cost_map; // 全局先验代价地图 + 台阶掩码 + 动态障碍物
     const CostMap* const masked_global_cost_map; // 全局先验代价地图 + 台阶掩码（不含动态障碍物）
     const DirectionMap* const masked_direction_map; // 全局先验方向场 - 台阶掩码
+    const CostMap* const current_dynamic_cost_map; // 当前时刻动态障碍物代价地图（通常为 local_cost_map）
 
     // ─── 逐步预测代价地图 ───
     std::vector<const CostMap*> per_step_cost_maps; // 每个预测时间步的代价地图（可为空）
+    std::vector<const CostMap*> per_step_dynamic_cost_maps; // 每个预测时间步的动态障碍物代价地图（可为空）
+    bool using_predicted_cost_maps = false;
     double prediction_dt = 0.0; // 预测步长 (s)
 
     // ─── 时间 ───
@@ -72,6 +75,7 @@ struct ControlOutput {
     // ─── 状态信息 ───
     FsmState fsm_state = FsmState::IDLE;
     bool consume_global_path = false;   // 通知 Node 消费当前全局路径，并据此重建台阶擦除地图
+    bool keep_goal_on_path_consume = false; // 消费当前路径但保留目标，等待 planner 返回新路径
     bool request_replan = false;        // 通知 Node 向 path_planner 发布一次重规划触发
 
     // ─── 调试 ───
@@ -130,9 +134,17 @@ struct StepRunupParams {
 };
 
 struct NoProgressGuardParams {
-    bool enable;
     double landmark_spacing;
     double timeout;
+};
+
+struct StepBlockReplanParams {
+    bool enable;
+    double lookahead_distance;
+    double sample_resolution;
+    double step_norm_threshold;
+    double obstacle_cost_threshold;
+    double predicted_obstacle_ratio_threshold;
 };
 
 struct NavigationParams {
@@ -143,6 +155,9 @@ struct NavigationParams {
     StepDetectionParams step_detection;
     StepRunupParams step_runup;
     NoProgressGuardParams no_progress_guard;
+    StepBlockReplanParams step_block_replan;
+
+    double step_dist_offset = 0.0; // 补偿代价地图膨胀导致的台阶检测距离偏差 (m)
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -187,7 +202,7 @@ private:
     bool compute_is_hazard(const ControlInput& input) const;
     bool update_recovery_safe_flag(const ControlInput& input);
     void recompute_follow_landmarks(const SplineD& path);
-    bool check_no_progress(const ControlInput& input);
+    bool check_no_progress(const ControlInput& input, double current_u);
 
     // ─── 工具函数 ───
     enum class StepDirection : uint8_t {
@@ -222,7 +237,7 @@ private:
     };
 
     struct StepRunupDecision {
-        bool cancel_path = false;
+        bool request_replan = false;
         std::optional<StepRunupContext> context;
         std::optional<std::vector<Eigen::Vector2d>> debug_rollout_path_map;
     };
@@ -239,7 +254,11 @@ private:
     static double prediction_path_length(const MPCPrediction& prediction);
     void update_step_lookahead_distance(const MPCPrediction& prediction);
     [[nodiscard]] double current_step_lookahead_distance() const;
+    [[nodiscard]] double project_path_u(const ControlInput& input, const SplineD& path, double seed_u) const;
     double advance_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
+    [[nodiscard]] bool check_follow_projection_guard(const ControlInput& input, const SplineD& path, double current_u) const;
+    [[nodiscard]] bool check_step_block_replan(const ControlInput& input, const SplineD& path, double current_u) const;
+    bool prepare_follow_step_behavior(const ControlInput& input, const SplineD& path, double current_u);
     bool is_same_step_target(const PathStepTarget& lhs, const PathStepTarget& rhs) const;
     bool is_same_step_target(const PathStepTarget& target, const StepTargetObservation& observation) const;
     void clear_step_state();
@@ -311,6 +330,7 @@ private:
     bool step_runup_goal_reached_ = false;
     std::optional<StepRunupContext> step_runup_context_;
     std::optional<PathStepTarget> last_completed_step_runup_target_;
+    std::optional<std::vector<Eigen::Vector2d>> pending_step_rollout_path_map_;
 
     // ─── 复活检测（底盘 Dead -> Mature） ───
     bool last_cycle_chassis_dead_ = false;

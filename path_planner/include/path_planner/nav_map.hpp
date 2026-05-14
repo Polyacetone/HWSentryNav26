@@ -5,6 +5,17 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 
 namespace path_planner {
+
+constexpr uint8_t STEP_MODE_FORBIDDEN = 0;
+
+constexpr uint8_t extract_up_mode(uint8_t step_mode) {
+    return step_mode & 0b11;
+}
+
+constexpr uint8_t extract_down_mode(uint8_t step_mode) {
+    return (step_mode >> 2) & 0b11;
+}
+
 class CostMap {
 public:
     using Ptr = std::shared_ptr<CostMap>;
@@ -44,6 +55,7 @@ public:
     bool is_fully_prohibited(const Eigen::Vector2d& grid_coord) const;
     double prohibited_direction_score(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
     double prohibited_direction_score(const Eigen::Vector2d& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
+    bool is_direction_prohibited(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
 
     const int width, height;
     const double resolution, origin_x, origin_y;

@@ -5,16 +5,6 @@
 
 namespace {
 
-constexpr uint8_t STEP_MODE_FORBIDDEN = 0;
-
-uint8_t extract_up_mode(uint8_t step_mode) {
-    return step_mode & 0b11;
-}
-
-uint8_t extract_down_mode(uint8_t step_mode) {
-    return (step_mode >> 2) & 0b11;
-}
-
 bool is_step_direction_pixel(const cv::Vec3b& val) {
     const bool zero = val[0] == 0 && val[1] == 0;
     const bool neutral = val[0] == 128 && val[1] == 128;
@@ -48,6 +38,11 @@ std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> convert_direction_
     return {std::move(dir_vec), std::move(step_mode_vec)};
 }
 
+} // namespace
+
+namespace path_planner {
+namespace {
+
 double prohibited_direction_score_impl(const Eigen::Vector2d& step_dir, uint8_t step_mode, const Eigen::Vector2d& move_dir, double dot_threshold) {
     if (step_dir.squaredNorm() <= 1e-12 || move_dir.squaredNorm() <= 1e-12) {
         return 0.0;
@@ -71,6 +66,7 @@ double prohibited_direction_score_impl(const Eigen::Vector2d& step_dir, uint8_t 
 }
 
 } // namespace
+} // namespace path_planner
 
 namespace path_planner {
 CostMap::CostMap(
@@ -270,5 +266,27 @@ double DirectionMap::prohibited_direction_score(const Eigen::Vector2d& grid_coor
         max_score = std::max(max_score, prohibited_direction_score(sample.coord, move_dir, dot_threshold) * sample.weight);
     }
     return std::clamp(max_score, 0.0, 1.0);
+}
+
+bool DirectionMap::is_direction_prohibited(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
+    const Eigen::Vector2d step_dir = at(grid_coord);
+    if (step_dir.squaredNorm() <= 1e-12 || move_dir.squaredNorm() <= 1e-12) {
+        return false;
+    }
+
+    const Eigen::Vector2d normalized_step_dir = step_dir.normalized();
+    const Eigen::Vector2d normalized_move_dir = move_dir.normalized();
+    const double alignment = normalized_move_dir.dot(normalized_step_dir);
+    const double clamped_threshold = std::clamp(dot_threshold, 0.0, 1.0);
+
+    if (alignment > clamped_threshold && extract_up_mode(step_mode_at(grid_coord)) == STEP_MODE_FORBIDDEN) {
+        return true;
+    }
+
+    if (alignment < -clamped_threshold && extract_down_mode(step_mode_at(grid_coord)) == STEP_MODE_FORBIDDEN) {
+        return true;
+    }
+
+    return false;
 }
 }

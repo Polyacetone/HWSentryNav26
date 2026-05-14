@@ -21,8 +21,6 @@ struct TransitionParams {
 
 // 危险恢复参数
 struct RecoveryParams {
-    bool enable;
-
     // 危险判定（当前位置）
     double hazard_cost_threshold;
     double hazard_step_norm_threshold;
@@ -46,7 +44,6 @@ struct RecoveryParams {
 
 // 卡住检测 + 倒车参数
 struct StuckParams {
-    bool enable;
     double cmd_vel_threshold;
     double timeout;
     double max_displacement;
@@ -89,6 +86,7 @@ struct FsmInput {
     bool step_active = false;
     bool step_runup_requested = false;
     bool step_runup_completed = false;
+    bool replan_requested = false;
 
     // 外部请求
     bool spin_requested = false;

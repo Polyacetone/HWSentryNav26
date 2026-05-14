@@ -21,7 +21,6 @@ AStarPlanner::AStarPlanner(
     const double direction_weight,
     const double obstacle_weight,
     const double step_weight,
-    const double prohibited_direction_weight,
     const double step_mode_dot_threshold,
     const int downsampled_waypoint_max_interval,
     const int feasible_threshold
@@ -29,7 +28,6 @@ AStarPlanner::AStarPlanner(
     direction_weight_(direction_weight),
     obstacle_weight_(obstacle_weight),
     step_weight_(step_weight),
-    prohibited_direction_weight_(prohibited_direction_weight),
     step_mode_dot_threshold_(step_mode_dot_threshold),
     downsampled_waypoint_max_interval_(downsampled_waypoint_max_interval),
     feasible_threshold_(feasible_threshold) {}
@@ -98,18 +96,18 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 const size_t n_key = get_key(next);
                 if (!is_valid(costmap, next) || closed_fwd[n_key] != 0) continue;
 
+                const Eigen::Vector2d move_dir = dir.cast<double>().normalized();
+                if (direction_map.is_direction_prohibited(next, move_dir, step_mode_dot_threshold_)) continue;
+
                 double obstacle_cost = costmap.at(next) * obstacle_weight_;
                 double step_cost = 0;
-                Eigen::Vector2d step_dir = direction_map.at(next);
-                const Eigen::Vector2d move_dir = dir.cast<double>().normalized();
-                const double prohibited_penalty = direction_map.prohibited_direction_score(next, move_dir, step_mode_dot_threshold_) * prohibited_direction_weight_;
+                const Eigen::Vector2d step_dir = direction_map.at(next);
                 if (step_dir != Eigen::Vector2d::Zero()) {
                     step_cost = (1 - std::abs(move_dir.dot(step_dir))) * direction_weight_;
                 }
-                // 当方向被禁止时跳过台阶位置惩罚，避免与禁止惩罚重复叠加
-                double step_penalty = (prohibited_penalty > 0.0) ? 0.0 : (step_dir.norm() * step_weight_);
+                double step_penalty = step_dir.norm() * step_weight_;
 
-                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty + prohibited_penalty;
+                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty;
                 if (all_fwd[n_key] && all_fwd[n_key]->g <= cost) continue;
                 const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, goal_grid), current);
                 open_fwd.push(neighbor);
@@ -135,18 +133,23 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 const Eigen::Vector2i next = current->coord + dir;
                 const size_t n_key = get_key(next);
                 if (!is_valid(costmap, next) || closed_bwd[n_key] != 0) continue;
-                
+
+                const Eigen::Vector2d move_dir = dir.cast<double>().normalized();
+                // 反向搜索扩展方向与遍历方向相反:
+                //   扩展: current → next  (dir = next - current)
+                //   最终路径: ... → next → current → ... (进入 current 方向 = current - next)
+                // 因此检查进入 current 而非 next
+                if (direction_map.is_direction_prohibited(current->coord, -move_dir, step_mode_dot_threshold_)) continue;
+
                 double obstacle_cost = costmap.at(next) * obstacle_weight_;
                 double step_cost = 0;
-                Eigen::Vector2d step_dir = direction_map.at(next);
-                const Eigen::Vector2d move_dir = dir.cast<double>().normalized();
-                const double prohibited_penalty = direction_map.prohibited_direction_score(next, move_dir, step_mode_dot_threshold_) * prohibited_direction_weight_;
+                const Eigen::Vector2d step_dir = direction_map.at(next);
                 if (step_dir != Eigen::Vector2d::Zero()) {
                     step_cost = (1 - std::abs(move_dir.dot(step_dir))) * direction_weight_;
                 }
-                double step_penalty = (prohibited_penalty > 0.0) ? 0.0 : (step_dir.norm() * step_weight_);
+                double step_penalty = step_dir.norm() * step_weight_;
 
-                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty + prohibited_penalty;
+                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty;
                 if (all_bwd[n_key] && all_bwd[n_key]->g <= cost) continue;
                 const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, start_grid), current);
                 open_bwd.push(neighbor);

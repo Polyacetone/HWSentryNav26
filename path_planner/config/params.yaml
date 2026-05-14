@@ -20,12 +20,6 @@
       enable: true # 是否启用调试模式
       rough_path_pub_topic: "/path_planner/debug/rough_path" # A*原始路径发布话题
 
-    # ── 重规划 ──
-    replan:
-      enable: false # 是否启用定时重规划（根据局部代价地图触发的避障重规划）
-      timer_period: 0.2 # 定时重规划周期 (s)
-      local_cost_threshold: 100 # 局部代价超过该值触发重规划 (0~255)
-
     # ── 起点预测 ──
     start_prediction:
       enable: true # 是否启用起点预测（考虑刹车距离+规划延迟，提前规划起点）
@@ -39,8 +33,7 @@
       skip_distance: 0.5 # 目标距离 < 该值时跳过A*，直接构造B样条初值进行优化 (m)
       direction_weight: 6.0 # 偏离台阶方向场的代价权重（鼓励顺着台阶方向移动）
       obstacle_weight: 4.0 # 障碍物代价权重（0~255 映射到 cost）
-      step_weight: 0.6 # 经过台阶区域的惩罚权重（基于方向场模长，被禁止方向会跳过此惩罚）
-      prohibited_direction_weight: 200.0 # alpha标记禁止方向上穿越台阶的高额惩罚权重
+      step_weight: 0.6 # 经过台阶区域的惩罚权重（基于方向场模长）
       downsampled_waypoint_max_interval: 5 # 路径降采样后点间最大间隔（栅格单位）
       feasible_threshold: 100 # 代价 <= 该值的格子视为可通行 (0~255)
 

@@ -39,7 +39,20 @@
       cost_max: 240.0 # 投影连线最大障碍物代价 > 该值则取消follow (0~255)
       cost_samples: 20 # 连线代价估计采样数
 
+    follow_no_progress_guard:
+      landmark_spacing: 1.0 # 路标点沿弧长间隔 (m)
+      timeout: 6.0 # 无进度超时 (s)
+
+    follow_step_block_replan:
+      enable: true # 是否启用“台阶被动态障碍物堵住”检测并触发全局重规划
+      lookahead_distance: 5.0 # 沿当前全局路径向前检查距离 (m)
+      sample_resolution: 0.2 # 非预测地图模式下的路径采样分辨率 (m)
+      step_norm_threshold: 0.9 # 方向场模长 >= 该值视为路径经过台阶区域
+      obstacle_cost_threshold: 100.0 # 动态障碍物代价值 >= 该值视为被障碍物占据
+      predicted_obstacle_ratio_threshold: 0.3 # 预测地图模式下，台阶样本中被占据比例超过该阈值则触发重规划
+
     step:
+      step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离
       detection:
         detect_norm_threshold: 0.9 # 方向场模长 >= 该值认为进入台阶区域；从进入点起继续搜索首个 < 该值的位置作为台阶尾部
         detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，< -阈值为下台阶
@@ -79,11 +92,6 @@
           path_integral_cost_weight: 1.0 # 路径积分中 cost 权重
           path_integral_step_weight: 3.0 # 路径积分中台阶方向场权重
           radius_preference_weight: 0.6 # 偏离理想助跑距离的惩罚权重
-
-    follow_no_progress_guard:
-      enable: true # 是否启用路标点无进度检测（超时未推进则取消follow）
-      landmark_spacing: 1.0 # 路标点沿弧长间隔 (m)
-      timeout: 6.0 # 无进度超时 (s)
 
     state_machine:
       follow_to_spin_vel_max: 0.2 # STOPPING→SPIN 退出判定：|v_cmd| < 该值 (m/s)
@@ -171,8 +179,8 @@
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
-          r_dv: 0.6 # 线速度平滑
-          r_domega: 0.2 # 角速度平滑
+          r_dv: 0.8 # 线速度平滑
+          r_domega: 0.4 # 角速度平滑
         motion_constraint_weights:
           acc_limit: 20.0 # 速度指令变化率超限惩罚
           alpha_limit: 20.0 # 角速度指令变化率超限惩罚
@@ -182,7 +190,7 @@
           step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
         terrain_weights:
           step_vel_weight: 2.0 # 锁存后台阶区域速度目标惩罚权重
-          direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
+          direction: 1.5 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
           obstacle: 1.0 # 避障权重（全局+局部融合代价）
         terminal_limits:
@@ -258,7 +266,6 @@
           step_terminal: 12.0 # 终端台阶惩罚
 
     recovery:
-      enable: true # 是否启用危险恢复功能
       hazard:
         cost_threshold: 30.0 # 当前位置代价 >= 该值认为在危险区域 (0~255)
         step_norm_threshold: 0.06 # 当前位置方向场模长 >= 该值认为在危险台阶区域
@@ -276,7 +283,6 @@
       exit:
         safe_hold_time: 1.0 # 安全区域保持时间，超过后才退出恢复 (s)
       stuck:
-        enable: true # 是否启用卡住检测
         cmd_vel_threshold: 0.4 # 指令速度超过该值才开始检测 (m/s)
         timeout: 2.0 # 卡住判定持续时间阈值 (s)
         max_displacement: 0.2 # 位移小于该值判定卡住 (m)

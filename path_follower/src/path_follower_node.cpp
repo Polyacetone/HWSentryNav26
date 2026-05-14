@@ -93,6 +93,7 @@ private:
     // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_, current_local_cost_map_;
     std::vector<CostMap::ConstPtr> prediction_maps_;           // 逐步预测代价地图（maps[0] 为当前帧）
+    CostMap::ConstPtr current_prediction_cost_map_;
     std::vector<CostMap::ConstPtr> per_step_final_cost_maps_;  // 逐步融合后的最终代价地图
     CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
@@ -369,7 +370,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .wait_replan_timeout = declare_parameter<double>("state_machine.wait_replan_timeout")
     };
     fsm_params.recovery = {
-        .enable = declare_parameter<bool>("recovery.enable"),
         .hazard_cost_threshold = declare_parameter<double>("recovery.hazard.cost_threshold"),
         .hazard_step_norm_threshold = declare_parameter<double>("recovery.hazard.step_norm_threshold"),
         .safe_cost_threshold = declare_parameter<double>("recovery.safe.cost_threshold"),
@@ -384,7 +384,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout")
     };
     fsm_params.stuck = {
-        .enable = declare_parameter<bool>("recovery.stuck.enable"),
         .cmd_vel_threshold = declare_parameter<double>("recovery.stuck.cmd_vel_threshold"),
         .timeout = declare_parameter<double>("recovery.stuck.timeout"),
         .max_displacement = declare_parameter<double>("recovery.stuck.max_displacement"),
@@ -434,10 +433,20 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     };
 
     nav_params.no_progress_guard = {
-        .enable = declare_parameter<bool>("follow_no_progress_guard.enable"),
         .landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing"),
         .timeout = declare_parameter<double>("follow_no_progress_guard.timeout")
     };
+
+    nav_params.step_block_replan = {
+        .enable = declare_parameter<bool>("follow_step_block_replan.enable"),
+        .lookahead_distance = declare_parameter<double>("follow_step_block_replan.lookahead_distance"),
+        .sample_resolution = declare_parameter<double>("follow_step_block_replan.sample_resolution"),
+        .step_norm_threshold = declare_parameter<double>("follow_step_block_replan.step_norm_threshold"),
+        .obstacle_cost_threshold = declare_parameter<double>("follow_step_block_replan.obstacle_cost_threshold"),
+        .predicted_obstacle_ratio_threshold = declare_parameter<double>("follow_step_block_replan.predicted_obstacle_ratio_threshold")
+    };
+
+    nav_params.step_dist_offset = declare_parameter<double>("step.step_dist_offset");
 
     // ─── 创建 MainController ───
     nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
@@ -606,17 +615,22 @@ void PathFollowerNode::predicted_cost_maps_callback(const interfaces::msg::Predi
     prediction_dt_ = msg->prediction_dt;
     prediction_maps_stamp_ns_ = rclcpp::Time(msg->maps.front().header.stamp).nanoseconds();
     prediction_maps_.clear();
+    current_prediction_cost_map_.reset();
     for (const auto& map : msg->maps) {
         if (map.data.size() != total) continue;
         std::vector<uint8_t> data(total);
         for (size_t j = 0; j < total; j++) {
             data[j] = static_cast<uint8_t>(map.data[j]);
         }
-        prediction_maps_.push_back(std::make_shared<CostMap>(
+        auto cost_map = std::make_shared<CostMap>(
             w, h, global_cost_map_->resolution,
             global_cost_map_->origin_x, global_cost_map_->origin_y,
             data
-        ));
+        );
+        if (!current_prediction_cost_map_) {
+            current_prediction_cost_map_ = cost_map;
+        }
+        prediction_maps_.push_back(std::move(cost_map));
     }
     update_masked_cost_maps();
 }
@@ -715,6 +729,7 @@ void PathFollowerNode::control_timer_callback() {
     }
 
     // 组装控制输入
+    const bool use_prediction_maps = should_use_prediction_maps();
     const ControlInput input = {
         .global_path = global_path_,
         .path_updated = path_updated_,
@@ -733,7 +748,17 @@ void PathFollowerNode::control_timer_callback() {
         .final_cost_map = final_cost_map_.get(),
         .masked_global_cost_map = masked_global_cost_map_.get(),
         .masked_direction_map = masked_direction_map_.get(),
+        .current_dynamic_cost_map = use_prediction_maps ? current_prediction_cost_map_.get() : current_local_cost_map_.get(),
         .per_step_cost_maps = std::move(per_step_ptrs),
+        .per_step_dynamic_cost_maps = [&]() {
+            std::vector<const CostMap*> maps;
+            if (use_prediction_maps) {
+                maps.reserve(prediction_maps_.size());
+                for (const auto& m : prediction_maps_) maps.push_back(m.get());
+            }
+            return maps;
+        }(),
+        .using_predicted_cost_maps = use_prediction_maps,
         .prediction_dt = prediction_dt_,
         .stamp = std::chrono::steady_clock::now()
     };
@@ -754,8 +779,8 @@ void PathFollowerNode::control_timer_callback() {
     // 若当前已进入 FIXED，只消费路径，不取消 fixed 目标标记。
     if (output.consume_global_path) {
         global_path_ = std::nullopt;
-        // 非 fixed 模式才清除 fixed 标志
-        if (output.fsm_state != FsmState::FIXED) {
+        // 仅在语义上真正取消目标时才清除 fixed 标志；重规划等待期间保留目标。
+        if (output.fsm_state != FsmState::FIXED && !output.keep_goal_on_path_consume) {
             fixed_goal_ = false;
         }
         update_step_layers();
