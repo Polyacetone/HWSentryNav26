@@ -1,14 +1,14 @@
 import rclpy
 from rclpy.node import Node
-from interfaces.msg import PredictedCostMaps
+from interfaces.msg import CostMaps
 from nav_msgs.msg import OccupancyGrid
 
 class PredictedCostmapExtractor(Node):
     def __init__(self):
         super().__init__('predicted_costmap_extractor')
         self.subscription = self.create_subscription(
-            PredictedCostMaps,
-            '/map_server/predicted_cost_maps',
+            CostMaps,
+            '/map_server/local_cost_maps',
             self.listener_callback,
             1
         )

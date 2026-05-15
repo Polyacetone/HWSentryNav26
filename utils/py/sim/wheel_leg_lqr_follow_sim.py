@@ -11,7 +11,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 
 from geometry_msgs.msg import Quaternion, TransformStamped
-from interfaces.msg import ChassisCmd, ChassisStatus, JointState
+from interfaces.msg import ChassisCmd, ChassisStatus, CostMaps, JointState
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import Image, Imu, PointCloud2, PointField
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
@@ -150,7 +150,7 @@ class SimConfig:
 
     # --- 地图话题（参考 path_follower/path_planner/map_server）---
     TOPIC_GLOBAL_COST_MAP: str = "/map_server/global_cost_map"
-    TOPIC_LOCAL_COST_MAP: str = "/map_server/local_cost_map"
+    TOPIC_LOCAL_COST_MAPS: str = "/map_server/local_cost_maps"
     TOPIC_GLOBAL_DIRECTION_MAP: str = "/map_server/global_direction_map"
 
     # --- 障碍物判定（cost map）---
@@ -971,7 +971,7 @@ class WheelLegLqrFollowSimNode(Node):
 
         # map subs
         self.create_subscription(OccupancyGrid, self.cfg.TOPIC_GLOBAL_COST_MAP, self._on_global_cost_map, 1)
-        self.create_subscription(OccupancyGrid, self.cfg.TOPIC_LOCAL_COST_MAP, self._on_local_cost_map, 1)
+        self.create_subscription(CostMaps, self.cfg.TOPIC_LOCAL_COST_MAPS, self._on_local_cost_maps, 1)
         self.create_subscription(Image, self.cfg.TOPIC_GLOBAL_DIRECTION_MAP, self._on_global_direction_map, 1)
 
         # timers
@@ -1025,11 +1025,14 @@ class WheelLegLqrFollowSimNode(Node):
             self.get_logger().error(f"Failed to parse global cost map: {ex}")
             self._global_cost_map = None
 
-    def _on_local_cost_map(self, msg: OccupancyGrid) -> None:
+    def _on_local_cost_maps(self, msg: CostMaps) -> None:
+        if not msg.maps:
+            self._local_cost_map = None
+            return
         try:
-            self._local_cost_map = CostMap2D(msg)
+            self._local_cost_map = CostMap2D(msg.maps[0])
         except Exception as ex:
-            self.get_logger().error(f"Failed to parse local cost map: {ex}")
+            self.get_logger().error(f"Failed to parse cost maps: {ex}")
             self._local_cost_map = None
 
     def _on_global_direction_map(self, msg: Image) -> None:

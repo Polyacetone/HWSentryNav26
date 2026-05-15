@@ -14,6 +14,7 @@
 #include <interfaces/msg/nav_goal.hpp>
 #include <interfaces/msg/global_path.hpp>
 #include <interfaces/msg/chassis_status.hpp>
+#include <interfaces/msg/cost_maps.hpp>
 
 #include <path_planner/nav_map.hpp>
 #include <path_planner/a_star_planner.hpp>
@@ -62,7 +63,7 @@ public:
 private:
     enum class ReplanReason { GOAL_UPDATE, EXTERNAL_TRIGGER };
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
+    rclcpp::Subscription<interfaces::msg::CostMaps>::SharedPtr local_cost_maps_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<interfaces::msg::NavGoal>::SharedPtr goal_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
@@ -95,7 +96,7 @@ private:
     bool last_goal_fixed_ = false;
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const;
     void goal_callback(const interfaces::msg::NavGoal::SharedPtr msg);
-    void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+    void local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg);
 
     void update_merged_cost_map();
     bool is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& map_pt) const;
@@ -210,9 +211,9 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
         }
     );
 
-    local_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-        declare_parameter<std::string>("local_cost_map_sub_topic"), 1,
-        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { local_cost_map_callback(msg); }
+    local_cost_maps_sub_ = create_subscription<interfaces::msg::CostMaps>(
+        declare_parameter<std::string>("local_cost_maps_sub_topic"), 1,
+        [this](const interfaces::msg::CostMaps::SharedPtr msg) { local_cost_maps_callback(msg); }
     );
 
     const std::string global_direction_map_sub_topic = declare_parameter<std::string>("global_direction_map_sub_topic");
@@ -289,9 +290,9 @@ bool PathPlannerNode::is_map_point_feasible(const CostMap& cost_map, const Direc
         !direction_map.is_fully_prohibited(dir_grid);
 }
 
-void PathPlannerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-    if (!global_cost_map_) return;
-    local_cost_map_ = std::make_shared<CostMap>(*msg);
+void PathPlannerNode::local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg) {
+    if (!global_cost_map_ || msg->maps.empty()) return;
+    local_cost_map_ = std::make_shared<CostMap>(msg->maps[0]);
     update_merged_cost_map();
 }
 

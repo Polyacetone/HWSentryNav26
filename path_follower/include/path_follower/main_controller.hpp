@@ -54,8 +54,7 @@ struct ControlInput {
 
     // ─── 逐步预测代价地图 ───
     std::vector<const CostMap*> per_step_cost_maps; // 每个预测时间步的代价地图（可为空）
-    std::vector<const CostMap*> per_step_dynamic_cost_maps; // 每个预测时间步的动态障碍物代价地图（可为空）
-    bool using_predicted_cost_maps = false;
+    std::vector<const CostMap*> per_step_dynamic_cost_maps; // 每个预测时间步的动态障碍物代价地图（非空=预测模式）
     double prediction_dt = 0.0; // 预测步长 (s)
 
     // ─── 时间 ───

@@ -14,7 +14,7 @@
 #include <std_msgs/msg/float64.hpp>
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
-#include <interfaces/msg/predicted_cost_maps.hpp>
+#include <interfaces/msg/cost_maps.hpp>
 #include <interfaces/msg/chassis_cmd.hpp>
 #include <interfaces/msg/comp_stage.hpp>
 #include <interfaces/msg/global_path.hpp>
@@ -38,8 +38,7 @@ private:
     // ─── ROS 回调 ───
     void control_points_callback(const interfaces::msg::GlobalPath::SharedPtr msg);
     void chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg);
-    void local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
-    void predicted_cost_maps_callback(const interfaces::msg::PredictedCostMaps::SharedPtr msg);
+    void local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
     void control_timer_callback();
 
@@ -58,8 +57,7 @@ private:
     // ─── ROS 通信 ───
     rclcpp::Subscription<interfaces::msg::GlobalPath>::SharedPtr control_points_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
-    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_sub_;
-    rclcpp::Subscription<interfaces::msg::PredictedCostMaps>::SharedPtr predicted_cost_maps_sub_;
+    rclcpp::Subscription<interfaces::msg::CostMaps>::SharedPtr local_cost_maps_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
     rclcpp::Subscription<interfaces::msg::SpinCmd>::SharedPtr spin_cmd_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
@@ -78,7 +76,6 @@ private:
 
     // ─── 参数 ───
     bool enable_debug_;
-    bool use_predicted_cost_maps_ = true;
     double remaining_energy_filter_alpha_ = 1.0;  // 一阶惯性滤波系数
     double prediction_dt_ = 0.2;                  // 预测步长 (s)
 
@@ -91,9 +88,9 @@ private:
     DirectionMap::ConstPtr masked_direction_map_;
 
     // ─── 缓存数据 ───
-    CostMap::ConstPtr global_cost_map_, current_local_cost_map_;
-    std::vector<CostMap::ConstPtr> prediction_maps_;           // 逐步预测代价地图（maps[0] 为当前帧）
-    CostMap::ConstPtr current_prediction_cost_map_;
+    CostMap::ConstPtr global_cost_map_;
+    CostMap::ConstPtr current_cost_map_;                       // 当前帧动态代价图（来自 cost_maps[0]）
+    std::vector<CostMap::ConstPtr> prediction_maps_;           // 预测代价地图（cost_maps[1..N]，可为空）
     std::vector<CostMap::ConstPtr> per_step_final_cost_maps_;  // 逐步融合后的最终代价地图
     CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
@@ -106,8 +103,7 @@ private:
     uint8_t comp_stage_ = 4;
     double rfr_pwr_limit_ = 90.0;
     double remaining_energy_filtered_ = 1400.0;
-    int64_t current_local_cost_map_stamp_ns_ = 0;
-    int64_t prediction_maps_stamp_ns_ = 0;
+    int64_t local_cost_maps_stamp_ns_ = 0;
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 };
@@ -466,7 +462,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
 
     // ─── 功率限制滤波参数 ───
     remaining_energy_filter_alpha_ = declare_parameter<double>("misc.remaining_energy_filter_alpha");
-    use_predicted_cost_maps_ = declare_parameter<bool>("prediction.use_predicted_cost_maps");
 
     // ─── 订阅 / 发布 ───
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -507,14 +502,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         }
     );
 
-    local_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-        declare_parameter<std::string>("local_cost_map_sub_topic"), 1,
-        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) { local_cost_map_callback(msg); }
-    );
-
-    predicted_cost_maps_sub_ = create_subscription<interfaces::msg::PredictedCostMaps>(
-        declare_parameter<std::string>("predicted_cost_maps_sub_topic"), 1,
-        [this](const interfaces::msg::PredictedCostMaps::SharedPtr msg) { predicted_cost_maps_callback(msg); }
+    local_cost_maps_sub_ = create_subscription<interfaces::msg::CostMaps>(
+        declare_parameter<std::string>("local_cost_maps_sub_topic"), 1,
+        [this](const interfaces::msg::CostMaps::SharedPtr msg) { local_cost_maps_callback(msg); }
     );
 
     control_points_sub_ = create_subscription<interfaces::msg::GlobalPath>(
@@ -604,52 +594,52 @@ void PathFollowerNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedP
     spin_high_priority_ = msg->high_priority;
 }
 
-void PathFollowerNode::local_cost_map_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-    if (!global_cost_map_) return;
-    current_local_cost_map_ = std::make_shared<CostMap>(*msg);
-    current_local_cost_map_stamp_ns_ = rclcpp::Time(msg->header.stamp).nanoseconds();
-    update_masked_cost_maps();
-}
-
-void PathFollowerNode::predicted_cost_maps_callback(const interfaces::msg::PredictedCostMaps::SharedPtr msg) {
+void PathFollowerNode::local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg) {
     if (!global_cost_map_ || msg->maps.empty()) return;
     const int w = global_cost_map_->width;
     const int h = global_cost_map_->height;
     const auto total = static_cast<size_t>(w * h);
 
+    if (msg->maps[0].data.size() != total) return;
+    local_cost_maps_stamp_ns_ = rclcpp::Time(msg->maps[0].header.stamp).nanoseconds();
     prediction_dt_ = msg->prediction_dt;
-    prediction_maps_stamp_ns_ = rclcpp::Time(msg->maps.front().header.stamp).nanoseconds();
+
+    // maps[0] = 当前帧动态代价图
+    {
+        std::vector<uint8_t> data(total);
+        for (size_t j = 0; j < total; j++) {
+            data[j] = static_cast<uint8_t>(msg->maps[0].data[j]);
+        }
+        current_cost_map_ = std::make_shared<CostMap>(
+            w, h, global_cost_map_->resolution,
+            global_cost_map_->origin_x, global_cost_map_->origin_y,
+            data
+        );
+    }
+
+    // maps[1..N] = 预测代价地图
     prediction_maps_.clear();
-    current_prediction_cost_map_.reset();
-    for (const auto& map : msg->maps) {
+    for (size_t i = 1; i < msg->maps.size(); i++) {
+        const auto& map = msg->maps[i];
         if (map.data.size() != total) continue;
         std::vector<uint8_t> data(total);
         for (size_t j = 0; j < total; j++) {
             data[j] = static_cast<uint8_t>(map.data[j]);
         }
-        auto cost_map = std::make_shared<CostMap>(
+        prediction_maps_.push_back(std::make_shared<CostMap>(
             w, h, global_cost_map_->resolution,
             global_cost_map_->origin_x, global_cost_map_->origin_y,
             data
-        );
-        if (!current_prediction_cost_map_) {
-            current_prediction_cost_map_ = cost_map;
-        }
-        prediction_maps_.push_back(std::move(cost_map));
+        ));
     }
+
     update_masked_cost_maps();
 }
 
 // ═══════════════════ 台阶掩码层更新 ════════════════════════════════
 
 bool PathFollowerNode::should_use_prediction_maps() const {
-    if (!use_predicted_cost_maps_ || prediction_maps_.empty()) {
-        return false;
-    }
-    if (!current_local_cost_map_ || current_local_cost_map_stamp_ns_ == 0 || prediction_maps_stamp_ns_ == 0) {
-        return true;
-    }
-    return prediction_maps_stamp_ns_ == current_local_cost_map_stamp_ns_;
+    return !prediction_maps_.empty();
 }
 
 void PathFollowerNode::update_step_layers() {
@@ -687,14 +677,10 @@ void PathFollowerNode::update_masked_cost_maps() {
                     std::make_shared<CostMap>(masked_global_cost_map_->merge(*pred_map))
                 );
             }
-            if (!per_step_final_cost_maps_.empty()) {
-                final_cost_map_ = per_step_final_cost_maps_[0];
-                return;
-            }
         }
 
-        if (current_local_cost_map_) {
-            final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*current_local_cost_map_));
+        if (current_cost_map_) {
+            final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*current_cost_map_));
         } else {
             final_cost_map_ = masked_global_cost_map_;
         }
@@ -734,7 +720,7 @@ void PathFollowerNode::control_timer_callback() {
     }
 
     // 组装控制输入
-    const bool use_prediction_maps = should_use_prediction_maps();
+    const bool has_prediction = should_use_prediction_maps();
     const ControlInput input = {
         .global_path = global_path_,
         .path_updated = path_updated_,
@@ -753,17 +739,16 @@ void PathFollowerNode::control_timer_callback() {
         .final_cost_map = final_cost_map_.get(),
         .masked_global_cost_map = masked_global_cost_map_.get(),
         .masked_direction_map = masked_direction_map_.get(),
-        .current_dynamic_cost_map = use_prediction_maps ? current_prediction_cost_map_.get() : current_local_cost_map_.get(),
+        .current_dynamic_cost_map = current_cost_map_.get(),
         .per_step_cost_maps = std::move(per_step_ptrs),
         .per_step_dynamic_cost_maps = [&]() {
             std::vector<const CostMap*> maps;
-            if (use_prediction_maps) {
+            if (has_prediction) {
                 maps.reserve(prediction_maps_.size());
                 for (const auto& m : prediction_maps_) maps.push_back(m.get());
             }
             return maps;
         }(),
-        .using_predicted_cost_maps = use_prediction_maps,
         .prediction_dt = prediction_dt_,
         .stamp = std::chrono::steady_clock::now()
     };

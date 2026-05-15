@@ -23,7 +23,7 @@
 
     local_map:
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
-      cost_map_pub_topic: "/map_server/local_cost_map" # 局部代价地图发布话题名称
+      local_cost_maps_pub_topic: "/map_server/local_cost_maps" # 局部代价地图序列发布话题（maps[0]=当前帧，maps[1..N]=预测帧）
       cloud_accumulate_frames: 5 # 局部点云累积帧数
       roi_xy_radius_min: 0.4 # 局部点云ROI的xy平面半径最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_xy_radius_max: 6.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
@@ -31,15 +31,17 @@
       roi_z_min: -0.55 # 局部点云ROI的z轴最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       downsample_voxel_size: 0.03 # 局部点云下采样体素大小，单位m
       with_global_cloud: # 有全局点云时通过比较局部点云与全局点云的最近邻距离来判断动态障碍物
+        enable_prediction: true # 有全局点云时是否启用目标跟踪预测
         distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m。有全局点云时使用
       without_global_cloud: # 无全局点云时采用法向量垂直z轴的特征来判断动态障碍物
+        enable_prediction: false # 无全局点云时是否启用目标跟踪预测（法向量分析容易将台阶等静态结构误检为动态，轨迹预测意义不大）
         normal_num_neighbors: 12 # 法向量估计使用的K近邻数量
         vertical_normal_abs_z_max: 0.3 # |normal.z|小于该值视为法向量垂直z轴（认为是动态障碍物）
+        direction_filter_threshold: 0.1 # 台阶方向场归一化模长过滤阈值 [0,1]（0.0=关闭），当无全局点云时在create_obstacle_mask中检查每个动态点对应的方向场2D模长归一化值（B/G通道，128-centered，除以128归一化到[0,1]），超过此阈值则视为台阶等已知静态结构予以滤除
       sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
       sor_std_mul: 2.0 # SOR保留阈值=均值+sor_std_mul*标准差
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
       object_tracker: # 基于目标的动态障碍物跟踪与预测参数
-        predicted_cost_maps_pub_topic: "/map_server/predicted_cost_maps" # 预测代价地图发布话题
         morph_close_kernel_size: 5 # 形态学闭运算核大小（0或1=关闭）
         min_blob_area: 3 # 最小连通域面积（像素），滤除噪声小斑块
         local_grid_size: 50 # 局部栅格地图边长（像素）

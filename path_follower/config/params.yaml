@@ -3,8 +3,7 @@
     control_points_sub_topic: "/path_planner/control_points" # B样条控制点
     global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局台阶地图（8UC3: B=方向X, G=方向Y, A=台阶模式alpha）
     global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图（OccupancyGrid）
-    local_cost_map_sub_topic: "/map_server/local_cost_map" # 局部代价地图
-    predicted_cost_maps_sub_topic: "/map_server/predicted_cost_maps" # 预测代价地图序列
+    local_cost_maps_sub_topic: "/map_server/local_cost_maps" # 局部代价地图序列（maps[0]=当前帧，maps[1..N]=预测帧）
     comp_stage_sub_topic: "/serial_bridge/comp_stage" # 比赛阶段
     chassis_status_sub_topic: "/serial_bridge/chassis_status" # 底盘状态（速度、腿模式等）
     spin_cmd_sub_topic: "/decision/spin_cmd" # 小陀螺指令
@@ -24,9 +23,6 @@
       stop_threshold_dist: 0.5 # 到达目标判定距离 (m)
       stop_threshold_u: 0.99 # 到达目标判定样条参数u
       remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
-
-    prediction:
-      use_predicted_cost_maps: true # follow模式是否使用预测代价地图（多步预测的障碍物轨迹）
 
     step_mask:
       path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积 >= 该值，认为路径经过台阶（触发掩码软擦除）

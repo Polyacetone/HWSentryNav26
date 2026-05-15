@@ -101,15 +101,15 @@ std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
     const double start_u,
     const CostMap* const dynamic_cost_map,
     const std::vector<const CostMap*>& dynamic_prediction_maps,
-    const DirectionMap& direction_map,
-    const bool using_predicted_cost_maps
+    const DirectionMap& direction_map
 ) {
     const auto& p = params.step_block_replan;
     const double lookahead_distance = std::max(0.0, p.lookahead_distance);
     const double resolution = std::max(1e-3, p.sample_resolution);
+    const bool using_predicted = !dynamic_prediction_maps.empty();
 
     FollowStepBlockSampleStats stats;
-    const int samples = using_predicted_cost_maps
+    const int samples = using_predicted
         ? static_cast<int>(dynamic_prediction_maps.size())
         : std::max(1, static_cast<int>(std::ceil(lookahead_distance / resolution)) + 1);
     if (samples <= 0) return stats;
@@ -142,7 +142,7 @@ std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
         const bool on_step = step_norm >= p.step_norm_threshold;
 
         bool blocked_dynamic = false;
-        if (using_predicted_cost_maps) {
+        if (using_predicted) {
             const CostMap* const cost_map = dynamic_prediction_maps[static_cast<size_t>(i)];
             if (!cost_map) return std::nullopt;
             const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
@@ -430,14 +430,13 @@ bool MainController::check_step_block_replan(const ControlInput& input, const Sp
         current_u,
         input.current_dynamic_cost_map,
         input.per_step_dynamic_cost_maps,
-        *input.masked_direction_map,
-        input.using_predicted_cost_maps
+        *input.masked_direction_map
     );
     if (!stats || stats->step_sample_count == 0) {
         return false;
     }
 
-    if (!input.using_predicted_cost_maps) {
+    if (input.per_step_dynamic_cost_maps.empty()) {
         if (stats->blocked_step_sample_count > 0) {
             RCLCPP_WARN(
                 logger_,

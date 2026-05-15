@@ -12,7 +12,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <interfaces/msg/robot_status.hpp>
-#include <interfaces/msg/predicted_cost_maps.hpp>
+#include <interfaces/msg/cost_maps.hpp>
 #include <common_utils/convert.hpp>
 #include <small_gicp/ann/kdtree_omp.hpp>
 #include <small_gicp/points/point_cloud.hpp>
@@ -32,6 +32,11 @@ void load_nav_map_channels_or_exit(
     int& map_size_x,
     int& map_size_y
 ) {
+    // BGRA 编码:
+    //   B (ch0): 台阶方向场 X 分量 (128-centered, 0/128=(0,0)表示无台阶)
+    //   G (ch1): 台阶方向场 Y 分量 (128-centered)
+    //   R (ch2): 全局代价地图 (0=自由, 255=障碍)
+    //   A (ch3): 台阶通行模式标记 (bit-packed: up_mode|down_mode<<2|up_speed<<4|down_speed<<6)
     cv::Mat nav_map = cv::imread(nav_map_path, cv::IMREAD_UNCHANGED);
     if (nav_map.empty()) {
         RCLCPP_FATAL(logger, "Failed to load global navmap from %s", nav_map_path.c_str());
@@ -46,7 +51,10 @@ void load_nav_map_channels_or_exit(
     map_size_y = nav_map.rows;
     std::vector<cv::Mat> channels;
     cv::split(nav_map, channels);
+
+    // direction_map: [B(dx), G(dy), A(step_mode)] — 3通道 CV_8UC3
     cv::merge(std::array{channels[0], channels[1], channels[3]}, global_direction_map);
+    // cost_map: R(ch2) — 单通道 CV_8UC1
     global_cost_map = channels[2];
 }
 
@@ -75,6 +83,7 @@ private:
         struct {
             int normal_num_neighbors;
             double vertical_normal_abs_z_max;
+            double direction_filter_threshold;
         } without_global_cloud;
         int sor_num_neighbors;
         double sor_std_mul;
@@ -86,6 +95,8 @@ private:
             int obstacle_threshold;
         } cost_map_inflation;
     } local_map_params_;
+    bool enable_prediction_with_cloud_;
+    bool enable_prediction_without_cloud_;
 
     cv::Mat global_direction_map_, global_cost_map_;
     bool global_nav_map_initialized_ = false;
@@ -98,8 +109,7 @@ private:
     rclcpp::Subscription<interfaces::msg::RobotStatus>::SharedPtr robot_status_sub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr global_direction_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_pub_;
-    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr local_cost_map_pub_;
-    rclcpp::Publisher<interfaces::msg::PredictedCostMaps>::SharedPtr predicted_cost_maps_pub_;
+    rclcpp::Publisher<interfaces::msg::CostMaps>::SharedPtr local_cost_maps_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_dynamic_points_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_accumulated_cloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_global_cloud_pub_;
@@ -149,7 +159,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         },
         .without_global_cloud = {
             .normal_num_neighbors = (int)declare_parameter<int>("local_map.without_global_cloud.normal_num_neighbors"),
-            .vertical_normal_abs_z_max = declare_parameter<double>("local_map.without_global_cloud.vertical_normal_abs_z_max")
+            .vertical_normal_abs_z_max = declare_parameter<double>("local_map.without_global_cloud.vertical_normal_abs_z_max"),
+            .direction_filter_threshold = declare_parameter<double>("local_map.without_global_cloud.direction_filter_threshold")
         },
         .sor_num_neighbors = (int)declare_parameter<int>("local_map.sor_num_neighbors"),
         .sor_std_mul = declare_parameter<double>("local_map.sor_std_mul"),
@@ -190,8 +201,10 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .prediction_dt = declare_parameter<double>("local_map.object_tracker.prediction_dt"),
         .num_threads = num_threads_
     };
-    std::string predicted_cost_maps_pub_topic = declare_parameter<std::string>("local_map.object_tracker.predicted_cost_maps_pub_topic");
-    predicted_cost_maps_pub_ = create_publisher<interfaces::msg::PredictedCostMaps>(predicted_cost_maps_pub_topic, 1);
+    enable_prediction_with_cloud_ = declare_parameter<bool>("local_map.with_global_cloud.enable_prediction");
+    enable_prediction_without_cloud_ = declare_parameter<bool>("local_map.without_global_cloud.enable_prediction");
+    std::string local_cost_maps_pub_topic = declare_parameter<std::string>("local_map.local_cost_maps_pub_topic");
+    local_cost_maps_pub_ = create_publisher<interfaces::msg::CostMaps>(local_cost_maps_pub_topic, 1);
 
     // 加载全局点云
     std::string global_cloud_filename = declare_parameter<std::string>("global_map.cloud_filename");
@@ -219,8 +232,6 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     global_direction_map_pub_ = create_publisher<sensor_msgs::msg::Image>(global_direction_map_pub_topic, 1);
     std::string global_cost_map_pub_topic = declare_parameter<std::string>("global_map.cost_map_pub_topic");
     global_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(global_cost_map_pub_topic, 1);
-    std::string local_cost_map_pub_topic = declare_parameter<std::string>("local_map.cost_map_pub_topic");
-    local_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(local_cost_map_pub_topic, 1);
     double global_map_pub_freq = declare_parameter<double>("global_map.pub_freq");
     timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / global_map_pub_freq), [this] { timer_callback(); });
     std::string local_cloud_sub_topic = declare_parameter<std::string>("local_map.cloud_sub_topic");
@@ -313,53 +324,66 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
     const small_gicp::PointCloud denoised_dynamic_points = remove_statistical_outliers(dynamic_points);
     RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", denoised_dynamic_points.points.size());
 
-    // 动态障碍物分析，发布代价地图
+    // 动态障碍物分析
     cv::Mat obstacle_mask = create_obstacle_mask(denoised_dynamic_points);
     cv::Mat local_cost_map = inflate_cost_map(obstacle_mask);
-    pub_cost_map(local_cost_map, msg->header.stamp, local_cost_map_pub_);
 
-    // 目标跟踪预测
-    if (!object_tracker_) {
-        object_tracker_ = std::make_unique<ObjectTracker>(map_size_x_, map_size_y_, map_resolution_, tracker_params_);
-        last_tracker_update_time_ = std::chrono::steady_clock::now();
+    // 根据当前模式（是否有全局点云）选择 prediction 开关
+    const bool use_prediction = global_kdtree_
+        ? enable_prediction_with_cloud_
+        : enable_prediction_without_cloud_;
+
+    if (use_prediction) {
+        // 目标跟踪预测
+        if (!object_tracker_) {
+            object_tracker_ = std::make_unique<ObjectTracker>(map_size_x_, map_size_y_, map_resolution_, tracker_params_);
+            last_tracker_update_time_ = std::chrono::steady_clock::now();
+        }
+        const auto now_time = std::chrono::steady_clock::now();
+        double dt = std::clamp(std::chrono::duration<double>(now_time - last_tracker_update_time_).count(), 0.01, 0.5);
+        last_tracker_update_time_ = now_time;
+
+        const auto tracker_update_begin = std::chrono::steady_clock::now();
+        auto prediction_result = object_tracker_->update(obstacle_mask, dt);
+        const auto tracker_update_end = std::chrono::steady_clock::now();
+
+        // 并行膨胀预测栅格
+        const auto tracker_inflate_begin = std::chrono::steady_clock::now();
+        #pragma omp parallel for num_threads(num_threads_) schedule(static)
+        for (int i = 0; i < static_cast<int>(prediction_result.future_masks.size()); i++) {
+            prediction_result.future_masks[static_cast<size_t>(i)] = inflate_cost_map(prediction_result.future_masks[static_cast<size_t>(i)]);
+        }
+        const auto tracker_inflate_end = std::chrono::steady_clock::now();
+
+        RCLCPP_DEBUG(
+            get_logger(),
+            "ObjectTracker timing: update=%.3f ms, inflate=%.3f ms, tracks=%zu, motion_tracks=%zu, fallback_cells=%d, obstacle_cells=%d, dt=%.3f s",
+            std::chrono::duration<double, std::milli>(tracker_update_end - tracker_update_begin).count(),
+            std::chrono::duration<double, std::milli>(tracker_inflate_end - tracker_inflate_begin).count(),
+            object_tracker_->track_count(),
+            prediction_result.motion_track_count,
+            cv::countNonZero(prediction_result.static_fallback_mask),
+            cv::countNonZero(obstacle_mask),
+            dt
+        );
+
+        // 打包发布代价地图序列（含预测帧）
+        interfaces::msg::CostMaps cm;
+        cm.prediction_dt = tracker_params_.prediction_dt;
+        cm.maps.resize(prediction_result.future_masks.size() + 1);
+        fill_occupancy_grid(local_cost_map, msg->header.stamp, cm.maps[0]);
+        for (size_t i = 0; i < prediction_result.future_masks.size(); i++) {
+            fill_occupancy_grid(prediction_result.future_masks[i], msg->header.stamp, cm.maps[i + 1]);
+        }
+        local_cost_maps_pub_->publish(cm);
+    } else {
+        // 无预测：直接发布当前帧代价地图
+        interfaces::msg::CostMaps cm;
+        cm.prediction_dt = tracker_params_.prediction_dt;
+        cm.maps.resize(1);
+        fill_occupancy_grid(local_cost_map, msg->header.stamp, cm.maps[0]);
+        local_cost_maps_pub_->publish(cm);
     }
-    const auto now_time = std::chrono::steady_clock::now();
-    double dt = std::clamp(std::chrono::duration<double>(now_time - last_tracker_update_time_).count(), 0.01, 0.5);
-    last_tracker_update_time_ = now_time;
-
-    const auto tracker_update_begin = std::chrono::steady_clock::now();
-    auto prediction_result = object_tracker_->update(obstacle_mask, dt);
-    const auto tracker_update_end = std::chrono::steady_clock::now();
-
-    // 并行膨胀预测栅格
-    const auto tracker_inflate_begin = std::chrono::steady_clock::now();
-    #pragma omp parallel for num_threads(num_threads_) schedule(static)
-    for (int i = 0; i < static_cast<int>(prediction_result.future_masks.size()); i++) {
-        prediction_result.future_masks[static_cast<size_t>(i)] = inflate_cost_map(prediction_result.future_masks[static_cast<size_t>(i)]);
-    }
-    const auto tracker_inflate_end = std::chrono::steady_clock::now();
-
-    RCLCPP_DEBUG(
-        get_logger(),
-        "ObjectTracker timing: update=%.3f ms, inflate=%.3f ms, tracks=%zu, motion_tracks=%zu, fallback_cells=%d, obstacle_cells=%d, dt=%.3f s",
-        std::chrono::duration<double, std::milli>(tracker_update_end - tracker_update_begin).count(),
-        std::chrono::duration<double, std::milli>(tracker_inflate_end - tracker_inflate_begin).count(),
-        object_tracker_->track_count(),
-        prediction_result.motion_track_count,
-        cv::countNonZero(prediction_result.static_fallback_mask),
-        cv::countNonZero(obstacle_mask),
-        dt
-    );
-
-    // 打包发布预测代价地图
-    interfaces::msg::PredictedCostMaps pcm;
-    pcm.prediction_dt = tracker_params_.prediction_dt;
-    pcm.maps.resize(prediction_result.future_masks.size() + 1);
-    fill_occupancy_grid(local_cost_map, msg->header.stamp, pcm.maps[0]);
-    for (size_t i = 0; i < prediction_result.future_masks.size(); i++) {
-        fill_occupancy_grid(prediction_result.future_masks[i], msg->header.stamp, pcm.maps[i + 1]);
-    }
-    predicted_cost_maps_pub_->publish(pcm);
 
     // 调试信息发布
     if (enable_debug_) {
@@ -575,10 +599,25 @@ small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(
 cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const {
     cv::Mat counts = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
     cv::Mat mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
+    const bool use_direction_filter = !global_kdtree_
+        && local_map_params_.without_global_cloud.direction_filter_threshold > 0.0
+        && !global_direction_map_.empty();
     for (const auto& pt : dynamic_points.points) {
         const int map_x = static_cast<int>(pt.x() / map_resolution_);
         const int map_y = static_cast<int>(pt.y() / map_resolution_);
         if (map_x < 0 || map_x >= map_size_x_ || map_y < 0 || map_y >= map_size_y_) continue;
+
+        if (use_direction_filter) {
+            // direction_map: ch0=B(dx), ch1=G(dy), ch2=A(step_mode), 128-centered
+            const auto& dir_px = global_direction_map_.at<cv::Vec3b>(map_y, map_x);
+            const double dx = static_cast<double>(dir_px[0]) - 128.0;
+            const double dy = static_cast<double>(dir_px[1]) - 128.0;
+            // 归一化到 [0,1]: dx/128, dy/128 ∈ [-1,1], 模长 ∈ [0,1]
+            if (std::sqrt(dx * dx + dy * dy) / 128.0 > local_map_params_.without_global_cloud.direction_filter_threshold) {
+                continue;
+            }
+        }
+
         uint8_t& cell = counts.at<uint8_t>(map_y, map_x);
         cell = (cell < 255) ? (cell + 1) : 255;
         if (cell >= local_map_params_.cell_obstacle_point_threshold) {
@@ -665,6 +704,10 @@ void MapServerNode::pub_direction_map(
     const rclcpp::Time& stamp,
     const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher
 ) const {
+    // direction_map 为 CV_8UC3:
+    //   ch0 = B (原始BGRA的B): 台阶方向 X (128-centered)
+    //   ch1 = G (原始BGRA的G): 台阶方向 Y (128-centered)
+    //   ch2 = B (原始BGRA的A): 台阶通行模式标记
     sensor_msgs::msg::Image::SharedPtr direction_map_msg = cv_bridge::CvImage(
         std_msgs::msg::Header(), "8UC3", direction_map
     ).toImageMsg();
