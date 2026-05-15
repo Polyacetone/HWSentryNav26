@@ -202,14 +202,16 @@ struct StStepping final : sc::state<StStepping, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (in.step_active) {
-            return discard_event();
-        }
-
+        // 台阶中水平推进可能真卡住，stuck 先于 step_active 检查。
+        // on_state_transition() 离开 STEPPING 时会清台阶状态，退出路径无竞态。
         if (in.is_stuck) {
             m.replan_after_recovery = false;
             m.reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
+        }
+
+        if (in.step_active) {
+            return discard_event();
         }
 
         return transit<StFollow>();
@@ -231,13 +233,9 @@ struct StSpin final : sc::state<StSpin, Machine> {
 
         const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
 
+        // SPIN 不检测 stuck：小陀螺模式是下位机伺服，且本来线速度就 ≈ 0，check_stuck 不会触发。
         if (in.is_hazard) {
             return transit<StHazardRecovery>();
-        }
-        if (in.is_stuck) {
-            m.replan_after_recovery = false;
-            m.reverse_start_time = in.stamp;
-            return transit<StStuckReverse>();
         }
         if (!keep_spinning) {
             if (in.has_path) {
@@ -268,12 +266,7 @@ struct StStopping final : sc::state<StStopping, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        if (in.is_stuck) {
-            m.replan_after_recovery = false;
-            m.reverse_start_time = in.stamp;
-            return transit<StStuckReverse>();
-        }
-
+        // STOPPING 不检测 stuck：减速中指令速度未归零但位移小是正常现象，检 stuck 会导致每次常规停车误报。
         if (m.stopping_dest != DestState::FOLLOW && in.has_new_path) {
             return transit<StFollow>();
         }

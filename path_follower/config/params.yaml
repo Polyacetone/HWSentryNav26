@@ -29,9 +29,6 @@
       full_effect_radius: 0.4 # 掩码满强度半径 (m)：<= 该距离内 alpha=1（cost 全擦除，dir 全保留）
       cutoff_radius: 0.8 # 掩码截止半径 (m)：>= 该距离内 alpha=0（cost 全保留，dir 全擦除）
       length_num_samples: 100 # 路径弧长估计采样数
-
-    follow_proj_guard:
-      dist_max: 2.0 # 当前位置到样条投影点距离 > 该值则取消follow (m)
       cost_max: 240.0 # 投影连线最大障碍物代价 > 该值则取消follow (0~255)
       cost_samples: 20 # 连线代价估计采样数
 
@@ -45,7 +42,7 @@
       sample_resolution: 0.2 # 非预测地图模式下的路径采样分辨率 (m)
       step_norm_threshold: 0.9 # 方向场模长 >= 该值视为路径经过台阶区域
       obstacle_cost_threshold: 100.0 # 动态障碍物代价值 >= 该值视为被障碍物占据
-      predicted_obstacle_ratio_threshold: 0.3 # 预测地图模式下，台阶样本中被占据比例超过该阈值则触发重规划
+      predicted_obstacle_ratio_threshold: 0.8 # 预测地图模式下，台阶样本中被占据比例超过该阈值则触发重规划
 
     step:
       step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离

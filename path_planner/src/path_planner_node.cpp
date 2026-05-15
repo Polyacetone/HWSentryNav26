@@ -20,6 +20,7 @@
 #include <path_planner/a_star_planner.hpp>
 #include <path_planner/bspline_optimizer.hpp>
 #include <common_utils/convert.hpp>
+#include <queue>
 
 namespace path_planner {
 
@@ -91,6 +92,8 @@ private:
     double start_prediction_planning_delay_;
     double start_prediction_min_speed_;
     double start_prediction_collision_check_step_;
+    double prediction_horizon_seconds_;
+    double prediction_weight_decay_;
 
     std::optional<Eigen::Vector2d> last_goal_map_;
     bool last_goal_fixed_ = false;
@@ -102,6 +105,10 @@ private:
     bool is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& map_pt) const;
     void plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, bool fixed, const ReplanReason reason);
     Eigen::Vector2d adjust_reachable_start_on_segment(const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const;
+    std::optional<Eigen::Vector2d> nudge_point_to_free(
+        const Eigen::Vector2d& map_pt,
+        double max_nudge_distance
+    ) const;
     Eigen::Vector2d predict_start_map(const Eigen::Vector2d& current_map) const;
     void publish_path(
         const std::vector<Eigen::Vector2d>& control_points,
@@ -118,6 +125,8 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     occupied_threshold_ = (int)declare_parameter<int>("occupied_threshold");
     on_step_threshold_ = declare_parameter<double>("on_step_threshold");
     step_mode_dot_threshold_ = declare_parameter<double>("step_mode_dot_threshold");
+    prediction_horizon_seconds_ = declare_parameter<double>("prediction.horizon_seconds");
+    prediction_weight_decay_ = declare_parameter<double>("prediction.weight_decay");
     start_prediction_enable_ = declare_parameter<bool>("start_prediction.enable");
     start_prediction_max_accel_ = declare_parameter<double>("start_prediction.max_accel");
     start_prediction_planning_delay_ = declare_parameter<double>("start_prediction.planning_delay");
@@ -292,7 +301,60 @@ bool PathPlannerNode::is_map_point_feasible(const CostMap& cost_map, const Direc
 
 void PathPlannerNode::local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg) {
     if (!global_cost_map_ || msg->maps.empty()) return;
-    local_cost_map_ = std::make_shared<CostMap>(msg->maps[0]);
+
+    if (prediction_horizon_seconds_ <= 0.0 || msg->maps.size() <= 1 || msg->prediction_dt <= 0.0) {
+        local_cost_map_ = std::make_shared<CostMap>(msg->maps[0]);
+    } else {
+        const size_t n = std::min(
+            msg->maps.size(),
+            static_cast<size_t>(std::ceil(prediction_horizon_seconds_ / msg->prediction_dt)) + 1
+        );
+
+        const size_t size = msg->maps[0].data.size();
+
+        const double inv_denom = n > 1 ? 1.0 / static_cast<double>(n - 1) : 0.0;
+        std::vector<double> frame_weights(n);
+        double total_weight = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            frame_weights[i] = std::max(
+                0.0, 1.0 - prediction_weight_decay_ * static_cast<double>(i) * inv_denom
+            );
+            total_weight += frame_weights[i];
+        }
+
+        if (total_weight <= 0.0) {
+            local_cost_map_ = std::make_shared<CostMap>(msg->maps[0]);
+            update_merged_cost_map();
+            return;
+        }
+
+        std::vector<double> accum(size, 0.0);
+        for (size_t i = 0; i < n; i++) {
+            const double w = frame_weights[i];
+            if (w <= 0.0) continue;
+            const auto& frame = msg->maps[i];
+            for (size_t j = 0; j < size; j++) {
+                accum[j] += static_cast<double>(frame.data[j]) * w;
+            }
+        }
+
+        std::vector<uint8_t> result(size);
+        for (size_t j = 0; j < size; j++) {
+            const double v = accum[j] / total_weight;
+            const uint32_t u = static_cast<uint32_t>(v + 0.5);
+            result[j] = u > 255u ? 255u : static_cast<uint8_t>(u);
+        }
+
+        local_cost_map_ = std::make_shared<CostMap>(
+            static_cast<int>(msg->maps[0].info.width),
+            static_cast<int>(msg->maps[0].info.height),
+            msg->maps[0].info.resolution,
+            msg->maps[0].info.origin.position.x,
+            msg->maps[0].info.origin.position.y,
+            result
+        );
+    }
+
     update_merged_cost_map();
 }
 
@@ -329,6 +391,79 @@ Eigen::Vector2d PathPlannerNode::adjust_reachable_start_on_segment(const Eigen::
         last_feasible = pt;
     }
     return last_feasible;
+}
+
+std::optional<Eigen::Vector2d> PathPlannerNode::nudge_point_to_free(
+    const Eigen::Vector2d& map_pt,
+    const double max_nudge_distance
+) const {
+    const Eigen::Vector2d grid_pt = merged_cost_map_->map_coord_to_grid(map_pt);
+    const int width = merged_cost_map_->width;
+    const int height = merged_cost_map_->height;
+
+    const auto key = [width](const int x, const int y) {
+        return static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
+    };
+
+    // 检查原位置是否已经是 free
+    if (merged_cost_map_->is_valid_coord(grid_pt)) {
+        if (merged_cost_map_->interpolate(grid_pt) < occupied_threshold_) {
+            const Eigen::Vector2d dir_grid = global_direction_map_->map_coord_to_grid(map_pt);
+            if (global_direction_map_->is_valid_coord(dir_grid) &&
+                global_direction_map_->interpolate(dir_grid).norm() < on_step_threshold_ &&
+                !global_direction_map_->is_fully_prohibited(dir_grid)) {
+                return map_pt;
+            }
+        }
+    }
+
+    const int sx = static_cast<int>(std::round(grid_pt.x()));
+    const int sy = static_cast<int>(std::round(grid_pt.y()));
+    if (sx < 0 || sx >= width || sy < 0 || sy >= height) {
+        return std::nullopt;
+    }
+
+    std::vector<uint8_t> visited(static_cast<size_t>(width) * static_cast<size_t>(height), 0);
+    std::queue<Eigen::Vector2i> q;
+    q.push(Eigen::Vector2i(sx, sy));
+    visited[key(sx, sy)] = 1;
+
+    static constexpr int dx[] = {0, 1, 0, -1, 1, 1, -1, -1};
+    static constexpr int dy[] = {1, 0, -1, 0, 1, -1, 1, -1};
+
+    while (!q.empty()) {
+        const auto current = q.front();
+        q.pop();
+
+        const double dist = (current.cast<double>() - grid_pt).norm() * merged_cost_map_->resolution;
+        if (dist > max_nudge_distance) continue;
+
+        if (merged_cost_map_->at(current) < occupied_threshold_) {
+            const Eigen::Vector2d candidate_map = merged_cost_map_->grid_coord_to_map(current.cast<double>());
+            const Eigen::Vector2d dir_grid = global_direction_map_->map_coord_to_grid(candidate_map);
+            if (global_direction_map_->is_valid_coord(dir_grid) &&
+                global_direction_map_->interpolate(dir_grid).norm() < on_step_threshold_ &&
+                !global_direction_map_->is_fully_prohibited(dir_grid)) {
+                return candidate_map;
+            }
+        }
+
+        for (int i = 0; i < 8; i++) {
+            const int nx = current.x() + dx[i];
+            const int ny = current.y() + dy[i];
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+            const double ndist = (Eigen::Vector2d(nx, ny) - grid_pt).norm() * merged_cost_map_->resolution;
+            if (ndist > max_nudge_distance) continue;
+
+            const size_t nk = key(nx, ny);
+            if (visited[nk]) continue;
+            visited[nk] = 1;
+            q.push(Eigen::Vector2i(nx, ny));
+        }
+    }
+
+    return std::nullopt;
 }
 
 Eigen::Vector2d PathPlannerNode::predict_start_map(const Eigen::Vector2d& current_map) const {
@@ -368,7 +503,6 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     const char* reason_label = reason == ReplanReason::GOAL_UPDATE
         ? "goal update"
         : "external trigger";
-    const bool use_merged_cost_map = reason == ReplanReason::EXTERNAL_TRIGGER;
     const auto publish_empty_path = [&](const std::string& message, const bool is_error) {
         if (is_error) {
             RCLCPP_ERROR(get_logger(), "%s (%s)", message.c_str(), reason_label);
@@ -383,8 +517,6 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
         return;
     }
 
-    const CostMap& planning_cost_map = use_merged_cost_map ? *merged_cost_map_ : *global_cost_map_;
-
     tf2::Transform chassis_to_map;
     try {
         chassis_to_map = utils::convert_to<tf2::Transform>(
@@ -396,49 +528,71 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     }
 
     const Eigen::Vector2d current_map(chassis_to_map.getOrigin().x(), chassis_to_map.getOrigin().y());
-    const Eigen::Vector2d start_map = predict_start_map(current_map);
+    Eigen::Vector2d start_map = predict_start_map(current_map);
+    Eigen::Vector2d goal_plan = goal_map;
 
+    // ── 起点 global 严格检查 ──
+    {
+        const Eigen::Vector2d sg = global_cost_map_->map_coord_to_grid(start_map);
+        if (!global_cost_map_->is_valid_coord(sg)) {
+            publish_empty_path("Start is out of bound!", true);
+            return;
+        }
+        if (!is_map_point_feasible(*global_cost_map_, *global_direction_map_, start_map)) {
+            publish_empty_path("Start is not feasible on global map!", true);
+            return;
+        }
+    }
+
+    // ── 起点 nudge：在 merged 上找最近 free 点（最多 1m）──
+    {
+        const auto nudged = nudge_point_to_free(start_map, 1.0);
+        if (!nudged) {
+            publish_empty_path("Cannot nudge start to a free cell within 1m!", true);
+            return;
+        }
+        start_map = *nudged;
+    }
+
+    // ── 终点 global 严格检查 ──
+    {
+        const Eigen::Vector2d gg = global_cost_map_->map_coord_to_grid(goal_map);
+        if (!global_cost_map_->is_valid_coord(gg)) {
+            publish_empty_path("Goal is out of bound!", true);
+            return;
+        }
+        if (!is_map_point_feasible(*global_cost_map_, *global_direction_map_, goal_map)) {
+            publish_empty_path("Goal is not feasible on global map!", true);
+            return;
+        }
+    }
+
+    // ── 终点 merged 检查 / nudge（取决于 fixed）──
+    {
+        if (fixed) {
+            if (!is_map_point_feasible(*merged_cost_map_, *global_direction_map_, goal_map)) {
+                publish_empty_path("Fixed goal is occupied by a dynamic obstacle!", true);
+                return;
+            }
+        } else {
+            const auto nudged = nudge_point_to_free(goal_map, 1.0);
+            if (!nudged) {
+                publish_empty_path("Cannot nudge goal to a free cell within 1m!", true);
+                return;
+            }
+            goal_plan = *nudged;
+        }
+    }
+
+    const CostMap& planning_cost_map = *merged_cost_map_;
     const Eigen::Vector2d start_grid = global_cost_map_->map_coord_to_grid(start_map);
-    const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_map);
-
-    if (!global_cost_map_->is_valid_coord(start_grid)) {
-        publish_empty_path(
-            "Start (" + std::to_string(start_map.x()) + ", " + std::to_string(start_map.y()) + ") is out of bound!",
-            true
-        );
-        return;
-    }
-
-    if (!is_map_point_feasible(*global_cost_map_, *global_direction_map_, start_map)) {
-        publish_empty_path(
-            "Start (" + std::to_string(start_map.x()) + ", " + std::to_string(start_map.y()) + ") is not feasible!",
-            true
-        );
-        return;
-    }
-
-    if (!global_cost_map_->is_valid_coord(goal_grid)) {
-        publish_empty_path(
-            "Goal (" + std::to_string(goal_map.x()) + ", " + std::to_string(goal_map.y()) + ") is out of bound!",
-            true
-        );
-        return;
-    }
-
-    if (!is_map_point_feasible(*global_cost_map_, *global_direction_map_, goal_map)) {
-        publish_empty_path(
-            "Goal (" + std::to_string(goal_map.x()) + ", " + std::to_string(goal_map.y()) + ") is not feasible!",
-            true
-        );
-        return;
-    }
-
-    const double dist = (goal_map - start_map).norm();
+    const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_plan);
+    const double dist = (goal_plan - start_map).norm();
 
     RCLCPP_INFO(
         get_logger(), "Planning (%s): Src(%.2f, %.2f) -> Dst(%.2f, %.2f) %s",
         reason_label,
-        start_map.x(), start_map.y(), goal_map.x(), goal_map.y(),
+        start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : ""
     );
 

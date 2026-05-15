@@ -28,6 +28,11 @@
       min_speed: 0.3 # 低于该速度不进行起点前推 (m/s)
       collision_check_step: 0.05 # 预测起点直线可达性采样间隔 (m)
 
+    # ── 代价地图预测融合（影响 A* + B样条）──
+    prediction:
+      horizon_seconds: 2.0 # 预测时间窗口  (0=仅使用当前帧)
+      weight_decay: 1.0 # 线性衰减因子 [0,1]，0=均匀，1=衰减到零
+
     # ── A* 规划器 ──
     path_planner:
       skip_distance: 0.5 # 目标距离 < 该值时跳过A*，直接构造B样条初值进行优化 (m)

@@ -25,10 +25,10 @@ DOWN_MODE_OPTIONS = [
 ]
 
 SPEED_OPTIONS = [
-    ("1", 0),
-    ("2", 1),
-    ("3", 2),
-    ("4", 3),
+    ("1.0 m/s", 0),
+    ("1.6 m/s", 1),
+    ("2.2 m/s", 2),
+    ("2.8 m/s", 3),
 ]
 
 UP_MODE_LABEL_TO_VALUE = {label: value for label, value in UP_MODE_OPTIONS}
@@ -310,17 +310,14 @@ class StepModeAnnotatorApp:
             self._set_controls_enabled(True)
             self.show_region(0)
             self.status_label.config(
-                text=(
-                    "已根据 BG 方向场检测台阶区域。"
-                    "原始台阶像素之外的 alpha 会保持为 0。"
-                ),
+                text="已根据 BG 方向场检测台阶区域。\n原始台阶像素之外的 alpha 会保持为 0。",
                 fg="#1f5fa7",
             )
         else:
             self._set_controls_enabled(False)
             self._clear_region_panel()
             self.status_label.config(
-                text="未检测到台阶区域。保存时仍会导出 alpha 全 0 的 RGBA 图。",
+                text="未检测到台阶区域。\n保存时仍会导出 alpha 全 0 的 RGBA 图。",
                 fg="#8a5d00",
             )
 
