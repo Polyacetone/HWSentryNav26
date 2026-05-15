@@ -29,6 +29,9 @@
       full_effect_radius: 0.4 # 掩码满强度半径 (m)：<= 该距离内 alpha=1（cost 全擦除，dir 全保留）
       cutoff_radius: 0.8 # 掩码截止半径 (m)：>= 该距离内 alpha=0（cost 全保留，dir 全擦除）
       length_num_samples: 100 # 路径弧长估计采样数
+
+    follow_proj_guard:
+      dist_max: 2.0 # 当前位置到样条投影点距离 > 该值则取消follow (m)
       cost_max: 240.0 # 投影连线最大障碍物代价 > 该值则取消follow (0~255)
       cost_samples: 20 # 连线代价估计采样数
 

@@ -95,6 +95,7 @@ private:
             int obstacle_threshold;
         } cost_map_inflation;
     } local_map_params_;
+    bool bypass_dynamic_obstacle_;
     bool enable_prediction_with_cloud_;
     bool enable_prediction_without_cloud_;
 
@@ -201,6 +202,7 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .prediction_dt = declare_parameter<double>("local_map.object_tracker.prediction_dt"),
         .num_threads = num_threads_
     };
+    bypass_dynamic_obstacle_ = declare_parameter<bool>("local_map.bypass_dynamic_obstacle");
     enable_prediction_with_cloud_ = declare_parameter<bool>("local_map.with_global_cloud.enable_prediction");
     enable_prediction_without_cloud_ = declare_parameter<bool>("local_map.without_global_cloud.enable_prediction");
     std::string local_cost_maps_pub_topic = declare_parameter<std::string>("local_map.local_cost_maps_pub_topic");
@@ -293,6 +295,15 @@ void MapServerNode::timer_callback() {
 
 void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     if (!global_nav_map_initialized_) return;
+
+    if (bypass_dynamic_obstacle_) {
+        interfaces::msg::CostMaps cm;
+        cm.prediction_dt = tracker_params_.prediction_dt;
+        cm.maps.resize(1);
+        fill_occupancy_grid(cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1), msg->header.stamp, cm.maps[0]);
+        local_cost_maps_pub_->publish(cm);
+        return;
+    }
 
     // 预处理点云，累积并下采样
     local_map_cloud_queue_.push_front(preprocess_cloud(msg));

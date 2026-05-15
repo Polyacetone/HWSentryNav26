@@ -22,6 +22,7 @@
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
 
     local_map:
+      bypass_dynamic_obstacle: false # 是否绕过动态障碍物检测（开启后发布全空的局部代价地图，用于调试）
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       local_cost_maps_pub_topic: "/map_server/local_cost_maps" # 局部代价地图序列发布话题（maps[0]=当前帧，maps[1..N]=预测帧）
       cloud_accumulate_frames: 5 # 局部点云累积帧数
