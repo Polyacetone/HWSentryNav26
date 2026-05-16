@@ -14,12 +14,7 @@ using path_planner::DirectionMap;
 using path_planner::Spline;
 
 constexpr double EPS = 1e-9;
-constexpr double FINITE_DIFF_STEP_GRID = 0.25;
-
-template <typename T>
-inline T square(const T& x) {
-    return x * x;
-}
+constexpr double FINITE_DIFF_STEP_METERS = 0.02;
 
 inline double smoothstep01(double t) {
     t = std::clamp(t, 0.0, 1.0);
@@ -381,13 +376,14 @@ public:
                 return query_gate * std::abs(query_cross);
             };
 
-            const double xp = alignment_at(pos + Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
-            const double xm = alignment_at(pos - Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
-            const double yp = alignment_at(pos + Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
-            const double ym = alignment_at(pos - Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
+            const double step_fd = FINITE_DIFF_STEP_METERS / cost_map_.resolution;
+            const double xp = alignment_at(pos + Eigen::Vector2d(step_fd, 0.0));
+            const double xm = alignment_at(pos - Eigen::Vector2d(step_fd, 0.0));
+            const double yp = alignment_at(pos + Eigen::Vector2d(0.0, step_fd));
+            const double ym = alignment_at(pos - Eigen::Vector2d(0.0, step_fd));
             const Eigen::Vector2d d_alignment_d_pos(
-                (xp - xm) / (2.0 * FINITE_DIFF_STEP_GRID),
-                (yp - ym) / (2.0 * FINITE_DIFF_STEP_GRID)
+                (xp - xm) / (2.0 * step_fd),
+                (yp - ym) / (2.0 * step_fd)
             );
 
             for (size_t i = 0; i < vel_evaluator_.ControlPointsSupport; ++i) {
@@ -453,22 +449,23 @@ public:
                 return direction_map_.prohibited_direction_score(query_pos, query_vel, dot_threshold_);
             };
 
-            const double xp = score_at(pos + Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0), vel);
-            const double xm = score_at(pos - Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0), vel);
-            const double yp = score_at(pos + Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID), vel);
-            const double ym = score_at(pos - Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID), vel);
+            const double step_fd = FINITE_DIFF_STEP_METERS / cost_map_.resolution;
+            const double xp = score_at(pos + Eigen::Vector2d(step_fd, 0.0), vel);
+            const double xm = score_at(pos - Eigen::Vector2d(step_fd, 0.0), vel);
+            const double yp = score_at(pos + Eigen::Vector2d(0.0, step_fd), vel);
+            const double ym = score_at(pos - Eigen::Vector2d(0.0, step_fd), vel);
             const Eigen::Vector2d d_score_d_pos(
-                (xp - xm) / (2.0 * FINITE_DIFF_STEP_GRID),
-                (yp - ym) / (2.0 * FINITE_DIFF_STEP_GRID)
+                (xp - xm) / (2.0 * step_fd),
+                (yp - ym) / (2.0 * step_fd)
             );
 
-            const double vxp = score_at(pos, vel + Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
-            const double vxm = score_at(pos, vel - Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
-            const double vyp = score_at(pos, vel + Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
-            const double vym = score_at(pos, vel - Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
+            const double vxp = score_at(pos, vel + Eigen::Vector2d(step_fd, 0.0));
+            const double vxm = score_at(pos, vel - Eigen::Vector2d(step_fd, 0.0));
+            const double vyp = score_at(pos, vel + Eigen::Vector2d(0.0, step_fd));
+            const double vym = score_at(pos, vel - Eigen::Vector2d(0.0, step_fd));
             const Eigen::Vector2d d_score_d_vel(
-                (vxp - vxm) / (2.0 * FINITE_DIFF_STEP_GRID),
-                (vyp - vym) / (2.0 * FINITE_DIFF_STEP_GRID)
+                (vxp - vxm) / (2.0 * step_fd),
+                (vyp - vym) / (2.0 * step_fd)
             );
 
             for (size_t i = 0; i < vel_evaluator_.ControlPointsSupport; ++i) {
@@ -539,13 +536,14 @@ public:
                 );
             };
 
-            const double xp = gate_at(pos + Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
-            const double xm = gate_at(pos - Eigen::Vector2d(FINITE_DIFF_STEP_GRID, 0.0));
-            const double yp = gate_at(pos + Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
-            const double ym = gate_at(pos - Eigen::Vector2d(0.0, FINITE_DIFF_STEP_GRID));
+            const double step_fd = FINITE_DIFF_STEP_METERS / cost_map_.resolution;
+            const double xp = gate_at(pos + Eigen::Vector2d(step_fd, 0.0));
+            const double xm = gate_at(pos - Eigen::Vector2d(step_fd, 0.0));
+            const double yp = gate_at(pos + Eigen::Vector2d(0.0, step_fd));
+            const double ym = gate_at(pos - Eigen::Vector2d(0.0, step_fd));
             const Eigen::Vector2d grad(
-                (xp - xm) / (2.0 * FINITE_DIFF_STEP_GRID),
-                (yp - ym) / (2.0 * FINITE_DIFF_STEP_GRID)
+                (xp - xm) / (2.0 * step_fd),
+                (yp - ym) / (2.0 * step_fd)
             );
 
             for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; ++i) {
@@ -644,7 +642,11 @@ public:
         const T speed_sq_grid = vel[0] * vel[0] + vel[1] * vel[1];
         const T speed_grid = ceres::sqrt(speed_sq_grid + T(EPS));
         const T speed_m = T(resolution_) * speed_grid;
-        const T gate = speed_sq_grid / (speed_sq_grid + T(square(std::max(params_.speed_gate_threshold, 1e-6) / std::max(resolution_, 1e-6))));
+        // 单一速度门控: v²/(v²+thresh²)
+        // 低俗时曲率代价病态（小速度除零），该门控平滑抑制之。
+        // 当 speed_m = speed_gate_threshold 时代价半衰，物理含义清晰。
+        const double safe_threshold = std::max(params_.speed_gate_threshold, 1e-6);
+        const T gate = speed_m * speed_m / (speed_m * speed_m + T(safe_threshold * safe_threshold));
 
         const double min_speed_grid = std::max(params_.min_speed_epsilon / std::max(resolution_, 1e-6), 1e-6);
         const T safe_speed_sq_grid = speed_sq_grid + T(min_speed_grid * min_speed_grid);
@@ -657,8 +659,7 @@ public:
         const T base_penalty = smooth_relu(curvature_mag, params_.base_beta);
         const T limit_penalty = smooth_relu(curvature_mag - T(max_curvature_), params_.limit_beta);
 
-        const T speed_scale = speed_m / (speed_m + T(std::max(params_.speed_gate_threshold, 1e-6)));
-        residuals[0] = gate * speed_scale * (
+        residuals[0] = gate * (
             T(params_.base_weight) * base_penalty + T(params_.limit_weight) * limit_penalty
         );
         return true;

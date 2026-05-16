@@ -215,7 +215,7 @@ Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) con
 
 // 检查插值点4个角是否完全被方向场覆盖且双向禁止。
 // 跳过无方向场的角点（台阶边缘插值时可能只有部分角点在台阶内），
-// 只要有一个台阶内的角点允许某个方向穿越，则判定为可通行。
+// 只要存在任一台阶角点双向禁止，则该点判定为不可通行。
 bool DirectionMap::is_fully_prohibited(const Eigen::Vector2d& grid_coord) const {
     if (!is_valid_coord(grid_coord)) return false;
 
@@ -250,22 +250,20 @@ double DirectionMap::prohibited_direction_score(const Eigen::Vector2d& grid_coor
     const double dx = grid_coord.x() - x0;
     const double dy = grid_coord.y() - y0;
 
-    const struct Sample {
-        Eigen::Vector2i coord;
-        double weight;
-    } samples[] = {
-        {{x0, y0}, (1 - dx) * (1 - dy)},
-        {{x1, y0}, dx * (1 - dy)},
-        {{x0, y1}, (1 - dx) * dy},
-        {{x1, y1}, dx * dy},
-    };
+    // 标准双线性插值加权和（而非保守 max）
+    const double w00 = (1 - dx) * (1 - dy);
+    const double w10 = dx * (1 - dy);
+    const double w01 = (1 - dx) * dy;
+    const double w11 = dx * dy;
 
-    double max_score = 0.0;
-    for (const auto& sample : samples) {
-        if (sample.weight <= 0.0) continue;
-        max_score = std::max(max_score, prohibited_direction_score(sample.coord, move_dir, dot_threshold) * sample.weight);
-    }
-    return std::clamp(max_score, 0.0, 1.0);
+    const double total = w00 + w10 + w01 + w11;
+    if (total <= 0.0) return 0.0;
+
+    const double score = w00 * prohibited_direction_score(Eigen::Vector2i(x0, y0), move_dir, dot_threshold)
+                       + w10 * prohibited_direction_score(Eigen::Vector2i(x1, y0), move_dir, dot_threshold)
+                       + w01 * prohibited_direction_score(Eigen::Vector2i(x0, y1), move_dir, dot_threshold)
+                       + w11 * prohibited_direction_score(Eigen::Vector2i(x1, y1), move_dir, dot_threshold);
+    return std::clamp(score / total, 0.0, 1.0);
 }
 
 bool DirectionMap::is_direction_prohibited(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {

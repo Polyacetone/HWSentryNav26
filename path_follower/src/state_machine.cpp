@@ -41,9 +41,11 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
 
     DestState stopping_dest = DestState::IDLE;
     std::chrono::steady_clock::time_point stopping_start_time;
-    std::chrono::steady_clock::time_point reverse_start_time;
-    std::chrono::steady_clock::time_point wait_replan_start_time;
     bool replan_after_recovery = false;
+
+    // 以下为各状态构造参数槽（由源状态写入、目标状态构造函数消费）
+    std::chrono::steady_clock::time_point pending_reverse_start_time;
+    std::chrono::steady_clock::time_point pending_wait_replan_start_time;
 
     void clear_output() {
         output = {};
@@ -110,7 +112,7 @@ struct StFixed final : sc::state<StFixed, Machine> {
         const auto& in = ev.input;
 
         if (in.is_stuck) {
-            m.reverse_start_time = in.stamp;
+            m.pending_reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
         if (in.spin_requested && in.spin_high_priority) {
@@ -143,7 +145,7 @@ struct StFollow final : sc::state<StFollow, Machine> {
             return transit<StStepping>();
         }
         if (in.replan_requested) {
-            m.wait_replan_start_time = in.stamp;
+            m.pending_wait_replan_start_time = in.stamp;
             return transit<StWaitReplan>();
         }
 
@@ -164,7 +166,7 @@ struct StFollow final : sc::state<StFollow, Machine> {
 
         if (in.is_stuck) {
             m.replan_after_recovery = true;
-            m.reverse_start_time = in.stamp;
+            m.pending_reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
         if (in.spin_requested && in.spin_high_priority) {
@@ -206,7 +208,7 @@ struct StStepping final : sc::state<StStepping, Machine> {
         // on_state_transition() 离开 STEPPING 时会清台阶状态，退出路径无竞态。
         if (in.is_stuck) {
             m.replan_after_recovery = false;
-            m.reverse_start_time = in.stamp;
+            m.pending_reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
 
@@ -295,6 +297,7 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
     explicit StStuckReverse(my_context ctx) : sc::state<StStuckReverse, Machine>(ctx) {
         auto& m = context<Machine>();
         m.active_state = FsmState::STUCK_REVERSE;
+        start_time_ = m.pending_reverse_start_time;
         RCLCPP_WARN(m.logger, "FSM -> STUCK_REVERSE");
     }
 
@@ -302,13 +305,16 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        const double elapsed = std::chrono::duration<double>(in.stamp - m.reverse_start_time).count();
+        const double elapsed = std::chrono::duration<double>(in.stamp - start_time_).count();
         if (elapsed > m.params.stuck.reverse_duration) {
             return transit<StHazardRecovery>();
         }
 
         return discard_event();
     }
+
+private:
+    std::chrono::steady_clock::time_point start_time_;
 };
 
 struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
@@ -326,7 +332,7 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
 
         if (in.is_stuck) {
             m.replan_after_recovery = false;
-            m.reverse_start_time = in.stamp;
+            m.pending_reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
         if (in.is_recovery_safe) {
@@ -334,8 +340,8 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
 
             if (m.replan_after_recovery) {
                 m.replan_after_recovery = false;
-                m.wait_replan_start_time = in.stamp;
-                return transit<StWaitReplan>();
+m.pending_wait_replan_start_time = in.stamp;
+            return transit<StWaitReplan>();
             }
 
             const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
@@ -387,7 +393,7 @@ struct StStepRunup final : sc::state<StStepRunup, Machine> {
         }
 
         if (in.replan_requested) {
-            m.wait_replan_start_time = in.stamp;
+            m.pending_wait_replan_start_time = in.stamp;
             return transit<StWaitReplan>();
         }
 
@@ -396,7 +402,7 @@ struct StStepRunup final : sc::state<StStepRunup, Machine> {
         }
         if (in.is_stuck) {
             m.replan_after_recovery = true;
-            m.reverse_start_time = in.stamp;
+            m.pending_reverse_start_time = in.stamp;
             return transit<StStuckReverse>();
         }
         if (in.spin_requested && in.spin_high_priority) {
@@ -405,7 +411,7 @@ struct StStepRunup final : sc::state<StStepRunup, Machine> {
             return transit<StStopping>();
         }
         if (in.step_runup_completed) {
-            m.wait_replan_start_time = in.stamp;
+            m.pending_wait_replan_start_time = in.stamp;
             return transit<StWaitReplan>();
         }
         if (in.has_new_path) {
@@ -422,6 +428,7 @@ struct StWaitReplan final : sc::state<StWaitReplan, Machine> {
     explicit StWaitReplan(my_context ctx) : sc::state<StWaitReplan, Machine>(ctx) {
         auto& m = context<Machine>();
         m.active_state = FsmState::WAIT_REPLAN;
+        start_time_ = m.pending_wait_replan_start_time;
         m.output.consume_global_path = true;
         m.output.request_replan = true;
         RCLCPP_INFO(m.logger, "FSM -> WAIT_REPLAN");
@@ -435,7 +442,7 @@ struct StWaitReplan final : sc::state<StWaitReplan, Machine> {
             return transit<StFollow>();
         }
 
-        const bool timeout = std::chrono::duration<double>(in.stamp - m.wait_replan_start_time).count() > m.params.transition.wait_replan_timeout;
+        const bool timeout = std::chrono::duration<double>(in.stamp - start_time_).count() > m.params.transition.wait_replan_timeout;
         if (timeout) {
             m.output.consume_global_path = true;
             RCLCPP_WARN(m.logger, "WAIT_REPLAN timed out after %.2f s without a valid path", m.params.transition.wait_replan_timeout);
@@ -449,6 +456,9 @@ struct StWaitReplan final : sc::state<StWaitReplan, Machine> {
 
         return discard_event();
     }
+
+private:
+    std::chrono::steady_clock::time_point start_time_;
 };
 
 } // anonymous namespace

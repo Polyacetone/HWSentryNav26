@@ -146,6 +146,10 @@ struct StepBlockReplanParams {
     double predicted_obstacle_ratio_threshold;
 };
 
+struct StepReleaseParams {
+    double latch_ttl; // 台阶锁存最大持续秒数，超时视为卡死
+};
+
 struct NavigationParams {
     double stop_threshold_dist;
     double stop_threshold_u;
@@ -155,8 +159,9 @@ struct NavigationParams {
     StepRunupParams step_runup;
     NoProgressGuardParams no_progress_guard;
     StepBlockReplanParams step_block_replan;
+    StepReleaseParams step_release;
 
-    double step_dist_offset = 0.0; // 补偿代价地图膨胀导致的台阶检测距离偏差 (m)
+    double step_dist_offset; // 补偿代价地图膨胀导致的台阶检测距离偏差 (m)
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -324,6 +329,7 @@ private:
     std::optional<PathStepTarget> active_step_target_;
     std::optional<ActiveStepMode> active_step_command_;
     std::optional<SplineD> step_locked_path_;
+    std::optional<std::chrono::steady_clock::time_point> step_latch_start_time_; // 台阶锁存时刻，用于TTL超时
     bool step_locked_fixed_goal_ = false;
     Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
     bool deferred_external_path_update_ = false;

@@ -464,13 +464,15 @@ void gauss_newton_running_derivatives(
     Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
 ) {
     using ResidualVec = Eigen::Matrix<double, NR, 1>;
-    constexpr double eps = 1e-5;
+    constexpr double EPS_REL = 1e-6;
+    constexpr double EPS_ABS = 1e-4;
 
     const ResidualVec r0 = residual_fn(x, u);
     Eigen::Matrix<double, NR, MPC_NX> jx;
     Eigen::Matrix<double, NR, MPC_NU> ju;
 
     for (int i = 0; i < MPC_NX; ++i) {
+        const double eps = std::max(EPS_REL * std::abs(x(i)), EPS_ABS);
         StateVec xp = x;
         xp(i) += eps;
         StateVec xm = x;
@@ -478,6 +480,7 @@ void gauss_newton_running_derivatives(
         jx.col(i) = (residual_fn(xp, u) - residual_fn(xm, u)) / (2.0 * eps);
     }
     for (int i = 0; i < MPC_NU; ++i) {
+        const double eps = std::max(EPS_REL * std::abs(u(i)), EPS_ABS);
         ControlVec up = u;
         up(i) += eps;
         ControlVec um = u;
@@ -500,12 +503,14 @@ void gauss_newton_running_derivatives(
 template<int NR, typename ResidualFn>
 void gauss_newton_terminal_derivatives(ResidualFn&& residual_fn, const StateVec& x, StateVec& lx, MatXX& lxx) {
     using ResidualVec = Eigen::Matrix<double, NR, 1>;
-    constexpr double eps = 1e-5;
+    constexpr double EPS_REL = 1e-6;
+    constexpr double EPS_ABS = 1e-4;
 
     const ResidualVec r0 = residual_fn(x);
     Eigen::Matrix<double, NR, MPC_NX> jx;
 
     for (int i = 0; i < MPC_NX; ++i) {
+        const double eps = std::max(EPS_REL * std::abs(x(i)), EPS_ABS);
         StateVec xp = x;
         xp(i) += eps;
         StateVec xm = x;
@@ -1138,20 +1143,16 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
     const double dnum_du = x(ix::V) * (-sin_e) * (-dtheta_du);
 
     const double denom_raw = 1.0 - kappa * ey;
-    double denom = signum(denom_raw) * std::max(std::abs(denom_raw), 0.1);
-    if (denom == 0.0) {
-        denom = 0.1;
-    }
-    const bool denom_linear = std::abs(denom_raw) > 0.1;
+    // 平滑 clamp: denom_raw → sign(denom_raw) * sqrt(denom_raw² + 0.1²)
+    // 相比 sign * max(|x|, 0.1)，该形式梯度过零连续（d/dx → 0 at x = 0）
+    constexpr double DENOM_EPS = 0.1;
+    const double denom_mag = std::sqrt(denom_raw * denom_raw + DENOM_EPS * DENOM_EPS);
+    const double denom = std::copysign(denom_mag, denom_raw);
+    const double denom_grad = denom_raw / denom_mag;
 
-    double ddenom_dpx = -kappa * dey_dpx;
-    double ddenom_dpy = -kappa * dey_dpy;
-    double ddenom_du = -kappa * dey_du;
-    if (!denom_linear) {
-        ddenom_dpx = 0.0;
-        ddenom_dpy = 0.0;
-        ddenom_du = 0.0;
-    }
+    const double ddenom_dpx = -kappa * dey_dpx * denom_grad;
+    const double ddenom_dpy = -kappa * dey_dpy * denom_grad;
+    const double ddenom_du = -kappa * dey_du * denom_grad;
 
     const double inv_denom = 1.0 / denom;
     const double inv_denom2 = inv_denom * inv_denom;
@@ -1386,12 +1387,17 @@ StopResidualVec stop_residual_impl(
         const double thr = std::max(p.energy.threshold, 1.0);
         const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
-        const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
-        r(10) = p.energy.weight * std::max(0.0, sp);
+        if (excess <= 0.0) {
+            r(10) = 0.0;
+        } else {
+            const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
+            r(10) = p.energy.weight * sp;
+        }
     }
 
     return r;
 }
+
 
 constexpr int STOP_TERMINAL_RESIDUAL_DIM = 2;
 using StopTerminalResidualVec = Eigen::Matrix<double, STOP_TERMINAL_RESIDUAL_DIM, 1>;
@@ -1549,12 +1555,17 @@ HoldResidualVec hold_residual_impl(
         const double thr = std::max(p.energy.threshold, 1.0);
         const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
-        const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
-        r(12) = p.energy.weight * std::max(0.0, sp);
+        if (excess <= 0.0) {
+            r(12) = 0.0;
+        } else {
+            const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
+            r(12) = p.energy.weight * sp;
+        }
     }
 
     return r;
 }
+
 
 constexpr int HOLD_TERMINAL_RESIDUAL_DIM = 4;
 using HoldTerminalResidualVec = Eigen::Matrix<double, HOLD_TERMINAL_RESIDUAL_DIM, 1>;

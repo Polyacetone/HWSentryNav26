@@ -36,9 +36,9 @@
     # ── A* 规划器 ──
     path_planner:
       skip_distance: 0.5 # 目标距离 < 该值时跳过A*，直接构造B样条初值进行优化 (m)
-      direction_weight: 6.0 # 偏离台阶方向场的代价权重（鼓励顺着台阶方向移动）
+      step_alignment_weight: 6.0 # 偏离台阶方向场的代价权重（鼓励顺着台阶方向移动）
       obstacle_weight: 4.0 # 障碍物代价权重（0~255 映射到 cost）
-      step_weight: 0.6 # 经过台阶区域的惩罚权重（基于方向场模长）
+      step_proximity_weight: 0.6 # 经过台阶区域的惩罚权重（基于方向场模长）
       downsampled_waypoint_max_interval: 5 # 路径降采样后点间最大间隔（栅格单位）
       feasible_threshold: 100 # 代价 <= 该值的格子视为可通行 (0~255)
 

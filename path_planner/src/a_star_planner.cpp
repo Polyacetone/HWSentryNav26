@@ -18,16 +18,16 @@ struct Node {
 
 namespace path_planner {
 AStarPlanner::AStarPlanner(
-    const double direction_weight,
+    const double step_alignment_weight,
     const double obstacle_weight,
-    const double step_weight,
+    const double step_proximity_weight,
     const double step_mode_dot_threshold,
     const int downsampled_waypoint_max_interval,
     const int feasible_threshold
 ):
-    direction_weight_(direction_weight),
+    step_alignment_weight_(step_alignment_weight),
     obstacle_weight_(obstacle_weight),
-    step_weight_(step_weight),
+    step_proximity_weight_(step_proximity_weight),
     step_mode_dot_threshold_(step_mode_dot_threshold),
     downsampled_waypoint_max_interval_(downsampled_waypoint_max_interval),
     feasible_threshold_(feasible_threshold) {}
@@ -73,10 +73,29 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
     all_fwd[s_key] = start_node;
     all_bwd[g_key] = goal_node;
 
+    // 计算给定方向栅格、方向地图的单步台阶对齐代价与台阶接近代价
+    const auto step_costs = [&](const Eigen::Vector2i& coord, const Eigen::Vector2d& move_dir) {
+        const Eigen::Vector2d step_dir = direction_map.at(coord);
+        double alignment = 0.0;
+        double proximity = 0.0;
+        if (step_dir != Eigen::Vector2d::Zero()) {
+            alignment = (1.0 - std::abs(move_dir.dot(step_dir))) * step_alignment_weight_;
+        }
+        proximity = step_dir.norm() * step_proximity_weight_;
+        return std::pair{alignment, proximity};
+    };
+
     Node::Ptr meet_fwd = nullptr, meet_bwd = nullptr;
     double best_cost = std::numeric_limits<double>::max();
 
     while (!open_fwd.empty() && !open_bwd.empty()) {
+        // 提前终止条件：两个方向堆顶的 f 值均超过 best_cost/2 时停止
+        const double top_fwd = open_fwd.top()->f();
+        const double top_bwd = open_bwd.top()->f();
+        if (best_cost < std::numeric_limits<double>::max() && top_fwd > best_cost * 0.5 && top_bwd > best_cost * 0.5) {
+            break;
+        }
+
         // 前向搜索
         if (!open_fwd.empty()) {
             const auto current = open_fwd.top(); open_fwd.pop();
@@ -99,15 +118,10 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 const Eigen::Vector2d move_dir = dir.cast<double>().normalized();
                 if (direction_map.is_direction_prohibited(next, move_dir, step_mode_dot_threshold_)) continue;
 
-                double obstacle_cost = costmap.at(next) * obstacle_weight_;
-                double step_cost = 0;
-                const Eigen::Vector2d step_dir = direction_map.at(next);
-                if (step_dir != Eigen::Vector2d::Zero()) {
-                    step_cost = (1 - std::abs(move_dir.dot(step_dir))) * direction_weight_;
-                }
-                double step_penalty = step_dir.norm() * step_weight_;
+                const double obstacle_cost = costmap.at(next) * obstacle_weight_;
+                const auto [step_alignment, step_proximity] = step_costs(next, move_dir);
 
-                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty;
+                const double cost = current->g + dir.norm() + obstacle_cost + step_alignment + step_proximity;
                 if (all_fwd[n_key] && all_fwd[n_key]->g <= cost) continue;
                 const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, goal_grid), current);
                 open_fwd.push(neighbor);
@@ -141,15 +155,10 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 // 因此检查进入 current 而非 next
                 if (direction_map.is_direction_prohibited(current->coord, -move_dir, step_mode_dot_threshold_)) continue;
 
-                double obstacle_cost = costmap.at(next) * obstacle_weight_;
-                double step_cost = 0;
-                const Eigen::Vector2d step_dir = direction_map.at(next);
-                if (step_dir != Eigen::Vector2d::Zero()) {
-                    step_cost = (1 - std::abs(move_dir.dot(step_dir))) * direction_weight_;
-                }
-                double step_penalty = step_dir.norm() * step_weight_;
+                const double obstacle_cost = costmap.at(next) * obstacle_weight_;
+                const auto [step_alignment, step_proximity] = step_costs(next, move_dir);
 
-                const double cost = current->g + dir.norm() + obstacle_cost + step_cost + step_penalty;
+                const double cost = current->g + dir.norm() + obstacle_cost + step_alignment + step_proximity;
                 if (all_bwd[n_key] && all_bwd[n_key]->g <= cost) continue;
                 const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, start_grid), current);
                 open_bwd.push(neighbor);
@@ -178,6 +187,9 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
         }
     }
 
+    // 注意: raw_path 是 grid 坐标, 后续 path_planner_node 中
+    // 乘 resolution_ 转为世界坐标时 grid 坐标下溢会导致负的世界坐标。
+    // 若在此处添加 grid 边界保护, 请同时验证 world 转换无下溢。
     // 路径降采样
     const int resolution = std::min<int>(
         downsampled_waypoint_max_interval_,

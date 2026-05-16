@@ -49,6 +49,8 @@
 
     step:
       step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离
+      release:
+        latch_ttl: 5.0 # 台阶锁存最长持续时间 (s)，超时视为卡死
       detection:
         detect_norm_threshold: 0.9 # 方向场模长 >= 该值认为进入台阶区域；从进入点起继续搜索首个 < 该值的位置作为台阶尾部
         detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，< -阈值为下台阶

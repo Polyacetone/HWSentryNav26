@@ -122,7 +122,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     enable_debug_ = declare_parameter<bool>("debug.enable");
-    occupied_threshold_ = (int)declare_parameter<int>("occupied_threshold");
+    occupied_threshold_ = static_cast<int>(declare_parameter<int>("occupied_threshold"));
     on_step_threshold_ = declare_parameter<double>("on_step_threshold");
     step_mode_dot_threshold_ = declare_parameter<double>("step_mode_dot_threshold");
     prediction_horizon_seconds_ = declare_parameter<double>("prediction.horizon_seconds");
@@ -142,9 +142,9 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
 
     skip_distance_ = declare_parameter<double>("path_planner.skip_distance");
     path_planner_ = std::make_shared<AStarPlanner>(
-        declare_parameter<double>("path_planner.direction_weight"),
+        declare_parameter<double>("path_planner.step_alignment_weight"),
         declare_parameter<double>("path_planner.obstacle_weight"),
-        declare_parameter<double>("path_planner.step_weight"),
+        declare_parameter<double>("path_planner.step_proximity_weight"),
         step_mode_dot_threshold_,
         declare_parameter<int>("path_planner.downsampled_waypoint_max_interval"),
         declare_parameter<int>("path_planner.feasible_threshold")

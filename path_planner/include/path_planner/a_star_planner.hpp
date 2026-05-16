@@ -12,9 +12,9 @@ public:
     using ConstPtr = std::shared_ptr<const AStarPlanner>;
 
     explicit AStarPlanner(
-        const double direction_weight,
+        const double step_alignment_weight,
         const double obstacle_weight,
-        const double step_weight,
+        const double step_proximity_weight,
         const double step_mode_dot_threshold,
         const int downsampled_waypoint_max_interval,
         const int feasible_threshold
@@ -40,7 +40,7 @@ private:
     const std::vector<Eigen::Vector2i> directions_ = {
         {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
     };
-    const double direction_weight_, obstacle_weight_, step_weight_, step_mode_dot_threshold_;
+    const double step_alignment_weight_, obstacle_weight_, step_proximity_weight_, step_mode_dot_threshold_;
     const int downsampled_waypoint_max_interval_, feasible_threshold_;
 };
 } // namespace path_planner
