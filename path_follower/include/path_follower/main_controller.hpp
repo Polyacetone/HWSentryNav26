@@ -50,6 +50,7 @@ struct ControlInput {
     const CostMap* const final_cost_map; // 全局先验代价地图 + 台阶掩码 + 动态障碍物
     const CostMap* const masked_global_cost_map; // 全局先验代价地图 + 台阶掩码（不含动态障碍物）
     const DirectionMap* const masked_direction_map; // 全局先验方向场 - 台阶掩码
+    const DirectionMap* const base_direction_map = nullptr; // 原始（未掩码）台阶方向场，用于恢复上台阶感知
     const CostMap* const current_dynamic_cost_map; // 当前时刻动态障碍物代价地图（通常为 local_cost_map）
 
     // ─── 逐步预测代价地图 ───
@@ -95,12 +96,6 @@ struct FollowProjectionGuardParams {
     int cost_samples;
 };
 
-struct StepLookaheadParams {
-    double rollout_length_filter_alpha;
-    double fixed_extension_distance;
-    double min_distance;
-};
-
 struct StepDetectionParams {
     double detect_norm_threshold;
     double detect_dot_threshold;
@@ -108,7 +103,7 @@ struct StepDetectionParams {
     double target_match_distance;
     double rollout_match_distance;
     int latch_threshold;
-    StepLookaheadParams lookahead;
+    double lookahead_distance;
 };
 
 struct StepRunupSearchParams {
@@ -146,10 +141,6 @@ struct StepBlockReplanParams {
     double predicted_obstacle_ratio_threshold;
 };
 
-struct StepReleaseParams {
-    double latch_ttl; // 台阶锁存最大持续秒数，超时视为卡死
-};
-
 struct NavigationParams {
     double stop_threshold_dist;
     double stop_threshold_u;
@@ -159,8 +150,8 @@ struct NavigationParams {
     StepRunupParams step_runup;
     NoProgressGuardParams no_progress_guard;
     StepBlockReplanParams step_block_replan;
-    StepReleaseParams step_release;
 
+    double latch_ttl; // 台阶锁存最大持续秒数，超时视为卡死
     double step_dist_offset; // 补偿代价地图膨胀导致的台阶检测距离偏差 (m)
 };
 
@@ -257,8 +248,6 @@ private:
         const std::vector<Eigen::Vector2d>& rollout_path_map,
         const DirectionMap& direction_map
     ) const;
-    static double prediction_path_length(const MPCPrediction& prediction);
-    void update_step_lookahead_distance(const MPCPrediction& prediction);
     [[nodiscard]] double current_step_lookahead_distance() const;
     [[nodiscard]] double project_path_u(const ControlInput& input, const SplineD& path, double seed_u) const;
     double advance_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
@@ -270,7 +259,7 @@ private:
     void clear_step_state();
     void clear_step_runup_state(bool clear_last_completed_target = false);
     void update_step_state_for_path_change(bool has_new_path);
-    void update_step_release(const SplineD& path, double current_u);
+    void update_step_release(const SplineD& path, double current_u, std::chrono::steady_clock::time_point stamp);
     void extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map);
     [[nodiscard]] bool is_currently_inside_active_step(double current_u) const;
     [[nodiscard]] uint8_t compute_step_distance_cm(const ControlInput& input, double current_u, const MPCPrediction& prediction) const;
@@ -315,13 +304,13 @@ private:
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     int path_version_ = 0;
 
-    double filtered_follow_rollout_length_ = 0.0;
-    double step_lookahead_distance_ = 0.0;
+
 
     // ─── 外部安全观测状态 ───
     bool stuck_active_ = false;
     std::chrono::steady_clock::time_point stuck_start_time_;
     Eigen::Vector2d stuck_start_pos_ = Eigen::Vector2d::Zero();
+    bool step_ttl_just_expired_ = false;
 
     // ─── 台阶检测 / 锁存 / 执行状态 ───
     std::optional<PathStepTarget> pending_step_target_detection_;

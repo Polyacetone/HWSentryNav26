@@ -4,6 +4,7 @@
 #include <boost/statechart/event.hpp>
 #include <boost/statechart/state.hpp>
 #include <boost/statechart/state_machine.hpp>
+#include <Eigen/Core>
 #include <rclcpp/logging.hpp>
 
 namespace path_follower {
@@ -45,6 +46,7 @@ struct Machine final : sc::state_machine<Machine, StIdle> {
 
     // 以下为各状态构造参数槽（由源状态写入、目标状态构造函数消费）
     std::chrono::steady_clock::time_point pending_reverse_start_time;
+    Eigen::Vector2d pending_reverse_start_pos = Eigen::Vector2d::Zero();
     std::chrono::steady_clock::time_point pending_wait_replan_start_time;
 
     void clear_output() {
@@ -112,7 +114,9 @@ struct StFixed final : sc::state<StFixed, Machine> {
         const auto& in = ev.input;
 
         if (in.is_stuck) {
+            m.replan_after_recovery = true;
             m.pending_reverse_start_time = in.stamp;
+            m.pending_reverse_start_pos = in.chassis_pos_map;
             return transit<StStuckReverse>();
         }
         if (in.spin_requested && in.spin_high_priority) {
@@ -204,11 +208,19 @@ struct StStepping final : sc::state<StStepping, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
+        // latch_ttl 超时直接进 STUCK_REVERSE，无需经过 FOLLOW 确认
+        if (in.step_ttl_expired) {
+            m.replan_after_recovery = false;
+            m.pending_reverse_start_time = in.stamp;
+            m.pending_reverse_start_pos = in.chassis_pos_map;
+            return transit<StStuckReverse>();
+        }
+
         // 台阶中水平推进可能真卡住，stuck 先于 step_active 检查。
-        // on_state_transition() 离开 STEPPING 时会清台阶状态，退出路径无竞态。
         if (in.is_stuck) {
             m.replan_after_recovery = false;
             m.pending_reverse_start_time = in.stamp;
+            m.pending_reverse_start_pos = in.chassis_pos_map;
             return transit<StStuckReverse>();
         }
 
@@ -297,7 +309,9 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
     explicit StStuckReverse(my_context ctx) : sc::state<StStuckReverse, Machine>(ctx) {
         auto& m = context<Machine>();
         m.active_state = FsmState::STUCK_REVERSE;
-        start_time_ = m.pending_reverse_start_time;
+        mature_accumulated_ = 0.0;
+        last_mature_stamp_ = m.pending_reverse_start_time;
+        entry_pos_ = m.pending_reverse_start_pos;
         RCLCPP_WARN(m.logger, "FSM -> STUCK_REVERSE");
     }
 
@@ -305,8 +319,34 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        const double elapsed = std::chrono::duration<double>(in.stamp - start_time_).count();
-        if (elapsed > m.params.stuck.reverse_duration) {
+        if (in.command_blocked) {
+            mature_accumulated_ += std::chrono::duration<double>(in.stamp - last_mature_stamp_).count();
+            last_mature_stamp_ = in.stamp;
+            return discard_event();
+        }
+
+        const double mature_elapsed = mature_accumulated_
+            + std::chrono::duration<double>(in.stamp - last_mature_stamp_).count();
+        const double displacement = (in.chassis_pos_map - entry_pos_).norm();
+
+        // 主退出条件：里程计检测到足够位移
+        if (displacement >= m.params.stuck.reverse_displacement) {
+            RCLCPP_WARN(
+                m.logger,
+                "STUCK_REVERSE: displaced %.2f m >= %.2f m, exiting to HAZARD_RECOVERY",
+                displacement, m.params.stuck.reverse_displacement
+            );
+            return transit<StHazardRecovery>();
+        }
+
+        // 安全网：MATURE 下累计超时仍未达到位移，打印 ERROR 表示严重异常
+        if (mature_elapsed >= m.params.stuck.reverse_timeout) {
+            RCLCPP_ERROR(
+                m.logger,
+                "STUCK_REVERSE TIMEOUT: mature elapsed %.1f s >= %.1f s but displacement only %.2f m < %.2f m — robot may be physically stuck",
+                mature_elapsed, m.params.stuck.reverse_timeout,
+                displacement, m.params.stuck.reverse_displacement
+            );
             return transit<StHazardRecovery>();
         }
 
@@ -314,7 +354,9 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
     }
 
 private:
-    std::chrono::steady_clock::time_point start_time_;
+    double mature_accumulated_ = 0.0;
+    std::chrono::steady_clock::time_point last_mature_stamp_;
+    Eigen::Vector2d entry_pos_ = Eigen::Vector2d::Zero();
 };
 
 struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
@@ -333,6 +375,7 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
         if (in.is_stuck) {
             m.replan_after_recovery = false;
             m.pending_reverse_start_time = in.stamp;
+            m.pending_reverse_start_pos = in.chassis_pos_map;
             return transit<StStuckReverse>();
         }
         if (in.is_recovery_safe) {
@@ -403,6 +446,7 @@ struct StStepRunup final : sc::state<StStepRunup, Machine> {
         if (in.is_stuck) {
             m.replan_after_recovery = true;
             m.pending_reverse_start_time = in.stamp;
+            m.pending_reverse_start_pos = in.chassis_pos_map;
             return transit<StStuckReverse>();
         }
         if (in.spin_requested && in.spin_high_priority) {

@@ -49,8 +49,7 @@
 
     step:
       step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离
-      release:
-        latch_ttl: 5.0 # 台阶锁存最长持续时间 (s)，超时视为卡死
+      latch_ttl: 5.0 # 台阶锁存最大持续秒数，超时视为卡死 (s)
       detection:
         detect_norm_threshold: 0.9 # 方向场模长 >= 该值认为进入台阶区域；从进入点起继续搜索首个 < 该值的位置作为台阶尾部
         detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，< -阈值为下台阶
@@ -58,12 +57,9 @@
         target_match_distance: 0.4 # 连续检测视为同一台阶目标的位置阈值 (m)
         rollout_match_distance: 0.8 # rollout 扫到的台阶与当前锁存目标匹配的位置阈值 (m)
         latch_threshold: 3 # 连续检测到同一台阶目标的次数阈值，超过才锁存
-        lookahead:
-          rollout_length_filter_alpha: 0.2 # 跟随 rollout 长度的一阶惯性滤波系数
-          fixed_extension_distance: 0.5 # 在滤波 rollout 长度基础上额外增加的固定前瞻距离 (m)
-          min_distance: 2.0 # lookahead_distance 最小值 (m)
+        lookahead_distance: 2.0 # 沿当前全局路径向前检查距离 (m)
       runup:
-        velocity_deficit_threshold: 0.4 # 上台阶预测速度赤字超过该值则触发助跑 (m/s)
+        velocity_deficit_threshold: 0.2 # 上台阶预测速度赤字超过该值则触发助跑 (m/s)
         goal_tolerance: 0.2 # 助跑点到达判定距离 (m)
         mpc_weights:
           tracking:
@@ -79,9 +75,9 @@
             lat_acc: 20.0 # 侧向稳定性惩罚
         search:
           radius_min: 2.0 # 助跑点搜索半径下界 (m)
-          radius_max: 3.0 # 助跑点搜索半径上界 (m)
-          radius_samples: 8 # 助跑点搜索半径采样数
-          sector_half_angle_rad: 0.4 # 以背离台阶方向为中心的采样扇区半角 (rad)
+          radius_max: 4.0 # 助跑点搜索半径上界 (m)
+          radius_samples: 9 # 助跑点搜索半径采样数
+          sector_half_angle_rad: 0.6 # 以背离台阶方向为中心的采样扇区半角 (rad)
           angle_samples: 13 # 扇区角度采样数
           candidate_cost_max: 40.0 # 候选点代价上限
           line_cost_max: 80.0 # 到助跑点连线的最大允许代价
@@ -290,6 +286,11 @@
         radius_samples: 5 # 半径采样数
         angle_samples: 36 # 角度采样数
         path_integral_resolution: 0.05 # 路径积分采样精度 (m)
+        path_integral_cost_weight: 1.0 # 路径积分中障碍代价权重
+        path_integral_step_weight: 1.0 # 路径积分中台阶方向场权重
+        step_ascent_penalty_weight: 5.0 # 上台阶轨迹惩罚权重
+        step_ascent_penalty_norm_threshold: 0.3 # 方向场模长低于此值不惩罚
+        step_ascent_penalty_dot_threshold: 0.2 # 路径方向与台阶上升方向点积 > 此值视为上台阶
         goal_timeout: 4.0 # 目标点超时 (s)，超时后重新搜索
       exit:
         safe_hold_time: 1.0 # 安全区域保持时间，超过后才退出恢复 (s)
@@ -297,5 +298,6 @@
         cmd_vel_threshold: 0.4 # 指令速度超过该值才开始检测 (m/s)
         timeout: 2.0 # 卡住判定持续时间阈值 (s)
         max_displacement: 0.2 # 位移小于该值判定卡住 (m)
-        reverse_speed: 0.5 # 倒车速度 (m/s)
-        reverse_duration: 2.0 # 倒车持续时间 (s)
+        reverse_speed: 0.8 # 倒车速度 (m/s)
+        reverse_displacement: 1.5 # 倒车退出位移阈值 (m) —— 里程计从 entry 起计
+        reverse_timeout: 10.0 # 倒车安全网超时 (s) —— MATURE 累计时间，超时打印 ERROR

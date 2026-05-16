@@ -43,6 +43,7 @@ public:
 
     [[nodiscard]] CostMap::ConstPtr step_cost_layer() const { return step_cost_layer_; }
     [[nodiscard]] DirectionMap::ConstPtr masked_direction_map() const { return masked_direction_map_; }
+    [[nodiscard]] DirectionMap::ConstPtr base_direction_map() const { return base_direction_map_; }
 
 private:
     struct KernelCell {

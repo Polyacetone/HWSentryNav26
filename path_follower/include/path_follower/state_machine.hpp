@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 
+#include <Eigen/Core>
 #include <rclcpp/logger.hpp>
 
 namespace path_follower {
@@ -36,6 +37,11 @@ struct RecoveryParams {
     int radius_samples;
     int angle_samples;
     double path_integral_resolution;
+    double path_integral_cost_weight;
+    double path_integral_step_weight;
+    double step_ascent_penalty_weight;
+    double step_ascent_penalty_norm_threshold;
+    double step_ascent_penalty_dot_threshold;
 
     // 退出条件
     double safe_hold_time;
@@ -44,11 +50,12 @@ struct RecoveryParams {
 
 // 卡住检测 + 倒车参数
 struct StuckParams {
-    double cmd_vel_threshold;
-    double timeout;
-    double max_displacement;
-    double reverse_speed;
-    double reverse_duration;
+    double cmd_vel_threshold;        // 指令速度超过此值才开始检测卡住
+    double timeout;                  // 卡住判定持续时间阈值 (s)
+    double max_displacement;         // 位移小于此值判定卡住 (m)
+    double reverse_speed;            // 倒车速度 (m/s)
+    double reverse_displacement;     // 倒车退出位移阈值 (m) —— 里程计从 entry 起计
+    double reverse_timeout;          // 倒车安全网超时 (s) —— MATURE 累计时间，超时则 RCLCPP_ERROR
 };
 
 // 所有 FSM 参数的聚合
@@ -92,10 +99,19 @@ struct FsmInput {
     bool spin_requested = false;
     bool spin_high_priority = false;
 
+    // 信号：step_latch_ttl 超时（用于直接从 STEPPING → STUCK_REVERSE）
+    bool step_ttl_expired = false;
+
+    // 底盘当前位置（map 坐标系，用于 STUCK_REVERSE 位移判定）
+    Eigen::Vector2d chassis_pos_map = Eigen::Vector2d::Zero();
+
     // 安全布尔（全部在 FSM 外计算）
     bool is_hazard = false;
     bool is_stuck = false;
     bool is_recovery_safe = false;
+
+    // 底盘控制状态（由 MainController 根据腿模式 + 比赛阶段判断）
+    bool command_blocked = false; // 底盘处于 FLIGHT/JUMP/STEP 等状态，不响应速度指令
 
     // 速度判定量（用于 STOPPING 退出判断，当前由 MainController 传入指令速度）
     double velocity = 0.0;   // 线速度

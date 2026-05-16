@@ -85,34 +85,12 @@ std::optional<MainController::StepTargetObservation> MainController::detect_step
     return std::nullopt;
 }
 
-double MainController::prediction_path_length(const MPCPrediction& prediction) {
-    double length = 0.0;
-    for (size_t i = 1; i < prediction.path_map.size(); ++i) {
-        length += (prediction.path_map[i] - prediction.path_map[i - 1]).norm();
-    }
-    return length;
-}
-
-void MainController::update_step_lookahead_distance(const MPCPrediction& prediction) {
-    const double raw_length = prediction_path_length(prediction);
-    const double alpha = std::clamp(nav_params_.step_detection.lookahead.rollout_length_filter_alpha, 0.0, 1.0);
-    filtered_follow_rollout_length_ = alpha * raw_length + (1.0 - alpha) * filtered_follow_rollout_length_;
-    step_lookahead_distance_ = std::max(
-        nav_params_.step_detection.lookahead.min_distance,
-        filtered_follow_rollout_length_ + nav_params_.step_detection.lookahead.fixed_extension_distance
-    );
-}
-
-double MainController::current_step_lookahead_distance() const {
-    return std::max(nav_params_.step_detection.lookahead.min_distance, step_lookahead_distance_);
-}
-
 std::optional<MainController::PathStepTarget> MainController::detect_step_target_on_path(
     const SplineD& path,
     const double start_u,
     const DirectionMap& direction_map
 ) const {
-    const double lookahead_distance = current_step_lookahead_distance();
+    const double lookahead_distance = nav_params_.step_detection.lookahead_distance;
     const double lookahead_u = advance_path_u_by_distance(path, start_u, lookahead_distance);
     const double resolution = std::max(1e-3, nav_params_.step_detection.path_sample_resolution);
     const int samples = std::max(1, static_cast<int>(std::ceil(lookahead_distance / resolution)));
@@ -224,7 +202,7 @@ void MainController::update_step_state_for_path_change(const bool has_new_path) 
     clear_step_runup_state(true);
 }
 
-void MainController::update_step_release(const SplineD& path, const double current_u) {
+void MainController::update_step_release(const SplineD& path, const double current_u, const std::chrono::steady_clock::time_point stamp) {
     (void)path;
     if (!active_step_target_) return;
     if (active_step_target_->path_version != path_version_) {
@@ -244,22 +222,19 @@ void MainController::update_step_release(const SplineD& path, const double curre
     }
 
     // TTL 超时释放：台阶锁存超过 latch_ttl 仍未退出，认为卡死
+    // 通过 step_ttl_just_expired_ 标志通知 FSM，由 STEPPING 状态直接转入 STUCK_REVERSE
     if (step_latch_start_time_) {
         const double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - *step_latch_start_time_
+            stamp - *step_latch_start_time_
         ).count();
-        if (elapsed >= nav_params_.step_release.latch_ttl) {
+        if (elapsed >= nav_params_.latch_ttl) {
             RCLCPP_WARN(
                 logger_,
-                "Step TTL expired (%.1f >= %.1f s), releasing step latch and triggering stuck",
-                elapsed, nav_params_.step_release.latch_ttl
+                "Step TTL expired (%.1f >= %.1f s), signaling direct STUCK_REVERSE transition",
+                elapsed, nav_params_.latch_ttl
             );
             clear_step_state();
-            // 直接触发卡死：将卡死计时器置为过去，使 check_stuck 立即返回 true
-            stuck_active_ = true;
-            stuck_start_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(
-                static_cast<int64_t>(std::ceil(fsm_params_.stuck.timeout + 0.1))
-            );
+            step_ttl_just_expired_ = true;
         }
     }
 }
@@ -269,7 +244,7 @@ void MainController::extend_active_step_exit(const SplineD& path, const Directio
     if (path_version_ != active_step_target_->path_version) return;
 
     const double resolution = std::max(1e-3, nav_params_.step_detection.path_sample_resolution);
-    const double lookahead_dist = current_step_lookahead_distance();
+    const double lookahead_dist = nav_params_.step_detection.lookahead_distance;
     const double scan_start_u = active_step_target_->exit_u + 1e-4;
     const double scan_end_u = advance_path_u_by_distance(path, scan_start_u, lookahead_dist);
     if (scan_end_u <= scan_start_u) return;

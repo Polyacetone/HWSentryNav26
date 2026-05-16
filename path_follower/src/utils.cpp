@@ -124,28 +124,44 @@ bool is_safe_goal(const RecoveryParams& p, const FieldSample& s) {
     return (s.cost < p.safe_cost_threshold) && (s.step_norm < p.safe_step_norm_threshold);
 }
 
-double potential_cost(const FieldSample& s) {
-    const double cost01 = std::clamp(s.cost / 255.0, 0.0, 1.0);
-    return cost01 + s.step_norm;
-}
-
 std::optional<PathScore> score_candidate_by_path_integral(
     const RecoveryParams& p,
     const CostMap& cost_map,
     const DirectionMap& dir_map,
     const Eigen::Vector2d& origin,
     const Eigen::Vector2d& goal,
-    const double radius
+    const double radius,
+    const DirectionMap* base_dir_map
 ) {
     double acc = 0.0;
     std::optional<FieldSample> end_s;
     const int n = std::max(1, static_cast<int>(radius / p.path_integral_resolution));
+    const Eigen::Vector2d path_dir = (goal - origin);
+    const double path_dir_norm = path_dir.norm();
+
     for (int i = 0; i <= n; i++) {
         const double t = static_cast<double>(i) / static_cast<double>(n);
         const Eigen::Vector2d pos = origin + (goal - origin) * t;
         const auto s = sample_fields(cost_map, dir_map, pos);
         if (!s) return std::nullopt;
-        acc += potential_cost(*s);
+
+        const double cost01 = std::clamp(s->cost / 255.0, 0.0, 1.0);
+        acc += p.path_integral_cost_weight * cost01
+            + p.path_integral_step_weight * s->step_norm;
+
+        if (base_dir_map && path_dir_norm > 1e-6) {
+            const Eigen::Vector2d gd = base_dir_map->map_coord_to_grid(pos);
+            if (base_dir_map->is_valid_coord(gd)) {
+                const Eigen::Vector2d step_dir = base_dir_map->interpolate(gd);
+                if (step_dir.norm() >= p.step_ascent_penalty_norm_threshold) {
+                    const double dot = step_dir.normalized().dot(path_dir / path_dir_norm);
+                    if (dot >= p.step_ascent_penalty_dot_threshold) {
+                        acc += p.step_ascent_penalty_weight * dot;
+                    }
+                }
+            }
+        }
+
         if (i == n) end_s = s;
     }
 
@@ -164,7 +180,8 @@ std::optional<Eigen::Vector2d> find_goal(
     const RecoveryParams& p,
     const CostMap& cost_map,
     const DirectionMap& dir_map,
-    const Eigen::Vector3d& chassis_pose
+    const Eigen::Vector3d& chassis_pose,
+    const DirectionMap* base_dir_map
 ) {
     const Eigen::Vector2d origin = chassis_pose.head<2>();
 
@@ -186,7 +203,7 @@ std::optional<Eigen::Vector2d> find_goal(
             const auto field = sample_fields(cost_map, dir_map, pt);
             if (!field) continue;
             if (field->cost >= p.recovery_cost_threshold) continue;
-            const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt, r);
+            const auto sc = score_candidate_by_path_integral(p, cost_map, dir_map, origin, pt, r, base_dir_map);
             if (!sc) continue;
             if (!best_sc || sc->score < best_sc->score) {
                 best_sc = *sc;

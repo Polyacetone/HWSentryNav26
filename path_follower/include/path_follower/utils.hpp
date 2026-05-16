@@ -69,22 +69,22 @@ std::optional<FieldSample> sample_fields(
 
 bool is_safe_goal(const RecoveryParams& p, const FieldSample& s);
 
-double potential_cost(const FieldSample& s);
-
 std::optional<PathScore> score_candidate_by_path_integral(
     const RecoveryParams& p,
     const CostMap& cost_map,
     const DirectionMap& dir_map,
     const Eigen::Vector2d& origin,
     const Eigen::Vector2d& goal,
-    double radius
+    double radius,
+    const DirectionMap* base_dir_map = nullptr
 );
 
 std::optional<Eigen::Vector2d> find_goal(
     const RecoveryParams& p,
     const CostMap& cost_map,
     const DirectionMap& dir_map,
-    const Eigen::Vector3d& chassis_pose
+    const Eigen::Vector3d& chassis_pose,
+    const DirectionMap* base_dir_map = nullptr
 );
 
 Eigen::Vector2d rotate_vector(const Eigen::Vector2d& v, double angle);

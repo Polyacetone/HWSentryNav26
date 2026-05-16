@@ -4,8 +4,6 @@
 namespace path_follower {
 namespace {
 
-constexpr double ANGLE_EPSILON = 1e-6;
-
 enum class ChassisControlState : uint8_t {
     DEAD,
     COMMAND_BLOCKED,
@@ -146,8 +144,6 @@ MainController::MainController(
     nav_params_(nav_params),
     fsm_params_(fsm_params) {
     last_fsm_state_ = control_fsm_->state();
-    filtered_follow_rollout_length_ = nav_params_.step_detection.lookahead.min_distance;
-    step_lookahead_distance_ = nav_params_.step_detection.lookahead.min_distance;
 }
 
 void MainController::sync_mpc_context(const ControlInput& input, const bool allow_observer_update) {
@@ -376,7 +372,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         if (effective_input.masked_direction_map) {
             extend_active_step_exit(*effective_input.global_path, *effective_input.masked_direction_map);
         }
-        update_step_release(*effective_input.global_path, current_u);
+        update_step_release(*effective_input.global_path, current_u, effective_input.stamp);
     }
 
     bool request_replan_now = false;
@@ -396,12 +392,16 @@ ControlOutput MainController::update(const ControlInput& input) {
     FsmInput fsm_input;
     fsm_input.has_path = has_path;
     fsm_input.has_new_path = has_new_path;
+    fsm_input.step_ttl_expired = step_ttl_just_expired_;
+    step_ttl_just_expired_ = false;
+    fsm_input.chassis_pos_map = effective_input.chassis_pose_map.head<2>();
     fsm_input.fixed_goal_flag = effective_input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
     fsm_input.step_active = is_step_active();
     fsm_input.step_runup_requested = step_runup_request_pending_;
     fsm_input.step_runup_completed = step_runup_goal_reached_;
     fsm_input.replan_requested = request_replan_now;
+    fsm_input.command_blocked = command_blocked;
     fsm_input.spin_requested = effective_input.spin_requested;
     fsm_input.spin_high_priority = effective_input.spin_high_priority;
     const bool hazard_allowed = (prev_state == FsmState::IDLE) || (prev_state == FsmState::SPIN)
@@ -452,13 +452,16 @@ ControlOutput MainController::update(const ControlInput& input) {
         clear_step_runup_state(state != FsmState::WAIT_REPLAN);
     }
 
-    // 4. 同步已发布指令到 FSM / MPC，并在非 MPC 状态时重置 MPC 的 warm start
+    // 4. 同步已发布指令到 FSM / MPC；IDLE / SPIN / STUCK_REVERSE 无 track 连续性，
+    //    进入这些状态后 MPC warm start 已无意义，直接重置。
     if (output.valid) {
         last_cmd_ = Eigen::Vector2d(output.velocity, output.omega);
         mpc_controller_->set_last_cmd(last_cmd_);
         remember_command_output(output);
-        const bool non_mpc_state = !hold_last_output && ((state == FsmState::IDLE) || (state == FsmState::SPIN) || (state == FsmState::STUCK_REVERSE));
-        if (non_mpc_state) {
+        const bool reset_warm_start = !hold_last_output && (
+            state == FsmState::IDLE || state == FsmState::SPIN || state == FsmState::STUCK_REVERSE
+        );
+        if (reset_warm_start) {
             reset_all_mpc_warm_start();
         }
     }
@@ -514,7 +517,6 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     }
 
     const auto& [cmd, prediction] = *result;
-    update_step_lookahead_distance(prediction);
 
     out.velocity = cmd.x();
     out.omega = cmd.y();
@@ -686,7 +688,8 @@ void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
     if (!need_new) return;
 
     recovery_goal_map_ = recovery_helpers::find_goal(
-        p, *input.masked_global_cost_map, *input.masked_direction_map, input.chassis_pose_map
+        p, *input.masked_global_cost_map, *input.masked_direction_map, input.chassis_pose_map,
+        input.base_direction_map
     );
     recovery_goal_set_time_ = input.stamp;
 

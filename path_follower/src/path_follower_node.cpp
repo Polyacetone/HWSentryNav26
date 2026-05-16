@@ -381,6 +381,11 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .radius_samples = static_cast<int>(declare_parameter<int>("recovery.search.radius_samples")),
         .angle_samples = static_cast<int>(declare_parameter<int>("recovery.search.angle_samples")),
         .path_integral_resolution = declare_parameter<double>("recovery.search.path_integral_resolution"),
+        .path_integral_cost_weight = declare_parameter<double>("recovery.search.path_integral_cost_weight"),
+        .path_integral_step_weight = declare_parameter<double>("recovery.search.path_integral_step_weight"),
+        .step_ascent_penalty_weight = declare_parameter<double>("recovery.search.step_ascent_penalty_weight"),
+        .step_ascent_penalty_norm_threshold = declare_parameter<double>("recovery.search.step_ascent_penalty_norm_threshold"),
+        .step_ascent_penalty_dot_threshold = declare_parameter<double>("recovery.search.step_ascent_penalty_dot_threshold"),
         .safe_hold_time = declare_parameter<double>("recovery.exit.safe_hold_time"),
         .goal_timeout = declare_parameter<double>("recovery.search.goal_timeout")
     };
@@ -389,7 +394,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .timeout = declare_parameter<double>("recovery.stuck.timeout"),
         .max_displacement = declare_parameter<double>("recovery.stuck.max_displacement"),
         .reverse_speed = declare_parameter<double>("recovery.stuck.reverse_speed"),
-        .reverse_duration = declare_parameter<double>("recovery.stuck.reverse_duration")
+        .reverse_displacement = declare_parameter<double>("recovery.stuck.reverse_displacement"),
+        .reverse_timeout = declare_parameter<double>("recovery.stuck.reverse_timeout")
     };
 
     // ─── MainController 参数 ───
@@ -408,11 +414,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .target_match_distance = declare_parameter<double>("step.detection.target_match_distance"),
         .rollout_match_distance = declare_parameter<double>("step.detection.rollout_match_distance"),
         .latch_threshold = static_cast<int>(declare_parameter<int>("step.detection.latch_threshold")),
-        .lookahead = {
-            .rollout_length_filter_alpha = declare_parameter<double>("step.detection.lookahead.rollout_length_filter_alpha"),
-            .fixed_extension_distance = declare_parameter<double>("step.detection.lookahead.fixed_extension_distance"),
-            .min_distance = declare_parameter<double>("step.detection.lookahead.min_distance")
-        }
+        .lookahead_distance = declare_parameter<double>("step.detection.lookahead_distance")
     };
     nav_params.step_runup = {
         .velocity_deficit_threshold = declare_parameter<double>("step.runup.velocity_deficit_threshold"),
@@ -432,12 +434,10 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .radius_preference_weight = declare_parameter<double>("step.runup.search.radius_preference_weight")
         }
     };
-
     nav_params.no_progress_guard = {
         .landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing"),
         .timeout = declare_parameter<double>("follow_no_progress_guard.timeout")
     };
-
     nav_params.step_block_replan = {
         .enable = declare_parameter<bool>("follow_step_block_replan.enable"),
         .lookahead_distance = declare_parameter<double>("follow_step_block_replan.lookahead_distance"),
@@ -446,7 +446,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .obstacle_cost_threshold = declare_parameter<double>("follow_step_block_replan.obstacle_cost_threshold"),
         .predicted_obstacle_ratio_threshold = declare_parameter<double>("follow_step_block_replan.predicted_obstacle_ratio_threshold")
     };
-
+    nav_params.latch_ttl = declare_parameter<double>("step.latch_ttl");
     nav_params.step_dist_offset = declare_parameter<double>("step.step_dist_offset");
 
     // ─── 创建 MainController ───
@@ -739,6 +739,7 @@ void PathFollowerNode::control_timer_callback() {
         .final_cost_map = final_cost_map_.get(),
         .masked_global_cost_map = masked_global_cost_map_.get(),
         .masked_direction_map = masked_direction_map_.get(),
+        .base_direction_map = global_direction_map_.get(),
         .current_dynamic_cost_map = current_cost_map_.get(),
         .per_step_cost_maps = std::move(per_step_ptrs),
         .per_step_dynamic_cost_maps = [&]() {
