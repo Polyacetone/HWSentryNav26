@@ -1,5 +1,5 @@
 #include <path_follower/utils.hpp>
-#include <path_follower/main_controller.hpp>
+#include <path_follower/state_machine.hpp>
 
 namespace path_follower {
 double clamp_path_u_extrapolated(const double u, const double u_min, const double u_max) {
@@ -219,28 +219,6 @@ Eigen::Vector2d rotate_vector(const Eigen::Vector2d& v, const double angle) {
     const double c = std::cos(angle);
     const double s = std::sin(angle);
     return Eigen::Vector2d(c * v.x() - s * v.y(), s * v.x() + c * v.y());
-}
-
-std::optional<double> score_runup_path_integral(
-    const NavigationParams& params,
-    const CostMap& cost_map,
-    const DirectionMap& dir_map,
-    const Eigen::Vector2d& origin,
-    const Eigen::Vector2d& goal
-) {
-    const double dist = (goal - origin).norm();
-    const double resolution = std::max(1e-3, params.step_runup.search.path_integral_resolution);
-    const int samples = std::max(1, static_cast<int>(std::ceil(dist / resolution)));
-    double score = 0.0;
-    for (int i = 0; i <= samples; ++i) {
-        const double t = static_cast<double>(i) / static_cast<double>(samples);
-        const Eigen::Vector2d pos = origin + (goal - origin) * t;
-        const auto sample = sample_fields(cost_map, dir_map, pos);
-        if (!sample) return std::nullopt;
-        score += params.step_runup.search.path_integral_cost_weight * std::clamp(sample->cost / 255.0, 0.0, 1.0)
-            + params.step_runup.search.path_integral_step_weight * sample->step_norm;
-    }
-    return score;
 }
 
 std::optional<double> max_cost_along_segment(

@@ -27,7 +27,6 @@ struct StSpin;
 struct StStopping;
 struct StStuckReverse;
 struct StHazardRecovery;
-struct StStepRunup;
 struct StWaitReplan;
 struct StStepping;
 
@@ -171,15 +170,13 @@ struct StFollow final : sc::state<StFollow, Machine> {
         if (in.is_stuck) {
             m.replan_after_recovery = true;
             m.pending_reverse_start_time = in.stamp;
+            m.pending_reverse_start_pos = in.chassis_pos_map;
             return transit<StStuckReverse>();
         }
         if (in.spin_requested && in.spin_high_priority) {
             m.stopping_dest = DestState::SPIN;
             m.stopping_start_time = in.stamp;
             return transit<StStopping>();
-        }
-        if (in.step_runup_requested) {
-            return transit<StStepRunup>();
         }
         if (in.reach_goal) {
             if (in.fixed_goal_flag) {
@@ -403,63 +400,6 @@ m.pending_wait_replan_start_time = in.stamp;
 
             m.output.consume_global_path = true;
             return transit<StIdle>();
-        }
-
-        return discard_event();
-    }
-};
-
-struct StStepRunup final : sc::state<StStepRunup, Machine> {
-    using reactions = sc::custom_reaction<EvUpdate>;
-
-    explicit StStepRunup(my_context ctx) : sc::state<StStepRunup, Machine>(ctx) {
-        auto& m = context<Machine>();
-        m.active_state = FsmState::STEP_RUNUP;
-        RCLCPP_INFO(m.logger, "FSM -> STEP_RUNUP");
-    }
-
-    sc::result react(const EvUpdate& ev) {
-        auto& m = context<Machine>();
-        const auto& in = ev.input;
-
-        if (!in.has_path) {
-            const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.fixed_goal_flag));
-            if (should_spin) {
-                m.stopping_dest = DestState::SPIN;
-            } else if (in.fixed_goal_flag) {
-                m.stopping_dest = DestState::FIXED;
-            } else {
-                m.stopping_dest = DestState::IDLE;
-            }
-            m.stopping_start_time = in.stamp;
-            return transit<StStopping>();
-        }
-
-        if (in.replan_requested) {
-            m.pending_wait_replan_start_time = in.stamp;
-            return transit<StWaitReplan>();
-        }
-
-        if (in.is_hazard) {
-            return transit<StHazardRecovery>();
-        }
-        if (in.is_stuck) {
-            m.replan_after_recovery = true;
-            m.pending_reverse_start_time = in.stamp;
-            m.pending_reverse_start_pos = in.chassis_pos_map;
-            return transit<StStuckReverse>();
-        }
-        if (in.spin_requested && in.spin_high_priority) {
-            m.stopping_dest = DestState::SPIN;
-            m.stopping_start_time = in.stamp;
-            return transit<StStopping>();
-        }
-        if (in.step_runup_completed) {
-            m.pending_wait_replan_start_time = in.stamp;
-            return transit<StWaitReplan>();
-        }
-        if (in.has_new_path) {
-            return transit<StFollow>();
         }
 
         return discard_event();

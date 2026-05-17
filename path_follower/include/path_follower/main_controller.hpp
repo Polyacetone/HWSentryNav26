@@ -82,7 +82,6 @@ struct ControlOutput {
     std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
-    std::optional<std::vector<Eigen::Vector2d>> step_rollout_path_map;
 
     // ─── 有效性 ───
     bool valid = false;                 // false 时 Node 不应发布指令
@@ -106,27 +105,6 @@ struct StepDetectionParams {
     double lookahead_distance;
 };
 
-struct StepRunupSearchParams {
-    double radius_min;
-    double radius_max;
-    int radius_samples;
-    double sector_half_angle_rad;
-    int angle_samples;
-    double candidate_cost_max;
-    double line_cost_max;
-    double safe_step_norm_threshold;
-    double path_integral_resolution;
-    double path_integral_cost_weight;
-    double path_integral_step_weight;
-    double radius_preference_weight;
-};
-
-struct StepRunupParams {
-    double velocity_deficit_threshold;
-    double goal_tolerance;
-    StepRunupSearchParams search;
-};
-
 struct NoProgressGuardParams {
     double landmark_spacing;
     double timeout;
@@ -147,7 +125,6 @@ struct NavigationParams {
 
     FollowProjectionGuardParams follow_proj_guard;
     StepDetectionParams step_detection;
-    StepRunupParams step_runup;
     NoProgressGuardParams no_progress_guard;
     StepBlockReplanParams step_block_replan;
 
@@ -186,7 +163,6 @@ private:
     ControlOutput execute_recovery(const ControlInput& input);
     ControlOutput execute_stuck_reverse(const ControlInput& input);
     ControlOutput execute_fixed(const ControlInput& input);
-    ControlOutput execute_step_runup(const ControlInput& input);
     void sync_mpc_context(const ControlInput& input, bool allow_observer_update);
     void reset_all_mpc_warm_start();
     void reset_all_mpc_observer();
@@ -224,21 +200,6 @@ private:
         StepDirection direction = StepDirection::UP;
     };
 
-    struct StepRunupContext {
-        PathStepTarget step_target;
-        ActiveStepMode step_command;
-        Eigen::Vector2d goal_map = Eigen::Vector2d::Zero();
-        double preferred_backoff_distance = 0.0;
-        double predicted_arrival_velocity = 0.0;
-        double velocity_deficit = 0.0;
-    };
-
-    struct StepRunupDecision {
-        bool request_replan = false;
-        std::optional<StepRunupContext> context;
-        std::optional<std::vector<Eigen::Vector2d>> debug_rollout_path_map;
-    };
-
     std::optional<PathStepTarget> detect_step_target_on_path(
         const SplineD& path,
         double start_u,
@@ -248,7 +209,6 @@ private:
         const std::vector<Eigen::Vector2d>& rollout_path_map,
         const DirectionMap& direction_map
     ) const;
-    [[nodiscard]] double current_step_lookahead_distance() const;
     [[nodiscard]] double project_path_u(const ControlInput& input, const SplineD& path, double seed_u) const;
     double advance_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
     [[nodiscard]] bool check_follow_projection_guard(const ControlInput& input, const SplineD& path, double current_u) const;
@@ -257,7 +217,6 @@ private:
     bool is_same_step_target(const PathStepTarget& lhs, const PathStepTarget& rhs) const;
     bool is_same_step_target(const PathStepTarget& target, const StepTargetObservation& observation) const;
     void clear_step_state();
-    void clear_step_runup_state(bool clear_last_completed_target = false);
     void update_step_state_for_path_change(bool has_new_path);
     void update_step_release(const SplineD& path, double current_u, std::chrono::steady_clock::time_point stamp);
     void extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map);
@@ -265,19 +224,6 @@ private:
     [[nodiscard]] uint8_t compute_step_distance_cm(const ControlInput& input, double current_u, const MPCPrediction& prediction) const;
     std::optional<PathStepTarget> try_latch_step_target(const SplineD& path, double current_u, const DirectionMap& direction_map);
     std::optional<ActiveStepMode> build_step_command(const PathStepTarget& target, const DirectionMap& direction_map) const;
-    StepRunupDecision evaluate_step_runup(
-        const ControlInput& input,
-        const SplineD& path,
-        double current_u,
-        const PathStepTarget& target,
-        const ActiveStepMode& step_command
-    ) const;
-    std::optional<Eigen::Vector2d> find_step_runup_goal(
-        const ControlInput& input,
-        const PathStepTarget& target,
-        double preferred_backoff_distance
-    ) const;
-    bool is_step_runup_goal_reached(const ControlInput& input) const;
     double step_speed_from_level(uint8_t speed_level) const;
     std::optional<ActiveStepMode> current_active_step_mode() const;
     bool is_step_active() const;
@@ -322,11 +268,6 @@ private:
     bool step_locked_fixed_goal_ = false;
     Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
     bool deferred_external_path_update_ = false;
-    bool step_runup_request_pending_ = false;
-    bool step_runup_goal_reached_ = false;
-    std::optional<StepRunupContext> step_runup_context_;
-    std::optional<PathStepTarget> last_completed_step_runup_target_;
-    std::optional<std::vector<Eigen::Vector2d>> pending_step_rollout_path_map_;
 
     // ─── 最近一次实际下发到底盘的控制指令 ───
     ControlOutput last_command_output_;

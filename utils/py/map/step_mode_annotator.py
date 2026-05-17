@@ -25,10 +25,10 @@ DOWN_MODE_OPTIONS = [
 ]
 
 SPEED_OPTIONS = [
-    ("1.0 m/s", 0),
-    ("1.6 m/s", 1),
-    ("2.2 m/s", 2),
-    ("2.8 m/s", 3),
+    ("1.2 m/s", 0),
+    ("1.8 m/s", 1),
+    ("2.4 m/s", 2),
+    ("3.0 m/s", 3),
 ]
 
 UP_MODE_LABEL_TO_VALUE = {label: value for label, value in UP_MODE_OPTIONS}

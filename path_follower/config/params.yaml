@@ -49,7 +49,7 @@
 
     step:
       step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离
-      latch_ttl: 5.0 # 台阶锁存最大持续秒数，超时视为卡死 (s)
+      latch_ttl: 8.0 # 台阶锁存最大持续秒数，超时视为卡死 (s)
       detection:
         detect_norm_threshold: 0.9 # 方向场模长 >= 该值认为进入台阶区域；从进入点起继续搜索首个 < 该值的位置作为台阶尾部
         detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，< -阈值为下台阶
@@ -57,35 +57,7 @@
         target_match_distance: 0.4 # 连续检测视为同一台阶目标的位置阈值 (m)
         rollout_match_distance: 0.8 # rollout 扫到的台阶与当前锁存目标匹配的位置阈值 (m)
         latch_threshold: 3 # 连续检测到同一台阶目标的次数阈值，超过才锁存
-        lookahead_distance: 2.0 # 沿当前全局路径向前检查距离 (m)
-      runup:
-        velocity_deficit_threshold: 0.2 # 上台阶预测速度赤字超过该值则触发助跑 (m/s)
-        goal_tolerance: 0.2 # 助跑点到达判定距离 (m)
-        mpc_weights:
-          tracking:
-            q_y: 0.5 # 横向误差权重
-            q_theta: 0.2 # 航向误差权重
-            q_u: 1.0 # 进度项权重（鼓励沿路径前进）
-          command:
-            r_dv: 0.2 # 线速度平滑
-            r_domega: 0.1 # 角速度平滑
-          motion:
-            acc_limit: 20.0 # 速度变化率约束惩罚
-            alpha_limit: 20.0 # 角速度变化率约束惩罚
-            lat_acc: 20.0 # 侧向稳定性惩罚
-        search:
-          radius_min: 2.0 # 助跑点搜索半径下界 (m)
-          radius_max: 4.0 # 助跑点搜索半径上界 (m)
-          radius_samples: 9 # 助跑点搜索半径采样数
-          sector_half_angle_rad: 0.6 # 以背离台阶方向为中心的采样扇区半角 (rad)
-          angle_samples: 13 # 扇区角度采样数
-          candidate_cost_max: 40.0 # 候选点代价上限
-          line_cost_max: 80.0 # 到助跑点连线的最大允许代价
-          safe_step_norm_threshold: 0.1 # 候选点方向场模长上限，避免落在台阶区
-          path_integral_resolution: 0.05 # 连线路径积分采样精度 (m)
-          path_integral_cost_weight: 1.0 # 路径积分中 cost 权重
-          path_integral_step_weight: 3.0 # 路径积分中台阶方向场权重
-          radius_preference_weight: 0.6 # 偏离理想助跑距离的惩罚权重
+        lookahead_distance: 3.0 # 沿当前全局路径向前检查距离 (m)
 
     state_machine:
       follow_to_spin_vel_max: 0.2 # STOPPING→SPIN 退出判定：|v_cmd| < 该值 (m/s)
@@ -102,9 +74,11 @@
         weight: 6.0 # 能量软约束权重
         softplus_beta: 20.0 # softplus斜率，越大越接近硬折线惩罚
       multi_hypothesis:
-        enable: false # 是否启用多假设求解（左/右偏移的备选路径）
-        lateral_offset: 1.0 # 横向偏移量 (m)
-        target_ey_penalty: 1.0 # 非中心target_ey的固定附加代价系数
+        enable: false # 是否启用双模板启动（正常前推 / 最大加速后退-保持-前进）
+        reverse_target_velocity: -1.0 # 后退模板目标倒车速度 (m/s)
+        forward_target_velocity: 0.3 # 后退模板倒车完成后加速到该正向速度 (m/s)
+        reverse_hold_steps: 6 # 达到倒车目标速度后保持的 rollout 步数
+      warm_start_velocity: 0.0 # reset / 冷启动时填充的前推速度 (m/s)
 
       follow:
         start_command:
@@ -182,30 +156,26 @@
         tracking_weights:
           q_y: 0.4  # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u: 1.0  # 进度项权重（鼓励沿路径前进）
+          q_u: 1.2  # 进度项权重（鼓励沿路径前进）
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
-          r_dv: 0.8 # 线速度平滑
-          r_domega: 0.4 # 角速度平滑
+          r_dv: 0.2 # 线速度平滑
+          r_domega: 0.1 # 角速度平滑
         motion_constraint_weights:
           acc_limit: 20.0 # 速度指令变化率超限惩罚
           alpha_limit: 20.0 # 角速度指令变化率超限惩罚
           lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         terrain_limits:
-          step_speed_levels: [1.0, 1.6, 2.2, 2.8] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
+          step_speed_levels: [1.2, 1.8, 2.4, 3.0] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
           step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
         terrain_weights:
-          step_vel_weight: 2.0 # 锁存后台阶区域速度目标惩罚权重
-          direction: 1.5 # 台阶方向对齐权重（鼓励与方向场同向）
+          step_vel_weight: 3.0 # 锁存后台阶区域速度目标惩罚权重
+          direction: 3.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
-          obstacle: 1.0 # 避障权重（全局+局部融合代价）
-        terminal_limits:
-          slow_down_deceleration: 2.5 # 终点减速期望加速度 (m/s²)
-          slow_down_target_vel: 0.3 # 终点减速目标速度 (m/s)
-          slow_down_num_samples: 12 # 剩余弧长估计的积分采样数
+          obstacle: 2.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
-          q_v_final: 0.2 # 终点减速权重（鼓励到达终点时减速）
+          q_v_final: 0.8 # 终点速度惩罚权重：softrelu(u-1)*v_act
         projection:
           num_samples: 50 # 投影到样条参数u的采样数
           search_window: 0.1 # 局部搜索窗口 (0~1)
@@ -299,5 +269,5 @@
         timeout: 2.0 # 卡住判定持续时间阈值 (s)
         max_displacement: 0.2 # 位移小于该值判定卡住 (m)
         reverse_speed: 0.8 # 倒车速度 (m/s)
-        reverse_displacement: 1.5 # 倒车退出位移阈值 (m) —— 里程计从 entry 起计
-        reverse_timeout: 10.0 # 倒车安全网超时 (s) —— MATURE 累计时间，超时打印 ERROR
+        reverse_displacement: 1.0 # 倒车退出位移阈值 (m) —— 里程计从 entry 起计
+        reverse_timeout: 3.0 # 倒车安全网超时 (s) —— MATURE 累计时间，超时打印 ERROR

@@ -45,7 +45,6 @@ double project_to_spline_u_extrapolated(
 
 namespace path_follower {
 struct RecoveryParams;
-struct NavigationParams;
 }
 
 namespace path_follower::recovery_helpers {
@@ -88,14 +87,6 @@ std::optional<Eigen::Vector2d> find_goal(
 );
 
 Eigen::Vector2d rotate_vector(const Eigen::Vector2d& v, double angle);
-
-std::optional<double> score_runup_path_integral(
-    const NavigationParams& params,
-    const CostMap& cost_map,
-    const DirectionMap& dir_map,
-    const Eigen::Vector2d& origin,
-    const Eigen::Vector2d& goal
-);
 
 std::optional<double> max_cost_along_segment(
     const CostMap& cost_map,

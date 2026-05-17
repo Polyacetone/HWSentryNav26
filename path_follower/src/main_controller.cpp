@@ -340,7 +340,6 @@ ControlOutput MainController::update(const ControlInput& input) {
     }
 
     const FsmState prev_state = last_fsm_state_;
-    const bool had_step_runup_request = step_runup_request_pending_;
     sync_mpc_context(effective_input, chassis_controllable);
 
     if (prev_state == FsmState::HAZARD_RECOVERY) {
@@ -353,10 +352,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     update_step_state_for_path_change(has_new_path);
     if (!has_path) {
         clear_step_state();
-        clear_step_runup_state(true);
     }
-
-    step_runup_goal_reached_ = (prev_state == FsmState::STEP_RUNUP) && is_step_runup_goal_reached(effective_input);
 
     if (has_new_path) {
         recompute_follow_landmarks(*effective_input.global_path);
@@ -376,7 +372,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     }
 
     bool request_replan_now = false;
-    if (!command_blocked && has_path && (prev_state == FsmState::FOLLOW || prev_state == FsmState::STEP_RUNUP)) {
+    if (!command_blocked && has_path && prev_state == FsmState::FOLLOW) {
         request_replan_now = check_follow_projection_guard(effective_input, *effective_input.global_path, current_u)
             || check_no_progress(effective_input, current_u)
             || ((prev_state == FsmState::FOLLOW) && check_step_block_replan(effective_input, *effective_input.global_path, current_u));
@@ -398,14 +394,12 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.fixed_goal_flag = effective_input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
     fsm_input.step_active = is_step_active();
-    fsm_input.step_runup_requested = step_runup_request_pending_;
-    fsm_input.step_runup_completed = step_runup_goal_reached_;
     fsm_input.replan_requested = request_replan_now;
     fsm_input.command_blocked = command_blocked;
     fsm_input.spin_requested = effective_input.spin_requested;
     fsm_input.spin_high_priority = effective_input.spin_high_priority;
     const bool hazard_allowed = (prev_state == FsmState::IDLE) || (prev_state == FsmState::SPIN)
-        || (prev_state == FsmState::HAZARD_RECOVERY) || (prev_state == FsmState::STEP_RUNUP);
+        || (prev_state == FsmState::HAZARD_RECOVERY);
     fsm_input.is_hazard = !command_blocked && hazard_allowed && compute_is_hazard(effective_input);
     fsm_input.is_stuck = !command_blocked && check_stuck(effective_input);
     fsm_input.is_recovery_safe = !command_blocked && update_recovery_safe_flag(effective_input);
@@ -431,15 +425,10 @@ ControlOutput MainController::update(const ControlInput& input) {
             case FsmState::HAZARD_RECOVERY: output = execute_recovery(effective_input); break;
             case FsmState::STUCK_REVERSE: output = execute_stuck_reverse(effective_input); break;
             case FsmState::FIXED: output = execute_fixed(effective_input); break;
-            case FsmState::STEP_RUNUP: output = execute_step_runup(effective_input); break;
             case FsmState::WAIT_REPLAN: output = execute_stop(effective_input); break;
             case FsmState::STEPPING: output = execute_follow(effective_input); break;
             case FsmState::DEAD: output = execute_idle(effective_input); break;
         }
-    }
-
-    if (had_step_runup_request && state != FsmState::STEP_RUNUP) {
-        clear_step_runup_state();
     }
 
     output.fsm_state = state;
@@ -449,7 +438,6 @@ ControlOutput MainController::update(const ControlInput& input) {
     if (output.consume_global_path) {
         last_reference_u_ = 0.0;
         clear_step_state();
-        clear_step_runup_state(state != FsmState::WAIT_REPLAN);
     }
 
     // 4. 同步已发布指令到 FSM / MPC；IDLE / SPIN / STUCK_REVERSE 无 track 连续性，
@@ -491,11 +479,6 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     ControlOutput out;
     if (!input.global_path || !input.final_cost_map || !input.masked_direction_map) return out;
 
-    if (pending_step_rollout_path_map_) {
-        out.step_rollout_path_map = pending_step_rollout_path_map_;
-        pending_step_rollout_path_map_ = std::nullopt;
-    }
-
     const double u0 = last_reference_u_;
     last_reference_u_ = u0;
 
@@ -512,8 +495,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_CONTROL_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
     }
 
     const auto& [cmd, prediction] = *result;
@@ -547,43 +530,6 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     return out;
 }
 
-ControlOutput MainController::execute_step_runup(const ControlInput& input) {
-    ControlOutput out;
-    out.mode = ChassisMode::NORMAL;
-    if (!step_runup_context_ || !input.final_cost_map || !input.masked_direction_map) {
-        out.velocity = 0.0;
-        out.omega = 0.0;
-        out.valid = true;
-        return out;
-    }
-
-    auto start_time = std::chrono::steady_clock::now();
-    const auto result = mpc_controller_->solve_hold(
-        step_runup_context_->goal_map,
-        input.chassis_pose_map,
-        input.chassis_state,
-        *input.final_cost_map,
-        *input.masked_direction_map
-    );
-    if (!result) {
-        RCLCPP_ERROR(logger_, "MPCSolver(StepRunup) solve failed: %s", result.error().c_str());
-        return out;
-    }
-
-    const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(StepRunup) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
-    }
-
-    out.velocity = std::get<0>(*result).x();
-    out.omega = std::get<0>(*result).y();
-    out.predicted_path_map = std::get<1>(*result).path_map;
-    out.predicted_v = std::get<1>(*result).v_pred;
-    out.predicted_w = std::get<1>(*result).w_pred;
-    out.valid = true;
-    return out;
-}
-
 // ═══════════════════ SPIN: 小陀螺 ════════════════════════════
 
 ControlOutput MainController::execute_spin(const ControlInput& input) {
@@ -610,8 +556,8 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_CONTROL_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -644,13 +590,6 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         }
     }
 
-    if (prev == FsmState::STEP_RUNUP && next != FsmState::STEP_RUNUP) {
-        if (step_runup_goal_reached_ && step_runup_context_) {
-            last_completed_step_runup_target_ = step_runup_context_->step_target;
-        }
-        clear_step_runup_state();
-    }
-
     if (next == FsmState::WAIT_REPLAN) {
         clear_step_state();
         last_reference_u_ = 0.0;
@@ -671,9 +610,9 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         recovery_safe_since_ = std::nullopt;
     }
 
-    // Hold 求解器由 HAZARD_RECOVERY / FIXED / STEP_RUNUP 共享，三者之间切换不应互相清空 warm start。
-    const bool next_uses_hold = (next == FsmState::FIXED) || (next == FsmState::STEP_RUNUP);
-    const bool prev_uses_hold = (prev == FsmState::FIXED) || (prev == FsmState::HAZARD_RECOVERY) || (prev == FsmState::STEP_RUNUP);
+    // Hold 求解器由 HAZARD_RECOVERY / FIXED 共享，两者之间切换不应互相清空 warm start。
+    const bool next_uses_hold = (next == FsmState::FIXED);
+    const bool prev_uses_hold = (prev == FsmState::FIXED) || (prev == FsmState::HAZARD_RECOVERY);
     if (allow_warm_start_reset && next_uses_hold && !prev_uses_hold) {
         mpc_controller_->reset_warm_start();
     }
@@ -809,8 +748,8 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_CONTROL_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -853,8 +792,8 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_CONTROL_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();

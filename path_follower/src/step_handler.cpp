@@ -186,20 +186,10 @@ void MainController::clear_step_state() {
     }
 }
 
-void MainController::clear_step_runup_state(const bool clear_last_completed_target) {
-    step_runup_request_pending_ = false;
-    step_runup_goal_reached_ = false;
-    step_runup_context_ = std::nullopt;
-    if (clear_last_completed_target) {
-        last_completed_step_runup_target_ = std::nullopt;
-    }
-}
-
 void MainController::update_step_state_for_path_change(const bool has_new_path) {
     if (!has_new_path) return;
     path_version_++;
     clear_step_state();
-    clear_step_runup_state(true);
 }
 
 void MainController::update_step_release(const SplineD& path, const double current_u, const std::chrono::steady_clock::time_point stamp) {
@@ -362,182 +352,6 @@ std::optional<MainController::PathStepTarget> MainController::try_latch_step_tar
     return target;
 }
 
-MainController::StepRunupDecision MainController::evaluate_step_runup(
-    const ControlInput& input,
-    const SplineD& path,
-    const double current_u,
-    const PathStepTarget& target,
-    const ActiveStepMode& step_command
-) const {
-    StepRunupDecision decision;
-    const auto rollout = mpc_controller_->rollout_step_arrival(
-        path,
-        input.chassis_pose_map,
-        input.chassis_state,
-        current_u,
-        step_command,
-        target.enter_u
-    );
-    if (!rollout) {
-        RCLCPP_WARN(logger_, "Step run-up rollout failed: %s", rollout.error().c_str());
-        return decision;
-    }
-    decision.debug_rollout_path_map = rollout->prediction.path_map;
-    if (!rollout->reached_target) {
-        return decision;
-    }
-    if (rollout->deficit <= nav_params_.step_runup.velocity_deficit_threshold) {
-        return decision;
-    }
-
-    const auto maybe_index = [&]() -> int {
-        if (rollout->prediction.path_map.empty()) return -1;
-        int best_idx = -1;
-        double best_dist = std::numeric_limits<double>::infinity();
-        for (size_t i = 0; i < rollout->prediction.path_map.size(); ++i) {
-            const double d = (rollout->prediction.path_map[i] - target.enter_pos_map).squaredNorm();
-            if (d < best_dist) {
-                best_dist = d;
-                best_idx = static_cast<int>(i);
-            }
-        }
-        return best_idx;
-    }();
-    RCLCPP_DEBUG(
-        logger_,
-        "Step run-up rollout: idx=%d arrival_v=%.2f target_v=%.2f deficit=%.2f current_v=%.2f",
-        maybe_index,
-        rollout->arrival_velocity,
-        rollout->target_velocity,
-        rollout->deficit,
-        input.chassis_state.velocity
-    );
-
-    if (last_completed_step_runup_target_ && is_same_step_target(*last_completed_step_runup_target_, target)) {
-        RCLCPP_WARN(
-            logger_,
-            "Step run-up loop detected at (%.2f, %.2f), cancelling path",
-            target.enter_pos_map.x(),
-            target.enter_pos_map.y()
-        );
-        decision.request_replan = true;
-        return decision;
-    }
-
-    const auto& profiles = mpc_controller_->params().follow.mode_profiles;
-    const MPCMotionConstraints* motion = nullptr;
-    switch (step_command.mode) {
-        case ChassisMode::STEP_UP_LEG_SHORT: motion = &profiles.up.short_leg.motion_constraints; break;
-        case ChassisMode::STEP_UP_JUMP:      motion = &profiles.up.jump.motion_constraints; break;
-        case ChassisMode::STEP_UP_LEG_LONG:  motion = &profiles.up.long_leg.motion_constraints; break;
-        case ChassisMode::STEP_DOWN_LEG_SHORT: motion = &profiles.down.short_leg.motion_constraints; break;
-        case ChassisMode::STEP_DOWN_JUMP:    motion = &profiles.down.jump.motion_constraints; break;
-        default:                             motion = &profiles.normal.motion_constraints; break;
-    }
-
-    const double required_distance = std::max(
-        0.0,
-        (step_command.target_velocity * step_command.target_velocity - rollout->arrival_velocity * rollout->arrival_velocity)
-            / std::max(2.0 * motion->acc_max, 1e-6)
-    );
-    const double preferred_backoff_distance = std::clamp(
-        required_distance,
-        nav_params_.step_runup.search.radius_min,
-        nav_params_.step_runup.search.radius_max
-    );
-    const auto goal = find_step_runup_goal(input, target, preferred_backoff_distance);
-    if (!goal) {
-        RCLCPP_WARN(
-            logger_,
-            "Step run-up requested but no valid run-up goal found at target (%.2f, %.2f)",
-            target.enter_pos_map.x(),
-            target.enter_pos_map.y()
-        );
-        decision.request_replan = true;
-        return decision;
-    }
-
-    decision.context = StepRunupContext {
-        .step_target = target,
-        .step_command = step_command,
-        .goal_map = *goal,
-        .preferred_backoff_distance = preferred_backoff_distance,
-        .predicted_arrival_velocity = rollout->arrival_velocity,
-        .velocity_deficit = rollout->deficit,
-    };
-    return decision;
-}
-
-std::optional<Eigen::Vector2d> MainController::find_step_runup_goal(
-    const ControlInput& input,
-    const PathStepTarget& target,
-    const double preferred_backoff_distance
-) const {
-    if (!input.final_cost_map || !input.masked_direction_map) return std::nullopt;
-
-    const double dir_norm = target.dir_map.norm();
-    if (dir_norm < ANGLE_EPSILON) return std::nullopt;
-
-    const Eigen::Vector2d origin = input.chassis_pose_map.head<2>();
-    const Eigen::Vector2d backward_dir = -target.dir_map / dir_norm;
-    const double radius_min = std::min(nav_params_.step_runup.search.radius_min, nav_params_.step_runup.search.radius_max);
-    const double radius_max = std::max(nav_params_.step_runup.search.radius_min, nav_params_.step_runup.search.radius_max);
-    const int radius_samples = std::max(1, nav_params_.step_runup.search.radius_samples);
-    const int angle_samples = std::max(1, nav_params_.step_runup.search.angle_samples);
-
-    std::optional<Eigen::Vector2d> best_goal;
-    double best_score = std::numeric_limits<double>::infinity();
-
-    for (int ri = 0; ri < radius_samples; ++ri) {
-        const double rt = (radius_samples == 1) ? 0.0 : static_cast<double>(ri) / static_cast<double>(radius_samples - 1);
-        const double radius = radius_min + (radius_max - radius_min) * rt;
-
-        for (int ai = 0; ai < angle_samples; ++ai) {
-            const double at = (angle_samples == 1) ? 0.5 : static_cast<double>(ai) / static_cast<double>(angle_samples - 1);
-            const double angle = -nav_params_.step_runup.search.sector_half_angle_rad
-                + 2.0 * nav_params_.step_runup.search.sector_half_angle_rad * at;
-            const Eigen::Vector2d dir = recovery_helpers::rotate_vector(backward_dir, angle);
-            const Eigen::Vector2d candidate = target.enter_pos_map + dir * radius;
-
-            const auto field = recovery_helpers::sample_fields(*input.final_cost_map, *input.masked_direction_map, candidate);
-            if (!field) continue;
-            if (field->cost > nav_params_.step_runup.search.candidate_cost_max) continue;
-            if (field->step_norm > nav_params_.step_runup.search.safe_step_norm_threshold) continue;
-
-            const auto line_cost = recovery_helpers::max_cost_along_segment(
-                *input.final_cost_map,
-                origin,
-                candidate,
-                nav_params_.follow_proj_guard.cost_samples
-            );
-            if (!line_cost || *line_cost > nav_params_.step_runup.search.line_cost_max) continue;
-
-            const auto path_score = recovery_helpers::score_runup_path_integral(
-                nav_params_,
-                *input.final_cost_map,
-                *input.masked_direction_map,
-                origin,
-                candidate
-            );
-            if (!path_score) continue;
-
-            const double score = *path_score
-                + nav_params_.step_runup.search.radius_preference_weight * std::abs(radius - preferred_backoff_distance);
-            if (score < best_score) {
-                best_score = score;
-                best_goal = candidate;
-            }
-        }
-    }
-
-    return best_goal;
-}
-
-bool MainController::is_step_runup_goal_reached(const ControlInput& input) const {
-    if (!step_runup_context_) return false;
-    return (input.chassis_pose_map.head<2>() - step_runup_context_->goal_map).norm() <= nav_params_.step_runup.goal_tolerance;
-}
-
 double MainController::step_speed_from_level(const uint8_t speed_level) const {
     return mpc_controller_->params().follow.terrain_limits.step_speed_levels[std::min<size_t>(speed_level, 3)];
 }
@@ -585,46 +399,10 @@ bool MainController::prepare_follow_step_behavior(
 ) {
     if (!input.masked_direction_map) return false;
 
-    if (!active_step_target_ && !step_runup_request_pending_) {
+    if (!active_step_target_) {
         if (const auto step_target = try_latch_step_target(path, current_u, *input.masked_direction_map)) {
             const auto step_command = build_step_command(*step_target, *input.masked_direction_map);
             if (step_command) {
-                const bool needs_runup = step_target->direction == StepDirection::UP;
-                const auto runup = needs_runup
-                    ? evaluate_step_runup(input, path, current_u, *step_target, *step_command)
-                    : StepRunupDecision {};
-                if (needs_runup && runup.debug_rollout_path_map) {
-                    pending_step_rollout_path_map_ = runup.debug_rollout_path_map;
-                }
-                if (runup.request_replan) {
-                    RCLCPP_WARN(
-                        logger_,
-                        "Follow replan: step run-up failed for target at (%.2f, %.2f)",
-                        step_target->enter_pos_map.x(),
-                        step_target->enter_pos_map.y()
-                    );
-                    return true;
-                }
-
-                if (runup.context) {
-                    step_runup_context_ = runup.context;
-                    step_runup_request_pending_ = true;
-                    step_runup_goal_reached_ = false;
-                    RCLCPP_DEBUG(
-                        logger_,
-                        "Step run-up requested: mode=%s deficit=%.2f target_v=%.2f arrival_v=%.2f current_v=%.2f enter_u=%.3f goal=(%.2f, %.2f)",
-                        mode_label(step_command->mode),
-                        runup.context->velocity_deficit,
-                        step_command->target_velocity,
-                        runup.context->predicted_arrival_velocity,
-                        input.chassis_state.velocity,
-                        step_target->enter_u,
-                        runup.context->goal_map.x(),
-                        runup.context->goal_map.y()
-                    );
-                    return false;
-                }
-
                 active_step_target_ = *step_target;
                 active_step_command_ = *step_command;
                 step_locked_path_ = input.global_path;
