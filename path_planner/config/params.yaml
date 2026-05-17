@@ -10,15 +10,20 @@
     control_points_pub_topic: "/path_planner/control_points" # B样条控制点发布话题
     optimized_path_pub_topic: "/path_planner/optimized_path" # 优化后路径采样点发布话题
 
-    # ── 可行性判定 ──
-    occupied_threshold: 50 # 格子代价值 > 该值则认为不可通行（0~255）
-    on_step_threshold: 0.1 # 格子方向场模长 > 该值则认为在台阶上不可达
-    step_mode_dot_threshold: 0.3 # 移动方向与台阶方向场点积阈值，超过该值判定为上/下台阶并检查alpha禁止位
-
     # ── 调试 ──
     debug:
       enable: true # 是否启用调试模式
       rough_path_pub_topic: "/path_planner/debug/rough_path" # A*原始路径发布话题
+
+    # ── 可行性判定 ──
+    traversability:
+      occupied_threshold: 50 # 格子代价值 > 该值则认为不可通行（0~255）
+      on_step_threshold: 0.1 # 格子方向场模长 > 该值则认为在台阶上不可达
+      step_mode_dot_threshold: 0.3 # 移动方向与台阶方向场点积阈值，超过该值判定为上/下台阶并检查alpha禁止位
+
+    # ── 起点/终点 Nudge ──
+    nudge:
+      max_distance: 1.0 # 在 merged cost map 上搜 free 格子的最大 BFS 半径 (m)
 
     # ── 起点预测 ──
     start_prediction:

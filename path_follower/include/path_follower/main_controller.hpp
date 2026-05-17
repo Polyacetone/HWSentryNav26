@@ -102,7 +102,9 @@ struct StepDetectionParams {
     double target_match_distance;
     double rollout_match_distance;
     int latch_threshold;
+    int release_threshold;
     double lookahead_distance;
+    double exit_advance_distance;
 };
 
 struct NoProgressGuardParams {
@@ -261,6 +263,7 @@ private:
     // ─── 台阶检测 / 锁存 / 执行状态 ───
     std::optional<PathStepTarget> pending_step_target_detection_;
     int pending_step_target_on_count_ = 0;
+    int pending_step_release_count_ = 0;
     std::optional<PathStepTarget> active_step_target_;
     std::optional<ActiveStepMode> active_step_command_;
     std::optional<SplineD> step_locked_path_;

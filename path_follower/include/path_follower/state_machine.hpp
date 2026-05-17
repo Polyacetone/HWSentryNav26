@@ -91,6 +91,7 @@ struct FsmInput {
     bool reach_goal = false;
     bool step_active = false;
     bool replan_requested = false;
+    bool replan_failed = false;     // 重规划请求收到了空路径（planner 失败）
 
     // 外部请求
     bool spin_requested = false;

@@ -225,6 +225,13 @@ struct StStepping final : sc::state<StStepping, Machine> {
             return discard_event();
         }
 
+        // 如果 stepping 完成时要求重规划（例如 stepping 期间收到了外部路径更新），
+        // 直接进入 WAIT_REPLAN 等待新路径，避免使用陈旧路径。
+        if (in.replan_requested) {
+            m.pending_wait_replan_start_time = in.stamp;
+            return transit<StWaitReplan>();
+        }
+
         return transit<StFollow>();
     }
 };
@@ -424,6 +431,17 @@ struct StWaitReplan final : sc::state<StWaitReplan, Machine> {
 
         if (in.has_new_path) {
             return transit<StFollow>();
+        }
+
+        if (in.replan_failed) {
+            m.output.consume_global_path = true;
+            RCLCPP_WARN(m.logger, "WAIT_REPLAN: replan failed (empty path)");
+
+            const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.fixed_goal_flag));
+            if (should_spin) {
+                return transit<StSpin>();
+            }
+            return transit<StIdle>();
         }
 
         const bool timeout = std::chrono::duration<double>(in.stamp - start_time_).count() > m.params.transition.wait_replan_timeout;

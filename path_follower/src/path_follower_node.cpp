@@ -49,6 +49,8 @@ private:
     void publish_chassis_cmd(const ControlOutput& output);
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     bool should_use_prediction_maps() const;
+    bool is_step_routing_context_locked() const;
+    void refresh_deferred_step_layers();
 
     // ─── 台阶掩码层更新 ───
     void update_step_layers();
@@ -95,6 +97,7 @@ private:
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplineD> global_path_;
     bool path_updated_ = false;
+    bool step_layer_update_deferred_ = false;
     bool fixed_goal_ = false;
     Eigen::Vector2d fixed_goal_pos_ = Eigen::Vector2d::Zero();
     ChassisMotionState chassis_state_ {};
@@ -388,7 +391,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .target_match_distance = declare_parameter<double>("step.detection.target_match_distance"),
         .rollout_match_distance = declare_parameter<double>("step.detection.rollout_match_distance"),
         .latch_threshold = static_cast<int>(declare_parameter<int>("step.detection.latch_threshold")),
-        .lookahead_distance = declare_parameter<double>("step.detection.lookahead_distance")
+        .release_threshold = static_cast<int>(declare_parameter<int>("step.detection.release_threshold")),
+        .lookahead_distance = declare_parameter<double>("step.detection.lookahead_distance"),
+        .exit_advance_distance = declare_parameter<double>("step.detection.exit_advance_distance")
     };
     nav_params.no_progress_guard = {
         .landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing"),
@@ -598,6 +603,18 @@ bool PathFollowerNode::should_use_prediction_maps() const {
     return !prediction_maps_.empty();
 }
 
+bool PathFollowerNode::is_step_routing_context_locked() const {
+    return nav_controller_ && nav_controller_->fsm_state() == FsmState::STEPPING;
+}
+
+void PathFollowerNode::refresh_deferred_step_layers() {
+    if (!step_layer_update_deferred_ || is_step_routing_context_locked()) {
+        return;
+    }
+
+    update_step_layers();
+}
+
 void PathFollowerNode::update_step_layers() {
     if (!global_cost_map_ || !global_direction_map_ || !step_routing_mask_) return;
 
@@ -610,9 +627,15 @@ void PathFollowerNode::update_step_layers() {
         }
     }
 
+    if (is_step_routing_context_locked()) {
+        step_layer_update_deferred_ = true;
+        return;
+    }
+
     step_routing_mask_->update(global_path_);
     step_cost_layer_ = step_routing_mask_->step_cost_layer();
     masked_direction_map_ = step_routing_mask_->masked_direction_map();
+    step_layer_update_deferred_ = false;
     update_masked_cost_maps();
 }
 
@@ -648,6 +671,8 @@ void PathFollowerNode::update_masked_cost_maps() {
 // ═══════════════════ 控制主循环 ══════════════════════════════
 
 void PathFollowerNode::control_timer_callback() {
+    refresh_deferred_step_layers();
+
     if (!global_cost_map_ || !final_cost_map_ || !masked_direction_map_) return;
 
     if (enable_debug_) {
@@ -732,6 +757,8 @@ void PathFollowerNode::control_timer_callback() {
         }
         update_step_layers();
     }
+
+    refresh_deferred_step_layers();
 
     // 发布指令
     if (output.valid) {

@@ -325,6 +325,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     }
 
     ControlInput effective_input = input;
+    bool had_deferred_update = false;
     const bool step_path_locked = active_step_command_.has_value() && step_locked_path_.has_value();
     if (step_path_locked) {
         if (input.path_updated || !input.global_path.has_value()) {
@@ -335,6 +336,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         effective_input.fixed_goal = step_locked_fixed_goal_;
         effective_input.fixed_goal_pos = step_locked_fixed_goal_pos_;
     } else {
+        had_deferred_update = deferred_external_path_update_;
         effective_input.path_updated = input.path_updated || deferred_external_path_update_;
         deferred_external_path_update_ = false;
     }
@@ -382,6 +384,12 @@ ControlOutput MainController::update(const ControlInput& input) {
         request_replan_now = !command_blocked && prepare_follow_step_behavior(effective_input, *effective_input.global_path, current_u);
     }
 
+    // stepping 期间若有路径更新被延迟锁存，stepping 结束后强制重规划，
+    // 避免使用在新位置下已失效的旧路径触发 follow_proj_guard 等问题。
+    if (!request_replan_now && had_deferred_update) {
+        request_replan_now = true;
+    }
+
     const bool dist_reached = has_path && ((effective_input.chassis_pose_map.head<2>() - effective_input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
     const bool u_reached = has_path && (current_u > nav_params_.stop_threshold_u);
 
@@ -395,6 +403,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.reach_goal = dist_reached || u_reached;
     fsm_input.step_active = is_step_active();
     fsm_input.replan_requested = request_replan_now;
+    fsm_input.replan_failed = !has_path && effective_input.path_updated;
     fsm_input.command_blocked = command_blocked;
     fsm_input.spin_requested = effective_input.spin_requested;
     fsm_input.spin_high_priority = effective_input.spin_high_priority;

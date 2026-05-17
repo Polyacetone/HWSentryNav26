@@ -175,6 +175,7 @@ void MainController::clear_step_state() {
     const bool had_latch = active_step_target_.has_value();
     pending_step_target_detection_ = std::nullopt;
     pending_step_target_on_count_ = 0;
+    pending_step_release_count_ = 0;
     active_step_target_ = std::nullopt;
     active_step_command_ = std::nullopt;
     step_locked_path_ = std::nullopt;
@@ -189,27 +190,36 @@ void MainController::clear_step_state() {
 void MainController::update_step_state_for_path_change(const bool has_new_path) {
     if (!has_new_path) return;
     path_version_++;
+    last_reference_u_ = 0.0;
     clear_step_state();
 }
 
 void MainController::update_step_release(const SplineD& path, const double current_u, const std::chrono::steady_clock::time_point stamp) {
-    (void)path;
     if (!active_step_target_) return;
     if (active_step_target_->path_version != path_version_) {
         RCLCPP_DEBUG(logger_, "Step released: path version changed (target_v=%d != cur_v=%d)", active_step_target_->path_version, path_version_);
         clear_step_state();
         return;
     }
-    if (current_u >= active_step_target_->exit_u) {
-        RCLCPP_DEBUG(
-            logger_,
-            "Step released: passed step (u=%.3f >= exit_u=%.3f)",
-            current_u,
-            active_step_target_->exit_u
-        );
-        clear_step_state();
+    const double release_u = advance_path_u_by_distance(path, active_step_target_->exit_u, nav_params_.step_detection.exit_advance_distance);
+    if (current_u >= release_u) {
+        pending_step_release_count_++;
+        if (pending_step_release_count_ >= nav_params_.step_detection.release_threshold) {
+            RCLCPP_DEBUG(
+                logger_,
+                "Step released: passed exit (u=%.3f >= release_u=%.3f (exit_u=%.3f + adv=%.2fm), release_count=%d >= release_threshold=%d)",
+                current_u,
+                release_u,
+                active_step_target_->exit_u,
+                nav_params_.step_detection.exit_advance_distance,
+                pending_step_release_count_,
+                nav_params_.step_detection.release_threshold
+            );
+            clear_step_state();
+        }
         return;
     }
+    pending_step_release_count_ = 0;
 
     // TTL 超时释放：台阶锁存超过 latch_ttl 仍未退出，认为卡死
     // 通过 step_ttl_just_expired_ 标志通知 FSM，由 STEPPING 状态直接转入 STUCK_REVERSE

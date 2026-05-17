@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <format>
 #include <rclcpp/rclcpp.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 #include <tf2_ros/transform_listener.hpp>
@@ -93,6 +94,7 @@ private:
     double start_prediction_min_speed_;
     double start_prediction_collision_check_step_;
     double prediction_horizon_seconds_;
+    double nudge_max_distance_;
     double prediction_weight_decay_;
 
     std::optional<Eigen::Vector2d> last_goal_map_;
@@ -122,9 +124,9 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     enable_debug_ = declare_parameter<bool>("debug.enable");
-    occupied_threshold_ = static_cast<int>(declare_parameter<int>("occupied_threshold"));
-    on_step_threshold_ = declare_parameter<double>("on_step_threshold");
-    step_mode_dot_threshold_ = declare_parameter<double>("step_mode_dot_threshold");
+    occupied_threshold_ = static_cast<int>(declare_parameter<int>("traversability.occupied_threshold"));
+    on_step_threshold_ = declare_parameter<double>("traversability.on_step_threshold");
+    step_mode_dot_threshold_ = declare_parameter<double>("traversability.step_mode_dot_threshold");
     prediction_horizon_seconds_ = declare_parameter<double>("prediction.horizon_seconds");
     prediction_weight_decay_ = declare_parameter<double>("prediction.weight_decay");
     start_prediction_enable_ = declare_parameter<bool>("start_prediction.enable");
@@ -132,6 +134,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     start_prediction_planning_delay_ = declare_parameter<double>("start_prediction.planning_delay");
     start_prediction_min_speed_ = declare_parameter<double>("start_prediction.min_speed");
     start_prediction_collision_check_step_ = declare_parameter<double>("start_prediction.collision_check_step");
+    nudge_max_distance_ = declare_parameter<double>("nudge.max_distance");
 
     if (enable_debug_) {
         std::string rough_path_pub_topic = declare_parameter<std::string>("debug.rough_path_pub_topic");
@@ -546,9 +549,12 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
 
     // ── 起点 nudge：在 merged 上找最近 free 点（最多 1m）──
     {
-        const auto nudged = nudge_point_to_free(start_map, 1.0);
+        const auto nudged = nudge_point_to_free(start_map, nudge_max_distance_);
         if (!nudged) {
-            publish_empty_path("Cannot nudge start to a free cell within 1m!", true);
+            publish_empty_path(
+                std::format("Cannot nudge start to a free cell within {:.2f} m!", nudge_max_distance_),
+                true
+            );
             return;
         }
         start_map = *nudged;
@@ -575,9 +581,12 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
                 return;
             }
         } else {
-            const auto nudged = nudge_point_to_free(goal_map, 1.0);
+            const auto nudged = nudge_point_to_free(goal_map, nudge_max_distance_);
             if (!nudged) {
-                publish_empty_path("Cannot nudge goal to a free cell within 1m!", true);
+                publish_empty_path(
+                    std::format("Cannot nudge goal to a free cell within {:.2f} m!", nudge_max_distance_),
+                    true
+                );
                 return;
             }
             goal_plan = *nudged;
