@@ -16,9 +16,8 @@ namespace path_follower {
 //  MPC 编译期常量
 // ═══════════════════════════════════════════════════════════════
 
-constexpr int MPC_HORIZON = 20; // MPC 预测步数
-constexpr double MPC_ROLLOUT_DT = 0.1;
-constexpr double MPC_CONTROL_DT = 0.05;
+constexpr int MPC_HORIZON = 50; // MPC 预测步数
+constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 constexpr int PWR_N = 12;
@@ -82,7 +81,9 @@ struct MPCFollowModeProfiles {
 struct MPCFollowTrackingWeights {
     double q_y;
     double q_theta;
-    double q_u;
+    double q_u_bwd;
+    double q_u_fwd;
+    double q_u_switch_eps;
 };
 
 struct MPCFollowCommandWeights {
@@ -161,7 +162,6 @@ struct PowerModelParams {
 };
 
 struct LPVDiscreteModel {
-    double dt = MPC_ROLLOUT_DT;
     double rho = 0.0;
     double ad00 = 1.0;
     double ad01 = 0.0;
@@ -270,13 +270,6 @@ struct EnergyParams {
     double softplus_beta;
 };
 
-struct MultiHypothesisParams {
-    bool enable;
-    double reverse_target_velocity;
-    double forward_target_velocity;
-    int reverse_hold_steps;
-};
-
 struct ActiveStepMode {
     ChassisMode mode = ChassisMode::NORMAL;
     double target_velocity = 0.0;
@@ -298,8 +291,6 @@ struct MPCParams {
     MPCHoldParams hold;
 
     EnergyParams energy;
-    double warm_start_velocity = 0.5;
-    MultiHypothesisParams mh_params;
     LPVKinematicModelParams kinematic_model;
     PowerModelParams power_model;
 };
@@ -381,8 +372,7 @@ public:
         const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit,
-        std::optional<ActiveStepMode> active_step_mode,
-        double target_ey = 0.0
+        std::optional<ActiveStepMode> active_step_mode
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -414,14 +404,12 @@ private:
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
     double prediction_dt_;
-    double rollout_dt_;
     LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
     double remaining_energy_;
     double rfr_pwr_limit_;
     std::optional<ActiveStepMode> active_step_mode_;
-    double target_ey_;
 };
 
 using FollowProblem = FollowProblemT<MPC_HORIZON>;
@@ -466,7 +454,6 @@ private:
     const MPCParams& p_;
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
-    double rollout_dt_;
     LPVDiscreteModel model_ {};
     double remaining_energy_;
     double rfr_pwr_limit_;
@@ -516,7 +503,6 @@ private:
     const MPCParams& p_;
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
-    double rollout_dt_;
     LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
     GridInfo dir_info_;
@@ -604,7 +590,7 @@ private:
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 
-    // 主 FDDP solver（中心假设）
+    // 主 FDDP solver
     fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
@@ -613,17 +599,10 @@ private:
     bool hold_warm_ = false;
     std::optional<ActiveStepMode> last_follow_mode_;
 
-    // 多假设 solver（正向 warm start / 平滑后退再前进启动）
-    fddp::Solver<FollowProblem> follow_solver_reverse_;
-
-    double follow_warm_carry_dt_ = 0.0;
-    double stop_warm_carry_dt_ = 0.0;
-    double hold_warm_carry_dt_ = 0.0;
-
     // 复用每步代价图视图，避免 solve_follow 中反复分配
     std::vector<CostMapGridView> step_cost_grids_cache_;
 
-    // 缓存的参考控制点（用于路径变化检测）
+    // 路径变更检测
     std::vector<Eigen::Vector2d> prev_ref_control_points_;
 
     // ── Hidden-state Luenberger observer ──

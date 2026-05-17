@@ -495,8 +495,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_CONTROL_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     }
 
     const auto& [cmd, prediction] = *result;
@@ -515,17 +515,6 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     out.predicted_w = prediction.w_pred;
     out.step_dist_cm = compute_step_distance_cm(input, u0, prediction);
     out.valid = true;
-
-    if (active_step_target_) {
-        RCLCPP_DEBUG(
-            logger_,
-            "step: mode=%s step_dist=%d u=%.3f enter=%.3f exit=%.3f inside=%d",
-            mode_label(active_step_command_ ? active_step_command_->mode : ChassisMode::NORMAL),
-            out.step_dist_cm, u0,
-            active_step_target_->enter_u, active_step_target_->exit_u,
-            (u0 >= active_step_target_->enter_u && u0 < active_step_target_->exit_u) ? 1 : 0
-        );
-    }
 
     return out;
 }
@@ -556,8 +545,8 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_CONTROL_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -610,7 +599,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         recovery_safe_since_ = std::nullopt;
     }
 
-    // Hold 求解器由 HAZARD_RECOVERY / FIXED 共享，两者之间切换不应互相清空 warm start。
+    // Hold 求解器由 HAZARD_RECOVERY / FIXED 共享，二者之间切换不应互相清空 warm start。
     const bool next_uses_hold = (next == FsmState::FIXED);
     const bool prev_uses_hold = (prev == FsmState::FIXED) || (prev == FsmState::HAZARD_RECOVERY);
     if (allow_warm_start_reset && next_uses_hold && !prev_uses_hold) {
@@ -748,8 +737,8 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_CONTROL_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -792,8 +781,8 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_CONTROL_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_CONTROL_DT * 500.0);
+    if (solve_ms > MPC_DT * 500.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
     }
 
     out.velocity = std::get<0>(*result).x();

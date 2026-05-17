@@ -77,7 +77,7 @@ enum class FsmState : uint8_t {
     STUCK_REVERSE = 6,    // 倒车脱困
     FIXED = 7,            // 固定在目标点位（持续 MPC 保持位置）
     WAIT_REPLAN = 8,      // 等待 path_planner 重规划
-    STEPPING = 9,        // 正在上下台阶，不允许外部任务打断
+    STEPPING = 9,         // 正在上下台阶，不允许外部任务打断
 };
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════

@@ -419,7 +419,7 @@ bool MainController::prepare_follow_step_behavior(
                     step_target->enter_pos_map.y()
                 );
             } else {
-                RCLCPP_WARN(logger_, "StepUp target latched but alpha mode forbids traversal");
+                RCLCPP_WARN(logger_, "Step target latched but alpha mode forbids traversal");
             }
         }
     }

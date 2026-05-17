@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <utility>
 
 namespace path_follower {
 
@@ -31,10 +30,6 @@ const MPCFollowModeProfile& select_follow_mode_profile(
 
 bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) {
     return active_step_mode.has_value() && active_step_mode->mode != ChassisMode::NORMAL;
-}
-
-inline double sq(double x) {
-    return x * x;
 }
 
 inline double softplus(double x) {
@@ -201,9 +196,8 @@ void zoh_v_matrices(
     gd1 = g10 * g0 + g11 * g1;
 }
 
-LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params, double rho, double dt) {
+LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params, double rho) {
     LPVDiscreteModel model;
-    model.dt = dt;
     model.rho = clamp_lpv_rho(rho, params.rho_clip);
 
     const double a00 = params.ca00 + model.rho * params.dca00;
@@ -214,7 +208,7 @@ LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params,
     const double b1 = params.cb1 + model.rho * params.dcb1;
 
     zoh_v_matrices(
-        a00, a01, a10, a11, b0, b1, params.gxh, params.gv, dt,
+        a00, a01, a10, a11, b0, b1, params.gxh, params.gv, MPC_DT,
         model.ad00, model.ad01, model.ad10, model.ad11,
         model.bd0, model.bd1, model.gd0, model.gd1
     );
@@ -222,7 +216,7 @@ LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params,
     const double lam = std::max(params.w_lam0 + model.rho * params.w_lam1, 1e-5);
     const double kw = params.w_k0 + model.rho * params.w_k1;
     const double cf = params.w_cf0 + model.rho * params.w_cf1;
-    model.alpha_w = std::exp(-lam * dt);
+    model.alpha_w = std::exp(-lam * MPC_DT);
     const double integ_w = (1.0 - model.alpha_w) / lam;
     model.beta_w = integ_w * kw;
     model.gamma_w = integ_w * cf;
@@ -570,7 +564,7 @@ StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const LPVDiscreteM
     const double v1 = model.ad10 * xh + model.ad11 * v + model.bd1 * dv + model.gd1 * nl_eval.nl;
     const double w1 = model.alpha_w * w + model.beta_w * dw - model.gamma_w * nl_eval.sw;
 
-    const double dt = model.dt;
+    const double dt = MPC_DT;
     const double theta1 = theta + (w + w1) * (dt * 0.5);
     const double ct0 = std::cos(theta), st0 = std::sin(theta);
     const double ct1 = std::cos(theta1), st1 = std::sin(theta1);
@@ -592,8 +586,7 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const LP
     const double theta = x(ix::THETA);
     const double xh = x(ix::XH), v = x(ix::V), w = x(ix::W);
     const double dv = x(ix::DV), dw = x(ix::DW);
-    const double dt = model.dt;
-    const double h = dt * 0.5;
+    const double dt = MPC_DT, h = dt * 0.5;
 
     const auto nl_eval = evaluate_lpv_nonlinear(v, w, model);
 
@@ -676,22 +669,19 @@ FollowProblemT<Horizon>::FollowProblemT(
     const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit,
-    std::optional<ActiveStepMode> active_step_mode,
-    double target_ey
-): 
+    std::optional<ActiveStepMode> active_step_mode
+):
     ref_cps_(ref_control_points),
     p_(params),
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
     prediction_dt_(prediction_dt),
-    rollout_dt_(MPC_ROLLOUT_DT),
-    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho, rollout_dt_)),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
-    active_step_mode_(active_step_mode),
-    target_ey_(target_ey) {}
+    active_step_mode_(active_step_mode) {}
 
 template<int Horizon>
 StateVec FollowProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
@@ -743,8 +733,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const DirectionMapGridView& dg,
     const GridInfo& di,
     double rfr_pwr_limit,
-    std::optional<ActiveStepMode> active_step_mode,
-    double target_ey
+    std::optional<ActiveStepMode> active_step_mode
 ) {
     const auto& follow = p.follow;
     const auto& tracking_w = follow.tracking_weights;
@@ -773,6 +762,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const auto u_adv = advance_u_progress_extrapolated_with_jacobian(uc_raw, x, ref_cps);
     const double u_next_extrap = u_adv.u_next_extrap;
     const double u_progress = std::min(1.0, u_next_extrap);
+    const double delta_u = u_next_extrap - uc;
 
     StateVec du_progress_dx = StateVec::Zero();
     if (u_next_extrap < 1.0) {
@@ -822,10 +812,10 @@ FollowResidualLinearization follow_residual_linearized_impl(
 
     const double a_lat = std::abs(v_act * w_act);
 
-    const double dv_lim = motion_lim.acc_max * MPC_ROLLOUT_DT;
-    const double dw_lim = motion_lim.alpha_max * MPC_ROLLOUT_DT;
+    const double dv_lim = motion_lim.acc_max * MPC_DT;
+    const double dw_lim = motion_lim.alpha_max * MPC_DT;
 
-    out.r(0) = tracking_w.q_y * (ey - target_ey);
+    out.r(0) = tracking_w.q_y * ey;
     out.jx(0, ix::X) = tracking_w.q_y * dey_dpx;
     out.jx(0, ix::Y) = tracking_w.q_y * dey_dpy;
     out.jx(0, ix::PATH_U) = tracking_w.q_y * dey_dpathu;
@@ -835,8 +825,14 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(1, ix::PATH_U) = tracking_w.q_theta * detheta_dpathu;
 
     const auto relu_progress = smooth_relu_eval(1.0 - u_progress);
-    out.r(2) = tracking_w.q_u * relu_progress.value;
-    out.jx.row(2) = (-tracking_w.q_u * relu_progress.deriv * du_progress_dx).transpose();
+    const double q_u_switch_eps = std::max(tracking_w.q_u_switch_eps, 1e-6);
+    const double forward_gate = 0.5 * (1.0 + smooth_sgn(delta_u, q_u_switch_eps));
+    const double q_u_weight = tracking_w.q_u_bwd + (tracking_w.q_u_fwd - tracking_w.q_u_bwd) * forward_gate;
+
+    // frozen coefficient: q_u_weight 随 Δu 变化参与残差计算,
+    // 但 Jacobian 中视为局部常数以避免切换点附近产生对抗梯度.
+    out.r(2) = q_u_weight * relu_progress.value;
+    out.jx.row(2) = (-q_u_weight * relu_progress.deriv * du_progress_dx).transpose();
 
     out.r(3) = command_w.r_v * v_cmd;
     out.ju(3, 0) = command_w.r_v;
@@ -895,11 +891,10 @@ FollowResidualLinearization follow_residual_linearized_impl(
         out.jx(12, ix::V) = terrain_w.step_vel_weight * dir_norm * relu_vstep.deriv * sign_v_err;
     }
 
-    // 终点速度惩罚：softrelu(u - 1) * v_act，u>1时平滑激活
-    const auto relu_u_over = smooth_relu_eval(uc_raw - 1.0);
-    out.r(13) = terminal_w.q_v_final * relu_u_over.value * v_act;
-    out.jx(13, ix::V) = terminal_w.q_v_final * relu_u_over.value;
-    out.jx(13, ix::PATH_U) = terminal_w.q_v_final * relu_u_over.deriv * v_act * duc_dpathu;
+    const auto endpoint_gate = smooth_relu_eval(uc - 1.0);
+    out.r(13) = terminal_w.q_v_final * v_act * endpoint_gate.value;
+    out.jx(13, ix::V) = terminal_w.q_v_final * endpoint_gate.value;
+    out.jx(13, ix::PATH_U) = terminal_w.q_v_final * v_act * endpoint_gate.deriv * duc_dpathu;
 
     if (p.energy.enable) {
         const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
@@ -929,21 +924,11 @@ FollowResidualVec follow_residual_impl(
     const DirectionMapGridView& dg,
     const GridInfo& di,
     double rfr_pwr_limit,
-    std::optional<ActiveStepMode> active_step_mode,
-    double target_ey
+    std::optional<ActiveStepMode> active_step_mode
 ) {
     return follow_residual_linearized_impl(
-        x,
-        u,
-        ref_cps,
-        p,
-        cg,
-        ci,
-        dg,
-        di,
-        rfr_pwr_limit,
-        active_step_mode,
-        target_ey
+        x, u, ref_cps, p, cg, ci, dg, di,
+        rfr_pwr_limit, active_step_mode
     ).r;
 }
 
@@ -1013,15 +998,15 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
     const double ddsdu_du = (d1_norm > 1e-12) ? (d1.dot(d2) / d1_norm) : 0.0;
     const double d_inv_dsdu_dpathu = -ddsdu_du * duc_dpathu / (dsdu * dsdu);
 
-    out.u_next_extrap = uc + MPC_ROLLOUT_DT * dsdt * inv_dsdu;
+    out.u_next_extrap = uc + MPC_DT * dsdt * inv_dsdu;
 
-    out.du_next_dx(ix::X) = MPC_ROLLOUT_DT * ddsdt_dpx * inv_dsdu;
-    out.du_next_dx(ix::Y) = MPC_ROLLOUT_DT * ddsdt_dpy * inv_dsdu;
-    out.du_next_dx(ix::THETA) = MPC_ROLLOUT_DT * ddsdt_dtheta * inv_dsdu;
-    out.du_next_dx(ix::V) = MPC_ROLLOUT_DT * ddsdt_dv * inv_dsdu;
+    out.du_next_dx(ix::X) = MPC_DT * ddsdt_dpx * inv_dsdu;
+    out.du_next_dx(ix::Y) = MPC_DT * ddsdt_dpy * inv_dsdu;
+    out.du_next_dx(ix::THETA) = MPC_DT * ddsdt_dtheta * inv_dsdu;
+    out.du_next_dx(ix::V) = MPC_DT * ddsdt_dv * inv_dsdu;
 
     const double ddsdt_dpathu = ddsdt_du * duc_dpathu;
-    out.du_next_dx(ix::PATH_U) = duc_dpathu + MPC_ROLLOUT_DT * (ddsdt_dpathu * inv_dsdu + dsdt * d_inv_dsdu_dpathu);
+    out.du_next_dx(ix::PATH_U) = duc_dpathu + MPC_DT * (ddsdt_dpathu * inv_dsdu + dsdt * d_inv_dsdu_dpathu);
 
     return out;
 }
@@ -1040,24 +1025,16 @@ double advance_u_progress(double u_cur, const StateVec& x, const std::vector<Eig
 template<int Horizon>
 const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(int k) const {
     if (step_cost_grids_.size() <= 1) return step_cost_grids_[0];
-    int idx = static_cast<int>(static_cast<double>(k) * rollout_dt_ / prediction_dt_);
+    int idx = static_cast<int>(static_cast<double>(k) * MPC_DT / prediction_dt_);
     return step_cost_grids_[static_cast<size_t>(std::min(idx, static_cast<int>(step_cost_grids_.size()) - 1))];
 }
 
 template<int Horizon>
 double FollowProblemT<Horizon>::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     return residual_cost(follow_residual_impl(
-        x,
-        u,
-        ref_cps_,
-        p_,
-        cost_grid_for_step(k),
-        cost_info_,
-        dir_grid_,
-        dir_info_,
-        rfr_pwr_limit_,
-        active_step_mode_,
-        target_ey_
+        x, u, ref_cps_, p_,
+        cost_grid_for_step(k), cost_info_, dir_grid_, dir_info_,
+        rfr_pwr_limit_, active_step_mode_
     ));
 }
 
@@ -1074,17 +1051,8 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 ) const {
     const auto& cg = cost_grid_for_step(k);
     const auto lin = follow_residual_linearized_impl(
-        x,
-        u,
-        ref_cps_,
-        p_,
-        cg,
-        cost_info_,
-        dir_grid_,
-        dir_info_,
-        rfr_pwr_limit_,
-        active_step_mode_,
-        target_ey_
+        x, u, ref_cps_, p_, cg, cost_info_, dir_grid_, dir_info_,
+        rfr_pwr_limit_, active_step_mode_
     );
 
     lx = lin.jx.transpose() * lin.r;
@@ -1127,8 +1095,7 @@ StopProblem::StopProblem(
     p_(params),
     cost_grid_(cost_grid),
     cost_info_(cost_info),
-    rollout_dt_(MPC_ROLLOUT_DT),
-    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho, rollout_dt_)),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
@@ -1177,8 +1144,8 @@ StopResidualVec stop_residual_impl(
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
     const double a_lat = std::abs(v_act * w_act);
 
-    const double dv_lim = motion_lim.acc_max * MPC_ROLLOUT_DT;
-    const double dw_lim = motion_lim.alpha_max * MPC_ROLLOUT_DT;
+    const double dv_lim = motion_lim.acc_max * MPC_DT;
+    const double dw_lim = motion_lim.alpha_max * MPC_DT;
     r(0) = command_w.q_v * v_cmd;
     r(1) = command_w.q_omega * w_cmd;
     r(2) = command_w.r_dv * dv_cmd;
@@ -1278,8 +1245,7 @@ HoldProblem::HoldProblem(
     p_(params),
     cost_grid_(cost_grid),
     cost_info_(cost_info),
-    rollout_dt_(MPC_ROLLOUT_DT),
-    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho, rollout_dt_)),
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
@@ -1344,8 +1310,8 @@ HoldResidualVec hold_residual_impl(
     const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     const double a_lat = std::abs(v_act * w_act);
 
-    const double dv_lim = motion_lim.acc_max * MPC_ROLLOUT_DT;
-    const double dw_lim = motion_lim.alpha_max * MPC_ROLLOUT_DT;
+    const double dv_lim = motion_lim.acc_max * MPC_DT;
+    const double dw_lim = motion_lim.alpha_max * MPC_DT;
     r(0) = goal_w.q_goal_xy * ddx;
     r(1) = goal_w.q_goal_xy * ddy;
     r(2) = goal_w.q_goal_theta * std::abs(heading_sin);
@@ -1449,120 +1415,28 @@ void HoldProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, Ma
 namespace {
 
 template<typename SolverT>
-void shift_warm_start_interpolated(SolverT& solver, int shift_steps, double frac) {
-    const double offset = static_cast<double>(shift_steps) + frac;
-    if (offset < 1e-12) return;
-
+void shift_warm_start(SolverT& solver) {
     const auto xs_prev = solver.xs;
     const auto us_prev = solver.us;
 
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        const double idx = static_cast<double>(k) + offset;
-        const size_t src = std::min(static_cast<size_t>(idx), static_cast<size_t>(SolverT::N - 1));
-        const double t = idx - static_cast<double>(src);
-        const size_t next = std::min(src + 1, static_cast<size_t>(SolverT::N - 1));
-        if (t < 1e-12) {
-            solver.us[k] = us_prev[src];
-        } else {
-            solver.us[k] = us_prev[src] * (1.0 - t) + us_prev[next] * t;
-        }
+    for (size_t k = 0; k + 1 < SolverT::N; ++k) {
+        solver.us[k] = us_prev[k + 1];
     }
+    solver.us[SolverT::N - 1] = us_prev[SolverT::N - 1];
 
-    for (size_t k = 1; k <= SolverT::N; ++k) {
-        const double idx = static_cast<double>(k) + offset;
-        const size_t src = std::min(static_cast<size_t>(idx), static_cast<size_t>(SolverT::N));
-        const double t = idx - static_cast<double>(src);
-        const size_t next = std::min(src + 1, static_cast<size_t>(SolverT::N));
-        if (t < 1e-12) {
-            solver.xs[k] = xs_prev[src];
-        } else {
-            solver.xs[k] = xs_prev[src] * (1.0 - t) + xs_prev[next] * t;
-        }
+    for (size_t k = 1; k < SolverT::N; ++k) {
+        solver.xs[k] = xs_prev[k + 1];
     }
+    solver.xs[SolverT::N] = xs_prev[SolverT::N];
 }
 
 template<typename SolverT, typename ProblemT>
-void initialize_primal_trajectory(
-    SolverT& solver,
-    const ProblemT& prob,
-    const StateVec& x0,
-    bool use_warm_start,
-    int shift_steps,
-    double frac,
-    double initial_velocity
-) {
+void initialize_primal_trajectory(SolverT& solver, const ProblemT& prob, const StateVec& x0, bool use_warm_start) {
     if (use_warm_start) {
-        shift_warm_start_interpolated(solver, shift_steps, frac);
+        shift_warm_start(solver);
     } else {
         for (size_t k = 0; k < SolverT::N; ++k) {
             solver.us[k].setZero();
-            solver.us[k](0) = initial_velocity;
-        }
-    }
-
-    solver.xs[0] = x0;
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        solver.xs[k + 1] = prob.dynamics(static_cast<int>(k), solver.xs[k], solver.us[k]);
-    }
-}
-
-template<typename SolverT, typename ProblemT>
-void initialize_reverse_then_forward_template(
-    SolverT& solver,
-    const SolverT& forward_template,
-    const ProblemT& prob,
-    const StateVec& x0,
-    const MultiHypothesisParams& params,
-    const MPCFollowModeProfile& mode_profile
-) {
-    const double reverse_target = std::clamp(
-        params.reverse_target_velocity,
-        mode_profile.command_bounds.vel_min,
-        0.0
-    );
-    const double forward_target = std::clamp(
-        params.forward_target_velocity,
-        0.0,
-        mode_profile.command_bounds.vel_max
-    );
-    const int hold_steps = std::max(0, params.reverse_hold_steps);
-    const double dv_per_step = mode_profile.motion_constraints.acc_max * MPC_ROLLOUT_DT;
-
-    solver.us = forward_template.us;
-    solver.xs = forward_template.xs;
-
-    double v_cmd = x0(ix::DV);
-    bool reversed = false;
-    int hold_remaining = hold_steps;
-    bool forwarded = false;
-
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        double target_v;
-        if (!reversed) {
-            target_v = reverse_target;
-        } else if (hold_remaining > 0) {
-            target_v = reverse_target;
-            --hold_remaining;
-        } else {
-            target_v = forward_target;
-        }
-
-        const double dv = std::clamp(target_v - v_cmd, -dv_per_step, dv_per_step);
-        v_cmd += dv;
-        solver.us[k](0) = std::clamp(
-            v_cmd,
-            mode_profile.command_bounds.vel_min,
-            mode_profile.command_bounds.vel_max
-        );
-
-        if (!reversed && std::abs(v_cmd - reverse_target) < dv_per_step * 0.5) {
-            v_cmd = reverse_target;
-            reversed = true;
-        }
-        if (reversed && hold_remaining == 0 && !forwarded
-            && std::abs(v_cmd - forward_target) < dv_per_step * 0.5) {
-            v_cmd = forward_target;
-            forwarded = true;
         }
     }
 
@@ -1607,15 +1481,6 @@ MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
     step_cost_grids_cache_.reserve(MPC_HORIZON + 1);
 }
 
-namespace {
-int advance_warm_shift_steps(double& carry_dt, double rollout_dt) {
-    const int shift_steps = static_cast<int>(std::floor((carry_dt + 1e-9) / std::max(rollout_dt, 1e-6)));
-    carry_dt -= static_cast<double>(shift_steps) * rollout_dt;
-    carry_dt = std::clamp(carry_dt, 0.0, rollout_dt);
-    return shift_steps;
-}
-} // anonymous namespace
-
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
     last_cmd_ = cmd;
 }
@@ -1626,15 +1491,8 @@ void MPCSolver::reset_warm_start() {
     hold_warm_ = false;
     last_u_ = 0.0;
     last_follow_mode_ = std::nullopt;
-    follow_warm_carry_dt_ = 0.0;
-    stop_warm_carry_dt_ = 0.0;
-    hold_warm_carry_dt_ = 0.0;
-    const double warm_v = params_.warm_start_velocity;
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
-        follow_solver_.us[k](0) = warm_v;
-        follow_solver_reverse_.us[k].setZero();
-        follow_solver_reverse_.us[k](0) = warm_v;
         stop_solver_.us[k].setZero();
         hold_solver_.us[k].setZero();
     }
@@ -1658,11 +1516,7 @@ void MPCSolver::update_observer(const ChassisMotionState& chassis_state) {
         observer_initialized_ = true;
         return;
     }
-    const auto model = build_lpv_discrete_model(
-        params_.kinematic_model,
-        0.5 * (prev_schedule_rho_ + rho_cur),
-        MPC_CONTROL_DT
-    );
+    const auto model = build_lpv_discrete_model(params_.kinematic_model, 0.5 * (prev_schedule_rho_ + rho_cur));
     const auto nl_eval = evaluate_lpv_nonlinear(prev_v_act_, prev_w_act_, model);
     const double xh_pred = model.ad00 * x_h_hat_ + model.ad01 * prev_v_act_ + model.bd0 * last_cmd_.x() + model.gd0 * nl_eval.nl;
     const double v_pred = model.ad10 * x_h_hat_ + model.ad11 * prev_v_act_ + model.bd1 * last_cmd_.x() + model.gd1 * nl_eval.nl;
@@ -1742,7 +1596,6 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     );
     if (path_changed || mode_changed) {
         follow_warm_ = false;
-        follow_warm_carry_dt_ = 0.0;
     }
     last_u_ = u0;
 
@@ -1753,14 +1606,14 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             chassis_state.velocity,
             params_.follow.start_command.vel_cmd_act_gap_max,
             follow_mode_profile.motion_constraints.acc_max,
-            MPC_CONTROL_DT
+            MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_state.omega,
             params_.follow.start_command.omega_cmd_act_gap_max,
             follow_mode_profile.motion_constraints.alpha_max,
-            MPC_CONTROL_DT
+            MPC_DT
         )
     );
     const double schedule_rho = select_follow_schedule_rho(
@@ -1786,7 +1639,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             step_cost_grids_cache_.emplace_back(*cm);
         }
     }
-    const double pred_dt = per_step_cost_maps.empty() ? MPC_ROLLOUT_DT : prediction_dt;
+    const double pred_dt = per_step_cost_maps.empty() ? MPC_DT : prediction_dt;
 
     const GridInfo ci = make_grid_info(cost_map);
     const DirectionMapGridView dg(direction_map);
@@ -1794,66 +1647,18 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     FollowProblem prob_center(
-        ref_cps,
-        params_,
-        step_cost_grids_cache_,
-        ci,
-        pred_dt,
-        schedule_rho,
-        dg,
-        di,
-        remaining_energy_,
-        rfr_pwr_limit_,
-        active_step_mode,
-        0.0
+        ref_cps, params_, step_cost_grids_cache_, ci, pred_dt, schedule_rho,
+        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode
     );
 
     fddp::SolverOptions opts;
-    opts.max_iters = 120;
+    opts.max_iters = 60;
     opts.tol_grad = 1e-6;
     opts.tol_cost = 1e-8;
 
-    // ── 初始化中心假设（插值对齐到真实时间） ──
-    if (follow_warm_) {
-        follow_warm_carry_dt_ += MPC_CONTROL_DT;
-    }
-    const int follow_shift_steps = follow_warm_ ? advance_warm_shift_steps(follow_warm_carry_dt_, MPC_ROLLOUT_DT) : 0;
-    const double follow_frac = follow_warm_ ? (follow_warm_carry_dt_ / MPC_ROLLOUT_DT) : 0.0;
-    initialize_primal_trajectory(follow_solver_, prob_center, x0, follow_warm_, follow_shift_steps, follow_frac, params_.warm_start_velocity);
-
-    if (params_.mh_params.enable) {
-        initialize_reverse_then_forward_template(
-            follow_solver_reverse_,
-            follow_solver_,
-            prob_center,
-            x0,
-            params_.mh_params,
-            follow_mode_profile
-        );
-
-        std::array<double, 2> costs {};
-        #pragma omp parallel sections
-        {
-            #pragma omp section
-            {
-                auto r = follow_solver_.solve(prob_center, opts);
-                costs[0] = r.cost;
-            }
-            #pragma omp section
-            {
-                auto r = follow_solver_reverse_.solve(prob_center, opts);
-                costs[1] = r.cost;
-            }
-        }
-
-        const int best = static_cast<int>(std::min_element(costs.begin(), costs.end()) - costs.begin());
-        if (best == 1) {
-            follow_solver_.xs = follow_solver_reverse_.xs;
-            follow_solver_.us = follow_solver_reverse_.us;
-        }
-    } else {
-        follow_solver_.solve(prob_center, opts);
-    }
+    // ── 初始化并求解中心假设 ──
+    initialize_primal_trajectory(follow_solver_, prob_center, x0, follow_warm_);
+    follow_solver_.solve(prob_center, opts);
 
     follow_warm_ = true;
     last_follow_mode_ = active_step_mode;
@@ -1873,14 +1678,14 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             chassis_state.velocity,
             params_.stop.start_command.vel_cmd_act_gap_max,
             params_.stop.motion_constraints.acc_max,
-            MPC_CONTROL_DT
+            MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_state.omega,
             params_.stop.start_command.omega_cmd_act_gap_max,
             params_.stop.motion_constraints.alpha_max,
-            MPC_CONTROL_DT
+            MPC_DT
         )
     );
     const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
@@ -1890,19 +1695,15 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
     StopProblem prob(params_, cg, ci, schedule_rho, remaining_energy_, rfr_pwr_limit_);
-    if (stop_warm_) {
-        stop_warm_carry_dt_ += MPC_CONTROL_DT;
-    }
-    const int stop_shift_steps = stop_warm_ ? advance_warm_shift_steps(stop_warm_carry_dt_, MPC_ROLLOUT_DT) : 0;
-    const double stop_frac = stop_warm_ ? (stop_warm_carry_dt_ / MPC_ROLLOUT_DT) : 0.0;
-    initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_, stop_shift_steps, stop_frac, 0.0);
+    initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 80;
+    opts.max_iters = 60;
     opts.tol_grad = 1e-6;
     opts.tol_cost = 1e-8;
     stop_solver_.solve(prob, opts);
     stop_warm_ = true;
+
     const Eigen::Vector2d cmd(stop_solver_.us[0](0), stop_solver_.us[0](1));
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, stop_solver_, x0)};
@@ -1921,14 +1722,14 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             chassis_state.velocity,
             params_.hold.start_command.vel_cmd_act_gap_max,
             params_.hold.motion_constraints.acc_max,
-            MPC_CONTROL_DT
+            MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_state.omega,
             params_.hold.start_command.omega_cmd_act_gap_max,
             params_.hold.motion_constraints.alpha_max,
-            MPC_CONTROL_DT
+            MPC_DT
         )
     );
     const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
@@ -1940,19 +1741,15 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
     HoldProblem prob(goal_map, params_, cg, ci, schedule_rho, dg, di, remaining_energy_, rfr_pwr_limit_);
-    if (hold_warm_) {
-        hold_warm_carry_dt_ += MPC_CONTROL_DT;
-    }
-    const int hold_shift_steps = hold_warm_ ? advance_warm_shift_steps(hold_warm_carry_dt_, MPC_ROLLOUT_DT) : 0;
-    const double hold_frac = hold_warm_ ? (hold_warm_carry_dt_ / MPC_ROLLOUT_DT) : 0.0;
-    initialize_primal_trajectory(hold_solver_, prob, x0, hold_warm_, hold_shift_steps, hold_frac, 0.0);
+    initialize_primal_trajectory(hold_solver_, prob, x0, hold_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 80;
+    opts.max_iters = 60;
     opts.tol_grad = 1e-6;
     opts.tol_cost = 1e-8;
     hold_solver_.solve(prob, opts);
     hold_warm_ = true;
+
     const Eigen::Vector2d cmd(hold_solver_.us[0](0), hold_solver_.us[0](1));
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, hold_solver_, x0)};

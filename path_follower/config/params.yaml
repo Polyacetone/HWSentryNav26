@@ -14,7 +14,6 @@
     debug:
       enable: true # 是否启用调试发布
       predicted_path_pub_topic: "/path_follower/debug/predicted_path" # MPC预测路径
-      step_rollout_path_pub_topic: "/path_follower/debug/step_rollout_path" # 台阶检测/助跑长时域预测路径
       v_pred_pub_topic: "/path_follower/debug/v_pred" # MPC预测线速度序列
       w_pred_pub_topic: "/path_follower/debug/w_pred" # MPC预测角速度序列
       final_cost_map_pub_topic: "/path_follower/debug/final_cost_map" # 最终融合代价地图
@@ -73,12 +72,6 @@
         threshold: 600.0 # 电容能量惩罚阈值 (J)，低于此值开始惩罚
         weight: 6.0 # 能量软约束权重
         softplus_beta: 20.0 # softplus斜率，越大越接近硬折线惩罚
-      multi_hypothesis:
-        enable: false # 是否启用双模板启动（正常前推 / 最大加速后退-保持-前进）
-        reverse_target_velocity: -1.0 # 后退模板目标倒车速度 (m/s)
-        forward_target_velocity: 0.3 # 后退模板倒车完成后加速到该正向速度 (m/s)
-        reverse_hold_steps: 6 # 达到倒车目标速度后保持的 rollout 步数
-      warm_start_velocity: 0.0 # reset / 冷启动时填充的前推速度 (m/s)
 
       follow:
         start_command:
@@ -156,12 +149,14 @@
         tracking_weights:
           q_y: 0.4  # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u: 1.2  # 进度项权重（鼓励沿路径前进）
+          q_u_bwd: 0.1  # 后退时的进度项权重：越小越允许先后退助跑
+          q_u_fwd: 1.0  # 前进时的进度项权重：越大越鼓励尽快恢复向前推进
+          q_u_switch_eps: 0.01 # 前/后向权重切换平滑带 (Δu)
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
-          r_dv: 0.2 # 线速度平滑
-          r_domega: 0.1 # 角速度平滑
+          r_dv: 0.4 # 线速度平滑
+          r_domega: 0.4 # 角速度平滑
         motion_constraint_weights:
           acc_limit: 20.0 # 速度指令变化率超限惩罚
           alpha_limit: 20.0 # 角速度指令变化率超限惩罚
@@ -171,11 +166,11 @@
           step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
         terrain_weights:
           step_vel_weight: 3.0 # 锁存后台阶区域速度目标惩罚权重
-          direction: 3.0 # 台阶方向对齐权重（鼓励与方向场同向）
+          direction: 2.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
-          obstacle: 2.0 # 避障权重（全局+局部融合代价）
+          obstacle: 1.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
-          q_v_final: 0.8 # 终点速度惩罚权重：softrelu(u-1)*v_act
+          q_v_final: 3.0 # 终点减速权重（鼓励到达终点时减速）
         projection:
           num_samples: 50 # 投影到样条参数u的采样数
           search_window: 0.1 # 局部搜索窗口 (0~1)

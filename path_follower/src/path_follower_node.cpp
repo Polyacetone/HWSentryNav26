@@ -167,7 +167,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .tracking_weights = {
                 .q_y = declare_parameter<double>("mpc.follow.tracking_weights.q_y"),
                 .q_theta = declare_parameter<double>("mpc.follow.tracking_weights.q_theta"),
-                .q_u = declare_parameter<double>("mpc.follow.tracking_weights.q_u")
+                .q_u_bwd = declare_parameter<double>("mpc.follow.tracking_weights.q_u_bwd"),
+                .q_u_fwd = declare_parameter<double>("mpc.follow.tracking_weights.q_u_fwd"),
+                .q_u_switch_eps = declare_parameter<double>("mpc.follow.tracking_weights.q_u_switch_eps")
             },
             .command_weights = {
                 .r_v = declare_parameter<double>("mpc.follow.command_weights.r_v"),
@@ -281,13 +283,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .threshold = declare_parameter<double>("mpc.energy.threshold"),
             .weight = declare_parameter<double>("mpc.energy.weight"),
             .softplus_beta = declare_parameter<double>("mpc.energy.softplus_beta")
-        },
-        .warm_start_velocity = declare_parameter<double>("mpc.warm_start_velocity"),
-        .mh_params = {
-            .enable = declare_parameter<bool>("mpc.multi_hypothesis.enable"),
-            .reverse_target_velocity = declare_parameter<double>("mpc.multi_hypothesis.reverse_target_velocity"),
-            .forward_target_velocity = declare_parameter<double>("mpc.multi_hypothesis.forward_target_velocity"),
-            .reverse_hold_steps = static_cast<int>(declare_parameter<int>("mpc.multi_hypothesis.reverse_hold_steps"))
         },
         .kinematic_model = {
             .z_ref = declare_parameter<double>("kinematic_model.z_ref"),
@@ -491,7 +486,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("chassis_cmd_pub_topic"), 1);
     follower_state_pub_ = create_publisher<interfaces::msg::FollowerState>(declare_parameter<std::string>("follower_state_pub_topic"), 1);
     replan_trigger_pub_ = create_publisher<std_msgs::msg::Empty>(declare_parameter<std::string>("replan_trigger_pub_topic"), 1);
-    control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_CONTROL_DT), [this]() { control_timer_callback(); });
+    control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_DT), [this]() { control_timer_callback(); });
 }
 
 // ═══════════════════════ ROS 回调 ════════════════════════════
