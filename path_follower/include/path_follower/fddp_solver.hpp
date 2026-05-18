@@ -114,6 +114,13 @@ public:
     SolverResult solve(const Problem& prob, const SolverOptions& opts = {});
 
 private:
+    struct ForwardPassResult {
+        double cost = 0.0;
+        double max_control_update = 0.0;
+        double max_state_deviation = 0.0;
+        bool within_trust_region = true;
+    };
+
     // ─── Backward pass data ───
     struct FeedbackGain {
         MatUX K;
@@ -129,6 +136,7 @@ private:
     std::array<MatXU, N> fu_;
 
     std::array<VecX, N + 1> fs_;
+    std::array<VecX, N + 1> fs_old_;
 
     // ─── Reused forward-pass buffers ───
     std::array<VecX, N + 1> xs_try_;
@@ -138,6 +146,8 @@ private:
 
     double dV1_ = 0.0;
     double dV2_ = 0.0;
+    double fs_old_norm_ = 0.0;
+    VecU tr_radii_;
 
     // ─── Filter ───
     std::vector<FilterEntry> filter_;
@@ -146,8 +156,8 @@ private:
     double rollout_cost(const Problem& prob) const;
     void compute_gaps(const Problem& prob);
     double gap_norm() const;
-    bool backward_pass(const Problem& prob, double mu, double tr_radius, const VecU& u_lo, const VecU& u_hi);
-    double forward_pass(const Problem& prob, double alpha, const VecU& u_lo, const VecU& u_hi);
+    bool backward_pass(const Problem& prob, double mu, const VecU& tr_lo, const VecU& tr_hi, const VecU& u_lo, const VecU& u_hi);
+    ForwardPassResult forward_pass(const Problem& prob, double alpha, double state_tr, const VecU& tr_lo, const VecU& tr_hi, const VecU& u_lo, const VecU& u_hi);
 
     bool filter_accepts(double cost, double cv) const;
     void filter_add(double cost, double cv);
@@ -311,7 +321,9 @@ bool Solver<P>::solve_box_qp(
 
         const double hfa = h(f, a);
         const double kf = -(g(f) + hfa * k(a)) / hff;
-        if (kf <= du_lo(f) || kf >= du_hi(f)) {
+        // Deadzone to prevent on/off chatter when kf lies at the constraint boundary
+        constexpr double BOX_DZ = 1e-10;
+        if (kf <= du_lo(f) + BOX_DZ || kf >= du_hi(f) - BOX_DZ) {
             k(f) = std::clamp(kf, du_lo(f), du_hi(f));
             K.row(f).setZero();
             return true;
@@ -351,7 +363,7 @@ void Solver<P>::filter_add(double cost, double cv) {
 }
 
 template<typename P>
-bool Solver<P>::backward_pass(const P& prob, double mu, double tr_radius, const VecU& u_lo, const VecU& u_hi) {
+bool Solver<P>::backward_pass(const P& prob, double mu, const VecU& tr_lo, const VecU& tr_hi, const VecU& u_lo, const VecU& u_hi) {
     prob.terminal_cost_derivatives(xs[N], Vx_[N], Vxx_[N]);
     Vx_[N] -= Vxx_[N] * fs_[N];
 
@@ -425,22 +437,18 @@ bool Solver<P>::backward_pass(const P& prob, double mu, double tr_radius, const 
 
         VecU k_ff;
         MatUX K_fb;
-        const VecU du_lo = u_lo - us[k];
-        const VecU du_hi = u_hi - us[k];
+        const VecU du_lo = (u_lo - us[k]).cwiseMax(tr_lo);
+        const VecU du_hi = (u_hi - us[k]).cwiseMin(tr_hi);
         if (!solve_box_qp(Quu_reg, Qu, Qux, du_lo, du_hi, k_ff, K_fb)) {
             return false;
-        }
-
-        const double k_norm = k_ff.norm();
-        if (k_norm > tr_radius && k_norm > 1e-12) {
-            k_ff *= tr_radius / k_norm;
         }
 
         gains_[k].k = k_ff;
         gains_[k].K = K_fb;
 
         dV1_ += k_ff.dot(Qu);
-        dV2_ += 0.5 * k_ff.dot(Quu * k_ff);
+        // Use Quu_reg for expected reduction (consistent with regularized QP)
+        dV2_ += 0.5 * k_ff.dot(Quu_reg * k_ff);
 
         Vx_[k] = Qx + K_fb.transpose() * Quu * k_ff + K_fb.transpose() * Qu + Qux.transpose() * k_ff;
         Vxx_[k] = Qxx + K_fb.transpose() * Quu * K_fb + K_fb.transpose() * Qux + Qux.transpose() * K_fb;
@@ -453,24 +461,54 @@ bool Solver<P>::backward_pass(const P& prob, double mu, double tr_radius, const 
 }
 
 template<typename P>
-double Solver<P>::forward_pass(const P& prob, double alpha, const VecU& u_lo, const VecU& u_hi) {
+typename Solver<P>::ForwardPassResult Solver<P>::forward_pass(
+    const P& prob,
+    double alpha,
+    double state_tr,
+    const VecU& tr_lo,
+    const VecU& tr_hi,
+    const VecU& u_lo,
+    const VecU& u_hi
+) {
+    ForwardPassResult result;
     xs_try_[0] = xs[0];
 
     for (int k = 0; k < N; ++k) {
         const VecX dx = xs_try_[k] - xs[k];
+        result.max_state_deviation = std::max(result.max_state_deviation, dx.norm());
+        if (result.max_state_deviation > state_tr) {
+            result.within_trust_region = false;
+            return result;
+        }
+
         us_try_[k] = clamp_u(us[k] + alpha * gains_[k].k + gains_[k].K * dx, u_lo, u_hi);
+        // Per-dimension trust region check
+        const VecU du = us_try_[k] - us[k];
+        for (int i = 0; i < NU; ++i) {
+            if (du(i) < tr_lo(i) - 1e-12 || du(i) > tr_hi(i) + 1e-12) {
+                result.within_trust_region = false;
+                return result;
+            }
+        }
+        result.max_control_update = std::max(result.max_control_update, du.norm());
+
         xs_try_[k + 1] = prob.dynamics(k, xs_try_[k], us_try_[k]) - (1.0 - alpha) * fs_[k + 1];
+        result.max_state_deviation = std::max(result.max_state_deviation, (xs_try_[k + 1] - xs[k + 1]).norm());
+        if (result.max_state_deviation > state_tr) {
+            result.within_trust_region = false;
+            return result;
+        }
     }
 
-    double cost = 0.0;
+    result.cost = 0.0;
     for (int k = 0; k < N; ++k) {
-        cost += prob.running_cost(k, xs_try_[k], us_try_[k]);
+        result.cost += prob.running_cost(k, xs_try_[k], us_try_[k]);
     }
-    cost += prob.terminal_cost(xs_try_[N]);
+    result.cost += prob.terminal_cost(xs_try_[N]);
 
     xs = xs_try_;
     us = us_try_;
-    return cost;
+    return result;
 }
 
 template<typename P>
@@ -482,11 +520,20 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
         us[k] = clamp_u(us[k], u_lo, u_hi);
     }
 
+    // Per-dimension trust region: scale by each control's feasible range
+    const VecU ctrl_span = (u_hi - u_lo).cwiseMax(1.0);
+    const double mean_span = ctrl_span.mean();
+    const double norm_tr = std::max(opts.trust_region_radius, 1e-6) / std::max(mean_span, 1.0);
+    tr_radii_ = norm_tr * ctrl_span;
+
     filter_.clear();
     filter_.reserve(static_cast<size_t>(std::max(opts.max_iters, 8)) + 8U);
 
     double cost = rollout_cost(prob);
-    double tr_radius = opts.trust_region_radius;
+    compute_gaps(prob);
+    filter_add(cost, gap_norm());
+
+    double tr_radius = tr_radii_.maxCoeff();
     double mu = opts.mu_init;
 
     SolverResult result;
@@ -495,13 +542,16 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
     for (int iter = 0; iter < opts.max_iters; ++iter) {
         result.iters = iter + 1;
 
-        compute_gaps(prob);
-        const double gnorm = gap_norm();
+        // fs_ is already up-to-date from gap scaling or initial compute
+        double gnorm = gap_norm();
         const bool use_fddp = (gnorm > opts.gap_threshold);
+
+        const VecU tr_vec_lo = -tr_radii_;
+        const VecU tr_vec_hi = tr_radii_;
 
         bool bp_ok = false;
         for (int retry = 0; retry < 20; ++retry) {
-            bp_ok = backward_pass(prob, mu, tr_radius, u_lo, u_hi);
+            bp_ok = backward_pass(prob, mu, tr_vec_lo, tr_vec_hi, u_lo, u_hi);
             if (bp_ok) {
                 break;
             }
@@ -511,10 +561,13 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
             break;
         }
 
+        // Bound-aware convergence: skip gradient check for dimensions at their bounds
         double grad_max = 0.0;
         for (int k = 0; k < N; ++k) {
             for (int i = 0; i < NU; ++i) {
-                grad_max = std::max(grad_max, std::abs(gains_[k].k(i)));
+                if (us[k](i) > u_lo(i) + 1e-8 && us[k](i) < u_hi(i) - 1e-8) {
+                    grad_max = std::max(grad_max, std::abs(gains_[k].k(i)));
+                }
             }
         }
         if (grad_max < opts.tol_grad && gnorm < opts.gap_threshold) {
@@ -526,16 +579,28 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
         us_old_ = us;
         const double cost_old = cost;
 
+        // Save current gaps before line search for feasibility scaling
+        fs_old_ = fs_;
+        fs_old_norm_ = gap_norm();
+
         bool accepted = false;
         double alpha = 1.0;
         while (alpha >= opts.alpha_min) {
             xs = xs_old_;
             us = us_old_;
 
-            const double cost_try = forward_pass(prob, alpha, u_lo, u_hi);
+            const ForwardPassResult fp = forward_pass(
+                prob, alpha, tr_radius, tr_vec_lo, tr_vec_hi, u_lo, u_hi
+            );
+            if (!fp.within_trust_region) {
+                alpha *= 0.5;
+                continue;
+            }
 
-            compute_gaps(prob);
-            const double cv_try = gap_norm();
+            const double cost_try = fp.cost;
+
+            // Gap scales analytically: fs_new = (1-alpha) * fs_old (exact for FDDP)
+            const double cv_try = (1.0 - alpha) * fs_old_norm_;
 
             const double dV_expected = alpha * dV1_ + 0.5 * alpha * alpha * dV2_;
             const double expected_reduction = -dV_expected;
@@ -546,7 +611,21 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
             const bool filter_ok = filter_accepts(cost_try, cv_try);
 
             if (armijo_ok || (use_fddp && cost_try < cost_old) || filter_ok) {
+                // Gain-ratio-based mu scheduling:
+                //   rho ≈ 1 → quadratic model is accurate → decrease mu
+                //   rho ≈ 0 → poor model → increase mu
+                //   rho < 0 → cost increased → increase mu more aggressively
+                const double rho = expected_reduction > 0.0
+                    ? cost_reduction / expected_reduction
+                    : -1.0;
+                if (rho > 0.75) {
+                    mu = std::max(mu / opts.mu_factor, opts.mu_min);
+                } else if (rho < 0.25) {
+                    mu = std::min(mu * opts.mu_factor, opts.mu_max);
+                }
+
                 cost = cost_try;
+                gnorm = cv_try;
                 accepted = true;
                 filter_add(cost_try, cv_try);
                 tr_radius = std::min(tr_radius * opts.tr_expand_factor, opts.tr_max);
@@ -559,12 +638,18 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
         if (!accepted) {
             xs = xs_old_;
             us = us_old_;
+            fs_ = fs_old_;  // restore gaps for restored trajectory
             mu = std::min(mu * opts.mu_factor, opts.mu_max);
             tr_radius = std::max(tr_radius * opts.tr_shrink_factor, opts.tr_min);
             continue;
         }
 
-        mu = std::max(mu / opts.mu_factor, opts.mu_min);
+        // Update gaps via analytical scaling: fs_new = (1-alpha) * fs_old
+        fs_[0].setZero();
+        for (int k = 1; k <= N; ++k) {
+            fs_[k] = (1.0 - alpha) * fs_old_[k];
+        }
+
         result.cost = cost;
 
         const double denom = std::max(std::abs(cost_old), 1.0);

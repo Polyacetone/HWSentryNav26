@@ -73,7 +73,6 @@
         enable: true # 是否启用能量约束（电容电量不足时限制功率）
         threshold: 600.0 # 电容能量惩罚阈值 (J)，低于此值开始惩罚
         weight: 6.0 # 能量软约束权重
-        softplus_beta: 20.0 # softplus斜率，越大越接近硬折线惩罚
 
       follow:
         start_command:
@@ -90,7 +89,6 @@
               acc_max: 1.8  # 最大 dv_cmd/dt (m/s²)
               alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
               a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-            lpv_rho: -0.87 # 常规构型调度量
           up:
             jump:
               command_bounds:
@@ -102,7 +100,6 @@
                 acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
                 alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
                 a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-              lpv_rho: -0.87 # 跳跃上台阶构型调度量
             short_leg:
               command_bounds:
                 vel_max: 2.4 # 线速度上限 (m/s)
@@ -113,7 +110,6 @@
                 acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
                 alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
                 a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-              lpv_rho: -0.16 # 短伸腿上台阶构型调度量
             long_leg:
               command_bounds:
                 vel_max: 1.5 # 线速度上限 (m/s)
@@ -124,7 +120,6 @@
                 acc_max: 1.5 # 最大 dv_cmd/dt (m/s²)
                 alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
                 a_lat_max: 1.5 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-              lpv_rho: 0.95 # 长伸腿上台阶构型调度量（待标定）
           down:
             jump:
               command_bounds:
@@ -136,7 +131,6 @@
                 acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
                 alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
                 a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-              lpv_rho: -0.16 # 跳跃下台阶构型调度量
             short_leg:
               command_bounds:
                 vel_max: 2.8 # 线速度上限 (m/s)
@@ -147,13 +141,10 @@
                 acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
                 alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
                 a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
-              lpv_rho: -0.16 # 短伸腿下台阶构型调度量
         tracking_weights:
           q_y: 0.4  # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u_bwd: 0.1  # 后退时的进度项权重：越小越允许先后退助跑
-          q_u_fwd: 1.0  # 前进时的进度项权重：越大越鼓励尽快恢复向前推进
-          q_u_switch_eps: 0.01 # 前/后向权重切换平滑带 (Δu)
+          q_u: 8.0  # 每步进度权重
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则

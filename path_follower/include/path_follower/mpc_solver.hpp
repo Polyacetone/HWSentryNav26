@@ -16,7 +16,7 @@ namespace path_follower {
 //  MPC 编译期常量
 // ═══════════════════════════════════════════════════════════════
 
-constexpr int MPC_HORIZON = 50; // MPC 预测步数
+constexpr int MPC_HORIZON = 60; // MPC 预测步数
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
@@ -62,7 +62,6 @@ struct MPCMotionConstraintWeights {
 struct MPCFollowModeProfile {
     MPCCommandBounds command_bounds;
     MPCMotionConstraints motion_constraints;
-    double lpv_rho;
 };
 
 struct MPCFollowModeProfiles {
@@ -81,9 +80,7 @@ struct MPCFollowModeProfiles {
 struct MPCFollowTrackingWeights {
     double q_y;
     double q_theta;
-    double q_u_bwd;
-    double q_u_fwd;
-    double q_u_switch_eps;
+    double q_u;
 };
 
 struct MPCFollowCommandWeights {
@@ -157,7 +154,6 @@ struct LPVKinematicModelParams {
 };
 
 struct PowerModelParams {
-    double smooth_abs_eps = 0.05;
     std::array<double, PWR_N> coeffs {};
 };
 
@@ -267,7 +263,6 @@ struct EnergyParams {
     bool enable;
     double threshold;
     double weight;
-    double softplus_beta;
 };
 
 struct ActiveStepMode {
@@ -372,7 +367,8 @@ public:
         const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit,
-        std::optional<ActiveStepMode> active_step_mode
+        std::optional<ActiveStepMode> active_step_mode,
+        double initial_path_u
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -409,6 +405,7 @@ private:
     GridInfo dir_info_;
     double remaining_energy_;
     double rfr_pwr_limit_;
+    double initial_path_u_;
     std::optional<ActiveStepMode> active_step_mode_;
 };
 

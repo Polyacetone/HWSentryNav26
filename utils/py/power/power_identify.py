@@ -546,8 +546,6 @@ def generate_power_model_yaml(coeffs: np.ndarray) -> str:
         "/**:",
         "  ros__parameters:",
         "    power_model:",
-        "      # Smooth absolute value epsilon: |x| ~= sqrt(x^2 + smooth_abs_eps^2)",
-        f"      smooth_abs_eps: {SGN_EPS}",
         "      # P = c0 + c1*v*a + c2*w*alpha + c3*a^2 + c4*alpha^2 + c5*|v| + c6*|w| + c7*v^2 + c8*w^2 + c9*|a| + c10*|alpha| + c11*|v*w|",
     ]
     for i, c in enumerate(coeffs):

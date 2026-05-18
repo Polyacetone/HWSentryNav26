@@ -126,7 +126,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("debug.final_cost_map_pub_topic"), 1);
     }
 
-    const auto load_follow_mode_profile = [this](const std::string& name, const double lpv_rho) {
+    const auto load_follow_mode_profile = [this](const std::string& name) {
         return MPCFollowModeProfile {
             .command_bounds = {
                 .vel_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".command_bounds.vel_max"),
@@ -139,7 +139,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".motion_constraints.alpha_max"),
                 .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".motion_constraints.a_lat_max"),
             },
-            .lpv_rho = lpv_rho,
         };
     };
 
@@ -156,23 +155,21 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .omega_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.omega_cmd_act_gap_max")
             },
             .mode_profiles = {
-                .normal = load_follow_mode_profile("normal", declare_parameter<double>("mpc.follow.mode_profiles.normal.lpv_rho")),
+                .normal = load_follow_mode_profile("normal"),
                 .up = {
-                    .jump = load_follow_mode_profile("up.jump", declare_parameter<double>("mpc.follow.mode_profiles.up.jump.lpv_rho")),
-                    .short_leg = load_follow_mode_profile("up.short_leg", declare_parameter<double>("mpc.follow.mode_profiles.up.short_leg.lpv_rho")),
-                    .long_leg = load_follow_mode_profile("up.long_leg", declare_parameter<double>("mpc.follow.mode_profiles.up.long_leg.lpv_rho")),
+                    .jump = load_follow_mode_profile("up.jump"),
+                    .short_leg = load_follow_mode_profile("up.short_leg"),
+                    .long_leg = load_follow_mode_profile("up.long_leg"),
                 },
                 .down = {
-                    .jump = load_follow_mode_profile("down.jump", declare_parameter<double>("mpc.follow.mode_profiles.down.jump.lpv_rho")),
-                    .short_leg = load_follow_mode_profile("down.short_leg", declare_parameter<double>("mpc.follow.mode_profiles.down.short_leg.lpv_rho")),
+                    .jump = load_follow_mode_profile("down.jump"),
+                    .short_leg = load_follow_mode_profile("down.short_leg"),
                 },
             },
             .tracking_weights = {
                 .q_y = declare_parameter<double>("mpc.follow.tracking_weights.q_y"),
                 .q_theta = declare_parameter<double>("mpc.follow.tracking_weights.q_theta"),
-                .q_u_bwd = declare_parameter<double>("mpc.follow.tracking_weights.q_u_bwd"),
-                .q_u_fwd = declare_parameter<double>("mpc.follow.tracking_weights.q_u_fwd"),
-                .q_u_switch_eps = declare_parameter<double>("mpc.follow.tracking_weights.q_u_switch_eps")
+                .q_u = declare_parameter<double>("mpc.follow.tracking_weights.q_u")
             },
             .command_weights = {
                 .r_v = declare_parameter<double>("mpc.follow.command_weights.r_v"),
@@ -284,8 +281,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .energy = {
             .enable = declare_parameter<bool>("mpc.energy.enable"),
             .threshold = declare_parameter<double>("mpc.energy.threshold"),
-            .weight = declare_parameter<double>("mpc.energy.weight"),
-            .softplus_beta = declare_parameter<double>("mpc.energy.softplus_beta")
+            .weight = declare_parameter<double>("mpc.energy.weight")
         },
         .kinematic_model = {
             .z_ref = declare_parameter<double>("kinematic_model.z_ref"),
@@ -324,7 +320,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi")
         },
         .power_model = {
-            .smooth_abs_eps = declare_parameter<double>("power_model.smooth_abs_eps"),
             .coeffs = [this]() {
                 std::array<double, PWR_N> coeffs {};
                 for (int i = 0; i < PWR_N; ++i) {

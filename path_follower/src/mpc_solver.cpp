@@ -32,52 +32,21 @@ bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) 
     return active_step_mode.has_value() && active_step_mode->mode != ChassisMode::NORMAL;
 }
 
-inline double softplus(double x) {
-    if (x > 20.0) return x;
-    if (x < -20.0) return std::exp(x);
-    return std::log(1.0 + std::exp(x));
+inline double positive_part(double x) {
+    return std::max(x, 0.0);
 }
 
-constexpr double SOFTPLUS_AT_ZERO = 0.6931471805599453;
-
-struct SoftplusEval {
-    double value;
-    double deriv;
-};
-
-inline SoftplusEval softplus_eval(double x) {
-    if (x > 20.0) {
-        return {x, 1.0};
-    }
-    if (x < -20.0) {
-        const double ex = std::exp(x);
-        return {ex, ex};
-    }
-    const double ex = std::exp(x);
-    return {std::log(1.0 + ex), ex / (1.0 + ex)};
+inline double positive_part_derivative(double x) {
+    return x > 0.0 ? 1.0 : 0.0;
 }
 
-struct SmoothReluEval {
-    double value;
-    double deriv;
-};
-
-inline SmoothReluEval smooth_relu_eval(double x) {
-    const auto sp = softplus_eval(x);
-    const double y = sp.value - SOFTPLUS_AT_ZERO;
-    if (y <= 0.0) {
-        return {0.0, 0.0};
-    }
-    return {y, sp.deriv};
-}
-
-inline double signum(double x) {
+inline double sign_or_zero(double x) {
     if (x > 0.0) return 1.0;
     if (x < 0.0) return -1.0;
     return 0.0;
 }
 
-inline double clamp_derivative(double x, double lo, double hi) {
+inline double clamp_derivative_piecewise(double x, double lo, double hi) {
     return (x > lo && x < hi) ? 1.0 : 0.0;
 }
 
@@ -104,14 +73,9 @@ double schedule_rho_from_state(const ChassisMotionState& chassis_state, const LP
 }
 
 double select_follow_schedule_rho(
-    const MPCFollowParams& params,
-    std::optional<ActiveStepMode> active_step_mode,
     const ChassisMotionState& chassis_state,
     const LPVKinematicModelParams& model_params
 ) {
-    if (is_active_follow_step_mode(active_step_mode)) {
-        return clamp_lpv_rho(select_follow_mode_profile(params, active_step_mode).lpv_rho, model_params.rho_clip);
-    }
     return schedule_rho_from_state(chassis_state, model_params);
 }
 
@@ -141,19 +105,19 @@ void zoh_v_matrices(
     const double tr_m = m00 + m11;
     const double det_m = m00 * m11 - m01 * m10;
     const double disc = tr_m * tr_m - 4.0 * det_m;
-    constexpr double eps = 1e-12;
+    constexpr double REG_EPS = 1e-8;
 
     double alpha = 0.0;
     double beta = 0.0;
-    if (disc > eps) {
+    if (disc > REG_EPS) {
         const double s = std::sqrt(disc);
         const double lam1 = 0.5 * (tr_m + s);
         const double lam2 = 0.5 * (tr_m - s);
-        const double e1 = std::exp(lam1);
-        const double e2 = std::exp(lam2);
-        beta = (e1 - e2) / (lam1 - lam2);
-        alpha = e1 - beta * lam1;
-    } else if (disc < -eps) {
+        const double delta = lam1 - lam2;
+        const double el2 = std::exp(lam2);
+        beta = el2 * std::expm1(delta) / delta;
+        alpha = std::exp(lam1) - beta * lam1;
+    } else if (disc < -REG_EPS) {
         const double p = 0.5 * tr_m;
         const double q = 0.5 * std::sqrt(-disc);
         const double ep = std::exp(p);
@@ -177,13 +141,15 @@ void zoh_v_matrices(
     double g01 = 0.0;
     double g10 = 0.0;
     double g11 = 0.0;
-    if (std::abs(det_a) > 1e-10) {
+    constexpr double DET_EPS = 1e-6;
+    if (std::abs(det_a) > DET_EPS) {
         const double inv_det = 1.0 / det_a;
         g00 = c * a11 * inv_det + beta * dt;
         g01 = c * (-a01) * inv_det;
         g10 = c * (-a10) * inv_det;
         g11 = c * a00 * inv_det + beta * dt;
     } else {
+        // Near-singular A: second-order Taylor for G = ∫₀ᵈᵗ exp(A τ) dτ
         g00 = dt + 0.5 * dt * dt * a00;
         g01 = 0.5 * dt * dt * a01;
         g10 = 0.5 * dt * dt * a10;
@@ -240,11 +206,11 @@ LPVNonlinearEval evaluate_lpv_nonlinear(double v, double w, const LPVDiscreteMod
     const double sw = smooth_sgn(w, model.sgn_eps);
     const double dsw = smooth_sgn_deriv(w, model.sgn_eps);
     const double absw = std::abs(w);
-    const double dabsw = signum(w);
+    const double sabsw = smooth_sgn(w, model.sgn_eps);
     return {
         .nl = model.cf1 * sv + model.cf2 * v * absw,
         .dnl_dv = model.cf1 * dsv + model.cf2 * absw,
-        .dnl_dw = model.cf2 * v * dabsw,
+        .dnl_dw = model.cf2 * v * sabsw,
         .sw = sw,
         .dsw_dw = dsw,
     };
@@ -256,31 +222,22 @@ Eigen::Vector2d apply_goal_deadzone(const Eigen::Vector2d& delta, double deadzon
     const double dist = delta.norm();
     if (dist <= 0.0) return Eigen::Vector2d::Zero();
 
-    const double mag = softplus(dist - deadzone) - softplus(0.0);
+    const double mag = positive_part(dist - deadzone);
     if (mag <= 0.0) {
         return Eigen::Vector2d::Zero();
     }
     return delta * (mag / dist);
 }
 
-inline double sabs(double x, double eps2) {
-    return std::sqrt(x * x + eps2);
-}
-
 inline double wrap_pi(double a) {
     return std::atan2(std::sin(a), std::cos(a));
 }
 
-inline double relu(double x) {
-    return smooth_relu_eval(x).value;
-}
-
 inline double predict_power(const PowerModelParams& power_model, double v, double w, double a, double alpha) {
-    const double eps2 = power_model.smooth_abs_eps * power_model.smooth_abs_eps;
     const auto& c = power_model.coeffs;
     return c[0] + c[1] * v * a + c[2] * w * alpha + c[3] * a * a + c[4] * alpha * alpha
-        + c[5] * sabs(v, eps2) + c[6] * sabs(w, eps2) + c[7] * v * v + c[8] * w * w + c[9] * sabs(a, eps2)
-        + c[10] * sabs(alpha, eps2) + c[11] * sabs(v * w, eps2);
+        + c[5] * std::abs(v) + c[6] * std::abs(w) + c[7] * v * v + c[8] * w * w + c[9] * std::abs(a)
+        + c[10] * std::abs(alpha) + c[11] * std::abs(v * w);
 }
 
 struct PowerEval {
@@ -290,22 +247,17 @@ struct PowerEval {
 };
 
 inline PowerEval predict_power_eval_vw(const PowerModelParams& power_model, double v, double w) {
-    const double eps2 = power_model.smooth_abs_eps * power_model.smooth_abs_eps;
     const auto& c = power_model.coeffs;
-    const double sabs_v = sabs(v, eps2);
-    const double sabs_w = sabs(w, eps2);
     const double vw = v * w;
-    const double sabs_vw = sabs(vw, eps2);
-
-    const double dsabs_v = v / sabs_v;
-    const double dsabs_w = w / sabs_w;
-    const double dsabs_vw_dvw = vw / sabs_vw;
+    const double sign_v = sign_or_zero(v);
+    const double sign_w = sign_or_zero(w);
+    const double sign_vw = sign_or_zero(vw);
 
     PowerEval out {};
-    out.value = c[0] + c[5] * sabs_v + c[6] * sabs_w + c[7] * v * v + c[8] * w * w + c[11] * sabs_vw;
+    out.value = c[0] + c[5] * std::abs(v) + c[6] * std::abs(w) + c[7] * v * v + c[8] * w * w + c[11] * std::abs(vw);
 
-    out.dv = c[5] * dsabs_v + 2.0 * c[7] * v + c[11] * dsabs_vw_dvw * w;
-    out.dw = c[6] * dsabs_w + 2.0 * c[8] * w + c[11] * dsabs_vw_dvw * v;
+    out.dv = c[5] * sign_v + 2.0 * c[7] * v + c[11] * sign_vw * w;
+    out.dw = c[6] * sign_w + 2.0 * c[8] * w + c[11] * sign_vw * v;
     return out;
 }
 
@@ -669,7 +621,8 @@ FollowProblemT<Horizon>::FollowProblemT(
     const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit,
-    std::optional<ActiveStepMode> active_step_mode
+    std::optional<ActiveStepMode> active_step_mode,
+    double initial_path_u
 ):
     ref_cps_(ref_control_points),
     p_(params),
@@ -681,6 +634,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
+    initial_path_u_(initial_path_u),
     active_step_mode_(active_step_mode) {}
 
 template<int Horizon>
@@ -695,7 +649,7 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
     mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
 
     const auto adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, ref_cps_);
-    const double dout_din = clamp_derivative(adv.u_next_extrap, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+    const double dout_din = clamp_derivative_piecewise(adv.u_next_extrap, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
     dfx.row(ix::PATH_U) = (dout_din * adv.du_next_dx).transpose();
     dfu.row(ix::PATH_U).setZero();
 }
@@ -714,7 +668,7 @@ ControlVec FollowProblemT<Horizon>::u_upper() const {
 
 namespace {
 
-constexpr int FOLLOW_RESIDUAL_DIM = 15;
+constexpr int FOLLOW_RESIDUAL_DIM = 14;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct FollowResidualLinearization {
@@ -757,17 +711,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
 
     const double uc_raw = x(ix::PATH_U);
     const double uc = clamp_path_u_extrapolated(uc_raw);
-    const double duc_dpathu = clamp_derivative(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
-
-    const auto u_adv = advance_u_progress_extrapolated_with_jacobian(uc_raw, x, ref_cps);
-    const double u_next_extrap = u_adv.u_next_extrap;
-    const double u_progress = std::min(1.0, u_next_extrap);
-    const double delta_u = u_next_extrap - uc;
-
-    StateVec du_progress_dx = StateVec::Zero();
-    if (u_next_extrap < 1.0) {
-        du_progress_dx = u_adv.du_next_dx;
-    }
+    const double duc_dpathu = clamp_derivative_piecewise(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
 
     Eigen::Vector2d pr, d1, d2;
     eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
@@ -824,90 +768,77 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(1, ix::THETA) = tracking_w.q_theta;
     out.jx(1, ix::PATH_U) = tracking_w.q_theta * detheta_dpathu;
 
-    const auto relu_progress = smooth_relu_eval(1.0 - u_progress);
-    const double q_u_switch_eps = std::max(tracking_w.q_u_switch_eps, 1e-6);
-    const double forward_gate = 0.5 * (1.0 + smooth_sgn(delta_u, q_u_switch_eps));
-    const double q_u_weight = tracking_w.q_u_bwd + (tracking_w.q_u_fwd - tracking_w.q_u_bwd) * forward_gate;
+    out.r(2) = command_w.r_v * v_cmd;
+    out.ju(2, 0) = command_w.r_v;
 
-    // frozen coefficient: q_u_weight 随 Δu 变化参与残差计算,
-    // 但 Jacobian 中视为局部常数以避免切换点附近产生对抗梯度.
-    out.r(2) = q_u_weight * relu_progress.value;
-    out.jx.row(2) = (-q_u_weight * relu_progress.deriv * du_progress_dx).transpose();
+    out.r(3) = command_w.r_omega * w_cmd;
+    out.ju(3, 1) = command_w.r_omega;
 
-    out.r(3) = command_w.r_v * v_cmd;
-    out.ju(3, 0) = command_w.r_v;
+    out.r(4) = command_w.r_dv * dv_cmd;
+    out.ju(4, 0) = command_w.r_dv;
+    out.jx(4, ix::DV) = -command_w.r_dv;
 
-    out.r(4) = command_w.r_omega * w_cmd;
-    out.ju(4, 1) = command_w.r_omega;
+    out.r(5) = command_w.r_domega * dw_cmd;
+    out.ju(5, 1) = command_w.r_domega;
+    out.jx(5, ix::DW) = -command_w.r_domega;
 
-    out.r(5) = command_w.r_dv * dv_cmd;
-    out.ju(5, 0) = command_w.r_dv;
-    out.jx(5, ix::DV) = -command_w.r_dv;
+    const double abs_dv_cmd = std::abs(dv_cmd);
+    const double relu_dv = positive_part(abs_dv_cmd - dv_lim);
+    out.r(6) = motion_w.acc_limit * relu_dv;
+    const double coeff_dv = motion_w.acc_limit * positive_part_derivative(abs_dv_cmd - dv_lim) * sign_or_zero(dv_cmd);
+    out.ju(6, 0) = coeff_dv;
+    out.jx(6, ix::DV) = -coeff_dv;
 
-    out.r(6) = command_w.r_domega * dw_cmd;
-    out.ju(6, 1) = command_w.r_domega;
-    out.jx(6, ix::DW) = -command_w.r_domega;
+    const double abs_dw_cmd = std::abs(dw_cmd);
+    const double relu_dw = positive_part(abs_dw_cmd - dw_lim);
+    out.r(7) = motion_w.alpha_limit * relu_dw;
+    const double coeff_dw = motion_w.alpha_limit * positive_part_derivative(abs_dw_cmd - dw_lim) * sign_or_zero(dw_cmd);
+    out.ju(7, 1) = coeff_dw;
+    out.jx(7, ix::DW) = -coeff_dw;
 
-    const double sign_dv_cmd = signum(dv_cmd);
-    const auto relu_dv = smooth_relu_eval(std::abs(dv_cmd) - dv_lim);
-    out.r(7) = motion_w.acc_limit * relu_dv.value;
-    const double coeff_dv = motion_w.acc_limit * relu_dv.deriv * sign_dv_cmd;
-    out.ju(7, 0) = coeff_dv;
-    out.jx(7, ix::DV) = -coeff_dv;
+    const double sign_lat = sign_or_zero(v_act * w_act);
+    const double relu_lat = positive_part(a_lat - motion_lim.a_lat_max);
+    out.r(8) = motion_w.lat_acc * relu_lat;
+    const double coeff_lat = motion_w.lat_acc * positive_part_derivative(a_lat - motion_lim.a_lat_max);
+    out.jx(8, ix::V) = coeff_lat * sign_lat * w_act;
+    out.jx(8, ix::W) = coeff_lat * sign_lat * v_act;
 
-    const double sign_dw_cmd = signum(dw_cmd);
-    const auto relu_dw = smooth_relu_eval(std::abs(dw_cmd) - dw_lim);
-    out.r(8) = motion_w.alpha_limit * relu_dw.value;
-    const double coeff_dw = motion_w.alpha_limit * relu_dw.deriv * sign_dw_cmd;
-    out.ju(8, 1) = coeff_dw;
-    out.jx(8, ix::DW) = -coeff_dw;
+    out.r(9) = env_w.obstacle * cs.value / 255.0;
+    out.jx(9, ix::X) = env_w.obstacle * cs.dx / 255.0;
+    out.jx(9, ix::Y) = env_w.obstacle * cs.dy / 255.0;
 
-    const double sign_lat = signum(v_act * w_act);
-    const auto relu_lat = smooth_relu_eval(a_lat - motion_lim.a_lat_max);
-    out.r(9) = motion_w.lat_acc * relu_lat.value;
-    const double coeff_lat = motion_w.lat_acc * relu_lat.deriv;
-    out.jx(9, ix::V) = coeff_lat * sign_lat * w_act;
-    out.jx(9, ix::W) = coeff_lat * sign_lat * v_act;
-
-    out.r(10) = env_w.obstacle * cs.value / 255.0;
-    out.jx(10, ix::X) = env_w.obstacle * cs.dx / 255.0;
-    out.jx(10, ix::Y) = env_w.obstacle * cs.dy / 255.0;
-
-    const double sign_cross = signum(cross);
-    out.r(11) = terrain_w.direction * std::abs(cross);
-    out.jx(11, ix::X) = terrain_w.direction * sign_cross * dcross_dx;
-    out.jx(11, ix::Y) = terrain_w.direction * sign_cross * dcross_dy;
-    out.jx(11, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
+    const double sign_cross = sign_or_zero(cross);
+    out.r(10) = terrain_w.direction * std::abs(cross);
+    out.jx(10, ix::X) = terrain_w.direction * sign_cross * dcross_dx;
+    out.jx(10, ix::Y) = terrain_w.direction * sign_cross * dcross_dy;
+    out.jx(10, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
 
     if (dir_norm_sq > 1e-10 && is_active_follow_step_mode(active_step_mode)) {
         const double target_vel = active_step_mode->target_velocity;
         const double v_err = v_act - target_vel;
         const double abs_v_err = std::abs(v_err);
-        const double sign_v_err = signum(v_err);
-        const auto relu_vstep = smooth_relu_eval(abs_v_err - follow.terrain_limits.step_vel_deadzone);
-        out.r(12) = terrain_w.step_vel_weight * dir_norm * relu_vstep.value;
-        out.jx(12, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep.value;
-        out.jx(12, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep.value;
-        out.jx(12, ix::V) = terrain_w.step_vel_weight * dir_norm * relu_vstep.deriv * sign_v_err;
+        const double relu_vstep = positive_part(abs_v_err - follow.terrain_limits.step_vel_deadzone);
+        out.r(11) = terrain_w.step_vel_weight * dir_norm * relu_vstep;
+        out.jx(11, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep;
+        out.jx(11, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep;
+        out.jx(11, ix::V) = terrain_w.step_vel_weight * dir_norm
+            * positive_part_derivative(abs_v_err - follow.terrain_limits.step_vel_deadzone) * sign_or_zero(v_err);
     }
 
-    const auto endpoint_gate = smooth_relu_eval(uc - 1.0);
-    out.r(13) = terminal_w.q_v_final * v_act * endpoint_gate.value;
-    out.jx(13, ix::V) = terminal_w.q_v_final * endpoint_gate.value;
-    out.jx(13, ix::PATH_U) = terminal_w.q_v_final * v_act * endpoint_gate.deriv * duc_dpathu;
+    const double endpoint_gate = positive_part(uc - 1.0);
+    out.r(12) = terminal_w.q_v_final * v_act * endpoint_gate;
+    out.jx(12, ix::V) = terminal_w.q_v_final * endpoint_gate;
+    out.jx(12, ix::PATH_U) = terminal_w.q_v_final * v_act * positive_part_derivative(uc - 1.0) * duc_dpathu;
 
     if (p.energy.enable) {
         const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
         const double thr = std::max(p.energy.threshold, 1.0);
-        const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr.value - rfr_pwr_limit) / thr;
-        const auto sp = softplus_eval(beta * excess);
-        const double energy_relu = sp.value / beta - SOFTPLUS_AT_ZERO / beta;
-        if (energy_relu > 0.0) {
-            out.r(14) = p.energy.weight * energy_relu;
-            const double common = p.energy.weight * sp.deriv / thr;
-            out.jx(14, ix::V) = common * pwr.dv;
-            out.jx(14, ix::W) = common * pwr.dw;
+        if (excess > 0.0) {
+            out.r(13) = p.energy.weight * excess;
+            const double common = p.energy.weight / thr;
+            out.jx(13, ix::V) = common * pwr.dv;
+            out.jx(13, ix::W) = common * pwr.dw;
         }
     }
 
@@ -938,13 +869,13 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
     out.du_next_dx.setZero();
 
     const double uc = clamp_path_u_extrapolated(u_cur);
-    const double duc_dpathu = clamp_derivative(x(ix::PATH_U), PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+    const double duc_dpathu = clamp_derivative_piecewise(x(ix::PATH_U), PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
 
     Eigen::Vector2d pr, d1, d2;
     eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
 
     const double d1_norm2 = d1.squaredNorm();
-    const double d1_norm = std::sqrt(d1_norm2 + 1e-18);
+    const double d1_norm = std::sqrt(d1_norm2 + 0.01);
     const double dsdu = d1_norm + 1e-6;
     const double inv_dsdu = 1.0 / dsdu;
 
@@ -1031,11 +962,14 @@ const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(int k) const 
 
 template<int Horizon>
 double FollowProblemT<Horizon>::running_cost(int k, const StateVec& x, const ControlVec& u) const {
-    return residual_cost(follow_residual_impl(
+    double cost = residual_cost(follow_residual_impl(
         x, u, ref_cps_, p_,
         cost_grid_for_step(k), cost_info_, dir_grid_, dir_info_,
         rfr_pwr_limit_, active_step_mode_
     ));
+    const double uc = clamp_path_u_extrapolated(x(ix::PATH_U));
+    cost += (p_.follow.tracking_weights.q_u / MPC_HORIZON) * positive_part(1.0 - uc);
+    return cost;
 }
 
 template<int Horizon>
@@ -1057,6 +991,16 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 
     lx = lin.jx.transpose() * lin.r;
     lu = lin.ju.transpose() * lin.r;
+
+    {
+        const double uc_raw = x(ix::PATH_U);
+        const double uc = clamp_path_u_extrapolated(uc_raw);
+        if (uc < 1.0) {
+            const double duc_dpathu = clamp_derivative_piecewise(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+            lx(ix::PATH_U) -= (p_.follow.tracking_weights.q_u / MPC_HORIZON) * duc_dpathu;
+        }
+    }
+
     lxx = (lin.jx.transpose() * lin.jx).eval();
     lux = (lin.ju.transpose() * lin.jx).eval();
     luu = (lin.ju.transpose() * lin.ju).eval();
@@ -1068,12 +1012,14 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 }
 
 template<int Horizon>
-double FollowProblemT<Horizon>::terminal_cost(const StateVec&) const {
+double FollowProblemT<Horizon>::terminal_cost(const StateVec& x) const {
+    (void)x;
     return 0.0;
 }
 
 template<int Horizon>
-void FollowProblemT<Horizon>::terminal_cost_derivatives(const StateVec&, StateVec& lfx, MatXX& lfxx) const {
+void FollowProblemT<Horizon>::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const {
+    (void)x;
     lfx.setZero();
     lfxx.setZero();
 }
@@ -1150,24 +1096,18 @@ StopResidualVec stop_residual_impl(
     r(1) = command_w.q_omega * w_cmd;
     r(2) = command_w.r_dv * dv_cmd;
     r(3) = command_w.r_domega * dw_cmd;
-    r(4) = motion_w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
-    r(5) = motion_w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
-    r(6) = motion_w.lat_acc * relu(a_lat - motion_lim.a_lat_max);
+    r(4) = motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim);
+    r(5) = motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim);
+    r(6) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
     r(7) = env_w.obstacle * cs.value / 255.0;
-    r(8) = motion_w.acc_limit * relu(std::abs(v_act));
-    r(9) = motion_w.alpha_limit * relu(std::abs(w_act));
+    r(8) = motion_w.acc_limit * std::abs(v_act);
+    r(9) = motion_w.alpha_limit * std::abs(w_act);
 
     if (p.energy.enable) {
         const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
         const double thr = std::max(p.energy.threshold, 1.0);
-        const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
-        if (excess <= 0.0) {
-            r(10) = 0.0;
-        } else {
-            const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
-            r(10) = p.energy.weight * sp;
-        }
+        r(10) = p.energy.weight * positive_part(excess);
     }
 
     return r;
@@ -1319,23 +1259,17 @@ HoldResidualVec hold_residual_impl(
     r(4) = command_w.r_omega * w_cmd;
     r(5) = command_w.r_dv * dv_cmd;
     r(6) = command_w.r_domega * dw_cmd;
-    r(7) = motion_w.acc_limit * relu(std::abs(dv_cmd) - dv_lim);
-    r(8) = motion_w.alpha_limit * relu(std::abs(dw_cmd) - dw_lim);
-    r(9) = motion_w.lat_acc * relu(a_lat - motion_lim.a_lat_max);
+    r(7) = motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim);
+    r(8) = motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim);
+    r(9) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
     r(10) = env_w.obstacle * cs.value / 255.0;
     r(11) = env_w.step * dir_norm;
 
     if (p.energy.enable) {
         const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
         const double thr = std::max(p.energy.threshold, 1.0);
-        const double beta = std::max(p.energy.softplus_beta, 1e-6);
         const double excess = (pwr - rfr_pwr_limit) / thr;
-        if (excess <= 0.0) {
-            r(12) = 0.0;
-        } else {
-            const double sp = softplus(beta * excess) / beta - softplus(0.0) / beta;
-            r(12) = p.energy.weight * sp;
-        }
+        r(12) = p.energy.weight * positive_part(excess);
     }
 
     return r;
@@ -1582,7 +1516,6 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 ) {
     const auto& ref_cps = global_path.getControlPoints();
     const bool path_changed = !same_cps(prev_ref_control_points_, ref_cps);
-    const bool mode_changed = last_follow_mode_ != active_step_mode;
     const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
     const double u0 = project_to_spline_u_extrapolated(
         global_path,
@@ -1594,7 +1527,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         PATH_U_EXTRAP_MIN,
         PATH_U_EXTRAP_MAX
     );
-    if (path_changed || mode_changed) {
+    if (path_changed) {
         follow_warm_ = false;
     }
     last_u_ = u0;
@@ -1617,8 +1550,6 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         )
     );
     const double schedule_rho = select_follow_schedule_rho(
-        params_.follow,
-        active_step_mode,
         chassis_state,
         params_.kinematic_model
     );
@@ -1648,7 +1579,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     FollowProblem prob_center(
         ref_cps, params_, step_cost_grids_cache_, ci, pred_dt, schedule_rho,
-        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode
+        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode, u0
     );
 
     fddp::SolverOptions opts;

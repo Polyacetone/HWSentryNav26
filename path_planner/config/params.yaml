@@ -56,7 +56,7 @@
       # ── Warmup 阶段：粗调，使样条大致符合路径形状 ──
       warmup:
         obstacle_weight: 0.5 # 避障权重
-        direction_weight: 6.0 # 台阶方向对齐权重（cross product惩罚偏离方向场）
+        direction_weight: 8.0 # 台阶方向对齐权重（cross product惩罚偏离方向场）
         step_weight: 0.25 # 台阶位置惩罚（鼓励避开台阶区域）
         prohibited_direction_weight: 30.0 # alpha标记禁止方向上穿越台阶的软惩罚
         start_end_weight: 15.0 # 起终点位置保持权重
@@ -77,7 +77,7 @@
       # ── Main 阶段：精调，基于台阶检测区间施加变曲率约束 ──
       main:
         obstacle_weight: 0.5 # 避障权重
-        direction_weight: 6.0 # 台阶方向对齐权重
+        direction_weight: 8.0 # 台阶方向对齐权重
         step_weight: 0.25 # 台阶位置惩罚
         prohibited_direction_weight: 30.0 # alpha标记禁止方向上穿越台阶的软惩罚
         start_end_weight: 15.0 # 起终点位置保持权重

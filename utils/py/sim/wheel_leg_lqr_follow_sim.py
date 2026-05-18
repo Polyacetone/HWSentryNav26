@@ -108,8 +108,8 @@ class SimConfig:
     CMD_TIMEOUT_SEC: float = 0.3
 
     # --- 初始位姿（世界坐标） ---
-    INIT_X: float = 3.0
-    INIT_Y: float = 3.5
+    INIT_X: float = 1.0
+    INIT_Y: float = 3.0
     INIT_THETA: float = 0.0
 
     # --- 指令限幅（目标值） ---
@@ -181,9 +181,9 @@ class SimConfig:
     # --- 动态障碍物 ---
     # 障碍物生成范围（世界坐标，单位 m）
     OBSTACLE_SPAWN_X_MIN: float = 0.0
-    OBSTACLE_SPAWN_X_MAX: float = 21.7
+    OBSTACLE_SPAWN_X_MAX: float = 9.6
     OBSTACLE_SPAWN_Y_MIN: float = 0.0
-    OBSTACLE_SPAWN_Y_MAX: float = 14.2
+    OBSTACLE_SPAWN_Y_MAX: float = 8.1
 
     # 障碍物点云外形（每个障碍物为球形点云，球心在 xy 平面运动，z 固定）
     OBSTACLE_CLOUD_RADIUS_M: float = 0.30          # 球半径 (m)
@@ -193,10 +193,10 @@ class SimConfig:
 
     # 障碍物种类列表（每项为 ObstacleSpec 实例，可自由增删）
     OBSTACLE_SPECS: tuple = (
-        # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
+        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
         # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
         # ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
-        # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
+        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
         # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
         # ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
     )

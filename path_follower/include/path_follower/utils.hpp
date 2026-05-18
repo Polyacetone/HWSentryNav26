@@ -13,8 +13,8 @@ using SplineD = ubs::UniformBSpline<double, 2, double, Eigen::Vector2d, std::vec
 }
 
 namespace path_follower{
-inline constexpr double PATH_U_EXTRAP_MIN = -0.35;
-inline constexpr double PATH_U_EXTRAP_MAX = 1.35;
+inline constexpr double PATH_U_EXTRAP_MIN = -1.0;
+inline constexpr double PATH_U_EXTRAP_MAX = 1.5;
 
 double clamp_path_u_extrapolated(
     double u,
