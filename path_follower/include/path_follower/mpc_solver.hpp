@@ -22,7 +22,6 @@ constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
 constexpr int PWR_N = 12; // P = c0 + c1*v*a + c2*w*alpha + c3*a^2 + c4*alpha^2 + c5*|v| + c6*|w| + c7*v^2 + c8*w^2 + c9*|a| + c10*|alpha| + c11*|v*w|
 
-constexpr int SOLVER_MAX_ITERS = 60;
 constexpr double SOLVER_TOL_GRAD = 1e-6;
 constexpr double SOLVER_TOL_COST = 1e-8;
 
@@ -116,45 +115,45 @@ struct ChassisMotionState {
 };
 
 struct LPVKinematicModelParams {
-    double z_ref = 0.0;
-    double z_scale = 1.0;
-    double rho_clip = 1.5;
-    double sgn_eps = 0.05;
+    double z_ref;
+    double z_scale;
+    double rho_clip;
+    double sgn_eps;
 
-    double ca00 = 0.0;
-    double ca01 = 0.0;
-    double ca10 = 0.0;
-    double ca11 = 0.0;
-    double cb0 = 0.0;
-    double cb1 = 0.0;
+    double ca00;
+    double ca01;
+    double ca10;
+    double ca11;
+    double cb0;
+    double cb1;
 
-    double dca00 = 0.0;
-    double dca01 = 0.0;
-    double dca10 = 0.0;
-    double dca11 = 0.0;
-    double dcb0 = 0.0;
-    double dcb1 = 0.0;
+    double dca00;
+    double dca01;
+    double dca10;
+    double dca11;
+    double dcb0;
+    double dcb1;
 
-    double gxh = 0.0;
-    double gv = 0.0;
-    double cf1 = 0.0;
-    double cf2 = 0.0;
+    double gxh;
+    double gv;
+    double cf1;
+    double cf2;
 
-    double w_lam0 = 0.0;
-    double w_k0 = 0.0;
-    double w_cf0 = 0.0;
-    double w_lam1 = 0.0;
-    double w_k1 = 0.0;
-    double w_cf1 = 0.0;
+    double w_lam0;
+    double w_k0;
+    double w_cf0;
+    double w_lam1;
+    double w_k1;
+    double w_cf1;
 
-    double xh0_bias = 0.0;
-    double xh0_psi = 0.0;
-    double xh0_v = 0.0;
-    double psi_bias = 0.0;
-    double psi_gain = 1.0;
-    double psi_v = 0.0;
-    double obs_lv = 0.0;
-    double obs_lpsi = 0.0;
+    double xh0_bias;
+    double xh0_psi;
+    double xh0_v;
+    double psi_bias;
+    double psi_gain;
+    double psi_v;
+    double obs_lv;
+    double obs_lpsi;
 };
 
 struct PowerModelParams {
@@ -162,21 +161,21 @@ struct PowerModelParams {
 };
 
 struct LPVDiscreteModel {
-    double rho = 0.0;
-    double ad00 = 1.0;
-    double ad01 = 0.0;
-    double ad10 = 0.0;
-    double ad11 = 1.0;
-    double bd0 = 0.0;
-    double bd1 = 0.0;
-    double gd0 = 0.0;
-    double gd1 = 0.0;
-    double alpha_w = 1.0;
-    double beta_w = 0.0;
-    double gamma_w = 0.0;
-    double sgn_eps = 0.05;
-    double cf1 = 0.0;
-    double cf2 = 0.0;
+    double rho;
+    double ad00;
+    double ad01;
+    double ad10;
+    double ad11;
+    double bd0;
+    double bd1;
+    double gd0;
+    double gd1;
+    double alpha_w;
+    double beta_w;
+    double gamma_w;
+    double sgn_eps;
+    double cf1;
+    double cf2;
 };
 
 struct MPCFollowTerminalWeights {
@@ -187,6 +186,29 @@ struct MPCFollowProjection {
     int proj_num_samples;
     double proj_search_window;
     double local_search_lazy_distance;
+};
+
+struct MPPISamplingStd {
+    double velocity;
+    double omega;
+};
+
+struct MPPINoiseSmoothing {
+    int window;
+    int passes;
+};
+
+struct MPCFollowMPPIParams {
+    bool enable;
+    int num_threads;
+    int batch_size;
+    int iteration_count;
+    double temperature;
+    double gamma;
+    MPPISamplingStd sampling_std;
+    MPPINoiseSmoothing noise_smoothing;
+    bool include_nominal_trajectory;
+    bool fallback_to_best_sample;
 };
 
 struct MPCFollowParams {
@@ -200,6 +222,9 @@ struct MPCFollowParams {
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowTerminalWeights terminal_weights;
     MPCFollowProjection projection;
+    MPCFollowMPPIParams mppi;
+    int base_max_iters;
+    int refine_max_iters;
 };
 
 struct MPCStopCommandWeights {
@@ -215,7 +240,6 @@ struct MPCStopEnvironmentWeights {
 
 struct MPCStopTerminalWeights {
     double obstacle_terminal;
-    double step_terminal = 0.0; // 停止模式下台阶由 step_cost_layer 转为障碍物处理，此字段保留但未使用
 };
 
 struct MPCStopParams {
@@ -226,6 +250,7 @@ struct MPCStopParams {
     MPCMotionConstraintWeights motion_constraint_weights;
     MPCStopEnvironmentWeights environment_weights;
     MPCStopTerminalWeights terminal_weights;
+    int max_iters;
 };
 
 struct MPCHoldGoalWeights {
@@ -243,13 +268,11 @@ struct MPCHoldCommandWeights {
 
 struct MPCHoldEnvironmentWeights {
     double obstacle;
-    double step;
 };
 
 struct MPCHoldTerminalWeights {
     double q_goal_xy_terminal;
     double obstacle_terminal;
-    double step_terminal;
 };
 
 struct MPCHoldParams {
@@ -261,6 +284,7 @@ struct MPCHoldParams {
     MPCMotionConstraintWeights motion_constraint_weights;
     MPCHoldEnvironmentWeights environment_weights;
     MPCHoldTerminalWeights terminal_weights;
+    int max_iters;
 };
 
 struct EnergyParams {
@@ -287,6 +311,9 @@ struct MPCPrediction {
     std::vector<double> headings;
     std::vector<double> v_pred;
     std::vector<double> w_pred;
+
+    /// MPPI 采样 rollout 调试轨迹（仅 debug 模式填充）
+    std::vector<std::vector<Eigen::Vector2d>> rollout_paths;
 };
 
 struct MPCParams {
@@ -477,8 +504,6 @@ public:
         const CostMapGridView& cost_grid,
         const GridInfo& cost_info,
         double schedule_rho,
-        const DirectionMapGridView& dir_grid,
-        const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit
     );
@@ -510,8 +535,6 @@ private:
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
     LPVDiscreteModel model_ {};
-    const DirectionMapGridView& dir_grid_;
-    GridInfo dir_info_;
     double remaining_energy_;
     double rfr_pwr_limit_;
 };
@@ -583,8 +606,7 @@ public:
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
-        const CostMap& cost_map,
-        const DirectionMap& direction_map
+        const CostMap& cost_map
     );
 
     [[nodiscard]] const MPCParams& params() const {

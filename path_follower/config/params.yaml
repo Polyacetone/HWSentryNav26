@@ -14,6 +14,7 @@
     debug:
       enable: true # 是否启用调试发布
       predicted_path_pub_topic: "/path_follower/debug/predicted_path" # MPC预测路径
+      mppi_rollouts_pub_topic: "/path_follower/debug/mppi_rollouts" # MPPI采样rollout轨迹（MarkerArray）
       v_pred_pub_topic: "/path_follower/debug/v_pred" # MPC预测线速度序列
       w_pred_pub_topic: "/path_follower/debug/w_pred" # MPC预测角速度序列
       final_cost_map_pub_topic: "/path_follower/debug/final_cost_map" # 最终融合代价地图
@@ -75,6 +76,23 @@
         weight: 6.0 # 能量软约束权重
 
       follow:
+        base_max_iters: 40 # FDDP base 阶段最大迭代次数
+        refine_max_iters: 40 # FDDP refine 阶段最大迭代次数（台阶场景精调）
+        mppi:
+          enable: true # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
+          num_threads: 6 # MPPI并行线程数
+          batch_size: 512 # 每次迭代采样轨迹数
+          iteration_count: 2 # MPPI迭代次数
+          temperature: 0.3 # 软最优权重温度，越小越偏向最优样本
+          gamma: 0.015 # 控制噪声正则权重，抑制大幅偏离名义控制
+          sampling_std:
+            velocity: 0.4 # 线速度采样标准差 (m/s)
+            omega: 1.0 # 角速度采样标准差 (rad/s)
+          noise_smoothing:
+            window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
+            passes: 2 # 平滑迭代次数
+          include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免MPPI退化时丢掉已有好解
+          fallback_to_best_sample: true # 最终优先采用历史最佳可行样本，增强跳出局部最优的稳定性
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
@@ -170,6 +188,7 @@
           local_search_lazy_distance: 0.1 # 局部搜索找到合适投影点的距离阈值 (m)
 
       stop:
+        max_iters: 40 # FDDP 求解器最大迭代次数
         command_bounds:
           vel_max: 2.8 # 线速度上限 (m/s)
           vel_min: 0.0  # 线速度下限 (m/s）
@@ -197,6 +216,7 @@
           obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
 
       hold:
+        max_iters: 40 # FDDP 求解器最大迭代次数
         command_bounds:
           vel_max: 1.2 # 线速度上限 (m/s)
           vel_min: -1.2 # 线速度下限 (m/s）
@@ -224,11 +244,9 @@
           lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         environment_weights:
           obstacle: 6.0 # 全程避障惩罚
-          step: 6.0 # 全程台阶惩罚（视为不可通行）
         terminal_weights:
           q_goal_xy_terminal: 3.0 # 终端目标点吸引
           obstacle_terminal: 12.0 # 终端避障惩罚
-          step_terminal: 12.0 # 终端台阶惩罚
 
     recovery:
       hazard:

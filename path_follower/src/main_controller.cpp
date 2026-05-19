@@ -504,8 +504,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_DT * 600.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 600.0);
     }
 
     const auto& [cmd, prediction] = *result;
@@ -522,6 +522,9 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     out.predicted_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
+    if (!prediction.rollout_paths.empty()) {
+        out.mppi_rollouts = std::move(prediction.rollout_paths);
+    }
     out.step_dist_cm = compute_step_distance_cm(input, u0, prediction);
     out.valid = true;
 
@@ -554,8 +557,8 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_DT * 600.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Stop) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 600.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -738,7 +741,7 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     const auto result = mpc_controller_->solve_hold(
         *recovery_goal_map_,
         input.chassis_pose_map, input.chassis_state,
-        *input.final_cost_map, *input.masked_direction_map
+        *input.final_cost_map
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Recovery) solve failed: %s", result.error().c_str());
@@ -746,8 +749,8 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_DT * 600.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Recovery) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 600.0);
     }
 
     out.velocity = std::get<0>(*result).x();
@@ -782,7 +785,7 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     const auto result = mpc_controller_->solve_hold(
         input.fixed_goal_pos,
         input.chassis_pose_map, input.chassis_state,
-        *input.final_cost_map, *input.masked_direction_map
+        *input.final_cost_map
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Fixed) solve failed: %s", result.error().c_str());
@@ -790,8 +793,8 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     }
 
     const double solve_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count();
-    if (solve_ms > MPC_DT * 500.0) {
-        RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 500.0);
+    if (solve_ms > MPC_DT * 600.0) {
+        RCLCPP_WARN(logger_, "MPCSolver(Fixed) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 600.0);
     }
 
     out.velocity = std::get<0>(*result).x();

@@ -1,7 +1,9 @@
 #include <path_follower/mpc_solver.hpp>
+#include <path_follower/mppi_sampler.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 
 namespace path_follower {
 
@@ -1134,7 +1136,7 @@ StopResidualVec stop_residual_impl(
 }
 
 
-constexpr int STOP_TERMINAL_RESIDUAL_DIM = 2;
+constexpr int STOP_TERMINAL_RESIDUAL_DIM = 1;
 using StopTerminalResidualVec = Eigen::Matrix<double, STOP_TERMINAL_RESIDUAL_DIM, 1>;
 
 StopTerminalResidualVec stop_terminal_residual_impl(
@@ -1147,7 +1149,6 @@ StopTerminalResidualVec stop_terminal_residual_impl(
     const auto& w = p.stop.terminal_weights;
     const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
     r(0) = w.obstacle_terminal * cs.value / 255.0;
-    r(1) = 0.0; // stop 模式不区分台阶，此槽位保留（STOP_TERMINAL_RESIDUAL_DIM=2 不变）
     return r;
 }
 
@@ -1196,8 +1197,6 @@ HoldProblem::HoldProblem(
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
     double schedule_rho,
-    const DirectionMapGridView& dir_grid,
-    const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit
 ):
@@ -1206,8 +1205,6 @@ HoldProblem::HoldProblem(
     cost_grid_(cost_grid),
     cost_info_(cost_info),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-    dir_grid_(dir_grid),
-    dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
@@ -1229,7 +1226,7 @@ ControlVec HoldProblem::u_upper() const {
 
 namespace {
 
-constexpr int HOLD_RESIDUAL_DIM = 13;
+constexpr int HOLD_RESIDUAL_DIM = 12;
 using HoldResidualVec = Eigen::Matrix<double, HOLD_RESIDUAL_DIM, 1>;
 
 HoldResidualVec hold_residual_impl(
@@ -1239,8 +1236,6 @@ HoldResidualVec hold_residual_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    const DirectionMapGridView& dg,
-    const GridInfo& di,
     double rfr_pwr_limit
 ) {
     const auto& hold = p.hold;
@@ -1266,8 +1261,6 @@ HoldResidualVec hold_residual_impl(
     const double heading_sin = std::sin(theta - desired_theta);
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
-    const auto ds = eval_dir_bilinear(dg, di, px, py);
-    const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     const double a_lat = std::abs(v_act * w_act);
 
     const double dv_lim = motion_lim.acc_max * MPC_DT;
@@ -1283,20 +1276,19 @@ HoldResidualVec hold_residual_impl(
     r(8) = motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim);
     r(9) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
     r(10) = env_w.obstacle * cs.value / 255.0;
-    r(11) = env_w.step * dir_norm;
 
     if (p.energy.enable) {
         const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double excess = (pwr - rfr_pwr_limit) / thr;
-        r(12) = p.energy.weight * positive_part(excess);
+        r(11) = p.energy.weight * positive_part(excess);
     }
 
     return r;
 }
 
 
-constexpr int HOLD_TERMINAL_RESIDUAL_DIM = 4;
+constexpr int HOLD_TERMINAL_RESIDUAL_DIM = 3;
 using HoldTerminalResidualVec = Eigen::Matrix<double, HOLD_TERMINAL_RESIDUAL_DIM, 1>;
 
 HoldTerminalResidualVec hold_terminal_residual_impl(
@@ -1304,9 +1296,7 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
     const Eigen::Vector2d& goal,
     const MPCParams& p,
     const CostMapGridView& cost_grid,
-    const GridInfo& cost_info,
-    const DirectionMapGridView& dir_grid,
-    const GridInfo& dir_info
+    const GridInfo& cost_info
 ) {
     HoldTerminalResidualVec r = HoldTerminalResidualVec::Zero();
     const auto& goal_w = p.hold.goal_weights;
@@ -1316,12 +1306,9 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
         goal_w.goal_deadzone
     );
     const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
-    const auto ds = eval_dir_bilinear(dir_grid, dir_info, x(ix::X), x(ix::Y));
-    const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
     r(0) = terminal_w.q_goal_xy_terminal * terminal_delta.x();
     r(1) = terminal_w.q_goal_xy_terminal * terminal_delta.y();
     r(2) = terminal_w.obstacle_terminal * cs.value / 255.0;
-    r(3) = terminal_w.step_terminal * dir_norm;
     return r;
 }
 
@@ -1330,7 +1317,7 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
 double HoldProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     (void)k;
     return residual_cost(
-        hold_residual_impl(x, u, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_, rfr_pwr_limit_)
+        hold_residual_impl(x, u, goal_, p_, cost_grid_, cost_info_, rfr_pwr_limit_)
     );
 }
 
@@ -1346,18 +1333,18 @@ void HoldProblem::running_cost_derivatives(
 ) const {
     (void)k;
     auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
-        return hold_residual_impl(xv, uv, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_, rfr_pwr_limit_);
+        return hold_residual_impl(xv, uv, goal_, p_, cost_grid_, cost_info_, rfr_pwr_limit_);
     };
     gauss_newton_running_derivatives<HOLD_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
 }
 
 double HoldProblem::terminal_cost(const StateVec& x) const {
-    return residual_cost(hold_terminal_residual_impl(x, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_));
+    return residual_cost(hold_terminal_residual_impl(x, goal_, p_, cost_grid_, cost_info_));
 }
 
 void HoldProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const {
     auto residual_fn = [&](const StateVec& xv) {
-        return hold_terminal_residual_impl(xv, goal_, p_, cost_grid_, cost_info_, dir_grid_, dir_info_);
+        return hold_terminal_residual_impl(xv, goal_, p_, cost_grid_, cost_info_);
     };
     gauss_newton_terminal_derivatives<HOLD_TERMINAL_RESIDUAL_DIM>(residual_fn, x, lfx, lfxx);
 }
@@ -1385,19 +1372,56 @@ void shift_warm_start(SolverT& solver) {
 }
 
 template<typename SolverT, typename ProblemT>
-void initialize_primal_trajectory(SolverT& solver, const ProblemT& prob, const StateVec& x0, bool use_warm_start) {
-    if (use_warm_start) {
-        shift_warm_start(solver);
-    } else {
-        for (size_t k = 0; k < SolverT::N; ++k) {
-            solver.us[k].setZero();
-        }
-    }
-
+void rollout_solver_states(SolverT& solver, const ProblemT& prob, const StateVec& x0) {
     solver.xs[0] = x0;
     for (size_t k = 0; k < SolverT::N; ++k) {
         solver.xs[k + 1] = prob.dynamics(static_cast<int>(k), solver.xs[k], solver.us[k]);
     }
+}
+
+template<typename SolverT>
+void zero_solver_controls(SolverT& solver) {
+    for (size_t k = 0; k < SolverT::N; ++k) {
+        solver.us[k].setZero();
+    }
+}
+
+template<typename SolverT>
+void fill_solver_controls(SolverT& solver, const ControlVec& u) {
+    for (size_t k = 0; k < SolverT::N; ++k) {
+        solver.us[k] = u;
+    }
+}
+
+template<typename SolverT, typename ProblemT>
+void clamp_solver_controls(SolverT& solver, const ProblemT& prob) {
+    const auto u_lo = prob.u_lower();
+    const auto u_hi = prob.u_upper();
+    for (size_t k = 0; k < SolverT::N; ++k) {
+        solver.us[k] = solver.us[k].cwiseMax(u_lo).cwiseMin(u_hi);
+    }
+}
+
+template<typename SolverT, typename ProblemT>
+void initialize_primal_trajectory(SolverT& solver, const ProblemT& prob, const StateVec& x0, bool use_warm_start) {
+    if (use_warm_start) {
+        shift_warm_start(solver);
+    } else {
+        zero_solver_controls(solver);
+    }
+    clamp_solver_controls(solver, prob);
+    rollout_solver_states(solver, prob, x0);
+}
+
+template<typename SolverT>
+std::array<ControlVec, SolverT::N> copy_solver_controls(const SolverT& solver) {
+    return solver.us;
+}
+
+template<typename SolverT>
+void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample) {
+    solver.xs = sample.xs;
+    solver.us = sample.us;
 }
 
 template<typename SolverT>
@@ -1607,9 +1631,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
-    const FollowProblemConfig single_stage_config = step_mode_requested
-        ? FOLLOW_REFINE_PROBLEM_CONFIG
-        : FOLLOW_BASE_PROBLEM_CONFIG;
+    const FollowProblemConfig single_stage_config = step_mode_requested ? FOLLOW_REFINE_PROBLEM_CONFIG : FOLLOW_BASE_PROBLEM_CONFIG;
     const FollowProblemConfig base_config = stepping_active ? FOLLOW_BASE_PROBLEM_CONFIG : single_stage_config;
 
     const FollowProblem base_problem(
@@ -1617,14 +1639,42 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode
     );
 
-    fddp::SolverOptions opts;
-    opts.max_iters = SOLVER_MAX_ITERS;
-    opts.tol_grad = SOLVER_TOL_GRAD;
-    opts.tol_cost = SOLVER_TOL_COST;
+    fddp::SolverOptions base_opts;
+    base_opts.max_iters = params_.follow.base_max_iters;
+    base_opts.tol_grad = SOLVER_TOL_GRAD;
+    base_opts.tol_cost = SOLVER_TOL_COST;
 
-    initialize_primal_trajectory(follow_base_solver_, base_problem, x0, follow_base_warm_);
-    follow_base_solver_.solve(base_problem, opts);
+    if (follow_base_warm_) {
+        shift_warm_start(follow_base_solver_);
+    } else {
+        fill_solver_controls(follow_base_solver_, cmd0);
+    }
+    clamp_solver_controls(follow_base_solver_, base_problem);
+
+    auto prev = std::chrono::steady_clock::now();
+
+    MPPIFollowSamplingResult mppi_result;
+    bool seeded_by_mppi = false;
+    if (params_.follow.mppi.enable) {
+        MPPIFollowSampler sampler(params_.follow.mppi);
+        mppi_result = sampler.optimize(base_problem, x0, copy_solver_controls(follow_base_solver_));
+        if (mppi_result.valid) {
+            seed_solver_from_sampling_result(follow_base_solver_, mppi_result);
+            seeded_by_mppi = true;
+        }
+    }
+
+    std::cout << "MPPI sampling time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prev).count() << " ms" << std::endl;
+    prev = std::chrono::steady_clock::now();
+
+    if (!seeded_by_mppi) {
+        rollout_solver_states(follow_base_solver_, base_problem, x0);
+    }
+    follow_base_solver_.solve(base_problem, base_opts);
     follow_base_warm_ = true;
+
+    std::cout << "Base MPC solve time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prev).count() << " ms" << std::endl;
+    prev = std::chrono::steady_clock::now();
 
     const FollowProblem* solved_problem = &base_problem;
     auto* solved_solver = &follow_base_solver_;
@@ -1639,23 +1689,26 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         // 重新积分：确保初始轨迹在 refine 问题动力学下一致，
         // 避免 clamp 后控制量与状态量不匹配导致 solver 每周期收敛路径不同。
         {
-            const auto u_lo = refine_problem.u_lower();
-            const auto u_hi = refine_problem.u_upper();
-            for (int k = 0; k < MPC_HORIZON; ++k) {
-                follow_refine_solver_.us[k] = follow_refine_solver_.us[k].cwiseMax(u_lo).cwiseMin(u_hi);
-                follow_refine_solver_.xs[k + 1] = refine_problem.dynamics(
-                    k, follow_refine_solver_.xs[k], follow_refine_solver_.us[k]
-                );
-            }
+            clamp_solver_controls(follow_refine_solver_, refine_problem);
+            rollout_solver_states(follow_refine_solver_, refine_problem, x0);
         }
-        follow_refine_solver_.solve(refine_problem, opts);
+        fddp::SolverOptions refine_opts;
+        refine_opts.max_iters = params_.follow.refine_max_iters;
+        refine_opts.tol_grad = SOLVER_TOL_GRAD;
+        refine_opts.tol_cost = SOLVER_TOL_COST;
+        follow_refine_solver_.solve(refine_problem, refine_opts);
         solved_problem = &refine_problem;
         solved_solver = &follow_refine_solver_;
+
+        std::cout << "Refine MPC solve time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prev).count() << " ms" << std::endl;
     }
 
     const Eigen::Vector2d cmd((*solved_solver).us[0](0), (*solved_solver).us[0](1));
     last_cmd_ = cmd;
-    return std::tuple {cmd, rollout_prediction(*solved_problem, *solved_solver, x0)};
+
+    MPCPrediction prediction = rollout_prediction(*solved_problem, *solved_solver, x0);
+    prediction.rollout_paths = std::move(mppi_result.rollout_paths);
+    return std::tuple {cmd, std::move(prediction)};
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_stop(
@@ -1689,7 +1742,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = SOLVER_MAX_ITERS;
+    opts.max_iters = params_.stop.max_iters;
     opts.tol_grad = SOLVER_TOL_GRAD;
     opts.tol_cost = SOLVER_TOL_COST;
     stop_solver_.solve(prob, opts);
@@ -1704,8 +1757,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
-    const CostMap& cost_map,
-    const DirectionMap& direction_map
+    const CostMap& cost_map
 ) {
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -1727,15 +1779,13 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const DirectionMapGridView dg(direction_map);
-    const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    HoldProblem prob(goal_map, params_, cg, ci, schedule_rho, dg, di, remaining_energy_, rfr_pwr_limit_);
+    HoldProblem prob(goal_map, params_, cg, ci, schedule_rho, remaining_energy_, rfr_pwr_limit_);
     initialize_primal_trajectory(hold_solver_, prob, x0, hold_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = SOLVER_MAX_ITERS;
+    opts.max_iters = params_.hold.max_iters;
     opts.tol_grad = SOLVER_TOL_GRAD;
     opts.tol_cost = SOLVER_TOL_COST;
     hold_solver_.solve(prob, opts);

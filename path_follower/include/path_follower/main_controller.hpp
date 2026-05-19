@@ -82,6 +82,7 @@ struct ControlOutput {
     std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
+    std::optional<std::vector<std::vector<Eigen::Vector2d>>> mppi_rollouts;
 
     // ─── 有效性 ───
     bool valid = false;                 // false 时 Node 不应发布指令
@@ -251,8 +252,6 @@ private:
     FsmState last_fsm_state_ = FsmState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     int path_version_ = 0;
-
-
 
     // ─── 外部安全观测状态 ───
     bool stuck_active_ = false;
