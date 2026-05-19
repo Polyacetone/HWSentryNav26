@@ -32,6 +32,24 @@ bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) 
     return active_step_mode.has_value() && active_step_mode->mode != ChassisMode::NORMAL;
 }
 
+const MPCFollowModeProfile& select_follow_problem_profile(
+    const MPCFollowParams& params,
+    const FollowProblemConfig& config,
+    std::optional<ActiveStepMode> active_step_mode
+) {
+    return config.use_active_mode_profile ? select_follow_mode_profile(params, active_step_mode) : params.mode_profiles.normal;
+}
+
+constexpr FollowProblemConfig FOLLOW_BASE_PROBLEM_CONFIG {
+    .use_active_mode_profile = false,
+    .enable_step_terrain_costs = false,
+};
+
+constexpr FollowProblemConfig FOLLOW_REFINE_PROBLEM_CONFIG {
+    .use_active_mode_profile = true,
+    .enable_step_terrain_costs = true,
+};
+
 inline double positive_part(double x) {
     return std::max(x, 0.0);
 }
@@ -613,6 +631,7 @@ template<int Horizon>
 FollowProblemT<Horizon>::FollowProblemT(
     const std::vector<Eigen::Vector2d>& ref_control_points,
     const MPCParams& params,
+    const FollowProblemConfig& config,
     const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
     double prediction_dt,
@@ -621,11 +640,11 @@ FollowProblemT<Horizon>::FollowProblemT(
     const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit,
-    std::optional<ActiveStepMode> active_step_mode,
-    double initial_path_u
+    std::optional<ActiveStepMode> active_step_mode
 ):
     ref_cps_(ref_control_points),
     p_(params),
+    config_(config),
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
     prediction_dt_(prediction_dt),
@@ -634,7 +653,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
-    initial_path_u_(initial_path_u),
     active_step_mode_(active_step_mode) {}
 
 template<int Horizon>
@@ -656,13 +674,13 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_lower() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
+    const auto& command_bounds = select_follow_problem_profile(p_.follow, config_, active_step_mode_).command_bounds;
     return ControlVec(command_bounds.vel_min, command_bounds.omega_min);
 }
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_upper() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
+    const auto& command_bounds = select_follow_problem_profile(p_.follow, config_, active_step_mode_).command_bounds;
     return ControlVec(command_bounds.vel_max, command_bounds.omega_max);
 }
 
@@ -682,6 +700,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const ControlVec& u,
     const std::vector<Eigen::Vector2d>& ref_cps,
     const MPCParams& p,
+    const FollowProblemConfig& config,
     const CostMapGridView& cg,
     const GridInfo& ci,
     const DirectionMapGridView& dg,
@@ -696,7 +715,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const auto& terrain_w = follow.terrain_weights;
     const auto& env_w = follow.environment_weights;
     const auto& terminal_w = follow.terminal_weights;
-    const auto& motion_lim = select_follow_mode_profile(follow, active_step_mode).motion_constraints;
+    const auto& motion_lim = select_follow_problem_profile(follow, config, active_step_mode).motion_constraints;
 
     FollowResidualLinearization out;
     out.r.setZero();
@@ -813,7 +832,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(10, ix::Y) = terrain_w.direction * sign_cross * dcross_dy;
     out.jx(10, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
 
-    if (dir_norm_sq > 1e-10 && is_active_follow_step_mode(active_step_mode)) {
+    if (config.enable_step_terrain_costs && dir_norm_sq > 1e-10 && is_active_follow_step_mode(active_step_mode)) {
         const double target_vel = active_step_mode->target_velocity;
         const double v_err = v_act - target_vel;
         const double abs_v_err = std::abs(v_err);
@@ -850,6 +869,7 @@ FollowResidualVec follow_residual_impl(
     const ControlVec& u,
     const std::vector<Eigen::Vector2d>& ref_cps,
     const MPCParams& p,
+    const FollowProblemConfig& config,
     const CostMapGridView& cg,
     const GridInfo& ci,
     const DirectionMapGridView& dg,
@@ -858,7 +878,7 @@ FollowResidualVec follow_residual_impl(
     std::optional<ActiveStepMode> active_step_mode
 ) {
     return follow_residual_linearized_impl(
-        x, u, ref_cps, p, cg, ci, dg, di,
+        x, u, ref_cps, p, config, cg, ci, dg, di,
         rfr_pwr_limit, active_step_mode
     ).r;
 }
@@ -963,7 +983,7 @@ const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(int k) const 
 template<int Horizon>
 double FollowProblemT<Horizon>::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     double cost = residual_cost(follow_residual_impl(
-        x, u, ref_cps_, p_,
+        x, u, ref_cps_, p_, config_,
         cost_grid_for_step(k), cost_info_, dir_grid_, dir_info_,
         rfr_pwr_limit_, active_step_mode_
     ));
@@ -985,7 +1005,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 ) const {
     const auto& cg = cost_grid_for_step(k);
     const auto lin = follow_residual_linearized_impl(
-        x, u, ref_cps_, p_, cg, cost_info_, dir_grid_, dir_info_,
+        x, u, ref_cps_, p_, config_, cg, cost_info_, dir_grid_, dir_info_,
         rfr_pwr_limit_, active_step_mode_
     );
 
@@ -1380,6 +1400,12 @@ void initialize_primal_trajectory(SolverT& solver, const ProblemT& prob, const S
     }
 }
 
+template<typename SolverT>
+void copy_solver_trajectory(SolverT& dst, const SolverT& src) {
+    dst.xs = src.xs;
+    dst.us = src.us;
+}
+
 template<typename ProblemT, typename SolverT>
 MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, const StateVec& x0) {
     std::array<StateVec, SolverT::N + 1> xs_pred;
@@ -1420,13 +1446,13 @@ void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
 }
 
 void MPCSolver::reset_warm_start() {
-    follow_warm_ = false;
+    follow_base_warm_ = false;
     stop_warm_ = false;
     hold_warm_ = false;
     last_u_ = 0.0;
-    last_follow_mode_ = std::nullopt;
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
-        follow_solver_.us[k].setZero();
+        follow_base_solver_.us[k].setZero();
+        follow_refine_solver_.us[k].setZero();
         stop_solver_.us[k].setZero();
         hold_solver_.us[k].setZero();
     }
@@ -1515,6 +1541,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     std::optional<ActiveStepMode> active_step_mode
 ) {
     const auto& ref_cps = global_path.getControlPoints();
+    const bool step_mode_requested = is_active_follow_step_mode(active_step_mode);
+    const bool stepping_active = step_mode_requested;
     const bool path_changed = !same_cps(prev_ref_control_points_, ref_cps);
     const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
     const double u0 = project_to_spline_u_extrapolated(
@@ -1528,11 +1556,13 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         PATH_U_EXTRAP_MAX
     );
     if (path_changed) {
-        follow_warm_ = false;
+        follow_base_warm_ = false;
     }
     last_u_ = u0;
 
-    const auto& follow_mode_profile = select_follow_mode_profile(params_.follow, active_step_mode);
+    const auto& follow_mode_profile = step_mode_requested
+        ? select_follow_mode_profile(params_.follow, active_step_mode)
+        : params_.follow.mode_profiles.normal;
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
             last_cmd_.x(),
@@ -1577,25 +1607,55 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
-    FollowProblem prob_center(
-        ref_cps, params_, step_cost_grids_cache_, ci, pred_dt, schedule_rho,
-        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode, u0
+    const FollowProblemConfig single_stage_config = step_mode_requested
+        ? FOLLOW_REFINE_PROBLEM_CONFIG
+        : FOLLOW_BASE_PROBLEM_CONFIG;
+    const FollowProblemConfig base_config = stepping_active ? FOLLOW_BASE_PROBLEM_CONFIG : single_stage_config;
+
+    const FollowProblem base_problem(
+        ref_cps, params_, base_config, step_cost_grids_cache_, ci, pred_dt, schedule_rho,
+        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode
     );
 
     fddp::SolverOptions opts;
-    opts.max_iters = 60;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
+    opts.max_iters = SOLVER_MAX_ITERS;
+    opts.tol_grad = SOLVER_TOL_GRAD;
+    opts.tol_cost = SOLVER_TOL_COST;
 
-    // ── 初始化并求解中心假设 ──
-    initialize_primal_trajectory(follow_solver_, prob_center, x0, follow_warm_);
-    follow_solver_.solve(prob_center, opts);
+    initialize_primal_trajectory(follow_base_solver_, base_problem, x0, follow_base_warm_);
+    follow_base_solver_.solve(base_problem, opts);
+    follow_base_warm_ = true;
 
-    follow_warm_ = true;
-    last_follow_mode_ = active_step_mode;
-    const Eigen::Vector2d cmd(follow_solver_.us[0](0), follow_solver_.us[0](1));
+    const FollowProblem* solved_problem = &base_problem;
+    auto* solved_solver = &follow_base_solver_;
+
+    if (stepping_active) {
+        const FollowProblem refine_problem(
+            ref_cps, params_, FOLLOW_REFINE_PROBLEM_CONFIG, step_cost_grids_cache_, ci, pred_dt, schedule_rho,
+            dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode
+        );
+        copy_solver_trajectory(follow_refine_solver_, follow_base_solver_);
+        follow_refine_solver_.xs[0] = x0;
+        // 重新积分：确保初始轨迹在 refine 问题动力学下一致，
+        // 避免 clamp 后控制量与状态量不匹配导致 solver 每周期收敛路径不同。
+        {
+            const auto u_lo = refine_problem.u_lower();
+            const auto u_hi = refine_problem.u_upper();
+            for (int k = 0; k < MPC_HORIZON; ++k) {
+                follow_refine_solver_.us[k] = follow_refine_solver_.us[k].cwiseMax(u_lo).cwiseMin(u_hi);
+                follow_refine_solver_.xs[k + 1] = refine_problem.dynamics(
+                    k, follow_refine_solver_.xs[k], follow_refine_solver_.us[k]
+                );
+            }
+        }
+        follow_refine_solver_.solve(refine_problem, opts);
+        solved_problem = &refine_problem;
+        solved_solver = &follow_refine_solver_;
+    }
+
+    const Eigen::Vector2d cmd((*solved_solver).us[0](0), (*solved_solver).us[0](1));
     last_cmd_ = cmd;
-    return std::tuple {cmd, rollout_prediction(prob_center, follow_solver_, x0)};
+    return std::tuple {cmd, rollout_prediction(*solved_problem, *solved_solver, x0)};
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_stop(
@@ -1629,9 +1689,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 60;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
+    opts.max_iters = SOLVER_MAX_ITERS;
+    opts.tol_grad = SOLVER_TOL_GRAD;
+    opts.tol_cost = SOLVER_TOL_COST;
     stop_solver_.solve(prob, opts);
     stop_warm_ = true;
 
@@ -1675,9 +1735,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     initialize_primal_trajectory(hold_solver_, prob, x0, hold_warm_);
 
     fddp::SolverOptions opts;
-    opts.max_iters = 60;
-    opts.tol_grad = 1e-6;
-    opts.tol_cost = 1e-8;
+    opts.max_iters = SOLVER_MAX_ITERS;
+    opts.tol_grad = SOLVER_TOL_GRAD;
+    opts.tol_cost = SOLVER_TOL_COST;
     hold_solver_.solve(prob, opts);
     hold_warm_ = true;
 

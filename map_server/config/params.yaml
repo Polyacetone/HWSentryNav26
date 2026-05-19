@@ -12,12 +12,12 @@
     global_map:
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图
       robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-      blue_nav_map_filename: "mamba.png" # 全局导航地图路径（蓝方）
-      red_nav_map_filename: "mamba.png" # 全局导航地图路径（红方）
-      default_nav_map_filename: "mamba.png" # 获取机器人颜色超时后使用此全局导航地图
+      blue_nav_map_filename: "pool.png" # 全局导航地图路径（蓝方）
+      red_nav_map_filename: "pool.png" # 全局导航地图路径（红方）
+      default_nav_map_filename: "pool.png" # 获取机器人颜色超时后使用此全局导航地图
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
-      cloud_filename: "mamba.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
+      cloud_filename: "pool.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
       downsample_voxel_size: 0.05 # 全局点云下采样体素大小，单位m
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
 

@@ -16,11 +16,15 @@ namespace path_follower {
 //  MPC 编译期常量
 // ═══════════════════════════════════════════════════════════════
 
-constexpr int MPC_HORIZON = 60; // MPC 预测步数
+constexpr int MPC_HORIZON = 60;
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 9; // [x, y, theta, x_h, v_act, w_act, dv, dw, path_u]
 constexpr int MPC_NU = 2; // [v_cmd, omega_cmd]
-constexpr int PWR_N = 12;
+constexpr int PWR_N = 12; // P = c0 + c1*v*a + c2*w*alpha + c3*a^2 + c4*alpha^2 + c5*|v| + c6*|w| + c7*v^2 + c8*w^2 + c9*|a| + c10*|alpha| + c11*|v*w|
+
+constexpr int SOLVER_MAX_ITERS = 60;
+constexpr double SOLVER_TOL_GRAD = 1e-6;
+constexpr double SOLVER_TOL_COST = 1e-8;
 
 // ═══════════════════════════════════════════════════════════════
 //  State / control vector indexing
@@ -272,6 +276,11 @@ struct ActiveStepMode {
     bool operator==(const ActiveStepMode&) const = default;
 };
 
+struct FollowProblemConfig {
+    bool use_active_mode_profile = false;
+    bool enable_step_terrain_costs = false;
+};
+
 /// MPC 预测轨迹
 struct MPCPrediction {
     std::vector<Eigen::Vector2d> path_map;
@@ -359,6 +368,7 @@ public:
     FollowProblemT(
         const std::vector<Eigen::Vector2d>& ref_control_points,
         const MPCParams& params,
+        const FollowProblemConfig& config,
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
         double prediction_dt,
@@ -367,8 +377,7 @@ public:
         const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit,
-        std::optional<ActiveStepMode> active_step_mode,
-        double initial_path_u
+        std::optional<ActiveStepMode> active_step_mode
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -397,6 +406,7 @@ private:
 
     const std::vector<Eigen::Vector2d>& ref_cps_;
     const MPCParams& p_;
+    FollowProblemConfig config_;
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
     double prediction_dt_;
@@ -405,7 +415,6 @@ private:
     GridInfo dir_info_;
     double remaining_energy_;
     double rfr_pwr_limit_;
-    double initial_path_u_;
     std::optional<ActiveStepMode> active_step_mode_;
 };
 
@@ -587,14 +596,14 @@ private:
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 
-    // 主 FDDP solver
-    fddp::Solver<FollowProblem> follow_solver_;
+    // Follow 基础层负责跨周期 warm start；台阶 refinement 每周期由基础层结果重新初始化。
+    fddp::Solver<FollowProblem> follow_base_solver_;
+    fddp::Solver<FollowProblem> follow_refine_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
-    bool follow_warm_ = false;
+    bool follow_base_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
-    std::optional<ActiveStepMode> last_follow_mode_;
 
     // 复用每步代价图视图，避免 solve_follow 中反复分配
     std::vector<CostMapGridView> step_cost_grids_cache_;
