@@ -181,7 +181,6 @@ void MainController::clear_step_state() {
     step_locked_path_ = std::nullopt;
     step_locked_fixed_goal_ = false;
     step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
-    step_latch_start_time_ = std::nullopt;
     if (had_latch) {
         RCLCPP_DEBUG(logger_, "Step decision cleared (had active latch)");
     }
@@ -194,7 +193,7 @@ void MainController::update_step_state_for_path_change(const bool has_new_path) 
     clear_step_state();
 }
 
-void MainController::update_step_release(const SplineD& path, const double current_u, const std::chrono::steady_clock::time_point stamp) {
+void MainController::update_step_release(const SplineD& path, const double current_u) {
     if (!active_step_target_) return;
     if (active_step_target_->path_version != path_version_) {
         RCLCPP_DEBUG(logger_, "Step released: path version changed (target_v=%d != cur_v=%d)", active_step_target_->path_version, path_version_);
@@ -220,23 +219,6 @@ void MainController::update_step_release(const SplineD& path, const double curre
         return;
     }
     pending_step_release_count_ = 0;
-
-    // TTL 超时释放：台阶锁存超过 latch_ttl 仍未退出，认为卡死
-    // 通过 step_ttl_just_expired_ 标志通知 FSM，由 STEPPING 状态直接转入 STUCK_REVERSE
-    if (step_latch_start_time_) {
-        const double elapsed = std::chrono::duration<double>(
-            stamp - *step_latch_start_time_
-        ).count();
-        if (elapsed >= nav_params_.latch_ttl) {
-            RCLCPP_WARN(
-                logger_,
-                "Step TTL expired (%.1f >= %.1f s), signaling direct STUCK_REVERSE transition",
-                elapsed, nav_params_.latch_ttl
-            );
-            clear_step_state();
-            step_ttl_just_expired_ = true;
-        }
-    }
 }
 
 void MainController::extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map) {
@@ -418,7 +400,6 @@ bool MainController::prepare_follow_step_behavior(
                 step_locked_path_ = input.global_path;
                 step_locked_fixed_goal_ = input.fixed_goal;
                 step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
-                step_latch_start_time_ = input.stamp;
                 RCLCPP_DEBUG(
                     logger_,
                     "Step command latched: dir=%s mode=%s target_v=%.2f at (%.2f, %.2f)",
@@ -438,7 +419,6 @@ bool MainController::prepare_follow_step_behavior(
         step_locked_path_ = input.global_path;
         step_locked_fixed_goal_ = input.fixed_goal;
         step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
-        step_latch_start_time_ = input.stamp;
     }
 
     return false;

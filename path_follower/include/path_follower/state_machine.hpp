@@ -97,8 +97,8 @@ struct FsmInput {
     bool spin_requested = false;
     bool spin_high_priority = false;
 
-    // 信号：step_latch_ttl 超时（用于直接从 STEPPING → STUCK_REVERSE）
-    bool step_ttl_expired = false;
+    // 信号：无进度检测触发（Follow/Stepping 模式，由路标点方式判定）
+    bool no_progress_detected = false;
 
     // 底盘当前位置（map 坐标系，用于 STUCK_REVERSE 位移判定）
     Eigen::Vector2d chassis_pos_map = Eigen::Vector2d::Zero();

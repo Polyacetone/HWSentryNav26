@@ -1,9 +1,10 @@
 #pragma once
 
+#include <Eigen/Core>
 #include <limits>
 #include <optional>
+#include <vector>
 #include <uniform_bspline/uniform_bspline.hpp>
-#include <Eigen/Core>
 #include <path_follower/nav_map.hpp>
 
 namespace path_follower {
@@ -41,6 +42,24 @@ double project_to_spline_u_extrapolated(
     double u_min = PATH_U_EXTRAP_MIN,
     double u_max = PATH_U_EXTRAP_MAX
 );
+
+void eval_quadratic_bspline2(
+    const std::vector<Eigen::Vector2d>& cps,
+    double u,
+    Eigen::Vector2d* p,
+    Eigen::Vector2d* d1,
+    Eigen::Vector2d* d2
+);
+
+void eval_quadratic_bspline2_extrapolated(
+    const std::vector<Eigen::Vector2d>& cps,
+    double u,
+    Eigen::Vector2d* p,
+    Eigen::Vector2d* d1,
+    Eigen::Vector2d* d2
+);
+
+double quadratic_bspline_curvature(const Eigen::Vector2d& d1, const Eigen::Vector2d& d2);
 }
 
 namespace path_follower {

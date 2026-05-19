@@ -128,10 +128,10 @@ struct NavigationParams {
 
     FollowProjectionGuardParams follow_proj_guard;
     StepDetectionParams step_detection;
-    NoProgressGuardParams no_progress_guard;
+    NoProgressGuardParams follow_no_progress_guard;
+    NoProgressGuardParams stepping_no_progress_guard;
     StepBlockReplanParams step_block_replan;
 
-    double latch_ttl; // 台阶锁存最大持续秒数，超时视为卡死
     double step_dist_offset; // 补偿代价地图膨胀导致的台阶检测距离偏差 (m)
 };
 
@@ -178,7 +178,7 @@ private:
     bool compute_is_hazard(const ControlInput& input) const;
     bool update_recovery_safe_flag(const ControlInput& input);
     void recompute_follow_landmarks(const SplineD& path);
-    bool check_no_progress(const ControlInput& input, double current_u);
+    bool check_no_progress(const ControlInput& input, double current_u, const NoProgressGuardParams& params, FsmState current_state);
 
     // ─── 工具函数 ───
     enum class StepDirection : uint8_t {
@@ -221,7 +221,7 @@ private:
     bool is_same_step_target(const PathStepTarget& target, const StepTargetObservation& observation) const;
     void clear_step_state();
     void update_step_state_for_path_change(bool has_new_path);
-    void update_step_release(const SplineD& path, double current_u, std::chrono::steady_clock::time_point stamp);
+    void update_step_release(const SplineD& path, double current_u);
     void extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map);
     [[nodiscard]] bool is_currently_inside_active_step(double current_u) const;
     [[nodiscard]] uint8_t compute_step_distance_cm(const ControlInput& input, double current_u, const MPCPrediction& prediction) const;
@@ -257,7 +257,6 @@ private:
     bool stuck_active_ = false;
     std::chrono::steady_clock::time_point stuck_start_time_;
     Eigen::Vector2d stuck_start_pos_ = Eigen::Vector2d::Zero();
-    bool step_ttl_just_expired_ = false;
 
     // ─── 台阶检测 / 锁存 / 执行状态 ───
     std::optional<PathStepTarget> pending_step_target_detection_;
@@ -266,7 +265,6 @@ private:
     std::optional<PathStepTarget> active_step_target_;
     std::optional<ActiveStepMode> active_step_command_;
     std::optional<SplineD> step_locked_path_;
-    std::optional<std::chrono::steady_clock::time_point> step_latch_start_time_; // 台阶锁存时刻，用于TTL超时
     bool step_locked_fixed_goal_ = false;
     Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
     bool deferred_external_path_update_ = false;
@@ -275,12 +273,15 @@ private:
     ControlOutput last_command_output_;
     bool has_last_command_output_ = false;
 
+    bool follow_stop_and_wait_replan_pending_ = false;
+
     bool last_cycle_chassis_controllable_ = false;
 
-    // ─── Follow 路标点无进度检测状态 ───
+    // ─── Follow/Stepping 路标点无进度检测状态 ───
     std::vector<double> follow_landmarks_u_;                 // 每隔 ~landmark_spacing 的路径参数 u
     int follow_max_landmark_idx_ = -1;                       // 已到达的最高路标点索引（-1=未初始化）
     std::chrono::steady_clock::time_point follow_max_landmark_time_;  // 最后一次路标更新时刻
+    FsmState last_no_progress_check_state_ = FsmState::IDLE; // 上次调用 check_no_progress 的状态，用于模式切换时重置计时
 };
 
 }

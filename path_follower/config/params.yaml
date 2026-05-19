@@ -35,9 +35,13 @@
       cost_max: 240.0 # 投影连线最大障碍物代价 > 该值则取消follow (0~255)
       cost_samples: 20 # 连线代价估计采样数
 
-    follow_no_progress_guard:
-      landmark_spacing: 1.0 # 路标点沿弧长间隔 (m)
-      timeout: 6.0 # 无进度超时 (s)
+    no_progress_guard:
+      follow:
+        landmark_spacing: 1.0 # 路标点沿弧长间隔 (m)
+        timeout: 6.0 # 无进度超时 (s)
+      stepping:
+        landmark_spacing: 0.3 # 路标点沿弧长间隔 (m)
+        timeout: 6.0 # 无进度超时 (s)
 
     follow_step_block_replan:
       enable: true # 是否启用“台阶被动态障碍物堵住”检测并触发全局重规划
@@ -49,7 +53,6 @@
 
     step:
       step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离
-      latch_ttl: 8.0 # 台阶锁存最大持续秒数，超时视为卡死 (s)
       detection:
         detect_norm_threshold: 0.9 # 方向场模长阈值，用于在路径上探测台阶 enter/exit 位置
         detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，< -阈值为下台阶
@@ -76,23 +79,29 @@
         weight: 6.0 # 能量软约束权重
 
       follow:
-        base_max_iters: 40 # FDDP base 阶段最大迭代次数
-        refine_max_iters: 40 # FDDP refine 阶段最大迭代次数（台阶场景精调）
+        total_iters: 30 # FDDP 总迭代次数（台阶/非台阶一致）
+        step_refine_iters: 20 # 台阶模式下分配给 refine 阶段的迭代次数，非台阶模式全部 iters 用于 base 阶段
         mppi:
           enable: true # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
-          num_threads: 6 # MPPI并行线程数
+          num_threads: 4 # MPPI并行线程数
           batch_size: 512 # 每次迭代采样轨迹数
           iteration_count: 2 # MPPI迭代次数
           temperature: 0.3 # 软最优权重温度，越小越偏向最优样本
           gamma: 0.015 # 控制噪声正则权重，抑制大幅偏离名义控制
-          sampling_std:
-            velocity: 0.4 # 线速度采样标准差 (m/s)
-            omega: 1.0 # 角速度采样标准差 (rad/s)
-          noise_smoothing:
-            window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
-            passes: 2 # 平滑迭代次数
+          geometry_sampling:
+            lateral_offset_std: 0.35 # 参考路径控制点沿法向的采样标准差 (m)
+          speed_sampling:
+            control_point_count: 4 # 速度 B-spline 控制点数量；越大可表达的行为模式越复杂
+            scale_std: 0.75 # 速度缩放控制点零均值采样标准差；允许局部负值以自然产生倒车
+            heading_feedback_gain: 4.0 # 几何跟踪航向反馈增益，用于 omega = kappa * v + k_fb * heading_error
+          regularization_std:
+            velocity: 0.4 # MPPI 加权平均时对速度增量的正则标准差 (m/s)
+            omega: 1.0 # MPPI 加权平均时对角速度增量的正则标准差 (rad/s)
           include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免MPPI退化时丢掉已有好解
           fallback_to_best_sample: true # 最终优先采用历史最佳可行样本，增强跳出局部最优的稳定性
+        rollout_safety:
+          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解命中则本帧退化为 solve_stop
+          lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
@@ -162,10 +171,10 @@
         tracking_weights:
           q_y: 0.4  # 横向误差权重
           q_theta: 0.2 # 航向误差权重
-          q_u: 8.0  # 每步进度权重
+          q_u: 6.0  # 每步进度权重
         command_weights:
-          r_v: 0.01 # 线速度正则
-          r_omega: 0.01 # 角速度正则
+          r_v: 0.001 # 线速度正则
+          r_omega: 0.001 # 角速度正则
           r_dv: 0.4 # 线速度平滑
           r_domega: 0.4 # 角速度平滑
         motion_constraint_weights:
@@ -176,8 +185,8 @@
           step_speed_levels: [1.2, 1.8, 2.4, 3.0] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
           step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
         terrain_weights:
-          step_vel_weight: 3.0 # 锁存后台阶区域速度目标惩罚权重
-          direction: 2.0 # 台阶方向对齐权重（鼓励与方向场同向）
+          step_vel_weight: 1.0 # 锁存后台阶区域速度目标惩罚权重
+          direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
           obstacle: 1.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
@@ -188,7 +197,7 @@
           local_search_lazy_distance: 0.1 # 局部搜索找到合适投影点的距离阈值 (m)
 
       stop:
-        max_iters: 40 # FDDP 求解器最大迭代次数
+        max_iters: 20 # FDDP 求解器最大迭代次数
         command_bounds:
           vel_max: 2.8 # 线速度上限 (m/s)
           vel_min: 0.0  # 线速度下限 (m/s）
@@ -216,7 +225,7 @@
           obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
 
       hold:
-        max_iters: 40 # FDDP 求解器最大迭代次数
+        max_iters: 20 # FDDP 求解器最大迭代次数
         command_bounds:
           vel_max: 1.2 # 线速度上限 (m/s)
           vel_min: -1.2 # 线速度下限 (m/s）

@@ -214,19 +214,27 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .iteration_count = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.iteration_count")),
                 .temperature = declare_parameter<double>("mpc.follow.mppi.temperature"),
                 .gamma = declare_parameter<double>("mpc.follow.mppi.gamma"),
-                .sampling_std = {
-                    .velocity = declare_parameter<double>("mpc.follow.mppi.sampling_std.velocity"),
-                    .omega = declare_parameter<double>("mpc.follow.mppi.sampling_std.omega")
+                .geometry_sampling = {
+                    .lateral_offset_std = declare_parameter<double>("mpc.follow.mppi.geometry_sampling.lateral_offset_std")
                 },
-                .noise_smoothing = {
-                    .window = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.noise_smoothing.window")),
-                    .passes = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.noise_smoothing.passes"))
+                .speed_sampling = {
+                    .control_point_count = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.speed_sampling.control_point_count")),
+                    .scale_std = declare_parameter<double>("mpc.follow.mppi.speed_sampling.scale_std"),
+                    .heading_feedback_gain = declare_parameter<double>("mpc.follow.mppi.speed_sampling.heading_feedback_gain")
+                },
+                .regularization_std = {
+                    .velocity = declare_parameter<double>("mpc.follow.mppi.regularization_std.velocity"),
+                    .omega = declare_parameter<double>("mpc.follow.mppi.regularization_std.omega")
                 },
                 .include_nominal_trajectory = declare_parameter<bool>("mpc.follow.mppi.include_nominal_trajectory"),
                 .fallback_to_best_sample = declare_parameter<bool>("mpc.follow.mppi.fallback_to_best_sample")
             },
-            .base_max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.base_max_iters")),
-            .refine_max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.refine_max_iters"))
+            .rollout_safety = {
+                .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),
+                .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold")
+            },
+            .total_iters = static_cast<int>(declare_parameter<int>("mpc.follow.total_iters")),
+            .step_refine_iters = static_cast<int>(declare_parameter<int>("mpc.follow.step_refine_iters"))
         },
         .stop = {
             .command_bounds = {
@@ -416,9 +424,13 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .lookahead_distance = declare_parameter<double>("step.detection.lookahead_distance"),
         .exit_advance_distance = declare_parameter<double>("step.detection.exit_advance_distance")
     };
-    nav_params.no_progress_guard = {
-        .landmark_spacing = declare_parameter<double>("follow_no_progress_guard.landmark_spacing"),
-        .timeout = declare_parameter<double>("follow_no_progress_guard.timeout")
+    nav_params.follow_no_progress_guard = {
+        .landmark_spacing = declare_parameter<double>("no_progress_guard.follow.landmark_spacing"),
+        .timeout = declare_parameter<double>("no_progress_guard.follow.timeout")
+    };
+    nav_params.stepping_no_progress_guard = {
+        .landmark_spacing = declare_parameter<double>("no_progress_guard.stepping.landmark_spacing"),
+        .timeout = declare_parameter<double>("no_progress_guard.stepping.timeout")
     };
     nav_params.step_block_replan = {
         .enable = declare_parameter<bool>("follow_step_block_replan.enable"),
@@ -428,7 +440,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .obstacle_cost_threshold = declare_parameter<double>("follow_step_block_replan.obstacle_cost_threshold"),
         .predicted_obstacle_ratio_threshold = declare_parameter<double>("follow_step_block_replan.predicted_obstacle_ratio_threshold")
     };
-    nav_params.latch_ttl = declare_parameter<double>("step.latch_ttl");
     nav_params.step_dist_offset = declare_parameter<double>("step.step_dist_offset");
 
     // ─── 创建 MainController ───

@@ -13,6 +13,8 @@ namespace path_follower {
 
 namespace {
 
+constexpr double kCostEps = 1e-9;
+
 const MPCFollowModeProfile& select_follow_mode_profile(
     const MPCFollowParams& params,
     std::optional<ActiveStepMode> active_step_mode
@@ -298,62 +300,6 @@ struct AdvanceUProgressEval {
 
 AdvanceUProgressEval
 advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps);
-
-// ─── B-spline 求值 ───
-
-inline void eval_bspline2(
-    const std::vector<Eigen::Vector2d>& cps,
-    double u_in,
-    Eigen::Vector2d* p,
-    Eigen::Vector2d* d1,
-    Eigen::Vector2d* d2
-) {
-    const int n = static_cast<int>(cps.size());
-    if (n < 3) {
-        if (p) *p = Eigen::Vector2d::Zero();
-        if (d1) *d1 = Eigen::Vector2d::Zero();
-        if (d2) *d2 = Eigen::Vector2d::Zero();
-        return;
-    }
-    const double scale = static_cast<double>(n - 2);
-    const double u = std::clamp(u_in, 0.0, 1.0);
-    const double bx = u * scale;
-    const int xi = std::clamp(static_cast<int>(std::floor(bx)), 0, n - 3);
-    const double t = bx - static_cast<double>(xi);
-    const double omt = 1.0 - t;
-    const auto& p0 = cps[static_cast<size_t>(xi)];
-    const auto& p1 = cps[static_cast<size_t>(xi + 1)];
-    const auto& p2 = cps[static_cast<size_t>(xi + 2)];
-    if (p) *p = 0.5 * omt * omt * p0 + 0.5 * (-2 * t * t + 2 * t + 1) * p1 + 0.5 * t * t * p2;
-    if (d1) *d1 = (-omt * p0 + (-2 * t + 1) * p1 + t * p2) * scale;
-    if (d2) *d2 = (p0 - 2 * p1 + p2) * (scale * scale);
-}
-
-inline void eval_bspline2_extrapolated(
-    const std::vector<Eigen::Vector2d>& cps,
-    double u_in,
-    Eigen::Vector2d* p,
-    Eigen::Vector2d* d1,
-    Eigen::Vector2d* d2
-) {
-    if (u_in >= 0.0 && u_in <= 1.0) {
-        eval_bspline2(cps, u_in, p, d1, d2);
-        return;
-    }
-
-    Eigen::Vector2d p_edge = Eigen::Vector2d::Zero();
-    Eigen::Vector2d d1_edge = Eigen::Vector2d::Zero();
-    if (u_in < 0.0) {
-        eval_bspline2(cps, 0.0, &p_edge, &d1_edge, nullptr);
-        if (p) *p = p_edge + d1_edge * u_in;
-    } else {
-        eval_bspline2(cps, 1.0, &p_edge, &d1_edge, nullptr);
-        if (p) *p = p_edge + d1_edge * (u_in - 1.0);
-    }
-
-    if (d1) *d1 = d1_edge;
-    if (d2) *d2 = Eigen::Vector2d::Zero();
-}
 
 inline bool same_cps(const std::vector<Eigen::Vector2d>& a, const std::vector<Eigen::Vector2d>& b) {
     if (a.size() != b.size()) return false;
@@ -686,6 +632,34 @@ ControlVec FollowProblemT<Horizon>::u_upper() const {
     return ControlVec(command_bounds.vel_max, command_bounds.omega_max);
 }
 
+template<int Horizon>
+const std::vector<Eigen::Vector2d>& FollowProblemT<Horizon>::ref_control_points() const {
+    return ref_cps_;
+}
+
+template<int Horizon>
+const MPCParams& FollowProblemT<Horizon>::params() const {
+    return p_;
+}
+
+template<int Horizon>
+FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const std::vector<Eigen::Vector2d>& ref_control_points) const {
+    return FollowProblemT<Horizon>(
+        ref_control_points,
+        p_,
+        config_,
+        step_cost_grids_,
+        cost_info_,
+        prediction_dt_,
+        model_.rho,
+        dir_grid_,
+        dir_info_,
+        remaining_energy_,
+        rfr_pwr_limit_,
+        active_step_mode_
+    );
+}
+
 namespace {
 
 constexpr int FOLLOW_RESIDUAL_DIM = 14;
@@ -735,7 +709,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const double duc_dpathu = clamp_derivative_piecewise(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
 
     Eigen::Vector2d pr, d1, d2;
-    eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+    eval_quadratic_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
 
     const double thetar = std::atan2(d1.y(), d1.x());
     const double sin_r = std::sin(thetar);
@@ -894,7 +868,7 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
     const double duc_dpathu = clamp_derivative_piecewise(x(ix::PATH_U), PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
 
     Eigen::Vector2d pr, d1, d2;
-    eval_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+    eval_quadratic_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
 
     const double d1_norm2 = d1.squaredNorm();
     const double d1_norm = std::sqrt(d1_norm2 + 0.01);
@@ -980,6 +954,30 @@ const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(int k) const 
     if (step_cost_grids_.size() <= 1) return step_cost_grids_[0];
     int idx = static_cast<int>(static_cast<double>(k) * MPC_DT / prediction_dt_);
     return step_cost_grids_[static_cast<size_t>(std::min(idx, static_cast<int>(step_cost_grids_.size()) - 1))];
+}
+
+template<int Horizon>
+std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_obstacle(int state_index, const StateVec& x) const {
+    const auto& safety = p_.follow.rollout_safety;
+    if (!safety.enable_lethal_obstacle_check) {
+        return std::nullopt;
+    }
+
+    const auto sample = eval_cost_bilinear(
+        cost_grid_for_step(std::max(0, state_index)),
+        cost_info_,
+        x(ix::X),
+        x(ix::Y)
+    );
+    if (sample.value + kCostEps < safety.lethal_obstacle_threshold) {
+        return std::nullopt;
+    }
+
+    return RolloutLethalObstacleInfo {
+        .state_index = state_index,
+        .position_map = Eigen::Vector2d(x(ix::X), x(ix::Y)),
+        .sampled_cost = sample.value,
+    };
 }
 
 template<int Horizon>
@@ -1419,9 +1417,9 @@ std::array<ControlVec, SolverT::N> copy_solver_controls(const SolverT& solver) {
 }
 
 template<typename SolverT>
-void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample) {
-    solver.xs = sample.xs;
+void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample, const FollowProblem& problem, const StateVec& x0) {
     solver.us = sample.us;
+    rollout_solver_states(solver, problem, x0);
 }
 
 template<typename SolverT>
@@ -1430,27 +1428,52 @@ void copy_solver_trajectory(SolverT& dst, const SolverT& src) {
     dst.us = src.us;
 }
 
-template<typename ProblemT, typename SolverT>
-MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, const StateVec& x0) {
-    std::array<StateVec, SolverT::N + 1> xs_pred;
-    xs_pred[0] = x0;
-    size_t valid_steps = SolverT::N;
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        xs_pred[k + 1] = prob.dynamics(static_cast<int>(k), xs_pred[k], solver.us[k]);
-        if (!xs_pred[k + 1].allFinite()) {
-            valid_steps = k;
-            break;
+template<typename ProblemT, typename StateContainerT>
+std::optional<RolloutLethalObstacleInfo> detect_rollout_lethal_obstacle(
+    const ProblemT& prob,
+    const StateContainerT& xs,
+    size_t state_count
+) {
+    for (size_t i = 0; i < state_count; ++i) {
+        if (const auto lethal = prob.detect_lethal_obstacle(static_cast<int>(i), xs[i])) {
+            return lethal;
         }
     }
+    return std::nullopt;
+}
+
+template<typename SolverT>
+struct RolloutStates {
+    std::array<StateVec, SolverT::N + 1> xs {};
+    size_t valid_steps = SolverT::N;
+};
+
+template<typename ProblemT, typename SolverT>
+RolloutStates<SolverT> rollout_states(const ProblemT& prob, const SolverT& solver, const StateVec& x0) {
+    RolloutStates<SolverT> rollout;
+    rollout.xs[0] = x0;
+    for (size_t k = 0; k < SolverT::N; ++k) {
+        rollout.xs[k + 1] = prob.dynamics(static_cast<int>(k), rollout.xs[k], solver.us[k]);
+        if (!rollout.xs[k + 1].allFinite()) {
+            rollout.valid_steps = k;
+            return rollout;
+        }
+    }
+    return rollout;
+}
+
+template<typename ProblemT, typename SolverT>
+MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, const StateVec& x0) {
+    const auto rollout = rollout_states(prob, solver, x0);
 
     MPCPrediction pred;
-    const size_t sz = valid_steps + 1;
+    const size_t sz = rollout.valid_steps + 1;
     pred.path_map.reserve(sz);
     pred.headings.reserve(sz);
     pred.v_pred.reserve(sz);
     pred.w_pred.reserve(sz);
-    for (size_t i = 0; i <= valid_steps; ++i) {
-        const auto& x = xs_pred[i];
+    for (size_t i = 0; i <= rollout.valid_steps; ++i) {
+        const auto& x = rollout.xs[i];
         pred.path_map.emplace_back(x(ix::X), x(ix::Y));
         pred.headings.push_back(x(ix::THETA));
         pred.v_pred.push_back(x(ix::V));
@@ -1539,22 +1562,7 @@ StateVec MPCSolver::make_initial_state(
     return x0;
 }
 
-MPCPrediction MPCSolver::extract_prediction(const StateVec* xs, const size_t n) {
-    MPCPrediction pred;
-    pred.path_map.reserve(n);
-    pred.headings.reserve(n);
-    pred.v_pred.reserve(n);
-    pred.w_pred.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        pred.path_map.emplace_back(xs[i](ix::X), xs[i](ix::Y));
-        pred.headings.push_back(xs[i](ix::THETA));
-        pred.v_pred.push_back(xs[i](ix::V));
-        pred.w_pred.push_back(xs[i](ix::W));
-    }
-    return pred;
-}
-
-std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_follow(
+std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow(
     const SplineD& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
@@ -1640,7 +1648,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     );
 
     fddp::SolverOptions base_opts;
-    base_opts.max_iters = params_.follow.base_max_iters;
+    base_opts.max_iters = stepping_active
+        ? params_.follow.total_iters - params_.follow.step_refine_iters
+        : params_.follow.total_iters;
     base_opts.tol_grad = SOLVER_TOL_GRAD;
     base_opts.tol_cost = SOLVER_TOL_COST;
 
@@ -1659,7 +1669,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         MPPIFollowSampler sampler(params_.follow.mppi);
         mppi_result = sampler.optimize(base_problem, x0, copy_solver_controls(follow_base_solver_));
         if (mppi_result.valid) {
-            seed_solver_from_sampling_result(follow_base_solver_, mppi_result);
+            seed_solver_from_sampling_result(follow_base_solver_, mppi_result, base_problem, x0);
             seeded_by_mppi = true;
         }
     }
@@ -1693,7 +1703,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             rollout_solver_states(follow_refine_solver_, refine_problem, x0);
         }
         fddp::SolverOptions refine_opts;
-        refine_opts.max_iters = params_.follow.refine_max_iters;
+        refine_opts.max_iters = params_.follow.step_refine_iters;
         refine_opts.tol_grad = SOLVER_TOL_GRAD;
         refine_opts.tol_cost = SOLVER_TOL_COST;
         follow_refine_solver_.solve(refine_problem, refine_opts);
@@ -1703,12 +1713,45 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
         std::cout << "Refine MPC solve time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prev).count() << " ms" << std::endl;
     }
 
+    const auto solved_rollout = rollout_states(*solved_problem, *solved_solver, x0);
+    MPCPrediction prediction;
+    {
+        const size_t sz = solved_rollout.valid_steps + 1;
+        prediction.path_map.reserve(sz);
+        prediction.headings.reserve(sz);
+        prediction.v_pred.reserve(sz);
+        prediction.w_pred.reserve(sz);
+        for (size_t i = 0; i <= solved_rollout.valid_steps; ++i) {
+            const auto& x = solved_rollout.xs[i];
+            prediction.path_map.emplace_back(x(ix::X), x(ix::Y));
+            prediction.headings.push_back(x(ix::THETA));
+            prediction.v_pred.push_back(x(ix::V));
+            prediction.w_pred.push_back(x(ix::W));
+        }
+    }
+    prediction.rollout_paths = std::move(mppi_result.rollout_paths);
+    if (const auto lethal = detect_rollout_lethal_obstacle(*solved_problem, solved_rollout.xs, solved_rollout.valid_steps + 1)) {
+        auto stop_result = solve_stop(chassis_pose_map, chassis_state, cost_map);
+        if (!stop_result) {
+            return std::unexpected(stop_result.error());
+        }
+
+        FollowSolveResult out;
+        out.command = std::get<0>(*stop_result);
+        out.prediction = std::get<1>(*stop_result);
+        out.status = FollowSolveStatus::STOP_AND_WAIT_REPLAN;
+        out.lethal_obstacle = lethal;
+        return out;
+    }
+
     const Eigen::Vector2d cmd((*solved_solver).us[0](0), (*solved_solver).us[0](1));
     last_cmd_ = cmd;
 
-    MPCPrediction prediction = rollout_prediction(*solved_problem, *solved_solver, x0);
-    prediction.rollout_paths = std::move(mppi_result.rollout_paths);
-    return std::tuple {cmd, std::move(prediction)};
+    FollowSolveResult out;
+    out.command = cmd;
+    out.prediction = std::move(prediction);
+    out.status = FollowSolveStatus::FOLLOW;
+    return out;
 }
 
 std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_stop(

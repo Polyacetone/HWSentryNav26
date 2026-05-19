@@ -151,8 +151,16 @@ struct StFollow final : sc::state<StFollow, Machine> {
             m.pending_wait_replan_start_time = in.stamp;
             return transit<StWaitReplan>();
         }
+        if (in.no_progress_detected) {
+            if (in.is_hazard) {
+                m.replan_after_recovery = true;
+                return transit<StHazardRecovery>();
+            }
+            m.pending_wait_replan_start_time = in.stamp;
+            return transit<StWaitReplan>();
+        }
 
-        // 路径被取消/清空：FOLLOW 不应“卡死”在无路径状态。
+        // 路径被取消/清空：FOLLOW 不应"卡死"在无路径状态。
         // 走 STOPPING 做平滑减速，并根据外部请求选择落点。
         if (!in.has_path) {
             const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.fixed_goal_flag));
@@ -205,12 +213,14 @@ struct StStepping final : sc::state<StStepping, Machine> {
         auto& m = context<Machine>();
         const auto& in = ev.input;
 
-        // latch_ttl 超时直接进 STUCK_REVERSE，无需经过 FOLLOW 确认
-        if (in.step_ttl_expired) {
-            m.replan_after_recovery = false;
-            m.pending_reverse_start_time = in.stamp;
-            m.pending_reverse_start_pos = in.chassis_pos_map;
-            return transit<StStuckReverse>();
+        // 无进度检测（替代原 latch_ttl 超时机制）：路标点方式判定台阶推进是否卡住
+        if (in.no_progress_detected) {
+            if (in.is_hazard) {
+                m.replan_after_recovery = true;
+                return transit<StHazardRecovery>();
+            }
+            m.pending_wait_replan_start_time = in.stamp;
+            return transit<StWaitReplan>();
         }
 
         // 台阶中水平推进可能真卡住，stuck 先于 step_active 检查。
@@ -333,14 +343,41 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
             + std::chrono::duration<double>(in.stamp - last_mature_stamp_).count();
         const double displacement = (in.chassis_pos_map - entry_pos_).norm();
 
-        // 主退出条件：里程计检测到足够位移
-        if (displacement >= m.params.stuck.reverse_displacement) {
+        // 通用路由：倒车结束后，根据 is_hazard 决定是否走 HAZARD_RECOVERY
+        auto exit_reverse = [&]() -> sc::result {
+            if (in.is_hazard) {
+                RCLCPP_WARN(
+                    m.logger,
+                    "STUCK_REVERSE: displaced %.2f m (mature=%.1f s), current position IS hazard, entering HAZARD_RECOVERY",
+                    displacement, mature_elapsed
+                );
+                return transit<StHazardRecovery>();
+            }
+
             RCLCPP_WARN(
                 m.logger,
-                "STUCK_REVERSE: displaced %.2f m >= %.2f m, exiting to HAZARD_RECOVERY",
-                displacement, m.params.stuck.reverse_displacement
+                "STUCK_REVERSE: displaced %.2f m (mature=%.1f s), current position safe, skipping HAZARD_RECOVERY",
+                displacement, mature_elapsed
             );
-            return transit<StHazardRecovery>();
+
+            if (m.replan_after_recovery) {
+                m.replan_after_recovery = false;
+                m.pending_wait_replan_start_time = in.stamp;
+                return transit<StWaitReplan>();
+            }
+
+            const bool should_spin = in.spin_requested
+                && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
+            if (should_spin) return transit<StSpin>();
+            if (in.has_path) return transit<StFollow>();
+            if (in.fixed_goal_flag) return transit<StFixed>();
+            m.output.consume_global_path = true;
+            return transit<StIdle>();
+        };
+
+        // 主退出条件：里程计检测到足够位移
+        if (displacement >= m.params.stuck.reverse_displacement) {
+            return exit_reverse();
         }
 
         // 安全网：MATURE 下累计超时仍未达到位移，打印 ERROR 表示严重异常
@@ -351,7 +388,7 @@ struct StStuckReverse final : sc::state<StStuckReverse, Machine> {
                 mature_elapsed, m.params.stuck.reverse_timeout,
                 displacement, m.params.stuck.reverse_displacement
             );
-            return transit<StHazardRecovery>();
+            return exit_reverse();
         }
 
         return discard_event();

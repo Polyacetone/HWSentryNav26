@@ -188,14 +188,19 @@ struct MPCFollowProjection {
     double local_search_lazy_distance;
 };
 
-struct MPPISamplingStd {
-    double velocity;
-    double omega;
+struct MPPIGeometrySamplingParams {
+    double lateral_offset_std;
 };
 
-struct MPPINoiseSmoothing {
-    int window;
-    int passes;
+struct MPPISpeedSamplingParams {
+    int control_point_count;
+    double scale_std;
+    double heading_feedback_gain;
+};
+
+struct MPPIControlRegularizationStd {
+    double velocity;
+    double omega;
 };
 
 struct MPCFollowMPPIParams {
@@ -205,10 +210,16 @@ struct MPCFollowMPPIParams {
     int iteration_count;
     double temperature;
     double gamma;
-    MPPISamplingStd sampling_std;
-    MPPINoiseSmoothing noise_smoothing;
+    MPPIGeometrySamplingParams geometry_sampling;
+    MPPISpeedSamplingParams speed_sampling;
+    MPPIControlRegularizationStd regularization_std;
     bool include_nominal_trajectory;
     bool fallback_to_best_sample;
+};
+
+struct MPCFollowRolloutSafetyParams {
+    bool enable_lethal_obstacle_check;
+    double lethal_obstacle_threshold;
 };
 
 struct MPCFollowParams {
@@ -223,8 +234,9 @@ struct MPCFollowParams {
     MPCFollowTerminalWeights terminal_weights;
     MPCFollowProjection projection;
     MPCFollowMPPIParams mppi;
-    int base_max_iters;
-    int refine_max_iters;
+    MPCFollowRolloutSafetyParams rollout_safety;
+    int total_iters;
+    int step_refine_iters;
 };
 
 struct MPCStopCommandWeights {
@@ -298,6 +310,12 @@ struct ActiveStepMode {
     double target_velocity = 0.0;
 
     bool operator==(const ActiveStepMode&) const = default;
+};
+
+struct RolloutLethalObstacleInfo {
+    int state_index = -1;
+    Eigen::Vector2d position_map = Eigen::Vector2d::Zero();
+    double sampled_cost = 0.0;
 };
 
 struct FollowProblemConfig {
@@ -427,6 +445,11 @@ public:
 
     ControlVec u_lower() const;
     ControlVec u_upper() const;
+
+    [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x) const;
+    [[nodiscard]] const std::vector<Eigen::Vector2d>& ref_control_points() const;
+    [[nodiscard]] const MPCParams& params() const;
+    [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const std::vector<Eigen::Vector2d>& ref_control_points) const;
 
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
@@ -572,6 +595,18 @@ namespace path_follower {
 
 class MPCSolver {
 public:
+    enum class FollowSolveStatus : uint8_t {
+        FOLLOW = 0,
+        STOP_AND_WAIT_REPLAN = 1,
+    };
+
+    struct FollowSolveResult {
+        Eigen::Vector2d command = Eigen::Vector2d::Zero();
+        MPCPrediction prediction;
+        FollowSolveStatus status = FollowSolveStatus::FOLLOW;
+        std::optional<RolloutLethalObstacleInfo> lethal_obstacle;
+    };
+
     explicit MPCSolver(const MPCParams& params);
 
     void set_last_cmd(const Eigen::Vector2d& cmd);
@@ -585,7 +620,7 @@ public:
         return x_h_hat_;
     }
 
-    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_follow(
+    std::expected<FollowSolveResult, std::string> solve_follow(
         const SplineD& global_path,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
@@ -651,7 +686,6 @@ private:
         const Eigen::Vector2d& cmd_clamped,
         double path_u
     ) const;
-    static MPCPrediction extract_prediction(const StateVec* xs, size_t n);
 };
 
 }

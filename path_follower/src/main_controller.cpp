@@ -370,14 +370,27 @@ ControlOutput MainController::update(const ControlInput& input) {
         if (effective_input.masked_direction_map) {
             extend_active_step_exit(*effective_input.global_path, *effective_input.masked_direction_map);
         }
-        update_step_release(*effective_input.global_path, current_u, effective_input.stamp);
+        update_step_release(*effective_input.global_path, current_u);
     }
 
-    bool request_replan_now = false;
+    bool request_replan_now = follow_stop_and_wait_replan_pending_;
+    if (request_replan_now) {
+        follow_stop_and_wait_replan_pending_ = false;
+    }
     if (!command_blocked && has_path && prev_state == FsmState::FOLLOW) {
-        request_replan_now = check_follow_projection_guard(effective_input, *effective_input.global_path, current_u)
-            || check_no_progress(effective_input, current_u)
-            || ((prev_state == FsmState::FOLLOW) && check_step_block_replan(effective_input, *effective_input.global_path, current_u));
+        request_replan_now = request_replan_now
+            || check_follow_projection_guard(effective_input, *effective_input.global_path, current_u)
+            || check_step_block_replan(effective_input, *effective_input.global_path, current_u);
+    }
+
+    // 无进度检测（Follow / Stepping 模式均使用统一的路标点方式，参数不同）
+    bool no_progress_detected = false;
+    if (!command_blocked && has_path) {
+        if (prev_state == FsmState::FOLLOW) {
+            no_progress_detected = check_no_progress(effective_input, current_u, nav_params_.follow_no_progress_guard, FsmState::FOLLOW);
+        } else if (prev_state == FsmState::STEPPING) {
+            no_progress_detected = check_no_progress(effective_input, current_u, nav_params_.stepping_no_progress_guard, FsmState::STEPPING);
+        }
     }
 
     if (!request_replan_now && has_path && prev_state == FsmState::FOLLOW) {
@@ -396,8 +409,6 @@ ControlOutput MainController::update(const ControlInput& input) {
     FsmInput fsm_input;
     fsm_input.has_path = has_path;
     fsm_input.has_new_path = has_new_path;
-    fsm_input.step_ttl_expired = step_ttl_just_expired_;
-    step_ttl_just_expired_ = false;
     fsm_input.chassis_pos_map = effective_input.chassis_pose_map.head<2>();
     fsm_input.fixed_goal_flag = effective_input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
@@ -408,8 +419,14 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.spin_requested = effective_input.spin_requested;
     fsm_input.spin_high_priority = effective_input.spin_high_priority;
     const bool hazard_allowed = (prev_state == FsmState::IDLE) || (prev_state == FsmState::SPIN)
-        || (prev_state == FsmState::HAZARD_RECOVERY);
+        || (prev_state == FsmState::HAZARD_RECOVERY)
+        || (prev_state == FsmState::STUCK_REVERSE);  // 用于退出 STUCK_REVERSE 时判断是否真需进 HAZARD_RECOVERY
     fsm_input.is_hazard = !command_blocked && hazard_allowed && compute_is_hazard(effective_input);
+    // 无进度触发时允许在 Follow/Stepping 状态下重新检查 hazard
+    if (no_progress_detected) {
+        fsm_input.is_hazard = !command_blocked && compute_is_hazard(effective_input);
+    }
+    fsm_input.no_progress_detected = no_progress_detected;
     fsm_input.is_stuck = !command_blocked && check_stuck(effective_input);
     fsm_input.is_recovery_safe = !command_blocked && update_recovery_safe_flag(effective_input);
     fsm_input.velocity = last_cmd_.x();
@@ -508,12 +525,34 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         RCLCPP_WARN(logger_, "MPCSolver(Follow) solve time %.2f ms > %.2f ms", solve_ms, MPC_DT * 600.0);
     }
 
-    const auto& [cmd, prediction] = *result;
+    const auto& follow_result = *result;
+    const auto& cmd = follow_result.command;
+    const auto& prediction = follow_result.prediction;
+
+    if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
+        follow_stop_and_wait_replan_pending_ = true;
+        if (follow_result.lethal_obstacle) {
+            const auto& lethal = *follow_result.lethal_obstacle;
+            RCLCPP_WARN(
+                logger_,
+                "Follow rollout entered lethal obstacle at step %d (x=%.2f, y=%.2f, cost=%.1f); outputting solve_stop and requesting wait_replan next cycle",
+                lethal.state_index,
+                lethal.position_map.x(),
+                lethal.position_map.y(),
+                lethal.sampled_cost
+            );
+        } else {
+            RCLCPP_WARN(logger_, "Follow rollout entered lethal obstacle; outputting solve_stop and requesting wait_replan next cycle");
+        }
+        clear_step_state();
+    }
 
     out.velocity = cmd.x();
     out.omega = cmd.y();
 
-    if (active_step_command_) {
+    if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
+        out.mode = ChassisMode::NORMAL;
+    } else if (active_step_command_) {
         out.mode = active_step_command_->mode;
     } else {
         out.mode = ChassisMode::NORMAL;
@@ -586,6 +625,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
         clear_step_state();
         last_reference_u_ = 0.0;
         follow_max_landmark_idx_ = -1;
+        follow_stop_and_wait_replan_pending_ = false;
         if (allow_warm_start_reset) {
             mpc_controller_->reset_warm_start();
         }
@@ -594,6 +634,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
     if (next == FsmState::WAIT_REPLAN) {
         clear_step_state();
         last_reference_u_ = 0.0;
+        follow_stop_and_wait_replan_pending_ = false;
     }
 
     if (next_follow_like && !prev_follow_like) {
@@ -811,7 +852,11 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
 
 void MainController::recompute_follow_landmarks(const SplineD& path) {
     follow_landmarks_u_.clear();
-    const double spacing = std::max(0.1, nav_params_.no_progress_guard.landmark_spacing);
+    // 使用两种模式中较小的间距，确保 Follow 和 Stepping 的路标粒度都足够
+    const double spacing = std::max(0.1, std::min(
+        nav_params_.follow_no_progress_guard.landmark_spacing,
+        nav_params_.stepping_no_progress_guard.landmark_spacing
+    ));
 
     // 先粗略估计路径弧长，动态确定采样数
     constexpr int ESTIMATE_SAMPLES = 100;
@@ -850,21 +895,28 @@ void MainController::recompute_follow_landmarks(const SplineD& path) {
     }
 }
 
-bool MainController::check_no_progress(const ControlInput& input, const double current_u) {
-    if (last_fsm_state_ != FsmState::FOLLOW) return false;
+bool MainController::check_no_progress(const ControlInput& input, const double current_u, const NoProgressGuardParams& params, const FsmState current_state) {
+    if (last_fsm_state_ != FsmState::FOLLOW && last_fsm_state_ != FsmState::STEPPING) return false;
     if (follow_landmarks_u_.empty()) return false;
 
     const int n = static_cast<int>(follow_landmarks_u_.size());
 
+    // 状态切换时重置计时器（例如 FOLLOW→STEPPING 或 STEPPING→FOLLOW），
+    // 避免前一个模式的计时残留导致新模式下过早触发。
+    if (current_state != last_no_progress_check_state_) {
+        last_no_progress_check_state_ = current_state;
+        follow_max_landmark_time_ = input.stamp;
+    }
+
     // 安全性说明：
-    //   follow_max_landmark_idx_ == -1 时下方条件恒成立，确保 FOLLOW 的首个
+    //   follow_max_landmark_idx_ == -1 时下方条件恒成立，确保 FOLLOW/STEPPING 的首个
     //   周期必重置计时器。该索引在以下时机归 -1：
     //     - 构造函数默认值
-    //     - has_new_path 时 (line 368)
-    //     - !has_path 时 (line 371)
-    //     - 离开 follow-like 状态时 (line 640)
-    // 因此除首个 FOLLOW 周期外，每次新路径或重入 FOLLOW 后首 cycle 必重置计时。
-    // follow_max_landmark_time_ 默认构造为 epoch，但首个 FOLLOW 周期
+    //     - has_new_path 时
+    //     - !has_path 时
+    //     - 离开 follow-like 状态时
+    // 因此除首个 FOLLOW/STEPPING 周期外，每次新路径或重入后首 cycle 必重置计时。
+    // follow_max_landmark_time_ 默认构造为 epoch，但首个周期
     // follow_max_landmark_idx_ < 0 保证其立即被覆盖，不会误触发超时。
 
     // 寻找当前 u 能覆盖的最高路标点索引
@@ -885,11 +937,12 @@ bool MainController::check_no_progress(const ControlInput& input, const double c
     }
 
     const double elapsed = std::chrono::duration<double>(input.stamp - follow_max_landmark_time_).count();
-    if (elapsed >= nav_params_.no_progress_guard.timeout) {
+    if (elapsed >= params.timeout) {
         const double landmark_u = follow_max_landmark_idx_ >= 0 ? follow_landmarks_u_[static_cast<size_t>(follow_max_landmark_idx_)] : -1.0;
+        const char* mode_name = (current_state == FsmState::STEPPING) ? "Stepping" : "Follow";
         RCLCPP_WARN(logger_,
-            "Follow replan: no progress at landmark %d/%d (landmark_u=%.3f, progress_u=%.3f) for %.1fs",
-            follow_max_landmark_idx_, n - 1, landmark_u, current_u, elapsed);
+            "%s replan: no progress at landmark %d/%d (landmark_u=%.3f, progress_u=%.3f) for %.1fs",
+            mode_name, follow_max_landmark_idx_, n - 1, landmark_u, current_u, elapsed);
         return true;
     }
     return false;

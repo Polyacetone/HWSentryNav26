@@ -100,6 +100,67 @@ double project_to_spline_u_extrapolated(
 
     return clamp_path_u_extrapolated(u_best, u_min, u_max);
 }
+
+void eval_quadratic_bspline2(
+    const std::vector<Eigen::Vector2d>& cps,
+    const double u_in,
+    Eigen::Vector2d* p,
+    Eigen::Vector2d* d1,
+    Eigen::Vector2d* d2
+) {
+    const int n = static_cast<int>(cps.size());
+    if (n < 3) {
+        if (p) *p = Eigen::Vector2d::Zero();
+        if (d1) *d1 = Eigen::Vector2d::Zero();
+        if (d2) *d2 = Eigen::Vector2d::Zero();
+        return;
+    }
+
+    const double scale = static_cast<double>(n - 2);
+    const double u = std::clamp(u_in, 0.0, 1.0);
+    const double bx = u * scale;
+    const int xi = std::clamp(static_cast<int>(std::floor(bx)), 0, n - 3);
+    const double t = bx - static_cast<double>(xi);
+    const double omt = 1.0 - t;
+    const auto& p0 = cps[static_cast<size_t>(xi)];
+    const auto& p1 = cps[static_cast<size_t>(xi + 1)];
+    const auto& p2 = cps[static_cast<size_t>(xi + 2)];
+
+    if (p) *p = 0.5 * omt * omt * p0 + 0.5 * (-2.0 * t * t + 2.0 * t + 1.0) * p1 + 0.5 * t * t * p2;
+    if (d1) *d1 = (-omt * p0 + (-2.0 * t + 1.0) * p1 + t * p2) * scale;
+    if (d2) *d2 = (p0 - 2.0 * p1 + p2) * (scale * scale);
+}
+
+void eval_quadratic_bspline2_extrapolated(
+    const std::vector<Eigen::Vector2d>& cps,
+    const double u_in,
+    Eigen::Vector2d* p,
+    Eigen::Vector2d* d1,
+    Eigen::Vector2d* d2
+) {
+    if (u_in >= 0.0 && u_in <= 1.0) {
+        eval_quadratic_bspline2(cps, u_in, p, d1, d2);
+        return;
+    }
+
+    Eigen::Vector2d p_edge = Eigen::Vector2d::Zero();
+    Eigen::Vector2d d1_edge = Eigen::Vector2d::Zero();
+    if (u_in < 0.0) {
+        eval_quadratic_bspline2(cps, 0.0, &p_edge, &d1_edge, nullptr);
+        if (p) *p = p_edge + d1_edge * u_in;
+    } else {
+        eval_quadratic_bspline2(cps, 1.0, &p_edge, &d1_edge, nullptr);
+        if (p) *p = p_edge + d1_edge * (u_in - 1.0);
+    }
+
+    if (d1) *d1 = d1_edge;
+    if (d2) *d2 = Eigen::Vector2d::Zero();
+}
+
+double quadratic_bspline_curvature(const Eigen::Vector2d& d1, const Eigen::Vector2d& d2) {
+    const double dsdu = std::sqrt(d1.squaredNorm() + 0.01) + 1e-6;
+    return (d1.x() * d2.y() - d1.y() * d2.x()) / (dsdu * dsdu * dsdu);
+}
 }
 
 namespace path_follower::recovery_helpers {
