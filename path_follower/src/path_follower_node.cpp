@@ -13,8 +13,6 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
-#include <visualization_msgs/msg/marker.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
 #include <interfaces/msg/cost_maps.hpp>
@@ -51,7 +49,7 @@ private:
     std::optional<double> get_chassis_theta_imu_world() const;
     void publish_chassis_cmd(const ControlOutput& output);
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
-    void publish_mppi_rollouts(const std::vector<std::vector<Eigen::Vector2d>>& rollouts);
+    void publish_mppi_rollout(const std::vector<Eigen::Vector2d>& rollout);
     bool should_use_prediction_maps() const;
     bool is_step_routing_context_locked() const;
     void refresh_deferred_step_layers();
@@ -75,7 +73,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr debug_mppi_rollouts_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mppi_rollouts_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -129,7 +127,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("debug.w_pred_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("debug.final_cost_map_pub_topic"), 1);
-        debug_mppi_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("debug.mppi_rollouts_pub_topic"), 1);
+        debug_mppi_rollouts_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("debug.mppi_rollouts_pub_topic"), 1);
     }
 
     const auto load_follow_mode_profile = [this](const std::string& name) {
@@ -211,8 +209,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .enable = declare_parameter<bool>("mpc.follow.mppi.enable"),
                 .num_threads = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.num_threads")),
                 .batch_size = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.batch_size")),
-                .iteration_count = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.iteration_count")),
-                .temperature = declare_parameter<double>("mpc.follow.mppi.temperature"),
                 .gamma = declare_parameter<double>("mpc.follow.mppi.gamma"),
                 .geometry_sampling = {
                     .lateral_offset_std = declare_parameter<double>("mpc.follow.mppi.geometry_sampling.lateral_offset_std")
@@ -226,15 +222,13 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                     .velocity = declare_parameter<double>("mpc.follow.mppi.regularization_std.velocity"),
                     .omega = declare_parameter<double>("mpc.follow.mppi.regularization_std.omega")
                 },
-                .include_nominal_trajectory = declare_parameter<bool>("mpc.follow.mppi.include_nominal_trajectory"),
-                .fallback_to_best_sample = declare_parameter<bool>("mpc.follow.mppi.fallback_to_best_sample")
+
             },
             .rollout_safety = {
                 .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),
                 .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold")
             },
-            .total_iters = static_cast<int>(declare_parameter<int>("mpc.follow.total_iters")),
-            .step_refine_iters = static_cast<int>(declare_parameter<int>("mpc.follow.step_refine_iters"))
+            .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },
         .stop = {
             .command_bounds = {
@@ -780,7 +774,7 @@ void PathFollowerNode::control_timer_callback() {
     }
 
     if (enable_debug_ && output.mppi_rollouts) {
-        publish_mppi_rollouts(*output.mppi_rollouts);
+        publish_mppi_rollout(*output.mppi_rollouts);
     }
 
     // 处理路径消费请求：清空 spline 路径，并据此重建台阶擦除地图。
@@ -859,64 +853,23 @@ nav_msgs::msg::Path PathFollowerNode::path_to_nav_msg(const std::vector<Eigen::V
     return msg;
 }
 
-void PathFollowerNode::publish_mppi_rollouts(const std::vector<std::vector<Eigen::Vector2d>>& rollouts) {
-    if (!debug_mppi_rollouts_pub_) return;
+void PathFollowerNode::publish_mppi_rollout(const std::vector<Eigen::Vector2d>& rollout) {
+    if (!debug_mppi_rollouts_pub_ || rollout.empty()) return;
 
-    visualization_msgs::msg::MarkerArray markers;
-    const auto stamp = now();
-
-    constexpr float hue_start = 0.0f;     // red
-    constexpr float hue_end = 300.0f;   // magenta
-    constexpr float sat = 1.0f;
-    constexpr float val = 1.0f;
-
-    for (size_t i = 0; i < rollouts.size(); ++i) {
-        const float t = (rollouts.size() <= 1) ? 0.0f : static_cast<float>(i) / static_cast<float>(rollouts.size() - 1);
-        const float h = hue_start + t * (hue_end - hue_start);
-
-        const float c = val * sat;
-        const float hp = h / 60.0f;
-        const float x = c * (1.0f - std::abs(std::fmod(hp, 2.0f) - 1.0f));
-        const float m = val - c;
-
-        float r, g, b;
-        const int sextant = static_cast<int>(hp) % 6;
-        switch (sextant) {
-            case 0: r = c; g = x; b = 0; break;
-            case 1: r = x; g = c; b = 0; break;
-            case 2: r = 0; g = c; b = x; break;
-            case 3: r = 0; g = x; b = c; break;
-            case 4: r = x; g = 0; b = c; break;
-            case 5: r = c; g = 0; b = x; break;
-            default: r = 0; g = 0; b = 0; break;
-        }
-
-        visualization_msgs::msg::Marker marker;
-        marker.header.stamp = stamp;
-        marker.header.frame_id = "map";
-        marker.ns = "mppi_rollouts";
-        marker.id = static_cast<int>(i);
-        marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.scale.x = 0.06;
-        marker.color.a = 0.65f;
-        marker.color.r = r + m;
-        marker.color.g = g + m;
-        marker.color.b = b + m;
-
-        marker.points.reserve(rollouts[i].size());
-        for (const auto& pt : rollouts[i]) {
-            geometry_msgs::msg::Point p;
-            p.x = pt.x();
-            p.y = pt.y();
-            p.z = 0.0;
-            marker.points.push_back(p);
-        }
-
-        markers.markers.push_back(std::move(marker));
+    nav_msgs::msg::Path msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = "map";
+    msg.poses.reserve(rollout.size());
+    for (const auto& pt : rollout) {
+        geometry_msgs::msg::PoseStamped ps;
+        ps.header = msg.header;
+        ps.pose.position.x = pt.x();
+        ps.pose.position.y = pt.y();
+        ps.pose.position.z = 0.0;
+        msg.poses.push_back(std::move(ps));
     }
 
-    debug_mppi_rollouts_pub_->publish(markers);
+    debug_mppi_rollouts_pub_->publish(msg);
 }
 
 }

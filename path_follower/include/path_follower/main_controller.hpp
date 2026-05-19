@@ -82,7 +82,7 @@ struct ControlOutput {
     std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
-    std::optional<std::vector<std::vector<Eigen::Vector2d>>> mppi_rollouts;
+    std::optional<std::vector<Eigen::Vector2d>> mppi_rollouts;
 
     // ─── 有效性 ───
     bool valid = false;                 // false 时 Node 不应发布指令

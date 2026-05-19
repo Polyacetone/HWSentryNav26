@@ -12,7 +12,6 @@ namespace path_follower {
 namespace {
 
 constexpr double SIGMA_EPS = 1e-6;
-constexpr double WEIGHT_EPS = 1e-12;
 constexpr double SPLINE_EPS = 1e-9;
 
 double wrap_pi(double a) {
@@ -175,7 +174,6 @@ double advance_u_progress_on_path(double u_cur, const StateVec& x, const std::ve
 }
 
 double control_regularization_cost(
-    const std::array<ControlVec, MPC_HORIZON>& nominal_controls,
     const std::array<ControlVec, MPC_HORIZON>& delta_u,
     const ControlVec& inv_variance,
     double gamma
@@ -183,10 +181,7 @@ double control_regularization_cost(
     double cost = 0.0;
     for (int k = 0; k < MPC_HORIZON; ++k) {
         const ControlVec scaled_delta = delta_u[static_cast<size_t>(k)].cwiseProduct(inv_variance);
-        cost += gamma * (
-            0.5 * delta_u[static_cast<size_t>(k)].dot(scaled_delta)
-            + nominal_controls[static_cast<size_t>(k)].dot(scaled_delta)
-        );
+    cost += 0.5 * gamma * delta_u[static_cast<size_t>(k)].dot(scaled_delta);
     }
     return cost;
 }
@@ -286,7 +281,7 @@ SampledSequence rollout_control_sequence(
     }
 
     running_cost += problem.terminal_cost(sample.xs[MPC_HORIZON]);
-    running_cost += control_regularization_cost(nominal_controls, sample.delta_u, inv_variance, gamma);
+    running_cost += control_regularization_cost(sample.delta_u, inv_variance, gamma);
     if (!std::isfinite(running_cost)) {
         return sample;
     }
@@ -357,7 +352,7 @@ SampledSequence rollout_generated_sequence(
     }
 
     running_cost += problem.terminal_cost(sample.xs[MPC_HORIZON]);
-    running_cost += control_regularization_cost(nominal_controls, sample.delta_u, inv_variance, params.gamma);
+    running_cost += control_regularization_cost(sample.delta_u, inv_variance, params.gamma);
     if (!std::isfinite(running_cost)) {
         return sample;
     }
@@ -365,16 +360,6 @@ SampledSequence rollout_generated_sequence(
     sample.cost = running_cost;
     sample.valid = true;
     return sample;
-}
-
-MPPIFollowSamplingResult to_result(const SampledSequence& sample) {
-    MPPIFollowSamplingResult result;
-    result.xs = sample.xs;
-    result.us = sample.us;
-    result.cost = sample.cost;
-    result.valid = sample.valid;
-    result.lethal_obstacle = sample.lethal_obstacle;
-    return result;
 }
 
 } // namespace
@@ -385,7 +370,7 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
     const std::array<ControlVec, MPC_HORIZON>& nominal_controls
 ) const {
     MPPIFollowSamplingResult invalid_result;
-    if (!params_.enable || params_.batch_size <= 0 || params_.iteration_count <= 0 || params_.temperature <= 0.0) {
+    if (!params_.enable || params_.batch_size <= 0) {
         return invalid_result;
     }
 
@@ -408,134 +393,47 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
     }
 
     SampledSequence best_sequence = rollout_control_sequence(
-        problem,
-        x0,
-        nominal,
-        nominal,
-        u_lo,
-        u_hi,
-        inv_variance,
-        params_.gamma
+        problem, x0, nominal, nominal, u_lo, u_hi, inv_variance, params_.gamma
     );
+    std::vector<Eigen::Vector2d> best_path;
+    if (best_sequence.valid) {
+        best_path.reserve(MPC_HORIZON + 1);
+        for (int k = 0; k <= MPC_HORIZON; ++k) {
+            best_path.emplace_back(best_sequence.xs[static_cast<size_t>(k)](ix::X), best_sequence.xs[static_cast<size_t>(k)](ix::Y));
+        }
+    }
 
-    std::vector<SampledSequence> samples(static_cast<size_t>(params_.batch_size));
     const std::vector<Eigen::Vector2d> cp_normals = build_control_point_normals(base_ref_cps);
+    std::vector<SampledSequence> samples(static_cast<size_t>(params_.batch_size));
 
     std::random_device rd;
     const uint64_t base_seed = (static_cast<uint64_t>(rd()) << 32U) ^ static_cast<uint64_t>(rd());
-    std::vector<std::vector<Eigen::Vector2d>> iteration_best_paths;
 
-    for (int iter = 0; iter < params_.iteration_count; ++iter) {
 #pragma omp parallel for if(params_.batch_size >= 32) schedule(static) num_threads(params_.num_threads)
-        for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
-            const bool use_nominal = params_.include_nominal_trajectory && sample_index == 0;
-            if (use_nominal) {
-                samples[static_cast<size_t>(sample_index)] = rollout_control_sequence(
-                    problem,
-                    x0,
-                    nominal,
-                    nominal,
-                    u_lo,
-                    u_hi,
-                    inv_variance,
-                    params_.gamma
-                );
-                continue;
-            }
-
-            std::mt19937_64 rng(make_seed(base_seed, iter, sample_index));
-            const std::vector<Eigen::Vector2d> sampled_ref_cps = deform_reference_path(
-                base_ref_cps,
-                cp_normals,
-                params_.geometry_sampling.lateral_offset_std,
-                rng
-            );
-            const std::vector<double> sampled_speed_cps = sample_speed_control_points(params_, rng);
-            const FollowProblem sampled_problem = problem.with_reference_path(sampled_ref_cps);
-
-            samples[static_cast<size_t>(sample_index)] = rollout_generated_sequence(
-                sampled_problem,
-                x0,
-                nominal,
-                sampled_ref_cps,
-                sampled_speed_cps,
-                u_lo,
-                u_hi,
-                inv_variance,
-                params_
-            );
-        }
-
-        double min_cost = std::numeric_limits<double>::infinity();
-        int best_batch_index = -1;
-        for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
-            const auto& sample = samples[static_cast<size_t>(sample_index)];
-            if (!sample.valid) {
-                continue;
-            }
-            if (sample.cost < min_cost) {
-                min_cost = sample.cost;
-                best_batch_index = sample_index;
-            }
-        }
-
-        if (best_batch_index < 0) {
-            break;
-        }
-
-        const auto& best_batch_sample = samples[static_cast<size_t>(best_batch_index)];
-        if (!best_sequence.valid || best_batch_sample.cost < best_sequence.cost) {
-            best_sequence = best_batch_sample;
-        }
-
-        std::vector<Eigen::Vector2d> path;
-        path.reserve(MPC_HORIZON + 1);
-        for (int k = 0; k <= MPC_HORIZON; ++k) {
-            const auto& s = best_batch_sample.xs[static_cast<size_t>(k)];
-            path.emplace_back(s(ix::X), s(ix::Y));
-        }
-        iteration_best_paths.push_back(std::move(path));
-
-        double weight_sum = 0.0;
-        std::array<ControlVec, MPC_HORIZON> weighted_delta {};
-        for (auto& u : weighted_delta) {
-            u.setZero();
-        }
-
-        for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
-            const auto& sample = samples[static_cast<size_t>(sample_index)];
-            if (!sample.valid) {
-                continue;
-            }
-
-            const double weight = std::exp(-(sample.cost - min_cost) / params_.temperature);
-            weight_sum += weight;
-            for (int k = 0; k < MPC_HORIZON; ++k) {
-                weighted_delta[static_cast<size_t>(k)] += weight * sample.delta_u[static_cast<size_t>(k)];
-            }
-        }
-
-        if (weight_sum <= WEIGHT_EPS) {
-            break;
-        }
-
-        for (int k = 0; k < MPC_HORIZON; ++k) {
-            nominal[static_cast<size_t>(k)] += weighted_delta[static_cast<size_t>(k)] / weight_sum;
-            nominal[static_cast<size_t>(k)] = nominal[static_cast<size_t>(k)].cwiseMax(u_lo).cwiseMin(u_hi);
-        }
-
-        const auto updated_nominal = rollout_control_sequence(
-            problem,
-            x0,
-            nominal,
-            nominal,
-            u_lo,
-            u_hi,
-            inv_variance,
-            params_.gamma
+    for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
+        std::mt19937_64 rng(make_seed(base_seed, 0, sample_index));
+        const std::vector<Eigen::Vector2d> sampled_ref_cps = deform_reference_path(
+            base_ref_cps, cp_normals, params_.geometry_sampling.lateral_offset_std, rng
         );
-        if (updated_nominal.valid && (!best_sequence.valid || updated_nominal.cost < best_sequence.cost)) {
-            best_sequence = updated_nominal;
+        const std::vector<double> sampled_speed_cps = sample_speed_control_points(params_, rng);
+        const FollowProblem sampled_problem = problem.with_reference_path(sampled_ref_cps);
+
+        samples[static_cast<size_t>(sample_index)] = rollout_generated_sequence(
+            sampled_problem, x0, nominal, sampled_ref_cps, sampled_speed_cps,
+            u_lo, u_hi, inv_variance, params_
+        );
+    }
+
+    for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
+        const auto& sample = samples[static_cast<size_t>(sample_index)];
+        if (!sample.valid) continue;
+        if (sample.cost < best_sequence.cost) {
+            best_sequence = sample;
+            best_path.clear();
+            best_path.reserve(MPC_HORIZON + 1);
+            for (int k = 0; k <= MPC_HORIZON; ++k) {
+                best_path.emplace_back(best_sequence.xs[static_cast<size_t>(k)](ix::X), best_sequence.xs[static_cast<size_t>(k)](ix::Y));
+            }
         }
     }
 
@@ -544,23 +442,12 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
     }
 
     MPPIFollowSamplingResult result;
-    if (!params_.fallback_to_best_sample) {
-        const auto final_nominal = rollout_control_sequence(
-            problem,
-            x0,
-            nominal,
-            nominal,
-            u_lo,
-            u_hi,
-            inv_variance,
-            params_.gamma
-        );
-        result = final_nominal.valid ? to_result(final_nominal) : to_result(best_sequence);
-    } else {
-        result = to_result(best_sequence);
-    }
-
-    result.rollout_paths = std::move(iteration_best_paths);
+    result.xs = best_sequence.xs;
+    result.us = best_sequence.us;
+    result.cost = best_sequence.cost;
+    result.valid = true;
+    result.lethal_obstacle = best_sequence.lethal_obstacle;
+    result.rollout_path = std::move(best_path);
     return result;
 }
 

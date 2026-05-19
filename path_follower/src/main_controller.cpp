@@ -561,8 +561,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     out.predicted_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
-    if (!prediction.rollout_paths.empty()) {
-        out.mppi_rollouts = std::move(prediction.rollout_paths);
+    if (!prediction.rollout_path.empty()) {
+        out.mppi_rollouts = std::move(prediction.rollout_path);
     }
     out.step_dist_cm = compute_step_distance_cm(input, u0, prediction);
     out.valid = true;

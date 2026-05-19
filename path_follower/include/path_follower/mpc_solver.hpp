@@ -189,32 +189,30 @@ struct MPCFollowProjection {
 };
 
 struct MPPIGeometrySamplingParams {
-    double lateral_offset_std;
+    double lateral_offset_std; ///< 路径控制点沿法向采样标准差 (m)
 };
 
 struct MPPISpeedSamplingParams {
-    int control_point_count;
-    double scale_std;
-    double heading_feedback_gain;
+    int control_point_count;   ///< 速度 B-spline 控制点数量
+    double scale_std;          ///< 速度缩放零均值采样标准差
+    double heading_feedback_gain; ///< omega = kappa * v + k_fb * heading_error
 };
 
+/// 每维归一化尺度，用于 reg_cost = ½·γ·Σₖ‖(uₖ - uₙₒₘₖ)/σ‖²
+/// 实际控制量偏差 Δu 会被 σ 归一化后再平方，消除 v/ω 量级差异
 struct MPPIControlRegularizationStd {
-    double velocity;
-    double omega;
+    double velocity; ///< 速度归一化标准差 (m/s)；σ_v 越大该维度锚定越松
+    double omega;    ///< 角速度归一化标准差 (rad/s)；σ_ω 越大该维度锚定越松
 };
 
 struct MPCFollowMPPIParams {
     bool enable;
-    int num_threads;
-    int batch_size;
-    int iteration_count;
-    double temperature;
-    double gamma;
+    int num_threads;                                       ///< 并行线程数
+    int batch_size;                                        ///< 每帧采样轨迹数
+    double gamma;                                          ///< KL 散度正则化权重；γ=0 无锚定，γ↑ 采样越贴近 warm start
     MPPIGeometrySamplingParams geometry_sampling;
     MPPISpeedSamplingParams speed_sampling;
     MPPIControlRegularizationStd regularization_std;
-    bool include_nominal_trajectory;
-    bool fallback_to_best_sample;
 };
 
 struct MPCFollowRolloutSafetyParams {
@@ -235,8 +233,7 @@ struct MPCFollowParams {
     MPCFollowProjection projection;
     MPCFollowMPPIParams mppi;
     MPCFollowRolloutSafetyParams rollout_safety;
-    int total_iters;
-    int step_refine_iters;
+    int max_iters;
 };
 
 struct MPCStopCommandWeights {
@@ -318,10 +315,7 @@ struct RolloutLethalObstacleInfo {
     double sampled_cost = 0.0;
 };
 
-struct FollowProblemConfig {
-    bool use_active_mode_profile = false;
-    bool enable_step_terrain_costs = false;
-};
+
 
 /// MPC 预测轨迹
 struct MPCPrediction {
@@ -330,8 +324,8 @@ struct MPCPrediction {
     std::vector<double> v_pred;
     std::vector<double> w_pred;
 
-    /// MPPI 采样 rollout 调试轨迹（仅 debug 模式填充）
-    std::vector<std::vector<Eigen::Vector2d>> rollout_paths;
+    /// MPPI 采样的最佳 rollout 路径调试信息（仅 debug 模式填充）
+    std::vector<Eigen::Vector2d> rollout_path;
 };
 
 struct MPCParams {
@@ -413,7 +407,6 @@ public:
     FollowProblemT(
         const std::vector<Eigen::Vector2d>& ref_control_points,
         const MPCParams& params,
-        const FollowProblemConfig& config,
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
         double prediction_dt,
@@ -456,7 +449,6 @@ private:
 
     const std::vector<Eigen::Vector2d>& ref_cps_;
     const MPCParams& p_;
-    FollowProblemConfig config_;
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
     double prediction_dt_;
@@ -653,12 +645,10 @@ private:
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 
-    // Follow 基础层负责跨周期 warm start；台阶 refinement 每周期由基础层结果重新初始化。
-    fddp::Solver<FollowProblem> follow_base_solver_;
-    fddp::Solver<FollowProblem> follow_refine_solver_;
+    fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
-    bool follow_base_warm_ = false;
+    bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
 
