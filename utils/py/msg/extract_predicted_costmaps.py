@@ -15,7 +15,7 @@ class PredictedCostmapExtractor(Node):
         self.publisher = self.create_publisher(OccupancyGrid, '/predicted_costmap', 10)
 
     def listener_callback(self, msg):
-        occupancy_grid = msg.maps[14]
+        occupancy_grid = msg.maps[0]
         self.publisher.publish(occupancy_grid)
 
 def main(args=None):

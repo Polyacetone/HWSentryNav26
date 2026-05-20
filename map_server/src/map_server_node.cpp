@@ -621,11 +621,15 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
         if (use_direction_filter) {
             // direction_map: ch0=B(dx), ch1=G(dy), ch2=A(step_mode), 128-centered
             const auto& dir_px = global_direction_map_.at<cv::Vec3b>(map_y, map_x);
-            const double dx = static_cast<double>(dir_px[0]) - 128.0;
-            const double dy = static_cast<double>(dir_px[1]) - 128.0;
-            // 归一化到 [0,1]: dx/128, dy/128 ∈ [-1,1], 模长 ∈ [0,1]
-            if (std::sqrt(dx * dx + dy * dy) / 128.0 > local_map_params_.without_global_cloud.direction_filter_threshold) {
-                continue;
+            // (0,0) 和 (128,128) 都视为无台阶方向，兼容不同的 navmap 编码
+            const bool no_direction = (dir_px[0] == 0 && dir_px[1] == 0)
+                || (dir_px[0] == 128 && dir_px[1] == 128);
+            if (!no_direction) {
+                const double dx = static_cast<double>(dir_px[0]) - 128.0;
+                const double dy = static_cast<double>(dir_px[1]) - 128.0;
+                if (std::sqrt(dx * dx + dy * dy) / 128.0 > local_map_params_.without_global_cloud.direction_filter_threshold) {
+                    continue;
+                }
             }
         }
 

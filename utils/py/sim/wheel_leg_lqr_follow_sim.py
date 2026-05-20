@@ -181,24 +181,24 @@ class SimConfig:
     # --- 动态障碍物 ---
     # 障碍物生成范围（世界坐标，单位 m）
     OBSTACLE_SPAWN_X_MIN: float = 0.0
-    OBSTACLE_SPAWN_X_MAX: float = 9.6
+    OBSTACLE_SPAWN_X_MAX: float = 28.0
     OBSTACLE_SPAWN_Y_MIN: float = 0.0
-    OBSTACLE_SPAWN_Y_MAX: float = 8.1
+    OBSTACLE_SPAWN_Y_MAX: float = 15.0
 
     # 障碍物点云外形（每个障碍物为球形点云，球心在 xy 平面运动，z 固定）
     OBSTACLE_CLOUD_RADIUS_M: float = 0.30          # 球半径 (m)
-    OBSTACLE_CLOUD_CENTER_Z_M: float = 0.50        # 球心固定 z 高度 (m)
+    OBSTACLE_CLOUD_CENTER_Z_M: float = 0.30        # 球心固定 z 高度 (m)
     OBSTACLE_CLOUD_DENSITY_PTS_PER_M2: float = 120.0  # 球面点密度 (points/m^2)
     OBSTACLE_CLOUD_MIN_POINTS: int = 80            # 每个障碍物最少点数
 
     # 障碍物种类列表（每项为 ObstacleSpec 实例，可自由增删）
     OBSTACLE_SPECS: tuple = (
-        # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
-        # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
-        # ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
-        # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
-        # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
-        # ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
+        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
+        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
+        ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
+        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
+        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
+        ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
     )
 
     # --- Frame 约定 ---
