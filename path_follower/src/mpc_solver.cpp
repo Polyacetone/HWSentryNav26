@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <iostream>
 
 namespace path_follower {
 
@@ -809,46 +808,47 @@ FollowResidualLinearization follow_residual_linearized_impl(
         if (active_step_mode->step_entry_u.has_value()) {
             const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
             const double path_u = std::clamp(uc, 0.0, 1.0);
-            const double d = (path_u < entry_u) ? quadratic_bspline_arc_length(ref_cps, path_u, entry_u) : 0.0;
+            if (path_u < entry_u) {
+                const double d = quadratic_bspline_arc_length(ref_cps, path_u, entry_u);
 
-            Eigen::Vector2d path_d1;
-            eval_quadratic_bspline2_extrapolated(ref_cps, path_u, nullptr, &path_d1, nullptr);
-            const double ds_du = (path_u < entry_u) ? (path_d1.norm() * duc_dpathu) : 0.0;
+                Eigen::Vector2d path_d1;
+                eval_quadratic_bspline2_extrapolated(ref_cps, path_u, nullptr, &path_d1, nullptr);
+                const double ds_du = path_d1.norm() * duc_dpathu;
 
-            const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
-            const double r_lo_expr = std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d;
-            const double r_hi_expr = v_act * v_act - 2.0 * a_guide * d;
-            const double r_lo_arg = std::max(REACHABILITY_EPS, r_lo_expr);
-            const double r_hi_arg = std::max(REACHABILITY_EPS, r_hi_expr);
-            const double r_lo = std::sqrt(r_lo_arg);
-            const double r_hi = std::sqrt(r_hi_arg);
+                const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
+                const double r_lo_expr = std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d;
+                const double r_hi_expr = v_act * v_act - 2.0 * a_guide * d;
+                const double r_lo_arg = std::max(REACHABILITY_EPS, r_lo_expr);
+                const double r_hi_arg = std::max(REACHABILITY_EPS, r_hi_expr);
+                const double r_lo = std::sqrt(r_lo_arg);
+                const double r_hi = std::sqrt(r_hi_arg);
 
-            const double relu_lo = positive_part(v_min - r_lo);
-            out.r(12) = std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * relu_lo;
-            if (relu_lo > 0.0) {
-                const bool lo_active = r_lo_expr > REACHABILITY_EPS;
-                const double drlo_dv = (lo_active && v_act > 0.0) ? (v_act / r_lo) : 0.0;
-                const double drlo_du = (lo_active && d > 0.0) ? (-a_guide * ds_du / r_lo) : 0.0;
-                out.jx(12, ix::V) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_dv;
-                out.jx(12, ix::PATH_U) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_du;
-            }
+                const double relu_lo = positive_part(v_min - r_lo);
+                out.r(12) = std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * relu_lo;
+                if (relu_lo > 0.0) {
+                    const bool lo_active = r_lo_expr > REACHABILITY_EPS;
+                    const double drlo_dv = (lo_active && v_act > 0.0) ? (v_act / r_lo) : 0.0;
+                    const double drlo_du = (lo_active) ? (-a_guide * ds_du / r_lo) : 0.0;
+                    out.jx(12, ix::V) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_dv;
+                    out.jx(12, ix::PATH_U) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_du;
+                }
 
-            const double relu_hi = positive_part(r_hi - v_max);
-            out.r(13) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * relu_hi;
-            if (relu_hi > 0.0) {
-                const bool hi_active = r_hi_expr > REACHABILITY_EPS;
-                const double drhi_dv = hi_active ? (v_act / r_hi) : 0.0;
-                const double drhi_du = (hi_active && d > 0.0) ? (a_guide * ds_du / r_hi) : 0.0;
-                out.jx(13, ix::V) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_dv;
-                out.jx(13, ix::PATH_U) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_du;
+                const double relu_hi = positive_part(r_hi - v_max);
+                out.r(13) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * relu_hi;
+                if (relu_hi > 0.0) {
+                    const bool hi_active = r_hi_expr > REACHABILITY_EPS;
+                    const double drhi_dv = hi_active ? (v_act / r_hi) : 0.0;
+                    const double drhi_du = (hi_active) ? (a_guide * ds_du / r_hi) : 0.0;
+                    out.jx(13, ix::V) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_dv;
+                    out.jx(13, ix::PATH_U) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_du;
+                }
             }
         }
     }
 
     const double endpoint_gate = positive_part(uc - 1.0);
-    out.r(14) = terminal_w.q_v_final * v_act * endpoint_gate;
-    out.jx(14, ix::V) = terminal_w.q_v_final * endpoint_gate;
-    out.jx(14, ix::PATH_U) = terminal_w.q_v_final * v_act * positive_part_derivative(uc - 1.0) * duc_dpathu;
+    out.r(14) = terminal_w.q_v_final * endpoint_gate;
+    out.jx(14, ix::PATH_U) = terminal_w.q_v_final * positive_part_derivative(uc - 1.0) * duc_dpathu;
 
     if (p.energy.enable) {
         const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
@@ -865,7 +865,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     return out;
 }
 
-FollowResidualVec follow_residual_impl(
+double follow_running_cost_value_only_impl(
     const StateVec& x,
     const ControlVec& u,
     const std::vector<Eigen::Vector2d>& ref_cps,
@@ -877,10 +877,105 @@ FollowResidualVec follow_residual_impl(
     double rfr_pwr_limit,
     std::optional<ActiveStepMode> active_step_mode
 ) {
-    return follow_residual_linearized_impl(
-        x, u, ref_cps, p, cg, ci, dg, di,
-        rfr_pwr_limit, active_step_mode
-    ).r;
+    const auto& follow = p.follow;
+    const auto& tracking_w = follow.tracking_weights;
+    const auto& command_w = follow.command_weights;
+    const auto& motion_w = follow.motion_constraint_weights;
+    const auto& terrain_w = follow.terrain_weights;
+    const auto& env_w = follow.environment_weights;
+    const auto& terminal_w = follow.terminal_weights;
+    const auto& motion_lim = select_follow_mode_profile(follow, active_step_mode).motion_constraints;
+
+    const double px = x(ix::X);
+    const double py = x(ix::Y);
+    const double theta = x(ix::THETA);
+    const double v_act = x(ix::V);
+    const double w_act = x(ix::W);
+    const double v_cmd = u(0);
+    const double w_cmd = u(1);
+    const double dv_cmd = v_cmd - x(ix::DV);
+    const double dw_cmd = w_cmd - x(ix::DW);
+
+    const double uc_raw = x(ix::PATH_U);
+    const double uc = clamp_path_u_extrapolated(uc_raw);
+
+    Eigen::Vector2d pr;
+    Eigen::Vector2d d1;
+    Eigen::Vector2d d2;
+    eval_quadratic_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+
+    const double thetar = std::atan2(d1.y(), d1.x());
+    const double sin_r = std::sin(thetar);
+    const double cos_r = std::cos(thetar);
+
+    const double ex = px - pr.x();
+    const double ey_w = py - pr.y();
+    const double ey = -ex * sin_r + ey_w * cos_r;
+    const double etheta = wrap_pi(theta - thetar);
+
+    const auto cs = eval_cost_bilinear(cg, ci, px, py);
+    const auto ds = eval_dir_bilinear(dg, di, px, py);
+
+    const Eigen::Vector2d dir = ds.value;
+    const double dir_norm_sq = dir.squaredNorm();
+    const double cross = std::cos(theta) * dir.y() - std::sin(theta) * dir.x();
+    const double a_lat = std::abs(v_act * w_act);
+
+    const double dv_lim = motion_lim.acc_max * MPC_DT;
+    const double dw_lim = motion_lim.alpha_max * MPC_DT;
+
+    double cost = 0.0;
+
+    cost += 0.5 * std::pow(tracking_w.q_y * ey, 2);
+    cost += 0.5 * std::pow(tracking_w.q_theta * etheta, 2);
+    cost += 0.5 * std::pow(command_w.r_v * v_cmd, 2);
+    cost += 0.5 * std::pow(command_w.r_omega * w_cmd, 2);
+    cost += 0.5 * std::pow(command_w.r_dv * dv_cmd, 2);
+    cost += 0.5 * std::pow(command_w.r_domega * dw_cmd, 2);
+    cost += 0.5 * std::pow(motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim), 2);
+    cost += 0.5 * std::pow(motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim), 2);
+    cost += 0.5 * std::pow(motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max), 2);
+    cost += 0.5 * std::pow(env_w.obstacle * cs.value / 255.0, 2);
+    cost += 0.5 * std::pow(terrain_w.direction * std::abs(cross), 2);
+
+    if (is_active_follow_step_mode(active_step_mode)) {
+        const double target_vel = active_step_mode->target_velocity;
+        const double deadzone = follow.terrain_limits.step_vel_deadzone;
+        const double v_center = target_vel;
+        const double relu_vstep = positive_part(std::abs(v_act - v_center) - deadzone);
+
+        if (dir_norm_sq > 1e-10) {
+            cost += 0.5 * std::pow(terrain_w.step_vel_weight * std::sqrt(dir_norm_sq) * relu_vstep, 2);
+        }
+
+        if (active_step_mode->step_entry_u.has_value()) {
+            const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
+            const double path_u = std::clamp(uc, 0.0, 1.0);
+            if (path_u < entry_u) {
+                const double d = quadratic_bspline_arc_length(ref_cps, path_u, entry_u);
+                const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
+                const double v_min = target_vel - deadzone;
+                const double v_max = target_vel + deadzone;
+                const double r_lo = std::sqrt(std::max(REACHABILITY_EPS, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
+                const double r_hi = std::sqrt(std::max(REACHABILITY_EPS, v_act * v_act - 2.0 * a_guide * d));
+
+                cost += 0.5 * std::pow(std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(v_min - r_lo), 2);
+                cost += 0.5 * std::pow(std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - v_max), 2);
+            }
+        }
+    }
+
+    cost += 0.5 * std::pow(terminal_w.q_v_final * positive_part(uc - 1.0), 2);
+
+    if (p.energy.enable) {
+        const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
+        const double thr = std::max(p.energy.threshold, 1.0);
+        const double excess = (pwr.value - rfr_pwr_limit) / thr;
+        cost += 0.5 * std::pow(p.energy.weight * positive_part(excess), 2);
+    }
+
+    cost += (p.follow.tracking_weights.q_u / MPC_HORIZON) * positive_part(1.0 - uc);
+    return cost;
 }
 
 AdvanceUProgressEval
@@ -1006,14 +1101,16 @@ std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_
 
 template<int Horizon>
 double FollowProblemT<Horizon>::running_cost(int k, const StateVec& x, const ControlVec& u) const {
-    double cost = residual_cost(follow_residual_impl(
+    return running_cost_value_only(k, x, u);
+}
+
+template<int Horizon>
+double FollowProblemT<Horizon>::running_cost_value_only(int k, const StateVec& x, const ControlVec& u) const {
+    return follow_running_cost_value_only_impl(
         x, u, ref_cps_, p_,
         cost_grid_for_step(k), cost_info_, dir_grid_, dir_info_,
         rfr_pwr_limit_, active_step_mode_
-    ));
-    const double uc = clamp_path_u_extrapolated(x(ix::PATH_U));
-    cost += (p_.follow.tracking_weights.q_u / MPC_HORIZON) * positive_part(1.0 - uc);
-    return cost;
+    );
 }
 
 template<int Horizon>
@@ -1441,9 +1538,9 @@ std::array<ControlVec, SolverT::N> copy_solver_controls(const SolverT& solver) {
 }
 
 template<typename SolverT>
-void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample, const FollowProblem& problem, const StateVec& x0) {
+void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample) {
+    solver.xs = sample.xs;
     solver.us = sample.us;
-    rollout_solver_states(solver, problem, x0);
 }
 
 template<typename ProblemT, typename StateContainerT>
@@ -1669,29 +1766,22 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
     clamp_solver_controls(follow_solver_, problem);
 
-    auto prev = std::chrono::steady_clock::now();
-
     MPPIFollowSamplingResult mppi_result;
     bool seeded_by_mppi = false;
     if (params_.follow.mppi.enable) {
         MPPIFollowSampler sampler(params_.follow.mppi);
         mppi_result = sampler.optimize(problem, x0, copy_solver_controls(follow_solver_));
         if (mppi_result.valid) {
-            seed_solver_from_sampling_result(follow_solver_, mppi_result, problem, x0);
+            seed_solver_from_sampling_result(follow_solver_, mppi_result);
             seeded_by_mppi = true;
         }
     }
-
-    std::cout << "MPPI sampling time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prev).count() << " ms" << std::endl;
-    prev = std::chrono::steady_clock::now();
 
     if (!seeded_by_mppi) {
         rollout_solver_states(follow_solver_, problem, x0);
     }
     follow_solver_.solve(problem, opts);
     follow_warm_ = true;
-
-    std::cout << "FDDP solve time: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prev).count() << " ms" << std::endl;
 
     const auto solved_rollout = rollout_states(problem, follow_solver_, x0);
     MPCPrediction prediction;
@@ -1709,7 +1799,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             prediction.w_pred.push_back(x(ix::W));
         }
     }
-    prediction.rollout_path = std::move(mppi_result.rollout_path);
+    prediction.rollout_paths = std::move(mppi_result.rollout_paths);
     if (const auto lethal = detect_rollout_lethal_obstacle(problem, solved_rollout.xs, solved_rollout.valid_steps + 1)) {
         auto stop_result = solve_stop(chassis_pose_map, chassis_state, cost_map);
         if (!stop_result) {

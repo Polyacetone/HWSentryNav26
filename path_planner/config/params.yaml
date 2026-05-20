@@ -55,11 +55,11 @@
 
       # ── Warmup 阶段：粗调，使样条大致符合路径形状 ──
       warmup:
-        obstacle_weight: 0.5 # 避障权重
+        obstacle_weight: 2.0 # 避障权重
         direction_weight: 8.0 # 台阶方向对齐权重（cross product惩罚偏离方向场）
         step_weight: 0.25 # 台阶位置惩罚（鼓励避开台阶区域）
-        prohibited_direction_weight: 30.0 # alpha标记禁止方向上穿越台阶的软惩罚
-        start_end_weight: 15.0 # 起终点位置保持权重
+        prohibited_direction_weight: 2.0 # alpha标记禁止方向上穿越台阶的软惩罚
+        start_end_weight: 30.0 # 起终点位置保持权重
         smoothness_weight: 0.005 # 二阶平滑正则（抑制局部抖动）
         samples_per_meter: 10.0 # 优化采样密度 (/m)
         max_iterations: 60 # 最大迭代次数
@@ -76,11 +76,11 @@
 
       # ── Main 阶段：精调，基于台阶检测区间施加变曲率约束 ──
       main:
-        obstacle_weight: 0.5 # 避障权重
+        obstacle_weight: 2.0 # 避障权重
         direction_weight: 8.0 # 台阶方向对齐权重
         step_weight: 0.25 # 台阶位置惩罚
-        prohibited_direction_weight: 30.0 # alpha标记禁止方向上穿越台阶的软惩罚
-        start_end_weight: 15.0 # 起终点位置保持权重
+        prohibited_direction_weight: 2.0 # alpha标记禁止方向上穿越台阶的软惩罚
+        start_end_weight: 30.0 # 起终点位置保持权重
         smoothness_weight: 0.005 # 二阶平滑正则
         samples_per_meter: 10.0 # 优化采样密度 (/m)
         max_iterations: 60 # 单轮最大迭代次数

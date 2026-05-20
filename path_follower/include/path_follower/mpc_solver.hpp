@@ -191,25 +191,27 @@ struct MPCFollowProjection {
     double local_search_lazy_distance;
 };
 
-struct MPPIGeometrySamplingParams {
-    double lateral_offset_std; ///< 路径控制点沿法向采样标准差 (m)
-    double heading_feedback_gain; ///< omega = kappa * v + k_fb * heading_error
+struct MPPISamplingStd {
+    double velocity;
+    double omega;
 };
 
-/// 每维归一化尺度，用于 reg_cost = ½·γ·Σₖ‖(uₖ - uₙₒₘₖ)/σ‖²
-/// 实际控制量偏差 Δu 会被 σ 归一化后再平方，消除 v/ω 量级差异
-struct MPPIControlRegularizationStd {
-    double velocity; ///< 速度归一化标准差 (m/s)；σ_v 越大该维度锚定越松
-    double omega;    ///< 角速度归一化标准差 (rad/s)；σ_ω 越大该维度锚定越松
+struct MPPINoiseSmoothing {
+    int window;
+    int passes;
 };
 
 struct MPCFollowMPPIParams {
     bool enable;
-    int num_threads;                                       ///< 并行线程数
-    int batch_size;                                        ///< 每帧采样轨迹数
-    double gamma;                                          ///< KL 散度正则化权重；γ=0 无锚定，γ↑ 采样越贴近 warm start
-    MPPIGeometrySamplingParams geometry_sampling;
-    MPPIControlRegularizationStd regularization_std;
+    int num_threads;
+    int batch_size;
+    int iteration_count;
+    double temperature;
+    double gamma;
+    MPPISamplingStd sampling_std;
+    MPPINoiseSmoothing noise_smoothing;
+    bool include_nominal_trajectory;
+    bool fallback_to_best_sample;
 };
 
 struct MPCFollowRolloutSafetyParams {
@@ -322,8 +324,8 @@ struct MPCPrediction {
     std::vector<double> v_pred;
     std::vector<double> w_pred;
 
-    /// MPPI 采样的最佳 rollout 路径调试信息（仅 debug 模式填充）
-    std::vector<Eigen::Vector2d> rollout_path;
+    /// MPPI 采样 rollout 调试轨迹（仅 debug 模式填充）
+    std::vector<std::vector<Eigen::Vector2d>> rollout_paths;
 };
 
 struct MPCParams {
@@ -420,6 +422,7 @@ public:
     void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
 
     double running_cost(int k, const StateVec& x, const ControlVec& u) const;
+    double running_cost_value_only(int k, const StateVec& x, const ControlVec& u) const;
     void running_cost_derivatives(
         int k,
         const StateVec& x,

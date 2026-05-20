@@ -81,16 +81,20 @@
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
         mppi:
-          enable: false # 单次 rollout 采样生成器：并行采样 batch_size 条轨迹，选取代价最低者作为 FDDP 初始猜测
-          num_threads: 4 # MPPI 并行线程数
-          batch_size: 512 # 采样轨迹数
-          gamma: 0.003 # KL 散度正则化权重。reg_cost = ½·γ·Σₖ‖(uₖ - uₙₒₘₖ)/σ‖²。γ=0 完全无锚定，越大采样越紧贴 warm start
-          geometry_sampling:
-            lateral_offset_std: 0.35 # 参考路径控制点沿法向的采样标准差 (m)
-            heading_feedback_gain: 4.0 # 几何跟踪航向反馈增益，用于 MPPI 几何 rollout 的 omega = kappa * v_nom + k_fb * heading_error
-          regularization_std:
-            velocity: 1.2 # 每维归一化尺度。reg_cost 中实际使用的是 Δ/σ，用于消除 v/ω 量级差异。
-            omega: 2.0   # 例如允许 Δv=1.0 与 Δω=2.5 产生相同惩罚。增大 σ = 松开该维度锚定
+          enable: true # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
+          num_threads: 2 # MPPI并行线程数
+          batch_size: 256 # 每次迭代采样轨迹数
+          iteration_count: 2 # MPPI迭代次数
+          temperature: 0.3 # 软最优权重温度，越小越偏向最优样本
+          gamma: 0.015 # 控制噪声正则权重，抑制大幅偏离名义控制
+          sampling_std:
+            velocity: 0.4 # 线速度采样标准差 (m/s)
+            omega: 1.0 # 角速度采样标准差 (rad/s)
+          noise_smoothing:
+            window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
+            passes: 2 # 平滑迭代次数
+          include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免MPPI退化时丢掉已有好解
+          fallback_to_best_sample: true # 最终优先采用历史最佳可行样本，增强跳出局部最优的稳定性
         rollout_safety:
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解命中则本帧退化为 solve_stop
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
@@ -162,11 +166,11 @@
                 a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
         tracking_weights:
           q_y: 0.40  # 横向误差权重
-          q_theta: 0.02 # 航向误差权重
-          q_u: 6.0  # 每步进度权重
+          q_theta: 0.05 # 航向误差权重
+          q_u: 8.0  # 每步进度权重
         command_weights:
-          r_v: 0.01 # 线速度正则
-          r_omega: 0.01 # 角速度正则
+          r_v: 0.001 # 线速度正则
+          r_omega: 0.001 # 角速度正则
           r_dv: 0.4 # 线速度平滑
           r_domega: 0.4 # 角速度平滑
         motion_constraint_weights:
@@ -176,16 +180,16 @@
         terrain_limits:
           step_speed_levels: [1.2, 1.8, 2.4, 3.0] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
           step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
-          step_reachability_guide_acc: 1.0 # 台阶入口可达势函数的引导加速度 (m/s^2)
+          step_reachability_guide_acc: 1.5 # 台阶入口可达势函数的引导加速度 (m/s^2)
         terrain_weights:
-          step_vel_weight: 0.1 # 台阶内部仍保留原始速度范围惩罚，但权重降低
+          step_vel_weight: 0.6 # 台阶内部仍保留原始速度范围惩罚，但权重降低
           step_reachability_lo: 1.0 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
           step_reachability_hi: 1.0 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
           direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
           obstacle: 1.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
-          q_v_final: 3.0 # 终点减速权重（鼓励到达终点时减速）
+          q_v_final: 1.0 # 终点减速权重（鼓励到达终点时减速）
         projection:
           num_samples: 50 # 投影到样条参数u的采样数
           search_window: 0.1 # 局部搜索窗口 (0~1)

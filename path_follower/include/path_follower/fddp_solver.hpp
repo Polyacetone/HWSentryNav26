@@ -448,7 +448,7 @@ bool Solver<P>::backward_pass(const P& prob, double mu, const VecU& tr_lo, const
 
         dV1_ += k_ff.dot(Qu);
         // Use Quu_reg for expected reduction (consistent with regularized QP)
-        dV2_ += 0.5 * k_ff.dot(Quu_reg * k_ff);
+        dV2_ += k_ff.dot(Quu_reg * k_ff);
 
         Vx_[k] = Qx + K_fb.transpose() * Quu * k_ff + K_fb.transpose() * Qu + Qux.transpose() * k_ff;
         Vxx_[k] = Qxx + K_fb.transpose() * Quu * K_fb + K_fb.transpose() * Qux + Qux.transpose() * K_fb;
@@ -493,6 +493,10 @@ typename Solver<P>::ForwardPassResult Solver<P>::forward_pass(
         result.max_control_update = std::max(result.max_control_update, du.norm());
 
         xs_try_[k + 1] = prob.dynamics(k, xs_try_[k], us_try_[k]) - (1.0 - alpha) * fs_[k + 1];
+        if (!xs_try_[k + 1].allFinite()) {
+            result.within_trust_region = false;
+            return result;
+        }
         result.max_state_deviation = std::max(result.max_state_deviation, (xs_try_[k + 1] - xs[k + 1]).norm());
         if (result.max_state_deviation > state_tr) {
             result.within_trust_region = false;
