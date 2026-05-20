@@ -161,6 +161,30 @@ double quadratic_bspline_curvature(const Eigen::Vector2d& d1, const Eigen::Vecto
     const double dsdu = std::sqrt(d1.squaredNorm() + 0.01) + 1e-6;
     return (d1.x() * d2.y() - d1.y() * d2.x()) / (dsdu * dsdu * dsdu);
 }
+
+double quadratic_bspline_arc_length(
+    const std::vector<Eigen::Vector2d>& cps,
+    const double u0,
+    const double u1,
+    const int samples
+) {
+    const int n = std::max(1, samples);
+    const double ua = std::clamp(u0, 0.0, 1.0);
+    const double ub = std::clamp(u1, 0.0, 1.0);
+    if (std::abs(ub - ua) <= 1e-9) {
+        return 0.0;
+    }
+
+    const double h = (ub - ua) / static_cast<double>(n);
+    double acc = 0.0;
+    for (int i = 0; i <= n; ++i) {
+        Eigen::Vector2d d1;
+        eval_quadratic_bspline2_extrapolated(cps, ua + h * static_cast<double>(i), nullptr, &d1, nullptr);
+        const double weight = (i == 0 || i == n) ? 1.0 : ((i % 2 == 0) ? 2.0 : 4.0);
+        acc += weight * d1.norm();
+    }
+    return std::abs(h) * acc / 3.0;
+}
 }
 
 namespace path_follower::recovery_helpers {

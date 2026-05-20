@@ -13,7 +13,8 @@ namespace path_follower {
 
 namespace {
 
-constexpr double kCostEps = 1e-9;
+constexpr double COST_EPS = 1e-9;
+constexpr double REACHABILITY_EPS = 1e-6;
 
 const MPCFollowModeProfile& select_follow_mode_profile(
     const MPCFollowParams& params,
@@ -643,7 +644,7 @@ FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const std::
 
 namespace {
 
-constexpr int FOLLOW_RESIDUAL_DIM = 14;
+constexpr int FOLLOW_RESIDUAL_DIM = 16;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct FollowResidualLinearization {
@@ -788,32 +789,76 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(10, ix::Y) = terrain_w.direction * sign_cross * dcross_dy;
     out.jx(10, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
 
-    if (dir_norm_sq > 1e-10 && is_active_follow_step_mode(active_step_mode)) {
+    if (is_active_follow_step_mode(active_step_mode)) {
         const double target_vel = active_step_mode->target_velocity;
-        const double v_err = v_act - target_vel;
+        const double v_min = target_vel - follow.terrain_limits.step_vel_deadzone;
+        const double v_max = target_vel + follow.terrain_limits.step_vel_deadzone;
+        const double v_center = 0.5 * (v_min + v_max);
+        const double v_err = v_act - v_center;
         const double abs_v_err = std::abs(v_err);
         const double relu_vstep = positive_part(abs_v_err - follow.terrain_limits.step_vel_deadzone);
-        out.r(11) = terrain_w.step_vel_weight * dir_norm * relu_vstep;
-        out.jx(11, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep;
-        out.jx(11, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep;
-        out.jx(11, ix::V) = terrain_w.step_vel_weight * dir_norm
-            * positive_part_derivative(abs_v_err - follow.terrain_limits.step_vel_deadzone) * sign_or_zero(v_err);
+
+        if (dir_norm_sq > 1e-10) {
+            out.r(11) = terrain_w.step_vel_weight * dir_norm * relu_vstep;
+            out.jx(11, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep;
+            out.jx(11, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep;
+            out.jx(11, ix::V) = terrain_w.step_vel_weight * dir_norm
+                * positive_part_derivative(abs_v_err - follow.terrain_limits.step_vel_deadzone) * sign_or_zero(v_err);
+        }
+
+        if (active_step_mode->step_entry_u.has_value()) {
+            const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
+            const double path_u = std::clamp(uc, 0.0, 1.0);
+            const double d = (path_u < entry_u) ? quadratic_bspline_arc_length(ref_cps, path_u, entry_u) : 0.0;
+
+            Eigen::Vector2d path_d1;
+            eval_quadratic_bspline2_extrapolated(ref_cps, path_u, nullptr, &path_d1, nullptr);
+            const double ds_du = (path_u < entry_u) ? (path_d1.norm() * duc_dpathu) : 0.0;
+
+            const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
+            const double r_lo_expr = std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d;
+            const double r_hi_expr = v_act * v_act - 2.0 * a_guide * d;
+            const double r_lo_arg = std::max(REACHABILITY_EPS, r_lo_expr);
+            const double r_hi_arg = std::max(REACHABILITY_EPS, r_hi_expr);
+            const double r_lo = std::sqrt(r_lo_arg);
+            const double r_hi = std::sqrt(r_hi_arg);
+
+            const double relu_lo = positive_part(v_min - r_lo);
+            out.r(12) = std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * relu_lo;
+            if (relu_lo > 0.0) {
+                const bool lo_active = r_lo_expr > REACHABILITY_EPS;
+                const double drlo_dv = (lo_active && v_act > 0.0) ? (v_act / r_lo) : 0.0;
+                const double drlo_du = (lo_active && d > 0.0) ? (-a_guide * ds_du / r_lo) : 0.0;
+                out.jx(12, ix::V) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_dv;
+                out.jx(12, ix::PATH_U) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_du;
+            }
+
+            const double relu_hi = positive_part(r_hi - v_max);
+            out.r(13) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * relu_hi;
+            if (relu_hi > 0.0) {
+                const bool hi_active = r_hi_expr > REACHABILITY_EPS;
+                const double drhi_dv = hi_active ? (v_act / r_hi) : 0.0;
+                const double drhi_du = (hi_active && d > 0.0) ? (a_guide * ds_du / r_hi) : 0.0;
+                out.jx(13, ix::V) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_dv;
+                out.jx(13, ix::PATH_U) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_du;
+            }
+        }
     }
 
     const double endpoint_gate = positive_part(uc - 1.0);
-    out.r(12) = terminal_w.q_v_final * v_act * endpoint_gate;
-    out.jx(12, ix::V) = terminal_w.q_v_final * endpoint_gate;
-    out.jx(12, ix::PATH_U) = terminal_w.q_v_final * v_act * positive_part_derivative(uc - 1.0) * duc_dpathu;
+    out.r(14) = terminal_w.q_v_final * v_act * endpoint_gate;
+    out.jx(14, ix::V) = terminal_w.q_v_final * endpoint_gate;
+    out.jx(14, ix::PATH_U) = terminal_w.q_v_final * v_act * positive_part_derivative(uc - 1.0) * duc_dpathu;
 
     if (p.energy.enable) {
         const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double excess = (pwr.value - rfr_pwr_limit) / thr;
         if (excess > 0.0) {
-            out.r(13) = p.energy.weight * excess;
+            out.r(15) = p.energy.weight * excess;
             const double common = p.energy.weight / thr;
-            out.jx(13, ix::V) = common * pwr.dv;
-            out.jx(13, ix::W) = common * pwr.dw;
+            out.jx(15, ix::V) = common * pwr.dv;
+            out.jx(15, ix::W) = common * pwr.dw;
         }
     }
 
@@ -948,7 +993,7 @@ std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_
         x(ix::X),
         x(ix::Y)
     );
-    if (sample.value + kCostEps < safety.lethal_obstacle_threshold) {
+    if (sample.value + COST_EPS < safety.lethal_obstacle_threshold) {
         return std::nullopt;
     }
 

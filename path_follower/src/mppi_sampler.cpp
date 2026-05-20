@@ -40,31 +40,6 @@ uint64_t make_seed(uint64_t base_seed, int iteration, int sample_index) {
     return base_seed ^ K0 ^ (static_cast<uint64_t>(iteration + 1) * K1) ^ static_cast<uint64_t>(sample_index + 1);
 }
 
-double evaluate_quadratic_bspline_scalar(const std::vector<double>& cps, double u_in) {
-    const int n = static_cast<int>(cps.size());
-    if (n <= 0) {
-        return 0.0;
-    }
-    if (n == 1) {
-        return cps.front();
-    }
-    if (n == 2) {
-        const double u = std::clamp(u_in, 0.0, 1.0);
-        return cps[0] * (1.0 - u) + cps[1] * u;
-    }
-
-    const double scale = static_cast<double>(n - 2);
-    const double u = std::clamp(u_in, 0.0, 1.0);
-    const double bx = u * scale;
-    const int xi = std::clamp(static_cast<int>(std::floor(bx)), 0, n - 3);
-    const double t = bx - static_cast<double>(xi);
-    const double omt = 1.0 - t;
-    const double p0 = cps[static_cast<size_t>(xi)];
-    const double p1 = cps[static_cast<size_t>(xi + 1)];
-    const double p2 = cps[static_cast<size_t>(xi + 2)];
-    return 0.5 * omt * omt * p0 + 0.5 * (-2.0 * t * t + 2.0 * t + 1.0) * p1 + 0.5 * t * t * p2;
-}
-
 double project_to_control_point_path_u(
     const std::vector<Eigen::Vector2d>& cps,
     const Eigen::Vector2d& pos,
@@ -229,24 +204,6 @@ std::vector<Eigen::Vector2d> deform_reference_path(
     return perturbed;
 }
 
-std::vector<double> sample_speed_control_points(const MPCFollowMPPIParams& params, std::mt19937_64& rng) {
-    const int cp_count = std::max(1, params.speed_sampling.control_point_count);
-    std::vector<double> cps(static_cast<size_t>(cp_count), 0.0);
-    std::normal_distribution<double> scale_dist(0.0, std::max(params.speed_sampling.scale_std, SIGMA_EPS));
-    for (double& cp : cps) {
-        cp = scale_dist(rng);
-    }
-    return cps;
-}
-
-double speed_scale_at_step(const std::vector<double>& speed_cps, int k) {
-    if (MPC_HORIZON <= 1) {
-        return evaluate_quadratic_bspline_scalar(speed_cps, 0.0);
-    }
-    const double t = static_cast<double>(k) / static_cast<double>(MPC_HORIZON - 1);
-    return evaluate_quadratic_bspline_scalar(speed_cps, t);
-}
-
 SampledSequence rollout_control_sequence(
     const FollowProblem& problem,
     const StateVec& x0,
@@ -296,7 +253,6 @@ SampledSequence rollout_generated_sequence(
     const StateVec& x0,
     const std::array<ControlVec, MPC_HORIZON>& nominal_controls,
     const std::vector<Eigen::Vector2d>& ref_cps,
-    const std::vector<double>& speed_cps,
     const ControlVec& u_lo,
     const ControlVec& u_hi,
     const ControlVec& inv_variance,
@@ -316,9 +272,7 @@ SampledSequence rollout_generated_sequence(
         return sample;
     }
 
-    const double v_max = std::max(0.0, u_hi(0));
-    const double v_rev_max = std::max(0.0, -u_lo(0));
-    const double heading_k = params.speed_sampling.heading_feedback_gain;
+    const double heading_k = params.geometry_sampling.heading_feedback_gain;
 
     double running_cost = 0.0;
     for (int k = 0; k < MPC_HORIZON; ++k) {
@@ -332,8 +286,7 @@ SampledSequence rollout_generated_sequence(
         const double theta_path = std::atan2(d1.y(), d1.x());
         const double curvature = quadratic_bspline_curvature(d1, d2);
 
-        double v_desired = v_max * speed_scale_at_step(speed_cps, k);
-        v_desired = std::clamp(v_desired, -v_rev_max, v_max);
+        const double v_desired = std::clamp(nominal_controls[idx](0), u_lo(0), u_hi(0));
         const double omega_desired = curvature * v_desired + heading_k * wrap_pi(theta_path - sample.xs[idx](ix::THETA));
 
         sample.us[idx] = ControlVec(v_desired, omega_desired).cwiseMax(u_lo).cwiseMin(u_hi);
@@ -415,11 +368,10 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
         const std::vector<Eigen::Vector2d> sampled_ref_cps = deform_reference_path(
             base_ref_cps, cp_normals, params_.geometry_sampling.lateral_offset_std, rng
         );
-        const std::vector<double> sampled_speed_cps = sample_speed_control_points(params_, rng);
         const FollowProblem sampled_problem = problem.with_reference_path(sampled_ref_cps);
 
         samples[static_cast<size_t>(sample_index)] = rollout_generated_sequence(
-            sampled_problem, x0, nominal, sampled_ref_cps, sampled_speed_cps,
+            sampled_problem, x0, nominal, sampled_ref_cps,
             u_lo, u_hi, inv_variance, params_
         );
     }

@@ -96,10 +96,13 @@ struct MPCFollowCommandWeights {
 struct MPCFollowTerrainLimits {
     std::array<double, 4> step_speed_levels;
     double step_vel_deadzone;
+    double step_reachability_guide_acc;
 };
 
 struct MPCFollowTerrainWeights {
     double step_vel_weight;
+    double step_reachability_lo;
+    double step_reachability_hi;
     double direction;
 };
 
@@ -190,11 +193,6 @@ struct MPCFollowProjection {
 
 struct MPPIGeometrySamplingParams {
     double lateral_offset_std; ///< 路径控制点沿法向采样标准差 (m)
-};
-
-struct MPPISpeedSamplingParams {
-    int control_point_count;   ///< 速度 B-spline 控制点数量
-    double scale_std;          ///< 速度缩放零均值采样标准差
     double heading_feedback_gain; ///< omega = kappa * v + k_fb * heading_error
 };
 
@@ -211,7 +209,6 @@ struct MPCFollowMPPIParams {
     int batch_size;                                        ///< 每帧采样轨迹数
     double gamma;                                          ///< KL 散度正则化权重；γ=0 无锚定，γ↑ 采样越贴近 warm start
     MPPIGeometrySamplingParams geometry_sampling;
-    MPPISpeedSamplingParams speed_sampling;
     MPPIControlRegularizationStd regularization_std;
 };
 
@@ -305,6 +302,7 @@ struct EnergyParams {
 struct ActiveStepMode {
     ChassisMode mode = ChassisMode::NORMAL;
     double target_velocity = 0.0;
+    std::optional<double> step_entry_u = std::nullopt;
 
     bool operator==(const ActiveStepMode&) const = default;
 };

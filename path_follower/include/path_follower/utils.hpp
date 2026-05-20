@@ -60,6 +60,13 @@ void eval_quadratic_bspline2_extrapolated(
 );
 
 double quadratic_bspline_curvature(const Eigen::Vector2d& d1, const Eigen::Vector2d& d2);
+
+double quadratic_bspline_arc_length(
+    const std::vector<Eigen::Vector2d>& cps,
+    double u0,
+    double u1,
+    int samples = 32
+);
 }
 
 namespace path_follower {

@@ -373,6 +373,7 @@ std::optional<ActiveStepMode> MainController::build_step_command(const PathStepT
             }
         }(),
         .target_velocity = step_speed_from_level(speed_level),
+        .step_entry_u = target.enter_u,
     };
 }
 

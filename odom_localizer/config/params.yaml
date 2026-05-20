@@ -9,7 +9,7 @@
     initial_transform_default: [0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
 
     perform_gicp_only_once: true # 是否只进行一次gicp配准（若为true，则在配准成功之后不再更新）
-    map_cloud_filename: "" # 先验地图点云文件路径（为空就只发布初始位姿）
+    map_cloud_filename: "RMUC2026.pcd" # 先验地图点云文件路径（为空就只发布初始位姿）
     source_cloud_sub_topic: "/small_glim/registered_cloud" # 输入点云订阅话题
     num_threads: 2 # 用于gicp对齐和点云处理的线程数
 

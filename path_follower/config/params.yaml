@@ -81,16 +81,13 @@
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
         mppi:
-          enable: true # 单次 rollout 采样生成器：并行采样 batch_size 条轨迹，选取代价最低者作为 FDDP 初始猜测
+          enable: false # 单次 rollout 采样生成器：并行采样 batch_size 条轨迹，选取代价最低者作为 FDDP 初始猜测
           num_threads: 4 # MPPI 并行线程数
-          batch_size: 1024 # 采样轨迹数
+          batch_size: 512 # 采样轨迹数
           gamma: 0.003 # KL 散度正则化权重。reg_cost = ½·γ·Σₖ‖(uₖ - uₙₒₘₖ)/σ‖²。γ=0 完全无锚定，越大采样越紧贴 warm start
           geometry_sampling:
             lateral_offset_std: 0.35 # 参考路径控制点沿法向的采样标准差 (m)
-          speed_sampling:
-            control_point_count: 5 # 速度 B-spline 控制点数量；越大可表达的行为模式越复杂
-            scale_std: 1.0 # 速度缩放控制点零均值采样标准差；允许局部负值以自然产生倒车
-            heading_feedback_gain: 4.0 # 几何跟踪航向反馈增益，用于 omega = kappa * v + k_fb * heading_error
+            heading_feedback_gain: 4.0 # 几何跟踪航向反馈增益，用于 MPPI 几何 rollout 的 omega = kappa * v_nom + k_fb * heading_error
           regularization_std:
             velocity: 1.2 # 每维归一化尺度。reg_cost 中实际使用的是 Δ/σ，用于消除 v/ω 量级差异。
             omega: 2.0   # 例如允许 Δv=1.0 与 Δω=2.5 产生相同惩罚。增大 σ = 松开该维度锚定
@@ -103,7 +100,7 @@
         mode_profiles:
           normal:
             command_bounds:
-              vel_max: 1.8 # 线速度上限 (m/s)
+              vel_max: 2.4 # 线速度上限 (m/s)
               vel_min: -1.2 # 线速度下限 (m/s）
               omega_max: 7.2 # 角速度上限 (rad/s)
               omega_min: -7.2 # 角速度下限 (rad/s)
@@ -114,7 +111,7 @@
           up:
             jump:
               command_bounds:
-                vel_max: 1.8 # 线速度上限 (m/s)
+                vel_max: 2.4 # 线速度上限 (m/s)
                 vel_min: -1.2 # 线速度下限 (m/s）
                 omega_max: 7.2 # 角速度上限 (rad/s)
                 omega_min: -7.2 # 角速度下限 (rad/s)
@@ -124,7 +121,7 @@
                 a_lat_max: 2.8 # 最大侧向加速度 |v_act*omega_act| (m/s²)
             short_leg:
               command_bounds:
-                vel_max: 1.8 # 线速度上限 (m/s)
+                vel_max: 2.4 # 线速度上限 (m/s)
                 vel_min: -1.2 # 线速度下限 (m/s）
                 omega_max: 7.2 # 角速度上限 (rad/s)
                 omega_min: -7.2 # 角速度下限 (rad/s)
@@ -145,7 +142,7 @@
           down:
             jump:
               command_bounds:
-                vel_max: 1.8 # 线速度上限 (m/s)
+                vel_max: 2.4 # 线速度上限 (m/s)
                 vel_min: -1.2 # 线速度下限 (m/s）
                 omega_max: 7.2 # 角速度上限 (rad/s)
                 omega_min: -7.2 # 角速度下限 (rad/s)
@@ -155,7 +152,7 @@
                 a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
             short_leg:
               command_bounds:
-                vel_max: 1.8 # 线速度上限 (m/s)
+                vel_max: 2.8 # 线速度上限 (m/s)
                 vel_min: -1.2 # 线速度下限 (m/s）
                 omega_max: 7.2 # 角速度上限 (rad/s)
                 omega_min: -7.2 # 角速度下限 (rad/s)
@@ -164,12 +161,12 @@
                 alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
                 a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
         tracking_weights:
-          q_y: 0.4  # 横向误差权重
-          q_theta: 0.2 # 航向误差权重
+          q_y: 0.40  # 横向误差权重
+          q_theta: 0.02 # 航向误差权重
           q_u: 6.0  # 每步进度权重
         command_weights:
-          r_v: 0.001 # 线速度正则
-          r_omega: 0.001 # 角速度正则
+          r_v: 0.01 # 线速度正则
+          r_omega: 0.01 # 角速度正则
           r_dv: 0.4 # 线速度平滑
           r_domega: 0.4 # 角速度平滑
         motion_constraint_weights:
@@ -178,9 +175,12 @@
           lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         terrain_limits:
           step_speed_levels: [1.2, 1.8, 2.4, 3.0] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
-          step_vel_deadzone: 0.4 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
+          step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
+          step_reachability_guide_acc: 1.0 # 台阶入口可达势函数的引导加速度 (m/s^2)
         terrain_weights:
-          step_vel_weight: 0.1 # 锁存后台阶区域速度目标惩罚权重
+          step_vel_weight: 0.1 # 台阶内部仍保留原始速度范围惩罚，但权重降低
+          step_reachability_lo: 1.0 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
+          step_reachability_hi: 1.0 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
           direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
           obstacle: 1.0 # 避障权重（全局+局部融合代价）

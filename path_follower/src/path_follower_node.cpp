@@ -188,10 +188,13 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             },
             .terrain_limits = {
                 .step_speed_levels = {step_speed_levels[0], step_speed_levels[1], step_speed_levels[2], step_speed_levels[3]},
-                .step_vel_deadzone = declare_parameter<double>("mpc.follow.terrain_limits.step_vel_deadzone")
+                .step_vel_deadzone = declare_parameter<double>("mpc.follow.terrain_limits.step_vel_deadzone"),
+                .step_reachability_guide_acc = declare_parameter<double>("mpc.follow.terrain_limits.step_reachability_guide_acc")
             },
             .terrain_weights = {
                 .step_vel_weight = declare_parameter<double>("mpc.follow.terrain_weights.step_vel_weight"),
+                .step_reachability_lo = declare_parameter<double>("mpc.follow.terrain_weights.step_reachability_lo"),
+                .step_reachability_hi = declare_parameter<double>("mpc.follow.terrain_weights.step_reachability_hi"),
                 .direction = declare_parameter<double>("mpc.follow.terrain_weights.direction")
             },
             .environment_weights = {
@@ -211,12 +214,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .batch_size = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.batch_size")),
                 .gamma = declare_parameter<double>("mpc.follow.mppi.gamma"),
                 .geometry_sampling = {
-                    .lateral_offset_std = declare_parameter<double>("mpc.follow.mppi.geometry_sampling.lateral_offset_std")
-                },
-                .speed_sampling = {
-                    .control_point_count = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.speed_sampling.control_point_count")),
-                    .scale_std = declare_parameter<double>("mpc.follow.mppi.speed_sampling.scale_std"),
-                    .heading_feedback_gain = declare_parameter<double>("mpc.follow.mppi.speed_sampling.heading_feedback_gain")
+                    .lateral_offset_std = declare_parameter<double>("mpc.follow.mppi.geometry_sampling.lateral_offset_std"),
+                    .heading_feedback_gain = declare_parameter<double>("mpc.follow.mppi.geometry_sampling.heading_feedback_gain")
                 },
                 .regularization_std = {
                     .velocity = declare_parameter<double>("mpc.follow.mppi.regularization_std.velocity"),
