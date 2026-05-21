@@ -217,6 +217,7 @@ struct MPCFollowMPPIParams {
 struct MPCFollowRolloutSafetyParams {
     bool enable_lethal_obstacle_check;
     double lethal_obstacle_threshold;
+    int fddp_lethal_consecutive_threshold;
 };
 
 struct MPCFollowParams {
@@ -669,6 +670,9 @@ private:
     // ── Energy state ──
     double remaining_energy_ = 200.0;
     double rfr_pwr_limit_ = 90.0;
+
+    // ── FDDP rollout 连续致命障碍物帧计数器 ──
+    int fddp_lethal_consecutive_count_ = 0;
 
     // ── 辅助 ──
     StateVec make_initial_state(

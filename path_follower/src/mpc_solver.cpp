@@ -1612,6 +1612,7 @@ void MPCSolver::reset_warm_start() {
     stop_warm_ = false;
     hold_warm_ = false;
     last_u_ = 0.0;
+    fddp_lethal_consecutive_count_ = 0;
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
         stop_solver_.us[k].setZero();
@@ -1800,18 +1801,33 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         }
     }
     prediction.rollout_paths = std::move(mppi_result.rollout_paths);
-    if (const auto lethal = detect_rollout_lethal_obstacle(problem, solved_rollout.xs, solved_rollout.valid_steps + 1)) {
-        auto stop_result = solve_stop(chassis_pose_map, chassis_state, cost_map);
-        if (!stop_result) {
-            return std::unexpected(stop_result.error());
+
+    {
+        const auto& safety = params_.follow.rollout_safety;
+        const auto lethal = detect_rollout_lethal_obstacle(
+            problem, solved_rollout.xs, solved_rollout.valid_steps + 1
+        );
+
+        if (lethal.has_value()) {
+            ++fddp_lethal_consecutive_count_;
+        } else {
+            fddp_lethal_consecutive_count_ = 0;
         }
 
-        FollowSolveResult out;
-        out.command = std::get<0>(*stop_result);
-        out.prediction = std::get<1>(*stop_result);
-        out.status = FollowSolveStatus::STOP_AND_WAIT_REPLAN;
-        out.lethal_obstacle = lethal;
-        return out;
+        const int threshold = safety.fddp_lethal_consecutive_threshold;
+        if (lethal.has_value() && fddp_lethal_consecutive_count_ >= threshold) {
+            auto stop_result = solve_stop(chassis_pose_map, chassis_state, cost_map);
+            if (!stop_result) {
+                return std::unexpected(stop_result.error());
+            }
+
+            FollowSolveResult out;
+            out.command = std::get<0>(*stop_result);
+            out.prediction = std::get<1>(*stop_result);
+            out.status = FollowSolveStatus::STOP_AND_WAIT_REPLAN;
+            out.lethal_obstacle = lethal;
+            return out;
+        }
     }
 
     const Eigen::Vector2d cmd(follow_solver_.us[0](0), follow_solver_.us[0](1));

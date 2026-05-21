@@ -118,6 +118,9 @@ void rollout_sequence(
         if (!sample.xs[idx + 1].allFinite()) {
             return;
         }
+        if (problem.detect_lethal_obstacle(k + 1, sample.xs[idx + 1]).has_value()) {
+            return;
+        }
     }
 
     cost += problem.terminal_cost(sample.xs[MPC_HORIZON]);

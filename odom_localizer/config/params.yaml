@@ -1,31 +1,53 @@
 /**:
   ros__parameters:
-    enable_debug: true # 是否开启调试信息输出
-    publish_rate: 1.0 # odom->map发布频率，单位Hz
-    robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，包含机器人颜色
-    robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-    initial_transform_blue: [24.1, 8.0, 0.4, 0.0, 0.0, 1.0, 0.0] # 在蓝方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_red: [3.9, 6.8, 0.4, 0.0, 0.0, 0.0, 1.0] # 在红方启动时的初始位姿，((x,y,z),(x,y,z,w))
-    initial_transform_default: [0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0] # 超时后使用此初始位姿，((x,y,z),(x,y,z,w))
+    general:
+      enable_debug: true # 是否输出 odom_localizer 的调试日志
+      num_threads: 2 # 点云预处理与 GICP 使用的线程数
+      publish_rate_hz: 1.0 # map->odom TF 发布频率
 
-    perform_gicp_only_once: true # 是否只进行一次gicp配准（若为true，则在配准成功之后不再更新）
-    map_cloud_filename: "RMUC2026.pcd" # 先验地图点云文件路径（为空就只发布初始位姿）
-    source_cloud_sub_topic: "/small_glim/registered_cloud" # 输入点云订阅话题
-    num_threads: 2 # 用于gicp对齐和点云处理的线程数
+    frames:
+      map: "map" # 全局地图坐标系
+      odom: "odom" # 里程计坐标系
 
-    downsample_resolution_map: 0.1 # 给先验地图降采样的voxel大小
-    cov_num_neighbors_map: 20 # 给先验地图计算点的协方差矩阵时采用多少个点作为邻居
+    topics:
+      robot_status: "/serial_bridge/robot_status" # 机器人状态输入，读取颜色决定初始位姿
+      registered_cloud: "/small_glim/registered_cloud" # 启动前 10s 使用的滑动窗口输入
+      ivox_cloud: "/small_glim/ivox_cloud" # 启动 10s 后周期重定位使用的输入
 
-    cloud_accumulate_frames: 6 # 输入点云累积的帧数
-    downsample_resolution_lidar: 0.1 # 给输入点云降采样的voxel大小
-    cov_num_neighbors_lidar: 20 # 给输入点云计算点的协方差矩阵时采用多少个点作为邻居
-    min_points_lidar: 1000 # 输入点云中至少要有这么多点，否则不进行配准
+    startup:
+      robot_color_wait_timeout_s: 1.0 # 等待颜色信息的最长时间；超时后使用 default 初始位姿
+      bootstrap_duration_s: 10.0 # 启动后的前导阶段时长；这段时间使用 registered_cloud 滑动窗口配准
+      initial_transform:
+        blue: [24.1, 8.0, -0.075, 0.0, 0.0, 1.0, 0.0] # 蓝方初始 map->odom，格式 [x, y, z, qx, qy, qz, qw]
+        red: [3.9, 6.8, 0.302, 0.0, 0.0, 0.0, 1.0] # 红方初始 map->odom，格式 [x, y, z, qx, qy, qz, qw]
+        default: [0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0] # 未收到颜色信息时的兜底 map->odom
 
-    gicp_max_correspondence_distance: 0.5 # gicp最大匹配距离
-    gicp_max_iterations: 32 # gicp最大迭代次数
-    normalized_error_threshold: 0.2 # 认为gicp结果合理的normalized error阈值
-    overlap_threshold: 0.0 # 认为gicp结果合理的重叠率阈值
+    map:
+      cloud_filename: "RMUC2026.pcd" # 先验地图点云文件名；留空则只发布初始位姿
+      downsample_resolution: 0.05 # 地图点云降采样体素大小；设为 0 表示不降采样
+      covariance_neighbors: 20 # 地图点云法向/协方差估计邻居数
 
-    odom_to_map_filter_ratio: 0.9 # odom->map的惯性滤波系数（0~1），越大越稳定
-    odom_to_map_no_filter_distance: 1.0 # 若odom->map的变化距离超过这个值，就直接更新，不进行滤波
-    odom_to_map_no_filter_angle: 0.6 # 若odom->map的变化角度超过这个值，就直接更新，不进行滤波
+    source:
+      registered_window_frames: 6 # bootstrap 阶段 registered_cloud 滑动窗口保留帧数上限
+      min_points_raw: 1000 # 原始输入点数低于该阈值时直接判定本次配准失败
+      min_points_downsampled: 500 # 降采样后点数仍过少时不进入 GICP
+      downsample_resolution: 0.05 # 输入点云降采样体素大小；registered_cloud 与 ivox_cloud 共用
+      covariance_neighbors: 20 # 输入点云法向/协方差估计邻居数
+
+    registration:
+      period_s: 1.0 # 周期重定位间隔；前 10s 与 10s 后都按该周期触发配准
+      gicp:
+        max_correspondence_distance: 0.5 # GICP 最大匹配距离
+        max_iterations: 32 # GICP 最大迭代次数
+        translation_eps: 0.001 # GICP 平移收敛阈值
+        rotation_eps: 0.001 # GICP 旋转收敛阈值
+      quality:
+        max_normalized_error: 0.2 # GICP fitness（error / inliers）上限，越小越严格
+        min_overlap_ratio: 0.7 # 最小重叠率阈值（inliers / source_points）
+        min_information_eigenvalue: 1.0e3 # 信息矩阵最小特征值下限；过小视为退化
+        max_information_condition_number: 1.0e6 # 信息矩阵条件数上限；过大视为病态解
+
+    update:
+      ema_ratio: 0.6 # 成功重定位后的 map->odom EMA 平滑系数，越大越保守
+      max_translation_step: 0.1 # 相邻两次已接受定位结果的最大允许平移差，超出则丢弃
+      max_rotation_step: 0.1 # 相邻两次已接受定位结果的最大允许旋转差，单位 rad，超出则丢弃

@@ -230,7 +230,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
             },
             .rollout_safety = {
                 .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),
-                .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold")
+                .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold"),
+                .fddp_lethal_consecutive_threshold = static_cast<int>(declare_parameter<int>("mpc.follow.rollout_safety.fddp_lethal_consecutive_threshold"))
             },
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },
