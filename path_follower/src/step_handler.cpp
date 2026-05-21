@@ -377,6 +377,19 @@ std::optional<ActiveStepMode> MainController::build_step_command(const PathStepT
     };
 }
 
+bool MainController::should_engage_step_mode(const SplineD& path, const double current_u) const {
+    if (!active_step_command_ || !active_step_target_) return true;
+    if (!active_step_command_->step_entry_u) return true;
+
+    const double entry_u = std::clamp(*active_step_command_->step_entry_u, 0.0, 1.0);
+    if (current_u >= entry_u) return true;
+
+    const double dist = quadratic_bspline_arc_length(
+        path.getControlPoints(), current_u, entry_u
+    );
+    return dist <= nav_params_.step_detection.step_engage_distance;
+}
+
 std::optional<ActiveStepMode> MainController::current_active_step_mode() const {
     return active_step_command_;
 }

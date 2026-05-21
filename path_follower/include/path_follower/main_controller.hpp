@@ -106,6 +106,7 @@ struct StepDetectionParams {
     int release_threshold;
     double lookahead_distance;
     double exit_advance_distance;
+    double step_engage_distance;
 };
 
 struct NoProgressGuardParams {
@@ -225,6 +226,7 @@ private:
     void extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map);
     [[nodiscard]] bool is_currently_inside_active_step(double current_u) const;
     [[nodiscard]] uint8_t compute_step_distance_cm(const ControlInput& input, double current_u, const MPCPrediction& prediction) const;
+    [[nodiscard]] bool should_engage_step_mode(const SplineD& path, double current_u) const;
     std::optional<PathStepTarget> try_latch_step_target(const SplineD& path, double current_u, const DirectionMap& direction_map);
     std::optional<ActiveStepMode> build_step_command(const PathStepTarget& target, const DirectionMap& direction_map) const;
     double step_speed_from_level(uint8_t speed_level) const;

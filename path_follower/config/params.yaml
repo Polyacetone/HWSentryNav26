@@ -61,8 +61,9 @@
         rollout_match_distance: 0.8 # rollout 扫到的台阶与当前锁存目标匹配的位置阈值 (m)
         latch_threshold: 3 # 进入 STEPPING 的滞回计数：连续 latch_threshold 次检测到同一台阶目标才锁存
         release_threshold: 3 # 退出 STEPPING 的滞回计数：连续 release_threshold 次过退出距离才释放
-        lookahead_distance: 3.0 # 沿路径向前搜索台阶的距离范围 (m)；也作为进入 STEPPING 模式的提前量
-        exit_advance_distance: 0.5 # 退出 STEPPING 的额外推进距离 (m)：current_u >= exit_u + exit_advance_distance 且满足滞回计数后才释放
+        lookahead_distance: 4.0 # 沿路径向前搜索台阶的距离范围 (m)；也作为进入 STEPPING 模式的提前量
+        step_engage_distance: 1.5 # 下发台阶底盘模式的距离门槛 (m)：距台阶入口 < 此值才把台阶模式发给下位机，此前仅使用台阶限速减速但 out.mode 仍为 NORMAL
+        exit_advance_distance: 0.3 # 退出 STEPPING 的额外推进距离 (m)：current_u >= exit_u + exit_advance_distance 且满足滞回计数后才释放
 
     state_machine:
       follow_to_spin_vel_max: 0.2 # STOPPING→SPIN 退出判定：|v_cmd| < 该值 (m/s)
@@ -166,31 +167,33 @@
                 alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
                 a_lat_max: 2.2 # 最大侧向加速度 |v_act*omega_act| (m/s²)
         tracking_weights:
-          q_y: 0.40  # 横向误差权重
+          q_y: 0.30  # 横向误差权重
           q_theta: 0.05 # 航向误差权重
-          q_u: 8.0  # 每步进度权重
+          q_u: 0.8  # 每步进度权重
         command_weights:
           r_v: 0.001 # 线速度正则
           r_omega: 0.001 # 角速度正则
           r_dv: 0.4 # 线速度平滑
           r_domega: 0.4 # 角速度平滑
         motion_constraint_weights:
-          acc_limit: 20.0 # 速度指令变化率超限惩罚
-          alpha_limit: 20.0 # 角速度指令变化率超限惩罚
-          lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
+          acc_limit: 30.0 # 速度指令变化率超限惩罚
+          alpha_limit: 30.0 # 角速度指令变化率超限惩罚
+          lat_acc: 30.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         terrain_limits:
           step_speed_levels: [1.2, 1.8, 2.4, 3.0] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
           step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
-          step_reachability_guide_acc: 1.5 # 台阶入口可达势函数的引导加速度 (m/s^2)
+          step_reachability_guide_acc: 1.2 # 台阶入口可达势函数的引导加速度 (m/s^2)
         terrain_weights:
-          step_vel_weight: 0.6 # 台阶内部仍保留原始速度范围惩罚，但权重降低
-          step_reachability_lo: 1.0 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
-          step_reachability_hi: 1.0 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
+          step_vel_weight: 0.4 # 台阶内部仍保留原始速度范围惩罚，但权重降低
+          step_reachability_lo: 0.8 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
+          step_reachability_hi: 0.8 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
           direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
           obstacle: 1.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
-          q_v_final: 1.0 # 终点减速权重（鼓励到达终点时减速）
+          q_v_final: 0.2 # 终端减速权重（全程激活）：v_allowed = sqrt(2 * a_brake * s + v_target^2)
+          a_brake: 2.2 # m/s², 期望制动减速度
+          slow_down_target_vel: 0.2 # m/s, 终点目标速度
         projection:
           num_samples: 50 # 投影到样条参数u的采样数
           search_window: 0.1 # 局部搜索窗口 (0~1)
@@ -216,9 +219,9 @@
           r_dv: 0.8 # 线速度指令平滑
           r_domega: 0.2 # 角速度指令平滑
         motion_constraint_weights:
-          acc_limit: 20.0 # 速度指令变化率超限惩罚
-          alpha_limit: 20.0 # 角速度指令变化率超限惩罚
-          lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
+          acc_limit: 30.0 # 速度指令变化率超限惩罚
+          alpha_limit: 30.0 # 角速度指令变化率超限惩罚
+          lat_acc: 30.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         environment_weights:
           obstacle: 6.0 # 避障惩罚（台阶区域已转为障碍物）
         terminal_weights:
@@ -248,9 +251,9 @@
           r_dv: 0.8 # 线速度指令平滑
           r_domega: 0.2 # 角速度指令平滑
         motion_constraint_weights:
-          acc_limit: 20.0 # 速度指令变化率超限惩罚
-          alpha_limit: 20.0 # 角速度指令变化率超限惩罚
-          lat_acc: 20.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
+          acc_limit: 30.0 # 速度指令变化率超限惩罚
+          alpha_limit: 30.0 # 角速度指令变化率超限惩罚
+          lat_acc: 30.0 # 侧向稳定性惩罚（|v_act*omega_act| 超限）
         environment_weights:
           obstacle: 6.0 # 全程避障惩罚
         terminal_weights:

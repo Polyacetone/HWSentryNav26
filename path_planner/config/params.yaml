@@ -65,7 +65,7 @@
         max_iterations: 60 # 最大迭代次数
         max_curvature: 1.2 # 统一曲率上限 (1/m)
         length_penalty:
-          weight: 0.06 # 路径长度惩罚（最小化|d1|²，促进u均匀分布）
+          weight: 0.03 # 路径长度惩罚（最小化|d1|²，促进u均匀分布）
         curvature:
           base_weight: 0.1 # 低曲率基础惩罚（抑制直道zigzag）
           base_beta: 4.0 # 基础惩罚平滑斜率
@@ -91,7 +91,7 @@
         step_transition_distance: 1.0 # 近/远曲率限制平滑过渡距离 (m)
         interval_iou_threshold: 0.85 # 连续两轮台阶区间IoU>=该值认为收敛，停止迭代
         length_penalty:
-          weight: 0.06 # 路径长度惩罚
+          weight: 0.03 # 路径长度惩罚
         curvature:
           base_weight: 0.1 # 低曲率基础惩罚
           base_beta: 4.0 # 基础惩罚平滑斜率

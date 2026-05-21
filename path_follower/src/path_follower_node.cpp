@@ -203,7 +203,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .obstacle = declare_parameter<double>("mpc.follow.environment_weights.obstacle")
             },
             .terminal_weights = {
-                .q_v_final = declare_parameter<double>("mpc.follow.terminal_weights.q_v_final")
+                .q_v_final = declare_parameter<double>("mpc.follow.terminal_weights.q_v_final"),
+                .a_brake = declare_parameter<double>("mpc.follow.terminal_weights.a_brake"),
+                .slow_down_target_vel = declare_parameter<double>("mpc.follow.terminal_weights.slow_down_target_vel")
             },
             .projection = {
                 .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow.projection.num_samples")),
@@ -421,7 +423,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .latch_threshold = static_cast<int>(declare_parameter<int>("step.detection.latch_threshold")),
         .release_threshold = static_cast<int>(declare_parameter<int>("step.detection.release_threshold")),
         .lookahead_distance = declare_parameter<double>("step.detection.lookahead_distance"),
-        .exit_advance_distance = declare_parameter<double>("step.detection.exit_advance_distance")
+        .exit_advance_distance = declare_parameter<double>("step.detection.exit_advance_distance"),
+        .step_engage_distance = declare_parameter<double>("step.detection.step_engage_distance")
     };
     nav_params.follow_no_progress_guard = {
         .landmark_spacing = declare_parameter<double>("no_progress_guard.follow.landmark_spacing"),

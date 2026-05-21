@@ -183,6 +183,8 @@ struct LPVDiscreteModel {
 
 struct MPCFollowTerminalWeights {
     double q_v_final;
+    double a_brake;
+    double slow_down_target_vel;
 };
 
 struct MPCFollowProjection {
@@ -410,6 +412,7 @@ public:
         const MPCParams& params,
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
+        const CostMapGridView& masked_global_grid,
         double prediction_dt,
         double schedule_rho,
         const DirectionMapGridView& dir_grid,
@@ -449,10 +452,12 @@ public:
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
 
+    Eigen::Vector2d goal_xy_;
     const std::vector<Eigen::Vector2d>& ref_cps_;
     const MPCParams& p_;
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
+    const CostMapGridView& masked_global_grid_;
     double prediction_dt_;
     LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;
@@ -619,6 +624,7 @@ public:
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
         const CostMap& cost_map,
+        const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
         const DirectionMap& direction_map,

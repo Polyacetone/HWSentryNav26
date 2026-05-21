@@ -56,6 +56,10 @@ inline double clamp_derivative_piecewise(double x, double lo, double hi) {
     return (x > lo && x < hi) ? 1.0 : 0.0;
 }
 
+double brake_speed_limit(double remaining_s, const MPCFollowTerminalWeights& w) {
+    return std::sqrt(std::max(0.0, 2.0 * w.a_brake * remaining_s) + w.slow_down_target_vel * w.slow_down_target_vel);
+}
+
 inline double smooth_sgn(double x, double eps) {
     return std::tanh(x / std::max(eps, 1e-6));
 }
@@ -565,6 +569,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     const MPCParams& params,
     const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
+    const CostMapGridView& masked_global_grid,
     double prediction_dt,
     double schedule_rho,
     const DirectionMapGridView& dir_grid,
@@ -577,13 +582,18 @@ FollowProblemT<Horizon>::FollowProblemT(
     p_(params),
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
+    masked_global_grid_(masked_global_grid),
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
-    active_step_mode_(active_step_mode) {}
+    active_step_mode_(active_step_mode) {
+    Eigen::Vector2d p;
+    eval_quadratic_bspline2_extrapolated(ref_control_points, 1.0, &p, nullptr, nullptr);
+    goal_xy_ = p;
+}
 
 template<int Horizon>
 StateVec FollowProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
@@ -631,6 +641,7 @@ FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const std::
         p_,
         step_cost_grids_,
         cost_info_,
+        masked_global_grid_,
         prediction_dt_,
         model_.rho,
         dir_grid_,
@@ -670,7 +681,6 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const auto& motion_w = follow.motion_constraint_weights;
     const auto& terrain_w = follow.terrain_weights;
     const auto& env_w = follow.environment_weights;
-    const auto& terminal_w = follow.terminal_weights;
     const auto& motion_lim = select_follow_mode_profile(follow, active_step_mode).motion_constraints;
 
     FollowResidualLinearization out;
@@ -846,9 +856,19 @@ FollowResidualLinearization follow_residual_linearized_impl(
         }
     }
 
-    const double endpoint_gate = positive_part(uc - 1.0);
-    out.r(14) = terminal_w.q_v_final * endpoint_gate;
-    out.jx(14, ix::PATH_U) = terminal_w.q_v_final * positive_part_derivative(uc - 1.0) * duc_dpathu;
+    const auto& terminal_w = follow.terminal_weights;
+    const double uc_clamped_brake = std::clamp(uc, 0.0, 1.0);
+    const double s_remaining_approx = (1.0 - uc_clamped_brake) * d1.norm();
+    const double v_allowed = brake_speed_limit(s_remaining_approx, terminal_w);
+    const double v_excess = v_act - v_allowed;
+    const double relu_brake = positive_part(v_excess);
+    out.r(14) = terminal_w.q_v_final * relu_brake;
+    if (v_excess > 0.0) {
+        out.jx(14, ix::V) = terminal_w.q_v_final;
+        const double ds_dpathu = -d1.norm() * duc_dpathu;
+        const double dv_allowed_ds = terminal_w.a_brake / std::max(v_allowed, 1e-6);
+        out.jx(14, ix::PATH_U) = -terminal_w.q_v_final * dv_allowed_ds * ds_dpathu;
+    }
 
     if (p.energy.enable) {
         const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
@@ -883,7 +903,6 @@ double follow_running_cost_value_only_impl(
     const auto& motion_w = follow.motion_constraint_weights;
     const auto& terrain_w = follow.terrain_weights;
     const auto& env_w = follow.environment_weights;
-    const auto& terminal_w = follow.terminal_weights;
     const auto& motion_lim = select_follow_mode_profile(follow, active_step_mode).motion_constraints;
 
     const double px = x(ix::X);
@@ -965,8 +984,6 @@ double follow_running_cost_value_only_impl(
         }
     }
 
-    cost += 0.5 * std::pow(terminal_w.q_v_final * positive_part(uc - 1.0), 2);
-
     if (p.energy.enable) {
         const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
         const double thr = std::max(p.energy.threshold, 1.0);
@@ -974,7 +991,16 @@ double follow_running_cost_value_only_impl(
         cost += 0.5 * std::pow(p.energy.weight * positive_part(excess), 2);
     }
 
-    cost += (p.follow.tracking_weights.q_u / MPC_HORIZON) * positive_part(1.0 - uc);
+    const double uc_clamped = std::clamp(uc, 0.0, 1.0);
+    const double s_remaining = quadratic_bspline_arc_length(ref_cps, uc_clamped, 1.0);
+
+    if (uc < 1.0) {
+        cost += (p.follow.tracking_weights.q_u / MPC_HORIZON) * s_remaining;
+    }
+
+    const auto& terminal_w = follow.terminal_weights;
+    const double v_allowed = brake_speed_limit(s_remaining, terminal_w);
+    cost += 0.5 * std::pow(terminal_w.q_v_final * positive_part(v_act - v_allowed), 2);
     return cost;
 }
 
@@ -1020,12 +1046,14 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
     const double dnum_du = x(ix::V) * (-sin_e) * (-dtheta_du);
 
     const double denom_raw = 1.0 - kappa * ey;
-    // 平滑 clamp: denom_raw → sign(denom_raw) * sqrt(denom_raw² + 0.1²)
-    // 相比 sign * max(|x|, 0.1)，该形式梯度过零连续（d/dx → 0 at x = 0）
+    // Frenet 进度公式 ds/dt = v*cos(e) / (1 - κ*ey) 仅在 denom_raw > 0 时物理有效。
+    // 当 1 - κ*ey <= 0（车在急弯内侧且横向误差过大），Frenet 框架退化：
+    //   - 使用 copysign 保留负号会导致 v>0 时 ds/dt<0（正速度倒推进度），
+    //     FDDP 反向传播会误导求解器选择负速度作为"增加 u"的手段。
+    //   - 修复：denom 永远取正模长，退化区退化为 |1-κ*ey| 的正则化形式。
     constexpr double DENOM_EPS = 0.1;
-    const double denom_mag = std::sqrt(denom_raw * denom_raw + DENOM_EPS * DENOM_EPS);
-    const double denom = std::copysign(denom_mag, denom_raw);
-    const double denom_grad = denom_raw / denom_mag;
+    const double denom = std::sqrt(denom_raw * denom_raw + DENOM_EPS * DENOM_EPS);
+    const double denom_grad = denom_raw / denom;
 
     const double ddenom_dpx = -kappa * dey_dpx * denom_grad;
     const double ddenom_dpy = -kappa * dey_dpy * denom_grad;
@@ -1083,7 +1111,7 @@ std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_
     }
 
     const auto sample = eval_cost_bilinear(
-        cost_grid_for_step(std::max(0, state_index)),
+        masked_global_grid_,
         cost_info_,
         x(ix::X),
         x(ix::Y)
@@ -1138,7 +1166,10 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
         const double uc = clamp_path_u_extrapolated(uc_raw);
         if (uc < 1.0) {
             const double duc_dpathu = clamp_derivative_piecewise(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
-            lx(ix::PATH_U) -= (p_.follow.tracking_weights.q_u / MPC_HORIZON) * duc_dpathu;
+            Eigen::Vector2d d1;
+            eval_quadratic_bspline2_extrapolated(ref_cps_, uc, nullptr, &d1, nullptr);
+            const double ds_du = d1.norm();
+            lx(ix::PATH_U) -= (p_.follow.tracking_weights.q_u / MPC_HORIZON) * ds_du * duc_dpathu;
         }
     }
 
@@ -1682,6 +1713,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
     const CostMap& cost_map,
+    const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
     const DirectionMap& direction_map,
@@ -1746,12 +1778,13 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const double pred_dt = per_step_cost_maps.empty() ? MPC_DT : prediction_dt;
 
     const GridInfo ci = make_grid_info(cost_map);
+    const CostMapGridView masked_global_grid(masked_global_map);
     const DirectionMapGridView dg(direction_map);
     const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     const FollowProblem problem(
-        ref_cps, params_, step_cost_grids_cache_, ci, pred_dt, schedule_rho,
+        ref_cps, params_, step_cost_grids_cache_, ci, masked_global_grid, pred_dt, schedule_rho,
         dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode
     );
 

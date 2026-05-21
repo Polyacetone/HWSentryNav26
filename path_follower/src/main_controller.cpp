@@ -503,7 +503,7 @@ ControlOutput MainController::execute_idle(const ControlInput& input) {
 
 ControlOutput MainController::execute_follow(const ControlInput& input) {
     ControlOutput out;
-    if (!input.global_path || !input.final_cost_map || !input.masked_direction_map) return out;
+    if (!input.global_path || !input.final_cost_map || !input.masked_global_cost_map || !input.masked_direction_map) return out;
 
     const double u0 = last_reference_u_;
     last_reference_u_ = u0;
@@ -511,7 +511,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_follow(
         *input.global_path, input.chassis_pose_map, input.chassis_state,
-        *input.final_cost_map, input.per_step_cost_maps, input.prediction_dt,
+        *input.final_cost_map, *input.masked_global_cost_map, input.per_step_cost_maps, input.prediction_dt,
         *input.masked_direction_map,
         current_active_step_mode()
     );
@@ -552,7 +552,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
         out.mode = ChassisMode::NORMAL;
-    } else if (active_step_command_) {
+    } else if (active_step_command_ && should_engage_step_mode(*input.global_path, u0)) {
         out.mode = active_step_command_->mode;
     } else {
         out.mode = ChassisMode::NORMAL;
