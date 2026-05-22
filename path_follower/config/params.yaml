@@ -168,7 +168,7 @@
           q_u: 0.8  # 每步进度权重
         command_weights:
           r_v: 0.001 # 线速度正则
-          r_omega: 0.001 # 角速度正则
+          r_omega: 0.01 # 角速度正则
           r_dv: 0.2 # 线速度平滑
           r_domega: 0.1 # 角速度平滑
         motion_constraint_weights:

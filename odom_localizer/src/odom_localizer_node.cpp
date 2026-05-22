@@ -68,63 +68,63 @@ public:
 
 private:
     struct GeneralConfig {
-        bool enable_debug = false;
-        int num_threads = 1;
-        double publish_rate_hz = 1.0;
+        bool enable_debug;
+        int num_threads;
+        double publish_rate_hz;
     };
 
     struct FrameConfig {
-        std::string map_frame = "map";
-        std::string odom_frame = "odom";
+        std::string map_frame;
+        std::string odom_frame;
     };
 
     struct TopicConfig {
-        std::string robot_status = "/serial_bridge/robot_status";
-        std::string registered_cloud = "/small_glim/registered_cloud";
-        std::string ivox_cloud = "/small_glim/ivox_cloud";
+        std::string robot_status;
+        std::string registered_cloud;
+        std::string ivox_cloud;
     };
 
     struct StartupConfig {
-        double robot_color_wait_timeout_s = 1.0;
-        double bootstrap_duration_s = 10.0;
-        Eigen::Isometry3d initial_transform_blue = Eigen::Isometry3d::Identity();
-        Eigen::Isometry3d initial_transform_red = Eigen::Isometry3d::Identity();
-        Eigen::Isometry3d initial_transform_default = Eigen::Isometry3d::Identity();
+        double robot_color_wait_timeout_s;
+        double bootstrap_duration_s;
+        Eigen::Isometry3d initial_transform_blue;
+        Eigen::Isometry3d initial_transform_red;
+        Eigen::Isometry3d initial_transform_default;
     };
 
     struct MapConfig {
         std::string cloud_filename;
-        double downsample_resolution = 0.1;
-        int covariance_neighbors = 20;
+        double downsample_resolution;
+        int covariance_neighbors;
     };
 
     struct SourceConfig {
-        size_t registered_window_frames = 6;
-        size_t min_points_raw = 1000;
-        size_t min_points_downsampled = 300;
-        double downsample_resolution = 0.1;
-        int covariance_neighbors = 20;
+        size_t registered_window_frames;
+        size_t min_points_raw;
+        size_t min_points_downsampled;
+        double downsample_resolution;
+        int covariance_neighbors;
     };
 
     struct RegistrationConfig {
-        double period_s = 1.0;
-        int max_iterations = 32;
-        double max_correspondence_distance = 0.5;
-        double translation_eps = 1e-3;
-        double rotation_eps = 0.1 * M_PI / 180.0;
+        double period_s;
+        int max_iterations;
+        double max_correspondence_distance;
+        double translation_eps;
+        double rotation_eps;
     };
 
     struct QualityConfig {
-        double max_normalized_error = 1.0;
-        double min_overlap_ratio = 0.0;
-        double min_information_eigenvalue = 1e-6;
-        double max_information_condition_number = 1e8;
+        double max_normalized_error;
+        double min_overlap_ratio;
+        double min_information_eigenvalue;
+        double max_information_condition_number;
     };
 
     struct UpdateConfig {
-        double ema_ratio = 0.9;
-        double max_translation_step = 1.0;
-        double max_rotation_step = 0.6;
+        double ema_ratio;
+        double max_translation_step;
+        double max_rotation_step;
     };
 
     struct RegistrationSource {
@@ -776,7 +776,7 @@ bool OdomLocalizerNode::apply_registration_update(const Eigen::Isometry3d& trans
 
 void OdomLocalizerNode::publish_transform() const {
     geometry_msgs::msg::TransformStamped transform_msg;
-    transform_msg.header.stamp = now();
+    transform_msg.header.stamp = now() + rclcpp::Duration::from_seconds(1 / general_.publish_rate_hz + 0.1);
     transform_msg.header.frame_id = frames_.map_frame;
     transform_msg.child_frame_id = frames_.odom_frame;
     transform_msg.transform = utils::convert_to<geometry_msgs::msg::Transform>(odom_to_map_filter_->value());
