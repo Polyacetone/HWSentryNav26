@@ -1,4 +1,5 @@
 #include <path_follower/main_controller.hpp>
+#include <path_follower/spline_path.hpp>
 #include <rclcpp/logging.hpp>
 
 namespace path_follower {
@@ -40,13 +41,13 @@ bool step_direction_matches(
 
 } // anonymous namespace
 
-double MainController::advance_path_u_by_distance(const SplineD& path, const double start_u, const double distance) const {
+double MainController::advance_path_u_by_distance(const SplinePath& path, const double start_u, const double distance) const {
     const double resolution = std::max(1e-3, nav_params_.step_detection.path_sample_resolution);
     double u = std::clamp(start_u, 0.0, 1.0);
     double travelled = 0.0;
 
     while (u < 1.0 && travelled < distance) {
-        const Eigen::Vector2d d1 = path.derivative(u, 1);
+        const Eigen::Vector2d d1 = path.tangent(u);
         const double speed = d1.norm();
         if (speed < 1e-12) {
             u = std::min(1.0, u + 1e-3);
@@ -54,19 +55,19 @@ double MainController::advance_path_u_by_distance(const SplineD& path, const dou
         }
         const double du = resolution / speed;
         const double next_u = std::min(1.0, u + du);
-        travelled += (path.evaluate(next_u) - path.evaluate(u)).norm();
+        travelled += (path.position(next_u) - path.position(u)).norm();
         u = next_u;
     }
     return u;
 }
 
-double MainController::retreat_path_u_by_distance(const SplineD& path, const double start_u, const double distance) const {
+double MainController::retreat_path_u_by_distance(const SplinePath& path, const double start_u, const double distance) const {
     const double resolution = std::max(1e-3, nav_params_.step_detection.path_sample_resolution);
     double u = std::clamp(start_u, 0.0, 1.0);
     double travelled = 0.0;
 
     while (u > 0.0 && travelled < distance) {
-        const Eigen::Vector2d d1 = path.derivative(u, 1);
+        const Eigen::Vector2d d1 = path.tangent(u);
         const double speed = d1.norm();
         if (speed < 1e-12) {
             u = std::max(0.0, u - 1e-3);
@@ -74,24 +75,24 @@ double MainController::retreat_path_u_by_distance(const SplineD& path, const dou
         }
         const double du = resolution / speed;
         const double next_u = std::max(0.0, u - du);
-        travelled += (path.evaluate(u) - path.evaluate(next_u)).norm();
+        travelled += (path.position(u) - path.position(next_u)).norm();
         u = next_u;
     }
     return u;
 }
 
 std::vector<MainController::StepPlanSegment> MainController::build_step_plan(
-    const SplineD& path,
+    const SplinePath& path,
     const DirectionMap& direction_map
 ) const {
     const double resolution = std::max(1e-3, nav_params_.step_detection.path_sample_resolution);
 
     double estimated_length = 0.0;
-    Eigen::Vector2d prev = path.evaluate(0.0);
+    Eigen::Vector2d prev = path.position(0.0);
     constexpr int length_estimate_samples = 100;
     for (int i = 1; i <= length_estimate_samples; ++i) {
         const double u = static_cast<double>(i) / static_cast<double>(length_estimate_samples);
-        const Eigen::Vector2d pos = path.evaluate(u);
+        const Eigen::Vector2d pos = path.position(u);
         estimated_length += (pos - prev).norm();
         prev = pos;
     }
@@ -104,8 +105,8 @@ std::vector<MainController::StepPlanSegment> MainController::build_step_plan(
         const double u = sample_count == 1
             ? 0.0
             : static_cast<double>(i) / static_cast<double>(sample_count - 1);
-        const Eigen::Vector2d pos = path.evaluate(u);
-        const Eigen::Vector2d tangent = path.derivative(u, 1);
+        const Eigen::Vector2d pos = path.position(u);
+        const Eigen::Vector2d tangent = path.tangent(u);
         const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
         if (!direction_map.is_valid_coord(g)) continue;
 
@@ -131,8 +132,7 @@ std::vector<MainController::StepPlanSegment> MainController::build_step_plan(
         size_t segment_end = segment_begin + 1;
         while (segment_end < step_samples.size()) {
             const bool direction_changed = step_samples[segment_end].direction != step_samples[segment_begin].direction;
-            const bool gap_too_large = quadratic_bspline_arc_length(
-                path.getControlPoints(),
+            const bool gap_too_large = path.arc_length(
                 step_samples[segment_end - 1].u,
                 step_samples[segment_end].u
             ) > resolution * 1.5;
@@ -228,7 +228,7 @@ void MainController::clear_step_plan() {
 
 void MainController::update_step_plan_for_path_change(
     const bool has_new_path,
-    const std::optional<SplineD>& path,
+    const std::optional<SplinePath>& path,
     const DirectionMap* const direction_map
 ) {
     if (!has_new_path) return;
@@ -307,7 +307,7 @@ void MainController::update_active_step_segment(const ControlInput& input, const
     );
 }
 
-uint8_t MainController::compute_step_distance_cm(const SplineD& path, const double current_u) const {
+uint8_t MainController::compute_step_distance_cm(const SplinePath& path, const double current_u) const {
     const StepPlanSegment* const segment = current_step_command_segment(current_u);
     if (!segment) {
         return 0;
@@ -316,7 +316,7 @@ uint8_t MainController::compute_step_distance_cm(const SplineD& path, const doub
         return 0;
     }
 
-    const double distance = quadratic_bspline_arc_length(path.getControlPoints(), current_u, segment->step_enter_u);
+    const double distance = path.arc_length(current_u, segment->step_enter_u);
     const double adjusted_distance = distance + nav_params_.step_dist_offset;
     const int64_t rounded_cm = std::lround(adjusted_distance * 100.0);
     return static_cast<uint8_t>(std::clamp<int64_t>(rounded_cm, 0, 255));

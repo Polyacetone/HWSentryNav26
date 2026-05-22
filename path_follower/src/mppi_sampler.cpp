@@ -15,8 +15,6 @@ namespace {
 constexpr double SIGMA_EPS = 1e-6;
 constexpr double WEIGHT_EPS = 1e-12;
 
-using NoiseBatch = Eigen::Array<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-
 struct SampledSequence {
     std::array<StateVec, MPC_HORIZON + 1> xs {};
     std::array<ControlVec, MPC_HORIZON> us {};
@@ -71,54 +69,71 @@ FIRKernel build_fir_kernel(const MPPINoiseSmoothing& smoothing) {
     };
 }
 
-void smooth_noise_batch_row(const NoiseBatch& raw_batch, NoiseBatch& smoothed_batch, int row, const FIRKernel& kernel) {
+/// smooth_noise_1d: apply FIR kernel to a 1-D horizon-length array (no barrier, fully local)
+void smooth_noise_1d(
+    const std::array<double, MPC_HORIZON>& raw,
+    std::array<double, MPC_HORIZON>& smoothed,
+    const FIRKernel& kernel
+) {
     if (!kernel.enabled()) {
-        smoothed_batch.row(row) = raw_batch.row(row);
+        smoothed = raw;
         return;
     }
-
-    constexpr int horizon = MPC_HORIZON;
-    for (int k = 0; k < horizon; ++k) {
+    for (int k = 0; k < MPC_HORIZON; ++k) {
         double accum = 0.0;
         double weight_sum = 0.0;
         for (int offset = -kernel.radius; offset <= kernel.radius; ++offset) {
             const int src = k + offset;
-            if (src < 0 || src >= horizon) {
-                continue;
-            }
-            const double weight = kernel.weights[static_cast<size_t>(offset + kernel.radius)];
-            accum += weight * raw_batch(row, src);
-            weight_sum += weight;
+            if (src < 0 || src >= MPC_HORIZON) continue;
+            const double w = kernel.weights[static_cast<size_t>(offset + kernel.radius)];
+            accum += w * raw[static_cast<size_t>(src)];
+            weight_sum += w;
         }
-        smoothed_batch(row, k) = (weight_sum > 0.0) ? (accum / weight_sum) : raw_batch(row, k);
+        smoothed[static_cast<size_t>(k)] = (weight_sum > 0.0) ? (accum / weight_sum) : raw[static_cast<size_t>(k)];
     }
 }
 
+/// rollout_sequence_v2: rollout with
+///   (a) early termination when cumulative cost exceeds cutoff,
+///   (b) cached cost bilinear sample from detect_lethal_obstacle → next step's cost.
 template<typename NoiseGetter>
-void rollout_sequence(
+void rollout_sequence_v2(
     const FollowProblem& problem,
     const StateVec& x0,
     const std::array<ControlVec, MPC_HORIZON>& nominal_controls,
     NoiseGetter&& noise_getter,
     const ControlVec& u_lo,
     const ControlVec& u_hi,
-    SampledSequence& sample
+    SampledSequence& sample,
+    double early_cutoff
 ) {
     sample.cost = std::numeric_limits<double>::infinity();
     sample.valid = false;
     sample.xs[0] = x0;
 
     double cost = 0.0;
+    double cached_cost_value = -1.0;   // invalid — no cached cost at step 0
+
     for (int k = 0; k < MPC_HORIZON; ++k) {
         const size_t idx = static_cast<size_t>(k);
         sample.us[idx] = (nominal_controls[idx] + noise_getter(k)).cwiseMax(u_lo).cwiseMin(u_hi);
         sample.effective_noise[idx] = sample.us[idx] - nominal_controls[idx];
-        cost += problem.running_cost_value_only(k, sample.xs[idx], sample.us[idx]);
+
+        // Use cached cost value from last step's lethal detection (at same state)
+        cost += problem.running_cost_value_only(k, sample.xs[idx], sample.us[idx], &cached_cost_value);
+
+        // Early termination: if cumulative cost already exceeds best known, discard this sample
+        if (cost >= early_cutoff) {
+            return;
+        }
+
         sample.xs[idx + 1] = problem.dynamics(k, sample.xs[idx], sample.us[idx]);
         if (!sample.xs[idx + 1].allFinite()) {
             return;
         }
-        if (problem.detect_lethal_obstacle(k + 1, sample.xs[idx + 1]).has_value()) {
+
+        // Lethal check — also outputs cost value for next step's running_cost_value_only
+        if (problem.detect_lethal_obstacle(k + 1, sample.xs[idx + 1], &cached_cost_value).has_value()) {
             return;
         }
     }
@@ -133,46 +148,19 @@ void rollout_sequence(
     sample.valid = true;
 }
 
-void rollout_nominal_sequence(
+void rollout_nominal_sequence_v2(
     const FollowProblem& problem,
     const StateVec& x0,
     const std::array<ControlVec, MPC_HORIZON>& nominal_controls,
     const ControlVec& u_lo,
     const ControlVec& u_hi,
-    SampledSequence& sample
+    SampledSequence& sample,
+    double early_cutoff
 ) {
-    rollout_sequence(
-        problem,
-        x0,
-        nominal_controls,
+    rollout_sequence_v2(
+        problem, x0, nominal_controls,
         [](int) { return ControlVec::Zero(); },
-        u_lo,
-        u_hi,
-        sample
-    );
-}
-
-void rollout_sequence_from_batches(
-    const FollowProblem& problem,
-    const StateVec& x0,
-    const std::array<ControlVec, MPC_HORIZON>& nominal_controls,
-    const NoiseBatch& vel_noise_batch,
-    const NoiseBatch& omega_noise_batch,
-    int sample_index,
-    const ControlVec& u_lo,
-    const ControlVec& u_hi,
-    SampledSequence& sample
-) {
-    rollout_sequence(
-        problem,
-        x0,
-        nominal_controls,
-        [&](int k) {
-            return ControlVec(vel_noise_batch(sample_index, k), omega_noise_batch(sample_index, k));
-        },
-        u_lo,
-        u_hi,
-        sample
+        u_lo, u_hi, sample, early_cutoff
     );
 }
 
@@ -212,6 +200,8 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
     const ControlVec u_lo = problem.u_lower();
     const ControlVec u_hi = problem.u_upper();
     const ControlVec sigma = sigma_vector(params_);
+    const double sigma_v = sigma(0);
+    const double sigma_w = sigma(1);
     const FIRKernel fir_kernel = build_fir_kernel(params_.noise_smoothing);
 
     std::array<ControlVec, MPC_HORIZON> nominal = nominal_controls;
@@ -220,69 +210,80 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
     }
 
     SampledSequence best_sequence;
-    rollout_nominal_sequence(problem, x0, nominal, u_lo, u_hi, best_sequence);
+    rollout_nominal_sequence_v2(
+        problem, x0, nominal, u_lo, u_hi, best_sequence,
+        std::numeric_limits<double>::infinity()
+    );
 
     std::vector<SampledSequence> samples(static_cast<size_t>(params_.batch_size));
-    NoiseBatch raw_vel_noise(params_.batch_size, MPC_HORIZON);
-    NoiseBatch raw_omega_noise(params_.batch_size, MPC_HORIZON);
-    NoiseBatch smoothed_vel_noise(params_.batch_size, MPC_HORIZON);
-    NoiseBatch smoothed_omega_noise(params_.batch_size, MPC_HORIZON);
     std::random_device rd;
     const uint64_t base_seed = (static_cast<uint64_t>(rd()) << 32U) ^ static_cast<uint64_t>(rd());
 
     std::vector<std::vector<Eigen::Vector2d>> iteration_best_paths;
     iteration_best_paths.reserve(static_cast<size_t>(params_.iteration_count));
 
-        for (int iter = 0; iter < params_.iteration_count; ++iter) {
-#pragma omp parallel if(params_.batch_size >= 32) num_threads(params_.num_threads)
-        {
+    for (int iter = 0; iter < params_.iteration_count; ++iter) {
+        const double early_cutoff = best_sequence.valid
+            ? best_sequence.cost
+            : std::numeric_limits<double>::infinity();
+
+        // ── Merged parallel loop: noise gen + smoothing + rollout (optimization 4) ──
+#pragma omp parallel for schedule(static) \
+    if(params_.batch_size >= 32) num_threads(params_.num_threads)
+        for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
             auto& rng = thread_local_rng(base_seed);
-            std::normal_distribution<double> vel_dist(0.0, sigma(0));
-            std::normal_distribution<double> omega_dist(0.0, sigma(1));
+            std::normal_distribution<double> vel_dist(0.0, sigma_v);
+            std::normal_distribution<double> omega_dist(0.0, sigma_w);
 
-#pragma omp for schedule(static)
-            for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
-                const bool use_nominal = params_.include_nominal_trajectory && sample_index == 0;
-                if (use_nominal) {
-                    raw_vel_noise.row(sample_index).setZero();
-                    raw_omega_noise.row(sample_index).setZero();
-                    continue;
-                }
+            // Thread-local noise arrays — no shared memory, no false sharing
+            std::array<double, MPC_HORIZON> raw_vel{};
+            std::array<double, MPC_HORIZON> raw_omega{};
+            std::array<double, MPC_HORIZON> smoothed_vel{};
+            std::array<double, MPC_HORIZON> smoothed_omega{};
+
+            const bool use_nominal = params_.include_nominal_trajectory && sample_index == 0;
+
+            // 1) Noise generation
+            if (!use_nominal) {
                 for (int k = 0; k < MPC_HORIZON; ++k) {
-                    raw_vel_noise(sample_index, k) = vel_dist(rng);
-                    raw_omega_noise(sample_index, k) = omega_dist(rng);
+                    raw_vel[static_cast<size_t>(k)] = vel_dist(rng);
+                    raw_omega[static_cast<size_t>(k)] = omega_dist(rng);
                 }
             }
 
-#pragma omp for schedule(static)
-            for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
-                smooth_noise_batch_row(raw_vel_noise, smoothed_vel_noise, sample_index, fir_kernel);
-                smooth_noise_batch_row(raw_omega_noise, smoothed_omega_noise, sample_index, fir_kernel);
+            // 2) Noise smoothing (local arrays, zero-copy when disabled)
+            if (use_nominal) {
+                smoothed_vel.fill(0.0);
+                smoothed_omega.fill(0.0);
+            } else if (fir_kernel.enabled()) {
+                smooth_noise_1d(raw_vel, smoothed_vel, fir_kernel);
+                smooth_noise_1d(raw_omega, smoothed_omega, fir_kernel);
+            } else {
+                smoothed_vel = raw_vel;
+                smoothed_omega = raw_omega;
             }
 
-#pragma omp for schedule(static)
-            for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
-                rollout_sequence_from_batches(
-                    problem,
-                    x0,
-                    nominal,
-                    smoothed_vel_noise,
-                    smoothed_omega_noise,
-                    sample_index,
-                    u_lo,
-                    u_hi,
-                    samples[static_cast<size_t>(sample_index)]
-                );
-            }
+            // 3) Rollout with early termination + cost caching (optimizations 1, 2)
+            rollout_sequence_v2(
+                problem, x0, nominal,
+                [&](int k) {
+                    return ControlVec(
+                        smoothed_vel[static_cast<size_t>(k)],
+                        smoothed_omega[static_cast<size_t>(k)]
+                    );
+                },
+                u_lo, u_hi,
+                samples[static_cast<size_t>(sample_index)],
+                early_cutoff
+            );
         }
 
+        // ── Serial reduction ──
         double min_cost = std::numeric_limits<double>::infinity();
         int best_batch_index = -1;
         for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
             const auto& sample = samples[static_cast<size_t>(sample_index)];
-            if (!sample.valid) {
-                continue;
-            }
+            if (!sample.valid) continue;
             if (sample.cost < min_cost) {
                 min_cost = sample.cost;
                 best_batch_index = sample_index;
@@ -314,9 +315,7 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
 
         for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
             const auto& sample = samples[static_cast<size_t>(sample_index)];
-            if (!sample.valid) {
-                continue;
-            }
+            if (!sample.valid) continue;
             const double weight = std::exp(-(sample.cost - min_cost) / params_.temperature);
             weight_sum += weight;
             for (int k = 0; k < MPC_HORIZON; ++k) {
@@ -341,7 +340,10 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
     MPPIFollowSamplingResult result;
     if (!params_.fallback_to_best_sample) {
         SampledSequence final_nominal;
-        rollout_nominal_sequence(problem, x0, nominal, u_lo, u_hi, final_nominal);
+        rollout_nominal_sequence_v2(
+            problem, x0, nominal, u_lo, u_hi, final_nominal,
+            std::numeric_limits<double>::infinity()
+        );
         if (final_nominal.valid) {
             result = to_result(final_nominal);
         } else {

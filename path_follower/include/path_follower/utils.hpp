@@ -3,71 +3,8 @@
 #include <Eigen/Core>
 #include <limits>
 #include <optional>
-#include <vector>
-#include <uniform_bspline/uniform_bspline.hpp>
+#include <path_follower/spline_path.hpp>
 #include <path_follower/nav_map.hpp>
-
-namespace path_follower {
-template <typename ValueType>
-using SplineT = ubs::UniformBSpline<ValueType, 2, ValueType, Eigen::Matrix<ValueType, 2, 1>, std::vector<Eigen::Matrix<ValueType, 2, 1>>>;
-using SplineD = ubs::UniformBSpline<double, 2, double, Eigen::Vector2d, std::vector<Eigen::Vector2d>>;
-}
-
-namespace path_follower{
-inline constexpr double PATH_U_EXTRAP_MIN = -1.0;
-inline constexpr double PATH_U_EXTRAP_MAX = 1.5;
-
-double clamp_path_u_extrapolated(
-    double u,
-    double u_min = PATH_U_EXTRAP_MIN,
-    double u_max = PATH_U_EXTRAP_MAX
-);
-
-double project_to_spline_u(
-    const SplineD& spline,
-    const Eigen::Vector2d& pos,
-    double u_hint,
-    int num_samples,
-    double search_window,
-    double local_search_lazy_distance
-);
-
-double project_to_spline_u_extrapolated(
-    const SplineD& spline,
-    const Eigen::Vector2d& pos,
-    double u_hint,
-    int num_samples,
-    double search_window,
-    double local_search_lazy_distance,
-    double u_min = PATH_U_EXTRAP_MIN,
-    double u_max = PATH_U_EXTRAP_MAX
-);
-
-void eval_quadratic_bspline2(
-    const std::vector<Eigen::Vector2d>& cps,
-    double u,
-    Eigen::Vector2d* p,
-    Eigen::Vector2d* d1,
-    Eigen::Vector2d* d2
-);
-
-void eval_quadratic_bspline2_extrapolated(
-    const std::vector<Eigen::Vector2d>& cps,
-    double u,
-    Eigen::Vector2d* p,
-    Eigen::Vector2d* d1,
-    Eigen::Vector2d* d2
-);
-
-double quadratic_bspline_curvature(const Eigen::Vector2d& d1, const Eigen::Vector2d& d2);
-
-double quadratic_bspline_arc_length(
-    const std::vector<Eigen::Vector2d>& cps,
-    double u0,
-    double u1,
-    int samples = 32
-);
-}
 
 namespace path_follower {
 struct RecoveryParams;

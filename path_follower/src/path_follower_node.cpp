@@ -23,7 +23,6 @@
 #include <interfaces/msg/global_path.hpp>
 #include <interfaces/msg/follower_state.hpp>
 
-#include <uniform_bspline/uniform_bspline.hpp>
 #include <common_utils/convert.hpp>
 #include <path_follower/nav_map.hpp>
 #include <path_follower/main_controller.hpp>
@@ -100,7 +99,7 @@ private:
     std::vector<CostMap::ConstPtr> per_step_final_cost_maps_;  // 逐步融合后的最终代价地图
     CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
-    std::optional<SplineD> global_path_;
+    std::optional<SplinePath> global_path_;
     bool path_updated_ = false;
     bool step_layer_update_deferred_ = false;
     bool fixed_goal_ = false;
@@ -549,15 +548,14 @@ void PathFollowerNode::control_points_callback(const interfaces::msg::GlobalPath
     for (size_t i = 0; i < msg->x.size(); ++i) {
         cpts.emplace_back(static_cast<double>(msg->x[i]), static_cast<double>(msg->y[i]));
     }
-    global_path_ = SplineD(cpts);
-    global_path_->setExtrapolate(true);
+    global_path_ = SplinePath(cpts);
     path_updated_ = true;
 
     // 更新 fixed 目标信息
     fixed_goal_ = msg->fixed;
     if (fixed_goal_) {
         // fixed 目标位置为路径末端
-        fixed_goal_pos_ = global_path_->evaluate(1.0);
+        fixed_goal_pos_ = global_path_->position(1.0);
         RCLCPP_INFO(get_logger(), "Received fixed goal path, target: (%.2f, %.2f)", fixed_goal_pos_.x(), fixed_goal_pos_.y());
     }
 

@@ -78,7 +78,7 @@
       follow:
         max_iters: 30 # FDDP 求解器最大迭代次数
         mppi:
-          enable: false # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
+          enable: true # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
           num_threads: 2 # MPPI并行线程数
           batch_size: 256 # 每次迭代采样轨迹数
           iteration_count: 2 # MPPI迭代次数

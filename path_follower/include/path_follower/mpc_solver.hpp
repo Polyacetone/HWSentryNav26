@@ -398,6 +398,9 @@ struct DirSample {
 
 DirSample eval_dir_bilinear(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map);
 
+/// 方向场双线性插值（仅值，无雅可比）—— 给 cost-only 路径用
+Eigen::Vector2d eval_dir_bilinear_value_only(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map);
+
 // ═══════════════════════════════════════════════════════════════
 //  共享动力学模型（supply analytic Jacobians for FDDP）
 // ═══════════════════════════════════════════════════════════════
@@ -411,7 +414,7 @@ template<int Horizon>
 class FollowProblemT {
 public:
     FollowProblemT(
-        const std::vector<Eigen::Vector2d>& ref_control_points,
+        const SplinePath& spline,
         const MPCParams& params,
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
@@ -430,7 +433,7 @@ public:
     void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
 
     double running_cost(int k, const StateVec& x, const ControlVec& u) const;
-    double running_cost_value_only(int k, const StateVec& x, const ControlVec& u) const;
+    double running_cost_value_only(int k, const StateVec& x, const ControlVec& u, double* cached_cost_value = nullptr) const;
     void running_cost_derivatives(
         int k,
         const StateVec& x,
@@ -448,16 +451,15 @@ public:
     ControlVec u_lower() const;
     ControlVec u_upper() const;
 
-    [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x) const;
-    [[nodiscard]] const std::vector<Eigen::Vector2d>& ref_control_points() const;
+    [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
     [[nodiscard]] const MPCParams& params() const;
-    [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const std::vector<Eigen::Vector2d>& ref_control_points) const;
+    [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const SplinePath& spline) const;
 
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
 
     Eigen::Vector2d goal_xy_;
-    const std::vector<Eigen::Vector2d>& ref_cps_;
+    SplinePath spline_;
     const MPCParams& p_;
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
@@ -625,7 +627,7 @@ public:
     }
 
     std::expected<FollowSolveResult, std::string> solve_follow(
-        const SplineD& global_path,
+        const SplinePath& global_path,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
         const CostMap& cost_map,
@@ -669,7 +671,7 @@ private:
     std::vector<CostMapGridView> step_cost_grids_cache_;
 
     // 路径变更检测
-    std::vector<Eigen::Vector2d> prev_ref_control_points_;
+    std::optional<SplinePath> prev_ref_control_points_;
 
     // ── Hidden-state Luenberger observer ──
     double x_h_hat_ = 0.0;

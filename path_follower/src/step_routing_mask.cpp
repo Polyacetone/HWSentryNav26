@@ -31,7 +31,7 @@ void StepRoutingMask::initialize(const CostMap& cost_map, DirectionMap::ConstPtr
     update(std::nullopt);
 }
 
-void StepRoutingMask::update(const std::optional<SplineD>& global_path) {
+void StepRoutingMask::update(const std::optional<SplinePath>& global_path) {
     if (!base_direction_map_) return;
 
     std::vector<double> max_alpha(base_step_cost_data_.size(), 0.0);
@@ -45,9 +45,9 @@ void StepRoutingMask::update(const std::optional<SplineD>& global_path) {
 
             for (int i = 0; i <= samples; ++i) {
                 const double u = static_cast<double>(i) / static_cast<double>(samples);
-                const Eigen::Vector2d pos = spline.evaluate(u);
+                const Eigen::Vector2d pos = spline.position(u);
 
-                Eigen::Vector2d tangent = spline.derivative(u, 1);
+                Eigen::Vector2d tangent = spline.tangent(u);
                 const double tangent_norm = tangent.norm();
                 if (tangent_norm < 1e-6) continue;
                 tangent /= tangent_norm;
@@ -109,13 +109,13 @@ void StepRoutingMask::update(const std::optional<SplineD>& global_path) {
     );
 }
 
-double StepRoutingMask::approximate_path_length(const SplineD& spline) const {
+double StepRoutingMask::approximate_path_length(const SplinePath& spline) const {
     const int samples = std::max(1, params_.length_num_samples);
     double len = 0.0;
     const double du = 1.0 / static_cast<double>(samples);
     for (int i = 0; i < samples; ++i) {
         const double u = (static_cast<double>(i) + 0.5) * du;
-        const Eigen::Vector2d d1 = spline.derivative(u, 1);
+        const Eigen::Vector2d d1 = spline.tangent(u);
         len += d1.norm() * du;
     }
     return len;

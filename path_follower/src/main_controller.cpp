@@ -55,7 +55,7 @@ struct FollowStepBlockSampleStats {
 
 std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
     const NavigationParams& params,
-    const SplineD& path,
+    const SplinePath& path,
     const double start_u,
     const CostMap* const dynamic_cost_map,
     const std::vector<const CostMap*>& dynamic_prediction_maps,
@@ -76,7 +76,7 @@ std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
         double u = std::clamp(start_u, 0.0, 1.0);
         double travelled = 0.0;
         while (u < 1.0 && travelled < distance) {
-            const Eigen::Vector2d d1 = path.derivative(u, 1);
+            const Eigen::Vector2d d1 = path.tangent(u);
             const double speed = d1.norm();
             if (speed < 1e-12) {
                 u = std::min(1.0, u + 1e-3);
@@ -84,7 +84,7 @@ std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
             }
             const double du = resolution / speed;
             const double next_u = std::min(1.0, u + du);
-            travelled += (path.evaluate(next_u) - path.evaluate(u)).norm();
+            travelled += (path.position(next_u) - path.position(u)).norm();
             u = next_u;
         }
         return u;
@@ -94,7 +94,7 @@ std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
         const double t = samples == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(samples - 1);
         const double u = advance_path_u(lookahead_distance * t);
 
-        const Eigen::Vector2d pos = path.evaluate(u);
+        const Eigen::Vector2d pos = path.position(u);
         const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(pos);
         if (!direction_map.is_valid_coord(dir_grid)) return std::nullopt;
 
@@ -189,9 +189,8 @@ void MainController::remember_command_output(const ControlOutput& output) {
     has_last_command_output_ = true;
 }
 
-double MainController::project_path_u(const ControlInput& input, const SplineD& path, const double seed_u) const {
-    return project_to_spline_u_extrapolated(
-        path,
+double MainController::project_path_u(const ControlInput& input, const SplinePath& path, const double seed_u) const {
+    return path.project_extrapolated(
         input.chassis_pose_map.head<2>(),
         seed_u,
         mpc_controller_->params().follow.projection.proj_num_samples,
@@ -200,9 +199,9 @@ double MainController::project_path_u(const ControlInput& input, const SplineD& 
     );
 }
 
-bool MainController::check_follow_projection_guard(const ControlInput& input, const SplineD& path, const double current_u) const {
+bool MainController::check_follow_projection_guard(const ControlInput& input, const SplinePath& path, const double current_u) const {
     const Eigen::Vector2d pos_map = input.chassis_pose_map.head<2>();
-    const Eigen::Vector2d proj_map = path.evaluate(current_u);
+    const Eigen::Vector2d proj_map = path.position(current_u);
     const double proj_dist = (proj_map - pos_map).norm();
     if (nav_params_.follow_proj_guard.dist_max > 0.0 && proj_dist > nav_params_.follow_proj_guard.dist_max) {
         RCLCPP_WARN(
@@ -242,7 +241,7 @@ bool MainController::check_follow_projection_guard(const ControlInput& input, co
     return false;
 }
 
-bool MainController::check_step_block_replan(const ControlInput& input, const SplineD& path, const double current_u) const {
+bool MainController::check_step_block_replan(const ControlInput& input, const SplinePath& path, const double current_u) const {
     const auto& p = nav_params_.step_block_replan;
     if (!p.enable || !input.masked_direction_map) return false;
 
@@ -400,7 +399,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         request_replan_now = true;
     }
 
-    const bool dist_reached = has_path && ((effective_input.chassis_pose_map.head<2>() - effective_input.global_path->evaluate(1.0)).norm() < nav_params_.stop_threshold_dist);
+    const bool dist_reached = has_path && ((effective_input.chassis_pose_map.head<2>() - effective_input.global_path->position(1.0)).norm() < nav_params_.stop_threshold_dist);
     const bool u_reached = has_path && (current_u > nav_params_.stop_threshold_u);
 
     FsmInput fsm_input;
@@ -847,7 +846,7 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
 
 // ═══════════════════ Follow 路标点无进度检测 ══════════════════
 
-void MainController::recompute_follow_landmarks(const SplineD& path) {
+void MainController::recompute_follow_landmarks(const SplinePath& path) {
     follow_landmarks_u_.clear();
     // 使用两种模式中较小的间距，确保 Follow 和 Stepping 的路标粒度都足够
     const double spacing = std::max(0.1, std::min(
@@ -858,10 +857,10 @@ void MainController::recompute_follow_landmarks(const SplineD& path) {
     // 先粗略估计路径弧长，动态确定采样数
     constexpr int ESTIMATE_SAMPLES = 100;
     double est_length = 0.0;
-    Eigen::Vector2d est_prev = path.evaluate(0.0);
+    Eigen::Vector2d est_prev = path.position(0.0);
     for (int i = 1; i <= ESTIMATE_SAMPLES; ++i) {
         const double u = static_cast<double>(i) / static_cast<double>(ESTIMATE_SAMPLES);
-        const Eigen::Vector2d cur = path.evaluate(u);
+        const Eigen::Vector2d cur = path.position(u);
         est_length += (cur - est_prev).norm();
         est_prev = cur;
     }
@@ -874,11 +873,11 @@ void MainController::recompute_follow_landmarks(const SplineD& path) {
 
     double arc = 0.0;
     double next_threshold = 0.0;
-    Eigen::Vector2d prev = path.evaluate(0.0);
+    Eigen::Vector2d prev = path.position(0.0);
 
     for (int i = 0; i <= N; i++) {
         const double u = static_cast<double>(i) / static_cast<double>(N);
-        const Eigen::Vector2d cur = path.evaluate(u);
+        const Eigen::Vector2d cur = path.position(u);
         if (i > 0) arc += (cur - prev).norm();
         prev = cur;
         if (arc >= next_threshold) {

@@ -278,8 +278,8 @@ inline double clamp_prev_cmd(double cmd_prev, double status, double cmd_act_diff
     );
 }
 
-double advance_u_progress(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps);
-double advance_u_progress_extrapolated(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps);
+double advance_u_progress(double u_cur, const StateVec& x, const SplinePath& spline);
+double advance_u_progress_extrapolated(double u_cur, const StateVec& x, const SplinePath& spline);
 
 struct AdvanceUProgressEval {
     double u_next_extrap;
@@ -287,17 +287,7 @@ struct AdvanceUProgressEval {
 };
 
 AdvanceUProgressEval
-advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps);
-
-inline bool same_cps(const std::vector<Eigen::Vector2d>& a, const std::vector<Eigen::Vector2d>& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); i++) {
-        if (a[i].x() != b[i].x() || a[i].y() != b[i].y()) {
-            return false;
-        }
-    }
-    return true;
-}
+advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const SplinePath& spline);
 
 // ─── Gauss-Newton 残差辅助 ───
 
@@ -455,6 +445,36 @@ DirSample eval_dir_bilinear(const DirectionMapGridView& grid, const GridInfo& in
     return s;
 }
 
+Eigen::Vector2d eval_dir_bilinear_value_only(const DirectionMapGridView& grid, const GridInfo& info, double x_map, double y_map) {
+    Eigen::Vector2d val = Eigen::Vector2d::Zero();
+    if (!std::isfinite(x_map) || !std::isfinite(y_map)) return val;
+    if (info.width < 2 || info.height < 2) return val;
+
+    const double gx = (x_map - info.origin_x) * info.inv_resolution;
+    const double gy = (y_map - info.origin_y) * info.inv_resolution;
+    if (gx < 0.0 || gy < 0.0 || gx >= static_cast<double>(info.width - 1)
+        || gy >= static_cast<double>(info.height - 1)) {
+        return val;
+    }
+
+    const int ix0 = static_cast<int>(std::floor(gx));
+    const int iy0 = static_cast<int>(std::floor(gy));
+    const double tx = gx - static_cast<double>(ix0);
+    const double ty = gy - static_cast<double>(iy0);
+
+    const Eigen::Vector2d f00 = grid.value_at_clamped(iy0, ix0);
+    const Eigen::Vector2d f10 = grid.value_at_clamped(iy0, ix0 + 1);
+    const Eigen::Vector2d f01 = grid.value_at_clamped(iy0 + 1, ix0);
+    const Eigen::Vector2d f11 = grid.value_at_clamped(iy0 + 1, ix0 + 1);
+
+    const double w00 = (1.0 - tx) * (1.0 - ty);
+    const double w10 = tx * (1.0 - ty);
+    const double w01 = (1.0 - tx) * ty;
+    const double w11 = tx * ty;
+
+    return w00 * f00 + w10 * f10 + w01 * f01 + w11 * f11;
+}
+
 // ════════════════════════════════════════════════════════════════
 //  共享动力学模型
 // ════════════════════════════════════════════════════════════════
@@ -565,7 +585,7 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const LP
 
 template<int Horizon>
 FollowProblemT<Horizon>::FollowProblemT(
-    const std::vector<Eigen::Vector2d>& ref_control_points,
+    const SplinePath& spline,
     const MPCParams& params,
     const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
@@ -579,7 +599,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     std::optional<ActiveStepMode> active_step_mode,
     double current_path_u
 ):
-    ref_cps_(ref_control_points),
+    spline_(spline),
     p_(params),
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
@@ -592,15 +612,13 @@ FollowProblemT<Horizon>::FollowProblemT(
     rfr_pwr_limit_(rfr_pwr_limit),
     active_step_mode_(active_step_mode),
     current_path_u_(current_path_u) {
-    Eigen::Vector2d p;
-    eval_quadratic_bspline2_extrapolated(ref_control_points, 1.0, &p, nullptr, nullptr);
-    goal_xy_ = p;
+    goal_xy_ = spline_.eval(1.0).p;
 }
 
 template<int Horizon>
 StateVec FollowProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
     StateVec xn = mpc_dynamics(x, u, model_);
-    xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, ref_cps_);
+    xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, spline_);
     return xn;
 }
 
@@ -608,8 +626,8 @@ template<int Horizon>
 void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
     mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
 
-    const auto adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, ref_cps_);
-    const double dout_din = clamp_derivative_piecewise(adv.u_next_extrap, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+    const auto adv = advance_u_progress_extrapolated_with_jacobian(x(ix::PATH_U), x, spline_);
+    const double dout_din = clamp_derivative_piecewise(adv.u_next_extrap, SplinePath::U_EXTRAP_MIN, SplinePath::U_EXTRAP_MAX);
     dfx.row(ix::PATH_U) = (dout_din * adv.du_next_dx).transpose();
     dfu.row(ix::PATH_U).setZero();
 }
@@ -669,19 +687,14 @@ ControlVec FollowProblemT<Horizon>::u_upper() const {
 }
 
 template<int Horizon>
-const std::vector<Eigen::Vector2d>& FollowProblemT<Horizon>::ref_control_points() const {
-    return ref_cps_;
-}
-
-template<int Horizon>
 const MPCParams& FollowProblemT<Horizon>::params() const {
     return p_;
 }
 
 template<int Horizon>
-FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const std::vector<Eigen::Vector2d>& ref_control_points) const {
+FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const SplinePath& spline) const {
     return FollowProblemT<Horizon>(
-        ref_control_points,
+        spline,
         p_,
         step_cost_grids_,
         cost_info_,
@@ -711,7 +724,7 @@ struct FollowResidualLinearization {
 FollowResidualLinearization follow_residual_linearized_impl(
     const StateVec& x,
     const ControlVec& u,
-    const std::vector<Eigen::Vector2d>& ref_cps,
+    const SplinePath& spline,
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
@@ -740,27 +753,22 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const double dw_cmd = w_cmd - x(ix::DW);
 
     const double uc_raw = x(ix::PATH_U);
-    const double uc = clamp_path_u_extrapolated(uc_raw);
-    const double duc_dpathu = clamp_derivative_piecewise(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+    const double uc = SplinePath::clamp_u_extrapolated(uc_raw);
+    const double duc_dpathu = clamp_derivative_piecewise(uc_raw, SplinePath::U_EXTRAP_MIN, SplinePath::U_EXTRAP_MAX);
 
-    Eigen::Vector2d pr, d1, d2;
-    eval_quadratic_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+    const auto se = spline.eval(uc);
 
-    const double thetar = std::atan2(d1.y(), d1.x());
-    const double sin_r = std::sin(thetar);
-    const double cos_r = std::cos(thetar);
+    const double d1_norm2 = se.d1.squaredNorm();
+    const double dtheta_du = (se.d1.x() * se.d2.y() - se.d1.y() * se.d2.x()) / std::max(d1_norm2, 1e-12);
 
-    const double d1_norm2 = d1.squaredNorm();
-    const double dtheta_du = (d1.x() * d2.y() - d1.y() * d2.x()) / std::max(d1_norm2, 1e-12);
-
-    const double ex = px - pr.x(), ey_w = py - pr.y();
-    const double ey = -ex * sin_r + ey_w * cos_r;
-    const double dey_dpx = -sin_r;
-    const double dey_dpy = cos_r;
-    const double dey_du = sin_r * d1.x() - cos_r * d1.y() - dtheta_du * (ex * cos_r + ey_w * sin_r);
+    const double ex = px - se.p.x(), ey_w = py - se.p.y();
+    const double ey = -ex * se.sin_r + ey_w * se.cos_r;
+    const double dey_dpx = -se.sin_r;
+    const double dey_dpy = se.cos_r;
+    const double dey_du = se.sin_r * se.d1.x() - se.cos_r * se.d1.y() - dtheta_du * (ex * se.cos_r + ey_w * se.sin_r);
     const double dey_dpathu = dey_du * duc_dpathu;
 
-    const double etheta = wrap_pi(theta - thetar);
+    const double etheta = wrap_pi(theta - se.thetar);
     const double detheta_dpathu = -dtheta_du * duc_dpathu;
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
@@ -864,11 +872,10 @@ FollowResidualLinearization follow_residual_linearized_impl(
             const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
             const double path_u = std::clamp(uc, 0.0, 1.0);
             if (path_u < entry_u) {
-                const double d = quadratic_bspline_arc_length(ref_cps, path_u, entry_u);
+                const double d = spline.arc_length(path_u, entry_u, 8);
 
-                Eigen::Vector2d path_d1;
-                eval_quadratic_bspline2_extrapolated(ref_cps, path_u, nullptr, &path_d1, nullptr);
-                const double ds_du = path_d1.norm() * duc_dpathu;
+                const auto se2 = spline.eval(path_u);
+                const double ds_du = se2.ds_du * duc_dpathu;
 
                 const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
                 const double r_lo_expr = std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d;
@@ -903,14 +910,14 @@ FollowResidualLinearization follow_residual_linearized_impl(
 
     const auto& terminal_w = follow.terminal_weights;
     const double uc_clamped_brake = std::clamp(uc, 0.0, 1.0);
-    const double s_remaining_approx = (1.0 - uc_clamped_brake) * d1.norm();
+    const double s_remaining_approx = (1.0 - uc_clamped_brake) * se.ds_du;
     const double v_allowed = brake_speed_limit(s_remaining_approx, terminal_w);
     const double v_excess = v_act - v_allowed;
     const double relu_brake = positive_part(v_excess);
     out.r(14) = terminal_w.q_v_final * relu_brake;
     if (v_excess > 0.0) {
         out.jx(14, ix::V) = terminal_w.q_v_final;
-        const double ds_dpathu = -d1.norm() * duc_dpathu;
+        const double ds_dpathu = -se.ds_du * duc_dpathu;
         const double dv_allowed_ds = terminal_w.a_brake / std::max(v_allowed, 1e-6);
         out.jx(14, ix::PATH_U) = -terminal_w.q_v_final * dv_allowed_ds * ds_dpathu;
     }
@@ -933,14 +940,15 @@ FollowResidualLinearization follow_residual_linearized_impl(
 double follow_running_cost_value_only_impl(
     const StateVec& x,
     const ControlVec& u,
-    const std::vector<Eigen::Vector2d>& ref_cps,
+    const SplinePath& spline,
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
     const DirectionMapGridView& dg,
     const GridInfo& di,
     double rfr_pwr_limit,
-    std::optional<ActiveStepMode> active_step_mode
+    std::optional<ActiveStepMode> active_step_mode,
+    double* cached_cost_value = nullptr
 ) {
     const auto& follow = p.follow;
     const auto& tracking_w = follow.tracking_weights;
@@ -961,27 +969,27 @@ double follow_running_cost_value_only_impl(
     const double dw_cmd = w_cmd - x(ix::DW);
 
     const double uc_raw = x(ix::PATH_U);
-    const double uc = clamp_path_u_extrapolated(uc_raw);
+    const double uc = SplinePath::clamp_u_extrapolated(uc_raw);
 
-    Eigen::Vector2d pr;
-    Eigen::Vector2d d1;
-    Eigen::Vector2d d2;
-    eval_quadratic_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+    const auto se = spline.eval(uc);
 
-    const double thetar = std::atan2(d1.y(), d1.x());
-    const double sin_r = std::sin(thetar);
-    const double cos_r = std::cos(thetar);
+    const double ex = px - se.p.x();
+    const double ey_w = py - se.p.y();
+    const double ey = -ex * se.sin_r + ey_w * se.cos_r;
+    const double etheta = wrap_pi(theta - se.thetar);
 
-    const double ex = px - pr.x();
-    const double ey_w = py - pr.y();
-    const double ey = -ex * sin_r + ey_w * cos_r;
-    const double etheta = wrap_pi(theta - thetar);
+    const Eigen::Vector2d dir = eval_dir_bilinear_value_only(dg, di, px, py);
 
-    const auto cs = eval_cost_bilinear(cg, ci, px, py);
-    const auto ds = eval_dir_bilinear(dg, di, px, py);
+    double cost_value;
+    if (cached_cost_value && *cached_cost_value >= 0.0) {
+        cost_value = *cached_cost_value;
+        *cached_cost_value = -1.0;
+    } else {
+        cost_value = eval_cost_bilinear(cg, ci, px, py).value;
+    }
 
-    const Eigen::Vector2d dir = ds.value;
     const double dir_norm_sq = dir.squaredNorm();
+    const double dir_norm = std::sqrt(dir_norm_sq);
     const double cross = std::cos(theta) * dir.y() - std::sin(theta) * dir.x();
     const double a_lat = std::abs(v_act * w_act);
 
@@ -990,17 +998,17 @@ double follow_running_cost_value_only_impl(
 
     double cost = 0.0;
 
-    cost += 0.5 * std::pow(tracking_w.q_y * ey, 2);
-    cost += 0.5 * std::pow(tracking_w.q_theta * etheta, 2);
-    cost += 0.5 * std::pow(command_w.r_v * v_cmd, 2);
-    cost += 0.5 * std::pow(command_w.r_omega * w_cmd, 2);
-    cost += 0.5 * std::pow(command_w.r_dv * dv_cmd, 2);
-    cost += 0.5 * std::pow(command_w.r_domega * dw_cmd, 2);
-    cost += 0.5 * std::pow(motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim), 2);
-    cost += 0.5 * std::pow(motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim), 2);
-    cost += 0.5 * std::pow(motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max), 2);
-    cost += 0.5 * std::pow(env_w.obstacle * cs.value / 255.0, 2);
-    cost += 0.5 * std::pow(terrain_w.direction * std::abs(cross), 2);
+    cost += 0.5 * (tracking_w.q_y * ey) * (tracking_w.q_y * ey);
+    cost += 0.5 * (tracking_w.q_theta * etheta) * (tracking_w.q_theta * etheta);
+    cost += 0.5 * (command_w.r_v * v_cmd) * (command_w.r_v * v_cmd);
+    cost += 0.5 * (command_w.r_omega * w_cmd) * (command_w.r_omega * w_cmd);
+    cost += 0.5 * (command_w.r_dv * dv_cmd) * (command_w.r_dv * dv_cmd);
+    cost += 0.5 * (command_w.r_domega * dw_cmd) * (command_w.r_domega * dw_cmd);
+    cost += 0.5 * (motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim)) * (motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim));
+    cost += 0.5 * (motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim)) * (motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim));
+    cost += 0.5 * (motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max)) * (motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max));
+    cost += 0.5 * (env_w.obstacle * cost_value / 255.0) * (env_w.obstacle * cost_value / 255.0);
+    cost += 0.5 * (terrain_w.direction * std::abs(cross)) * (terrain_w.direction * std::abs(cross));
 
     if (is_active_follow_step_mode(active_step_mode)) {
         const double target_vel = active_step_mode->target_velocity;
@@ -1009,22 +1017,22 @@ double follow_running_cost_value_only_impl(
         const double relu_vstep = positive_part(std::abs(v_act - v_center) - deadzone);
 
         if (dir_norm_sq > 1e-10) {
-            cost += 0.5 * std::pow(terrain_w.step_vel_weight * std::sqrt(dir_norm_sq) * relu_vstep, 2);
+            cost += 0.5 * (terrain_w.step_vel_weight * dir_norm * relu_vstep) * (terrain_w.step_vel_weight * dir_norm * relu_vstep);
         }
 
         if (active_step_mode->step_entry_u.has_value()) {
             const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
             const double path_u = std::clamp(uc, 0.0, 1.0);
             if (path_u < entry_u) {
-                const double d = quadratic_bspline_arc_length(ref_cps, path_u, entry_u);
+                const double d = spline.arc_length(path_u, entry_u, 8);
                 const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
                 const double v_min = target_vel - deadzone;
                 const double v_max = target_vel + deadzone;
                 const double r_lo = std::sqrt(std::max(REACHABILITY_EPS, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
                 const double r_hi = std::sqrt(std::max(REACHABILITY_EPS, v_act * v_act - 2.0 * a_guide * d));
 
-                cost += 0.5 * std::pow(std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(v_min - r_lo), 2);
-                cost += 0.5 * std::pow(std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - v_max), 2);
+                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(v_min - r_lo)) * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(v_min - r_lo));
+                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - v_max)) * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - v_max));
             }
         }
     }
@@ -1033,11 +1041,11 @@ double follow_running_cost_value_only_impl(
         const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double excess = (pwr.value - rfr_pwr_limit) / thr;
-        cost += 0.5 * std::pow(p.energy.weight * positive_part(excess), 2);
+        cost += 0.5 * (p.energy.weight * positive_part(excess)) * (p.energy.weight * positive_part(excess));
     }
 
     const double uc_clamped = std::clamp(uc, 0.0, 1.0);
-    const double s_remaining = quadratic_bspline_arc_length(ref_cps, uc_clamped, 1.0);
+    const double s_remaining = spline.arc_length(uc_clamped, 1.0, 8);
 
     if (uc < 1.0) {
         cost += (p.follow.tracking_weights.q_u / MPC_HORIZON) * s_remaining;
@@ -1045,43 +1053,38 @@ double follow_running_cost_value_only_impl(
 
     const auto& terminal_w = follow.terminal_weights;
     const double v_allowed = brake_speed_limit(s_remaining, terminal_w);
-    cost += 0.5 * std::pow(terminal_w.q_v_final * positive_part(v_act - v_allowed), 2);
+    cost += 0.5 * (terminal_w.q_v_final * positive_part(v_act - v_allowed)) * (terminal_w.q_v_final * positive_part(v_act - v_allowed));
     return cost;
 }
 
 AdvanceUProgressEval
-advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps) {
+advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, const SplinePath& spline) {
     AdvanceUProgressEval out {};
     out.du_next_dx.setZero();
 
-    const double uc = clamp_path_u_extrapolated(u_cur);
-    const double duc_dpathu = clamp_derivative_piecewise(x(ix::PATH_U), PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
+    const double uc = SplinePath::clamp_u_extrapolated(u_cur);
+    const double duc_dpathu = clamp_derivative_piecewise(x(ix::PATH_U), SplinePath::U_EXTRAP_MIN, SplinePath::U_EXTRAP_MAX);
 
-    Eigen::Vector2d pr, d1, d2;
-    eval_quadratic_bspline2_extrapolated(ref_cps, uc, &pr, &d1, &d2);
+    const auto se = spline.eval(uc);
 
-    const double d1_norm2 = d1.squaredNorm();
+    const double d1_norm2 = se.d1.squaredNorm();
     const double d1_norm = std::sqrt(d1_norm2 + 0.01);
     const double dsdu = d1_norm + 1e-6;
     const double inv_dsdu = 1.0 / dsdu;
 
-    const double cross12 = d1.x() * d2.y() - d1.y() * d2.x();
+    const double cross12 = se.d1.x() * se.d2.y() - se.d1.y() * se.d2.x();
     const double kappa = cross12 / (dsdu * dsdu * dsdu);
-
-    const double thetar = std::atan2(d1.y(), d1.x());
-    const double sin_r = std::sin(thetar);
-    const double cos_r = std::cos(thetar);
     const double dtheta_du = cross12 / std::max(d1_norm2, 1e-12);
 
-    const double ex = x(ix::X) - pr.x();
-    const double ey_w = x(ix::Y) - pr.y();
-    const double ey = -ex * sin_r + ey_w * cos_r;
+    const double ex = x(ix::X) - se.p.x();
+    const double ey_w = x(ix::Y) - se.p.y();
+    const double ey = -ex * se.sin_r + ey_w * se.cos_r;
 
-    const double dey_dpx = -sin_r;
-    const double dey_dpy = cos_r;
-    const double dey_du = sin_r * d1.x() - cos_r * d1.y() - dtheta_du * (ex * cos_r + ey_w * sin_r);
+    const double dey_dpx = -se.sin_r;
+    const double dey_dpy = se.cos_r;
+    const double dey_du = se.sin_r * se.d1.x() - se.cos_r * se.d1.y() - dtheta_du * (ex * se.cos_r + ey_w * se.sin_r);
 
-    const double etheta = wrap_pi(x(ix::THETA) - thetar);
+    const double etheta = wrap_pi(x(ix::THETA) - se.thetar);
     const double cos_e = std::cos(etheta);
     const double sin_e = std::sin(etheta);
 
@@ -1114,7 +1117,7 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
     const double ddsdt_dv = dnum_dv * inv_denom;
     const double ddsdt_du = (dnum_du * denom - num * ddenom_du) * inv_denom2;
 
-    const double ddsdu_du = (d1_norm > 1e-12) ? (d1.dot(d2) / d1_norm) : 0.0;
+    const double ddsdu_du = (d1_norm > 1e-12) ? (se.d1.dot(se.d2) / d1_norm) : 0.0;
     const double d_inv_dsdu_dpathu = -ddsdu_du * duc_dpathu / (dsdu * dsdu);
 
     out.u_next_extrap = uc + MPC_DT * dsdt * inv_dsdu;
@@ -1130,13 +1133,13 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
     return out;
 }
 
-double advance_u_progress_extrapolated(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps) {
-    return advance_u_progress_extrapolated_with_jacobian(u_cur, x, ref_cps).u_next_extrap;
+double advance_u_progress_extrapolated(double u_cur, const StateVec& x, const SplinePath& spline) {
+    return advance_u_progress_extrapolated_with_jacobian(u_cur, x, spline).u_next_extrap;
 }
 
 /// 更新 Frenet 进度
-double advance_u_progress(double u_cur, const StateVec& x, const std::vector<Eigen::Vector2d>& ref_cps) {
-    return clamp_path_u_extrapolated(advance_u_progress_extrapolated(u_cur, x, ref_cps));
+double advance_u_progress(double u_cur, const StateVec& x, const SplinePath& spline) {
+    return SplinePath::clamp_u_extrapolated(advance_u_progress_extrapolated(u_cur, x, spline));
 }
 
 } // anonymous namespace
@@ -1149,7 +1152,7 @@ const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(int k) const 
 }
 
 template<int Horizon>
-std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_obstacle(int state_index, const StateVec& x) const {
+std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value) const {
     const auto& safety = p_.follow.rollout_safety;
     if (!safety.enable_lethal_obstacle_check) {
         return std::nullopt;
@@ -1161,6 +1164,11 @@ std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_
         x(ix::X),
         x(ix::Y)
     );
+
+    if (out_cost_value) {
+        *out_cost_value = sample.value;
+    }
+
     if (sample.value + COST_EPS < safety.lethal_obstacle_threshold) {
         return std::nullopt;
     }
@@ -1178,11 +1186,11 @@ double FollowProblemT<Horizon>::running_cost(int k, const StateVec& x, const Con
 }
 
 template<int Horizon>
-double FollowProblemT<Horizon>::running_cost_value_only(int k, const StateVec& x, const ControlVec& u) const {
+double FollowProblemT<Horizon>::running_cost_value_only(int k, const StateVec& x, const ControlVec& u, double* cached_cost_value) const {
     return follow_running_cost_value_only_impl(
-        x, u, ref_cps_, p_,
+        x, u, spline_, p_,
         cost_grid_for_step(k), cost_info_, dir_grid_, dir_info_,
-        rfr_pwr_limit_, active_step_mode_
+        rfr_pwr_limit_, active_step_mode_, cached_cost_value
     );
 }
 
@@ -1199,7 +1207,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 ) const {
     const auto& cg = cost_grid_for_step(k);
     const auto lin = follow_residual_linearized_impl(
-        x, u, ref_cps_, p_, cg, cost_info_, dir_grid_, dir_info_,
+        x, u, spline_, p_, cg, cost_info_, dir_grid_, dir_info_,
         rfr_pwr_limit_, active_step_mode_
     );
 
@@ -1208,12 +1216,10 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 
     {
         const double uc_raw = x(ix::PATH_U);
-        const double uc = clamp_path_u_extrapolated(uc_raw);
+        const double uc = SplinePath::clamp_u_extrapolated(uc_raw);
         if (uc < 1.0) {
-            const double duc_dpathu = clamp_derivative_piecewise(uc_raw, PATH_U_EXTRAP_MIN, PATH_U_EXTRAP_MAX);
-            Eigen::Vector2d d1;
-            eval_quadratic_bspline2_extrapolated(ref_cps_, uc, nullptr, &d1, nullptr);
-            const double ds_du = d1.norm();
+            const double duc_dpathu = clamp_derivative_piecewise(uc_raw, SplinePath::U_EXTRAP_MIN, SplinePath::U_EXTRAP_MAX);
+            const double ds_du = spline_.eval(uc).ds_du;
             lx(ix::PATH_U) -= (p_.follow.tracking_weights.q_u / MPC_HORIZON) * ds_du * duc_dpathu;
         }
     }
@@ -1768,7 +1774,7 @@ StateVec MPCSolver::make_initial_state(
 }
 
 std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow(
-    const SplineD& global_path,
+    const SplinePath& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
     const CostMap& cost_map,
@@ -1778,18 +1784,14 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const DirectionMap& direction_map,
     std::optional<ActiveStepMode> active_step_mode
 ) {
-    const auto& ref_cps = global_path.getControlPoints();
-    const bool path_changed = !same_cps(prev_ref_control_points_, ref_cps);
+    const bool path_changed = !(prev_ref_control_points_ && *prev_ref_control_points_ == global_path);
     const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
-    const double u0 = project_to_spline_u_extrapolated(
-        global_path,
+    const double u0 = global_path.project_extrapolated(
         chassis_pose_map.head<2>(),
         projection_hint,
         params_.follow.projection.proj_num_samples,
         params_.follow.projection.proj_search_window,
-        params_.follow.projection.local_search_lazy_distance,
-        PATH_U_EXTRAP_MIN,
-        PATH_U_EXTRAP_MAX
+        params_.follow.projection.local_search_lazy_distance
     );
     if (path_changed) {
         follow_warm_ = false;
@@ -1818,7 +1820,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         params_.kinematic_model
     );
 
-    prev_ref_control_points_ = ref_cps;
+    prev_ref_control_points_ = global_path;
 
     // ── 构建每个预测步的 cost grid view（复用缓存，避免重复分配） ──
     step_cost_grids_cache_.clear();
@@ -1843,7 +1845,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     const FollowProblem problem(
-        ref_cps, params_, step_cost_grids_cache_, ci, masked_global_grid, pred_dt, schedule_rho,
+        global_path, params_, step_cost_grids_cache_, ci, masked_global_grid, pred_dt, schedule_rho,
         dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode, u0
     );
 

@@ -37,7 +37,7 @@ public:
     void initialize(const CostMap& cost_map, DirectionMap::ConstPtr direction_map);
 
     /// 基于当前全局路径更新输出层。
-    void update(const std::optional<SplineD>& global_path);
+    void update(const std::optional<SplinePath>& global_path);
 
     [[nodiscard]] bool ready() const { return static_cast<bool>(base_direction_map_); }
 
@@ -52,7 +52,7 @@ private:
         double alpha;
     };
 
-    [[nodiscard]] double approximate_path_length(const SplineD& spline) const;
+    [[nodiscard]] double approximate_path_length(const SplinePath& spline) const;
     void build_kernel(double resolution);
     void apply_kernel_at(const Eigen::Vector2i& grid_coord, std::vector<double>& max_alpha) const;
 

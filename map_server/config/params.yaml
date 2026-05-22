@@ -14,7 +14,7 @@
       robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
       blue_nav_map_filename: "RMUC2026blue.png" # 全局导航地图路径（蓝方）
       red_nav_map_filename: "RMUC2026red.png" # 全局导航地图路径（红方）
-      default_nav_map_filename: "RMUC2026ns.png" # 获取机器人颜色超时后使用此全局导航地图
+      default_nav_map_filename: "RMUC2026.png" # 获取机器人颜色超时后使用此全局导航地图
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
       cloud_filename: "RMUC2026.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）

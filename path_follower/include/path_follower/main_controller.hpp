@@ -26,7 +26,7 @@ enum class StepDirection : uint8_t {
 /// 每个控制周期由 Node 填写、传入 MainController
 struct ControlInput {
     // ─── 路径 ───
-    std::optional<SplineD> global_path;
+    std::optional<SplinePath> global_path;
     bool path_updated;  // 本周期是否收到路径更新（包括空路径）
 
     // ─── fixed 目标 ───
@@ -179,7 +179,7 @@ private:
     bool check_stuck(const ControlInput& input);
     bool compute_is_hazard(const ControlInput& input) const;
     bool update_recovery_safe_flag(const ControlInput& input);
-    void recompute_follow_landmarks(const SplineD& path);
+    void recompute_follow_landmarks(const SplinePath& path);
     bool check_no_progress(const ControlInput& input, double current_u, const NoProgressGuardParams& params, FsmState current_state);
 
     // ─── 工具函数 ───
@@ -197,20 +197,20 @@ private:
         ActiveStepMode command;
     };
 
-    [[nodiscard]] double project_path_u(const ControlInput& input, const SplineD& path, double seed_u) const;
-    double advance_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
-    double retreat_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
-    [[nodiscard]] bool check_follow_projection_guard(const ControlInput& input, const SplineD& path, double current_u) const;
-    [[nodiscard]] bool check_step_block_replan(const ControlInput& input, const SplineD& path, double current_u) const;
-    std::vector<StepPlanSegment> build_step_plan(const SplineD& path, const DirectionMap& direction_map) const;
+    [[nodiscard]] double project_path_u(const ControlInput& input, const SplinePath& path, double seed_u) const;
+    double advance_path_u_by_distance(const SplinePath& path, double start_u, double distance) const;
+    double retreat_path_u_by_distance(const SplinePath& path, double start_u, double distance) const;
+    [[nodiscard]] bool check_follow_projection_guard(const ControlInput& input, const SplinePath& path, double current_u) const;
+    [[nodiscard]] bool check_step_block_replan(const ControlInput& input, const SplinePath& path, double current_u) const;
+    std::vector<StepPlanSegment> build_step_plan(const SplinePath& path, const DirectionMap& direction_map) const;
     void clear_step_runtime_state();
     void clear_step_plan();
-    void update_step_plan_for_path_change(bool has_new_path, const std::optional<SplineD>& path, const DirectionMap* direction_map);
+    void update_step_plan_for_path_change(bool has_new_path, const std::optional<SplinePath>& path, const DirectionMap* direction_map);
     void update_active_step_segment(const ControlInput& input, double current_u);
     [[nodiscard]] std::optional<size_t> find_active_step_segment_index(double current_u) const;
     [[nodiscard]] const StepPlanSegment* active_step_segment(double current_u) const;
     [[nodiscard]] const StepPlanSegment* current_step_command_segment(double current_u) const;
-    [[nodiscard]] uint8_t compute_step_distance_cm(const SplineD& path, double current_u) const;
+    [[nodiscard]] uint8_t compute_step_distance_cm(const SplinePath& path, double current_u) const;
     [[nodiscard]] bool should_activate_step_mode(double current_u) const;
     std::optional<ActiveStepMode> build_step_command(
         StepDirection direction,
@@ -252,7 +252,7 @@ private:
     // ─── 台阶检测 / 锁存 / 执行状态 ───
     std::vector<StepPlanSegment> step_plan_;
     std::optional<size_t> active_step_segment_index_;
-    std::optional<SplineD> step_locked_path_;
+    std::optional<SplinePath> step_locked_path_;
     bool step_locked_fixed_goal_ = false;
     Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
     bool deferred_external_path_update_ = false;
