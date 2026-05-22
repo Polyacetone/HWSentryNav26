@@ -105,9 +105,9 @@ struct StepDetectionParams {
     double detect_norm_threshold;
     double detect_dot_threshold;
     double path_sample_resolution;
-    double lookahead_distance;
-    double exit_advance_distance;
-    double step_engage_distance;
+    double prepare_distance;
+    double active_distance;
+    double release_distance;
 };
 
 struct NoProgressGuardParams {
@@ -185,11 +185,11 @@ private:
     // ─── 工具函数 ───
     struct StepPlanSegment {
         int path_version = 0;
-        double stepping_enter_u = 0.0;
-        double mode_enter_u = 0.0;
+        double prepare_u = 0.0;
+        double active_u = 0.0;
         double step_enter_u = 0.0;
         double step_exit_u = 0.0;
-        double stepping_exit_u = 0.0;
+        double release_u = 1.0;
         Eigen::Vector2d step_enter_pos_map = Eigen::Vector2d::Zero();
         Eigen::Vector2d step_exit_pos_map = Eigen::Vector2d::Zero();
         Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
@@ -211,7 +211,7 @@ private:
     [[nodiscard]] const StepPlanSegment* active_step_segment(double current_u) const;
     [[nodiscard]] const StepPlanSegment* current_step_command_segment(double current_u) const;
     [[nodiscard]] uint8_t compute_step_distance_cm(const SplineD& path, double current_u) const;
-    [[nodiscard]] bool should_engage_step_mode(double current_u) const;
+    [[nodiscard]] bool should_activate_step_mode(double current_u) const;
     std::optional<ActiveStepMode> build_step_command(
         StepDirection direction,
         const Eigen::Vector2d& step_enter_pos_map,

@@ -418,9 +418,9 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .detect_norm_threshold = declare_parameter<double>("step.detection.detect_norm_threshold"),
         .detect_dot_threshold = declare_parameter<double>("step.detection.detect_dot_threshold"),
         .path_sample_resolution = declare_parameter<double>("step.detection.path_sample_resolution"),
-        .lookahead_distance = declare_parameter<double>("step.detection.lookahead_distance"),
-        .exit_advance_distance = declare_parameter<double>("step.detection.exit_advance_distance"),
-        .step_engage_distance = declare_parameter<double>("step.detection.step_engage_distance")
+        .prepare_distance = declare_parameter<double>("step.detection.prepare_distance"),
+        .active_distance = declare_parameter<double>("step.detection.active_distance"),
+        .release_distance = declare_parameter<double>("step.detection.release_distance")
     };
     nav_params.follow_no_progress_guard = {
         .landmark_spacing = declare_parameter<double>("no_progress_guard.follow.landmark_spacing"),

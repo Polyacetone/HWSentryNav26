@@ -549,7 +549,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
         out.mode = ChassisMode::NORMAL;
-    } else if (const auto active_step_mode = current_active_step_mode(u0); active_step_mode && should_engage_step_mode(u0)) {
+    } else if (const auto active_step_mode = current_active_step_mode(u0); active_step_mode && should_activate_step_mode(u0)) {
         out.mode = active_step_mode->mode;
     } else {
         out.mode = ChassisMode::NORMAL;

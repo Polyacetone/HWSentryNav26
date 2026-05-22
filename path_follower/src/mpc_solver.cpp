@@ -576,7 +576,8 @@ FollowProblemT<Horizon>::FollowProblemT(
     const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit,
-    std::optional<ActiveStepMode> active_step_mode
+    std::optional<ActiveStepMode> active_step_mode,
+    double current_path_u
 ):
     ref_cps_(ref_control_points),
     p_(params),
@@ -589,7 +590,8 @@ FollowProblemT<Horizon>::FollowProblemT(
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
-    active_step_mode_(active_step_mode) {
+    active_step_mode_(active_step_mode),
+    current_path_u_(current_path_u) {
     Eigen::Vector2d p;
     eval_quadratic_bspline2_extrapolated(ref_control_points, 1.0, &p, nullptr, nullptr);
     goal_xy_ = p;
@@ -614,14 +616,56 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_lower() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
-    return ControlVec(command_bounds.vel_min, command_bounds.omega_min);
+    const auto& normal_bounds = p_.follow.mode_profiles.normal.command_bounds;
+    if (!active_step_mode_ || active_step_mode_->mode == ChassisMode::NORMAL) {
+        return ControlVec(normal_bounds.vel_min, normal_bounds.omega_min);
+    }
+
+    const auto& step_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
+
+    double factor = 0.0;
+    const double pu = active_step_mode_->prepare_u;
+    const double au = active_step_mode_->active_u;
+    if (current_path_u_ >= au) {
+        factor = 1.0;
+    } else if (current_path_u_ > pu) {
+        const double range = au - pu;
+        if (range > 1e-10) {
+            factor = (current_path_u_ - pu) / range;
+        }
+    }
+
+    return ControlVec(
+        normal_bounds.vel_min * (1.0 - factor) + step_bounds.vel_min * factor,
+        normal_bounds.omega_min * (1.0 - factor) + step_bounds.omega_min * factor
+    );
 }
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_upper() const {
-    const auto& command_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
-    return ControlVec(command_bounds.vel_max, command_bounds.omega_max);
+    const auto& normal_bounds = p_.follow.mode_profiles.normal.command_bounds;
+    if (!active_step_mode_ || active_step_mode_->mode == ChassisMode::NORMAL) {
+        return ControlVec(normal_bounds.vel_max, normal_bounds.omega_max);
+    }
+
+    const auto& step_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
+
+    double factor = 0.0;
+    const double pu = active_step_mode_->prepare_u;
+    const double au = active_step_mode_->active_u;
+    if (current_path_u_ >= au) {
+        factor = 1.0;
+    } else if (current_path_u_ > pu) {
+        const double range = au - pu;
+        if (range > 1e-10) {
+            factor = (current_path_u_ - pu) / range;
+        }
+    }
+
+    return ControlVec(
+        normal_bounds.vel_max * (1.0 - factor) + step_bounds.vel_max * factor,
+        normal_bounds.omega_max * (1.0 - factor) + step_bounds.omega_max * factor
+    );
 }
 
 template<int Horizon>
@@ -648,7 +692,8 @@ FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const std::
         dir_info_,
         remaining_energy_,
         rfr_pwr_limit_,
-        active_step_mode_
+        active_step_mode_,
+        current_path_u_
     );
 }
 
@@ -1544,11 +1589,25 @@ void fill_solver_controls(SolverT& solver, const ControlVec& u) {
 }
 
 template<typename SolverT, typename ProblemT>
-void clamp_solver_controls(SolverT& solver, const ProblemT& prob) {
+void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
     const auto u_lo = prob.u_lower();
     const auto u_hi = prob.u_upper();
     for (size_t k = 0; k < SolverT::N; ++k) {
-        solver.us[k] = solver.us[k].cwiseMax(u_lo).cwiseMin(u_hi);
+        auto& u = solver.us[k];
+        double scale = 1.0;
+        for (int i = 0; i < SolverT::NU; ++i) {
+            if (u(i) > u_hi(i) && u_hi(i) != 0.0) {
+                scale = std::min(scale, u_hi(i) / u(i));
+            } else if (u(i) < u_lo(i) && u_lo(i) != 0.0) {
+                scale = std::min(scale, u_lo(i) / u(i));
+            }
+        }
+        if (scale < 1.0) {
+            u *= scale;
+        }
+        for (int i = 0; i < SolverT::NU; ++i) {
+            u(i) = std::clamp(u(i), u_lo(i), u_hi(i));
+        }
     }
 }
 
@@ -1559,7 +1618,7 @@ void initialize_primal_trajectory(SolverT& solver, const ProblemT& prob, const S
     } else {
         zero_solver_controls(solver);
     }
-    clamp_solver_controls(solver, prob);
+    scale_solver_controls(solver, prob);
     rollout_solver_states(solver, prob, x0);
 }
 
@@ -1785,7 +1844,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const FollowProblem problem(
         ref_cps, params_, step_cost_grids_cache_, ci, masked_global_grid, pred_dt, schedule_rho,
-        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode
+        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode, u0
     );
 
     fddp::SolverOptions opts;
@@ -1798,7 +1857,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     } else {
         fill_solver_controls(follow_solver_, cmd0);
     }
-    clamp_solver_controls(follow_solver_, problem);
+    scale_solver_controls(follow_solver_, problem);
 
     MPPIFollowSamplingResult mppi_result;
     bool seeded_by_mppi = false;

@@ -1,8 +1,4 @@
 #include <path_follower/main_controller.hpp>
-
-#include <algorithm>
-#include <limits>
-
 #include <rclcpp/logging.hpp>
 
 namespace path_follower {
@@ -177,42 +173,42 @@ std::vector<MainController::StepPlanSegment> MainController::build_step_plan(
 
     for (size_t i = 0; i < plan.size(); ++i) {
         StepPlanSegment& segment = plan[i];
-        segment.stepping_enter_u = retreat_path_u_by_distance(path, segment.step_enter_u, nav_params_.step_detection.lookahead_distance);
-        segment.mode_enter_u = retreat_path_u_by_distance(path, segment.step_enter_u, nav_params_.step_detection.step_engage_distance);
-        segment.stepping_exit_u = advance_path_u_by_distance(path, segment.step_exit_u, nav_params_.step_detection.exit_advance_distance);
+        segment.prepare_u = retreat_path_u_by_distance(path, segment.step_enter_u, nav_params_.step_detection.prepare_distance);
+        segment.active_u = retreat_path_u_by_distance(path, segment.step_enter_u, nav_params_.step_detection.active_distance);
+        segment.release_u = advance_path_u_by_distance(path, segment.step_exit_u, nav_params_.step_detection.release_distance);
     }
 
     for (size_t i = 1; i < plan.size(); ++i) {
         StepPlanSegment& prev_segment = plan[i - 1];
         StepPlanSegment& cur_segment = plan[i];
 
-        if (cur_segment.stepping_enter_u < prev_segment.stepping_exit_u) {
-            cur_segment.stepping_enter_u = prev_segment.stepping_exit_u;
+        if (cur_segment.prepare_u < prev_segment.release_u) {
+            cur_segment.prepare_u = prev_segment.release_u;
         }
-        if (cur_segment.mode_enter_u < cur_segment.stepping_enter_u) {
-            cur_segment.mode_enter_u = cur_segment.stepping_enter_u;
+        if (cur_segment.active_u < cur_segment.prepare_u) {
+            cur_segment.active_u = cur_segment.prepare_u;
         }
 
-        if (prev_segment.mode_enter_u > prev_segment.step_enter_u) {
-            prev_segment.mode_enter_u = prev_segment.step_enter_u;
+        if (prev_segment.active_u > prev_segment.step_enter_u) {
+            prev_segment.active_u = prev_segment.step_enter_u;
         }
-        if (prev_segment.mode_enter_u > prev_segment.stepping_exit_u) {
-            prev_segment.mode_enter_u = prev_segment.stepping_exit_u;
+        if (cur_segment.prepare_u > cur_segment.step_enter_u) {
+            cur_segment.prepare_u = cur_segment.step_enter_u;
         }
-        if (cur_segment.stepping_enter_u > cur_segment.step_enter_u) {
-            cur_segment.stepping_enter_u = cur_segment.step_enter_u;
-        }
-        if (cur_segment.mode_enter_u > cur_segment.step_enter_u) {
-            cur_segment.mode_enter_u = cur_segment.step_enter_u;
+        if (cur_segment.active_u > cur_segment.step_enter_u) {
+            cur_segment.active_u = cur_segment.step_enter_u;
         }
     }
 
     for (StepPlanSegment& segment : plan) {
-        segment.stepping_enter_u = std::clamp(segment.stepping_enter_u, 0.0, segment.step_enter_u);
-        segment.mode_enter_u = std::clamp(segment.mode_enter_u, segment.stepping_enter_u, segment.step_enter_u);
+        segment.prepare_u = std::clamp(segment.prepare_u, 0.0, segment.step_enter_u);
+        segment.active_u = std::clamp(segment.active_u, segment.prepare_u, segment.step_enter_u);
         segment.step_exit_u = std::max(segment.step_exit_u, segment.step_enter_u);
-        segment.stepping_exit_u = std::max(segment.stepping_exit_u, segment.step_exit_u);
+        segment.release_u = std::max(segment.release_u, segment.step_exit_u);
         segment.command.step_entry_u = segment.step_enter_u;
+        segment.command.prepare_u = segment.prepare_u;
+        segment.command.active_u = segment.active_u;
+        segment.command.release_u = segment.release_u;
     }
 
     return plan;
@@ -254,10 +250,10 @@ void MainController::update_step_plan_for_path_change(
 std::optional<size_t> MainController::find_active_step_segment_index(const double current_u) const {
     for (size_t i = 0; i < step_plan_.size(); ++i) {
         const StepPlanSegment& segment = step_plan_[i];
-        if (current_u + U_EPSILON < segment.stepping_enter_u) {
+        if (current_u + U_EPSILON < segment.prepare_u) {
             break;
         }
-        if (current_u < segment.stepping_exit_u) {
+        if (current_u < segment.release_u) {
             return i;
         }
     }
@@ -300,12 +296,13 @@ void MainController::update_active_step_segment(const ControlInput& input, const
     const StepPlanSegment& segment = step_plan_[*active_step_segment_index_];
     RCLCPP_DEBUG(
         logger_,
-        "Activated step segment #%zu: stepping=[%.3f, %.3f) step=[%.3f, %.3f] mode=%s",
+        "Activated step segment #%zu: prepare=[%.3f, %.3f) step=[%.3f, %.3f] active_u=%.3f mode=%s",
         *active_step_segment_index_,
-        segment.stepping_enter_u,
-        segment.stepping_exit_u,
-        segment.step_enter_u,
+        segment.prepare_u,
+        segment.release_u,
         segment.step_exit_u,
+        segment.active_u,
+        segment.release_u,
         mode_label(segment.command.mode)
     );
 }
@@ -325,10 +322,10 @@ uint8_t MainController::compute_step_distance_cm(const SplineD& path, const doub
     return static_cast<uint8_t>(std::clamp<int64_t>(rounded_cm, 0, 255));
 }
 
-bool MainController::should_engage_step_mode(const double current_u) const {
+bool MainController::should_activate_step_mode(const double current_u) const {
     const StepPlanSegment* const segment = current_step_command_segment(current_u);
     if (!segment) return false;
-    return current_u + U_EPSILON >= segment->mode_enter_u;
+    return current_u + U_EPSILON >= segment->active_u;
 }
 
 std::optional<ActiveStepMode> MainController::build_step_command(

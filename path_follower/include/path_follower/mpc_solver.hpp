@@ -308,6 +308,9 @@ struct ActiveStepMode {
     ChassisMode mode = ChassisMode::NORMAL;
     double target_velocity = 0.0;
     std::optional<double> step_entry_u = std::nullopt;
+    double prepare_u = 0.0;
+    double active_u = 0.0;
+    double release_u = 1.0;
 
     bool operator==(const ActiveStepMode&) const = default;
 };
@@ -419,7 +422,8 @@ public:
         const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit,
-        std::optional<ActiveStepMode> active_step_mode
+        std::optional<ActiveStepMode> active_step_mode,
+        double current_path_u
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -465,6 +469,7 @@ private:
     double remaining_energy_;
     double rfr_pwr_limit_;
     std::optional<ActiveStepMode> active_step_mode_;
+    double current_path_u_;
 };
 
 using FollowProblem = FollowProblemT<MPC_HORIZON>;

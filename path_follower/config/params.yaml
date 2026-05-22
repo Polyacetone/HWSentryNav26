@@ -57,9 +57,9 @@
         detect_norm_threshold: 0.9 # 方向场模长阈值，用于在路径上探测台阶 enter/exit 位置
         detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，< -阈值为下台阶
         path_sample_resolution: 0.05 # 沿路径采样分辨率 (m)
-        lookahead_distance: 4.0 # 沿路径向前扩展 STEPPING 起点的距离 (m)
-        step_engage_distance: 2.0 # 下发台阶底盘模式的距离门槛 (m)：距台阶入口 < 此值才把台阶模式发给下位机，此前仅使用台阶限速减速但 out.mode 仍为 NORMAL
-        exit_advance_distance: 0.3 # 退出 STEPPING 的额外推进距离 (m)：路径预处理时将台阶结束点向后扩展该距离
+        prepare_distance: 4.0 # 控制约束渐变起点 (m)：距台阶入口 < 此值时控制限从 normal 向台阶模式线性渐变
+        active_distance: 2.0 # 控制约束渐变终点 (m)：距台阶入口 < 此值时控制限完全切换为台阶模式，同时下发台阶底盘模式
+        release_distance: 0.3 # 退出 STEPPING 的额外推进距离 (m)：路径预处理时将台阶结束点向后扩展该距离
 
     state_machine:
       follow_to_spin_vel_max: 0.2 # STOPPING→SPIN 退出判定：|v_cmd| < 该值 (m/s)
