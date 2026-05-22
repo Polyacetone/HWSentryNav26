@@ -326,7 +326,7 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     ControlInput effective_input = input;
     bool had_deferred_update = false;
-    const bool step_path_locked = active_step_command_.has_value() && step_locked_path_.has_value();
+    const bool step_path_locked = active_step_segment_index_.has_value() && step_locked_path_.has_value();
     if (step_path_locked) {
         if (input.path_updated || !input.global_path.has_value()) {
             deferred_external_path_update_ = true;
@@ -351,9 +351,9 @@ ControlOutput MainController::update(const ControlInput& input) {
     const bool has_path = effective_input.global_path.has_value();
     const bool has_new_path = has_path && effective_input.path_updated;
 
-    update_step_state_for_path_change(has_new_path);
+    update_step_plan_for_path_change(has_new_path, effective_input.global_path, effective_input.masked_direction_map);
     if (!has_path) {
-        clear_step_state();
+        clear_step_plan();
     }
 
     if (has_new_path) {
@@ -367,10 +367,11 @@ ControlOutput MainController::update(const ControlInput& input) {
     const double current_u = has_path ? project_path_u(effective_input, *effective_input.global_path, last_reference_u_) : 0.0;
     if (has_path) {
         last_reference_u_ = current_u;
-        if (effective_input.masked_direction_map) {
-            extend_active_step_exit(*effective_input.global_path, *effective_input.masked_direction_map);
+        if (prev_state == FsmState::FOLLOW || prev_state == FsmState::STEPPING) {
+            update_active_step_segment(effective_input, current_u);
+        } else {
+            clear_step_runtime_state();
         }
-        update_step_release(*effective_input.global_path, current_u);
     }
 
     bool request_replan_now = follow_stop_and_wait_replan_pending_;
@@ -393,10 +394,6 @@ ControlOutput MainController::update(const ControlInput& input) {
         }
     }
 
-    if (!request_replan_now && has_path && prev_state == FsmState::FOLLOW) {
-        request_replan_now = !command_blocked && prepare_follow_step_behavior(effective_input, *effective_input.global_path, current_u);
-    }
-
     // stepping 期间若有路径更新被延迟锁存，stepping 结束后强制重规划，
     // 避免使用在新位置下已失效的旧路径触发 follow_proj_guard 等问题。
     if (!request_replan_now && had_deferred_update) {
@@ -412,7 +409,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.chassis_pos_map = effective_input.chassis_pose_map.head<2>();
     fsm_input.fixed_goal_flag = effective_input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
-    fsm_input.step_active = is_step_active();
+    fsm_input.step_active = is_step_active(current_u);
     fsm_input.replan_requested = request_replan_now;
     fsm_input.replan_failed = !has_path && effective_input.path_updated;
     fsm_input.command_blocked = command_blocked;
@@ -463,7 +460,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     output.keep_goal_on_path_consume = output.request_replan || state == FsmState::WAIT_REPLAN;
     if (output.consume_global_path) {
         last_reference_u_ = 0.0;
-        clear_step_state();
+        clear_step_plan();
     }
 
     // 4. 同步已发布指令到 FSM / MPC；IDLE / SPIN / STUCK_REVERSE 无 track 连续性，
@@ -513,7 +510,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         *input.global_path, input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, *input.masked_global_cost_map, input.per_step_cost_maps, input.prediction_dt,
         *input.masked_direction_map,
-        current_active_step_mode()
+        current_active_step_mode(u0)
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
@@ -544,7 +541,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         } else {
             RCLCPP_WARN(logger_, "Follow rollout entered lethal obstacle; outputting solve_stop and requesting wait_replan next cycle");
         }
-        clear_step_state();
+        clear_step_plan();
     }
 
     out.velocity = cmd.x();
@@ -552,8 +549,8 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
         out.mode = ChassisMode::NORMAL;
-    } else if (active_step_command_ && should_engage_step_mode(*input.global_path, u0)) {
-        out.mode = active_step_command_->mode;
+    } else if (const auto active_step_mode = current_active_step_mode(u0); active_step_mode && should_engage_step_mode(u0)) {
+        out.mode = active_step_mode->mode;
     } else {
         out.mode = ChassisMode::NORMAL;
     }
@@ -564,7 +561,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     if (!prediction.rollout_paths.empty()) {
         out.mppi_rollouts = std::move(prediction.rollout_paths);
     }
-    out.step_dist_cm = compute_step_distance_cm(input, u0, prediction);
+    out.step_dist_cm = compute_step_distance_cm(*input.global_path, u0);
     out.valid = true;
 
     return out;
@@ -622,7 +619,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
     }
 
     if (prev_follow_like && !next_follow_like) {
-        clear_step_state();
+        clear_step_runtime_state();
         last_reference_u_ = 0.0;
         follow_max_landmark_idx_ = -1;
         follow_stop_and_wait_replan_pending_ = false;
@@ -632,7 +629,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
     }
 
     if (next == FsmState::WAIT_REPLAN) {
-        clear_step_state();
+        clear_step_plan();
         last_reference_u_ = 0.0;
         follow_stop_and_wait_replan_pending_ = false;
     }

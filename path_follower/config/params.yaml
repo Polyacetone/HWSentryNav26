@@ -26,8 +26,8 @@
 
     step_mask:
       path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积 >= 该值，认为路径经过台阶（触发掩码软擦除）
-      full_effect_radius: 0.4 # 掩码满强度半径 (m)：<= 该距离内 alpha=1（cost 全擦除，dir 全保留）
-      cutoff_radius: 0.8 # 掩码截止半径 (m)：>= 该距离内 alpha=0（cost 全保留，dir 全擦除）
+      full_effect_radius: 0.6 # 掩码满强度半径 (m)：<= 该距离内 alpha=1（cost 全擦除，dir 全保留）
+      cutoff_radius: 1.0 # 掩码截止半径 (m)：>= 该距离内 alpha=0（cost 全保留，dir 全擦除）
       length_num_samples: 100 # 路径弧长估计采样数
 
     follow_proj_guard:
@@ -57,13 +57,9 @@
         detect_norm_threshold: 0.9 # 方向场模长阈值，用于在路径上探测台阶 enter/exit 位置
         detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，< -阈值为下台阶
         path_sample_resolution: 0.05 # 沿路径采样分辨率 (m)
-        target_match_distance: 0.4 # 连续检测视为同一台阶目标的位置阈值 (m)
-        rollout_match_distance: 0.8 # rollout 扫到的台阶与当前锁存目标匹配的位置阈值 (m)
-        latch_threshold: 3 # 进入 STEPPING 的滞回计数：连续 latch_threshold 次检测到同一台阶目标才锁存
-        release_threshold: 3 # 退出 STEPPING 的滞回计数：连续 release_threshold 次过退出距离才释放
-        lookahead_distance: 4.0 # 沿路径向前搜索台阶的距离范围 (m)；也作为进入 STEPPING 模式的提前量
-        step_engage_distance: 1.5 # 下发台阶底盘模式的距离门槛 (m)：距台阶入口 < 此值才把台阶模式发给下位机，此前仅使用台阶限速减速但 out.mode 仍为 NORMAL
-        exit_advance_distance: 0.3 # 退出 STEPPING 的额外推进距离 (m)：current_u >= exit_u + exit_advance_distance 且满足滞回计数后才释放
+        lookahead_distance: 4.0 # 沿路径向前扩展 STEPPING 起点的距离 (m)
+        step_engage_distance: 2.0 # 下发台阶底盘模式的距离门槛 (m)：距台阶入口 < 此值才把台阶模式发给下位机，此前仅使用台阶限速减速但 out.mode 仍为 NORMAL
+        exit_advance_distance: 0.3 # 退出 STEPPING 的额外推进距离 (m)：路径预处理时将台阶结束点向后扩展该距离
 
     state_machine:
       follow_to_spin_vel_max: 0.2 # STOPPING→SPIN 退出判定：|v_cmd| < 该值 (m/s)
@@ -80,7 +76,7 @@
         weight: 6.0 # 能量软约束权重
 
       follow:
-        max_iters: 20 # FDDP 求解器最大迭代次数
+        max_iters: 30 # FDDP 求解器最大迭代次数
         mppi:
           enable: false # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
           num_threads: 2 # MPPI并行线程数
@@ -173,8 +169,8 @@
         command_weights:
           r_v: 0.001 # 线速度正则
           r_omega: 0.001 # 角速度正则
-          r_dv: 0.4 # 线速度平滑
-          r_domega: 0.4 # 角速度平滑
+          r_dv: 0.2 # 线速度平滑
+          r_domega: 0.1 # 角速度平滑
         motion_constraint_weights:
           acc_limit: 30.0 # 速度指令变化率超限惩罚
           alpha_limit: 30.0 # 角速度指令变化率超限惩罚
@@ -193,7 +189,7 @@
         terminal_weights:
           q_v_final: 0.2 # 终端减速权重（全程激活）：v_allowed = sqrt(2 * a_brake * s + v_target^2)
           a_brake: 2.2 # m/s², 期望制动减速度
-          slow_down_target_vel: 0.2 # m/s, 终点目标速度
+          slow_down_target_vel: 0.1 # m/s, 终点目标速度
         projection:
           num_samples: 50 # 投影到样条参数u的采样数
           search_window: 0.1 # 局部搜索窗口 (0~1)

@@ -418,10 +418,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         .detect_norm_threshold = declare_parameter<double>("step.detection.detect_norm_threshold"),
         .detect_dot_threshold = declare_parameter<double>("step.detection.detect_dot_threshold"),
         .path_sample_resolution = declare_parameter<double>("step.detection.path_sample_resolution"),
-        .target_match_distance = declare_parameter<double>("step.detection.target_match_distance"),
-        .rollout_match_distance = declare_parameter<double>("step.detection.rollout_match_distance"),
-        .latch_threshold = static_cast<int>(declare_parameter<int>("step.detection.latch_threshold")),
-        .release_threshold = static_cast<int>(declare_parameter<int>("step.detection.release_threshold")),
         .lookahead_distance = declare_parameter<double>("step.detection.lookahead_distance"),
         .exit_advance_distance = declare_parameter<double>("step.detection.exit_advance_distance"),
         .step_engage_distance = declare_parameter<double>("step.detection.step_engage_distance")

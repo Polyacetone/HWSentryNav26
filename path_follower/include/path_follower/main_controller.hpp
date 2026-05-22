@@ -16,6 +16,11 @@
 
 namespace path_follower {
 
+enum class StepDirection : uint8_t {
+    UP,
+    DOWN,
+};
+
 // ═══════════════════════ 控制器输入 ═══════════════════════════
 
 /// 每个控制周期由 Node 填写、传入 MainController
@@ -100,10 +105,6 @@ struct StepDetectionParams {
     double detect_norm_threshold;
     double detect_dot_threshold;
     double path_sample_resolution;
-    double target_match_distance;
-    double rollout_match_distance;
-    int latch_threshold;
-    int release_threshold;
     double lookahead_distance;
     double exit_advance_distance;
     double step_engage_distance;
@@ -182,56 +183,44 @@ private:
     bool check_no_progress(const ControlInput& input, double current_u, const NoProgressGuardParams& params, FsmState current_state);
 
     // ─── 工具函数 ───
-    enum class StepDirection : uint8_t {
-        UP,
-        DOWN,
-    };
-
-    struct PathStepTarget {
+    struct StepPlanSegment {
         int path_version = 0;
-        double enter_u = 0.0;
-        double exit_u = 0.0;
-        Eigen::Vector2d enter_pos_map = Eigen::Vector2d::Zero();
-        Eigen::Vector2d exit_pos_map = Eigen::Vector2d::Zero();
+        double stepping_enter_u = 0.0;
+        double mode_enter_u = 0.0;
+        double step_enter_u = 0.0;
+        double step_exit_u = 0.0;
+        double stepping_exit_u = 0.0;
+        Eigen::Vector2d step_enter_pos_map = Eigen::Vector2d::Zero();
+        Eigen::Vector2d step_exit_pos_map = Eigen::Vector2d::Zero();
         Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
         StepDirection direction = StepDirection::UP;
+        ActiveStepMode command;
     };
 
-    struct StepTargetObservation {
-        double distance_from_start = 0.0;
-        Eigen::Vector2d pos_map = Eigen::Vector2d::Zero();
-        Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
-        StepDirection direction = StepDirection::UP;
-    };
-
-    std::optional<PathStepTarget> detect_step_target_on_path(
-        const SplineD& path,
-        double start_u,
-        const DirectionMap& direction_map
-    ) const;
-    std::optional<StepTargetObservation> detect_step_target_on_rollout(
-        const std::vector<Eigen::Vector2d>& rollout_path_map,
-        const DirectionMap& direction_map
-    ) const;
     [[nodiscard]] double project_path_u(const ControlInput& input, const SplineD& path, double seed_u) const;
     double advance_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
+    double retreat_path_u_by_distance(const SplineD& path, double start_u, double distance) const;
     [[nodiscard]] bool check_follow_projection_guard(const ControlInput& input, const SplineD& path, double current_u) const;
     [[nodiscard]] bool check_step_block_replan(const ControlInput& input, const SplineD& path, double current_u) const;
-    bool prepare_follow_step_behavior(const ControlInput& input, const SplineD& path, double current_u);
-    bool is_same_step_target(const PathStepTarget& lhs, const PathStepTarget& rhs) const;
-    bool is_same_step_target(const PathStepTarget& target, const StepTargetObservation& observation) const;
-    void clear_step_state();
-    void update_step_state_for_path_change(bool has_new_path);
-    void update_step_release(const SplineD& path, double current_u);
-    void extend_active_step_exit(const SplineD& path, const DirectionMap& direction_map);
-    [[nodiscard]] bool is_currently_inside_active_step(double current_u) const;
-    [[nodiscard]] uint8_t compute_step_distance_cm(const ControlInput& input, double current_u, const MPCPrediction& prediction) const;
-    [[nodiscard]] bool should_engage_step_mode(const SplineD& path, double current_u) const;
-    std::optional<PathStepTarget> try_latch_step_target(const SplineD& path, double current_u, const DirectionMap& direction_map);
-    std::optional<ActiveStepMode> build_step_command(const PathStepTarget& target, const DirectionMap& direction_map) const;
+    std::vector<StepPlanSegment> build_step_plan(const SplineD& path, const DirectionMap& direction_map) const;
+    void clear_step_runtime_state();
+    void clear_step_plan();
+    void update_step_plan_for_path_change(bool has_new_path, const std::optional<SplineD>& path, const DirectionMap* direction_map);
+    void update_active_step_segment(const ControlInput& input, double current_u);
+    [[nodiscard]] std::optional<size_t> find_active_step_segment_index(double current_u) const;
+    [[nodiscard]] const StepPlanSegment* active_step_segment(double current_u) const;
+    [[nodiscard]] const StepPlanSegment* current_step_command_segment(double current_u) const;
+    [[nodiscard]] uint8_t compute_step_distance_cm(const SplineD& path, double current_u) const;
+    [[nodiscard]] bool should_engage_step_mode(double current_u) const;
+    std::optional<ActiveStepMode> build_step_command(
+        StepDirection direction,
+        const Eigen::Vector2d& step_enter_pos_map,
+        double step_enter_u,
+        const DirectionMap& direction_map
+    ) const;
     double step_speed_from_level(uint8_t speed_level) const;
-    std::optional<ActiveStepMode> current_active_step_mode() const;
-    bool is_step_active() const;
+    std::optional<ActiveStepMode> current_active_step_mode(double current_u) const;
+    bool is_step_active(double current_u) const;
 
     static double wrap_pi(double a) {
         return std::atan2(std::sin(a), std::cos(a));
@@ -261,11 +250,8 @@ private:
     Eigen::Vector2d stuck_start_pos_ = Eigen::Vector2d::Zero();
 
     // ─── 台阶检测 / 锁存 / 执行状态 ───
-    std::optional<PathStepTarget> pending_step_target_detection_;
-    int pending_step_target_on_count_ = 0;
-    int pending_step_release_count_ = 0;
-    std::optional<PathStepTarget> active_step_target_;
-    std::optional<ActiveStepMode> active_step_command_;
+    std::vector<StepPlanSegment> step_plan_;
+    std::optional<size_t> active_step_segment_index_;
     std::optional<SplineD> step_locked_path_;
     bool step_locked_fixed_goal_ = false;
     Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
