@@ -15,21 +15,48 @@ namespace {
 constexpr double COST_EPS = 1e-9;
 constexpr double REACHABILITY_EPS = 1e-6;
 
-const MPCFollowModeProfile& select_follow_mode_profile(
+MPCFollowModeProfile select_follow_mode_profile(
     const MPCFollowParams& params,
     std::optional<ActiveStepMode> active_step_mode
 ) {
-    if (!active_step_mode) {
+    if (!active_step_mode || active_step_mode->mode == ChassisMode::NORMAL) {
         return params.mode_profiles.normal;
     }
-    switch (active_step_mode->mode) {
-        case ChassisMode::STEP_UP_LEG_SHORT: return params.mode_profiles.up.short_leg;
-        case ChassisMode::STEP_UP_JUMP: return params.mode_profiles.up.jump;
-        case ChassisMode::STEP_UP_LEG_LONG: return params.mode_profiles.up.long_leg;
-        case ChassisMode::STEP_DOWN_LEG_SHORT: return params.mode_profiles.down.short_leg;
-        case ChassisMode::STEP_DOWN_JUMP: return params.mode_profiles.down.jump;
-        default: return params.mode_profiles.normal;
+
+    const double factor = active_step_mode->mode_blend_factor;
+    if (factor <= 0.0) {
+        return params.mode_profiles.normal;
     }
+
+    const auto& step_profile = [&]() -> const MPCFollowModeProfile& {
+        switch (active_step_mode->mode) {
+            case ChassisMode::STEP_UP_LEG_SHORT: return params.mode_profiles.up.short_leg;
+            case ChassisMode::STEP_UP_JUMP: return params.mode_profiles.up.jump;
+            case ChassisMode::STEP_UP_LEG_LONG: return params.mode_profiles.up.long_leg;
+            case ChassisMode::STEP_DOWN_LEG_SHORT: return params.mode_profiles.down.short_leg;
+            case ChassisMode::STEP_DOWN_JUMP: return params.mode_profiles.down.jump;
+            default: return params.mode_profiles.normal;
+        }
+    }();
+
+    if (factor >= 1.0) {
+        return step_profile;
+    }
+
+    const auto& n = params.mode_profiles.normal;
+    return MPCFollowModeProfile {
+        .command_bounds = {
+            .vel_max = n.command_bounds.vel_max * (1.0 - factor) + step_profile.command_bounds.vel_max * factor,
+            .vel_min = n.command_bounds.vel_min * (1.0 - factor) + step_profile.command_bounds.vel_min * factor,
+            .omega_max = n.command_bounds.omega_max * (1.0 - factor) + step_profile.command_bounds.omega_max * factor,
+            .omega_min = n.command_bounds.omega_min * (1.0 - factor) + step_profile.command_bounds.omega_min * factor,
+        },
+        .motion_constraints = {
+            .acc_max = n.motion_constraints.acc_max * (1.0 - factor) + step_profile.motion_constraints.acc_max * factor,
+            .alpha_max = n.motion_constraints.alpha_max * (1.0 - factor) + step_profile.motion_constraints.alpha_max * factor,
+            .a_lat_max = n.motion_constraints.a_lat_max * (1.0 - factor) + step_profile.motion_constraints.a_lat_max * factor,
+        }
+    };
 }
 
 bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) {
@@ -632,56 +659,14 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_lower() const {
-    const auto& normal_bounds = p_.follow.mode_profiles.normal.command_bounds;
-    if (!active_step_mode_ || active_step_mode_->mode == ChassisMode::NORMAL) {
-        return ControlVec(normal_bounds.vel_min, normal_bounds.omega_min);
-    }
-
-    const auto& step_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
-
-    double factor = 0.0;
-    const double pu = active_step_mode_->prepare_u;
-    const double au = active_step_mode_->active_u;
-    if (current_path_u_ >= au) {
-        factor = 1.0;
-    } else if (current_path_u_ > pu) {
-        const double range = au - pu;
-        if (range > 1e-10) {
-            factor = (current_path_u_ - pu) / range;
-        }
-    }
-
-    return ControlVec(
-        normal_bounds.vel_min * (1.0 - factor) + step_bounds.vel_min * factor,
-        normal_bounds.omega_min * (1.0 - factor) + step_bounds.omega_min * factor
-    );
+    const auto profile = select_follow_mode_profile(p_.follow, active_step_mode_);
+    return ControlVec(profile.command_bounds.vel_min, profile.command_bounds.omega_min);
 }
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_upper() const {
-    const auto& normal_bounds = p_.follow.mode_profiles.normal.command_bounds;
-    if (!active_step_mode_ || active_step_mode_->mode == ChassisMode::NORMAL) {
-        return ControlVec(normal_bounds.vel_max, normal_bounds.omega_max);
-    }
-
-    const auto& step_bounds = select_follow_mode_profile(p_.follow, active_step_mode_).command_bounds;
-
-    double factor = 0.0;
-    const double pu = active_step_mode_->prepare_u;
-    const double au = active_step_mode_->active_u;
-    if (current_path_u_ >= au) {
-        factor = 1.0;
-    } else if (current_path_u_ > pu) {
-        const double range = au - pu;
-        if (range > 1e-10) {
-            factor = (current_path_u_ - pu) / range;
-        }
-    }
-
-    return ControlVec(
-        normal_bounds.vel_max * (1.0 - factor) + step_bounds.vel_max * factor,
-        normal_bounds.omega_max * (1.0 - factor) + step_bounds.omega_max * factor
-    );
+    const auto profile = select_follow_mode_profile(p_.follow, active_step_mode_);
+    return ControlVec(profile.command_bounds.vel_max, profile.command_bounds.omega_max);
 }
 
 template<int Horizon>

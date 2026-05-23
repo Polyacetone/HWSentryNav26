@@ -251,7 +251,8 @@ private:
 
     // ─── 台阶检测 / 锁存 / 执行状态 ───
     std::vector<StepPlanSegment> step_plan_;
-    std::optional<size_t> active_step_segment_index_;
+    std::optional<size_t> held_step_segment_index_;
+    double step_mode_blend_factor_ = 0.0;
     std::optional<SplinePath> step_locked_path_;
     bool step_locked_fixed_goal_ = false;
     Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();

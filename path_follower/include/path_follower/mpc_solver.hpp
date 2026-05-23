@@ -311,6 +311,7 @@ struct ActiveStepMode {
     double prepare_u = 0.0;
     double active_u = 0.0;
     double release_u = 1.0;
+    double mode_blend_factor = 0.0;
 
     bool operator==(const ActiveStepMode&) const = default;
 };

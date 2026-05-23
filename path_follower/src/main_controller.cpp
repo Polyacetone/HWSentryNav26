@@ -283,7 +283,7 @@ ControlOutput MainController::update(const ControlInput& input) {
 
     ControlInput effective_input = input;
     bool had_deferred_update = false;
-    const bool step_path_locked = active_step_segment_index_.has_value() && step_locked_path_.has_value();
+    const bool step_path_locked = held_step_segment_index_.has_value() && step_locked_path_.has_value();
     if (step_path_locked) {
         if (input.path_updated || !input.global_path.has_value()) {
             deferred_external_path_update_ = true;

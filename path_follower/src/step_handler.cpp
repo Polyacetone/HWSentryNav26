@@ -75,6 +75,15 @@ double MainController::retreat_path_u_by_distance(const SplinePath& path, const 
         travelled += (path.position(u) - path.position(next_u)).norm();
         u = next_u;
     }
+
+    // Linear extrapolation beyond u=0 using tangent at path start
+    if (travelled < distance) {
+        const double speed = path.tangent(0.0).norm();
+        if (speed > 1e-12) {
+            u = -(distance - travelled) / speed;
+        }
+    }
+
     return u;
 }
 
@@ -198,7 +207,7 @@ std::vector<MainController::StepPlanSegment> MainController::build_step_plan(
     }
 
     for (StepPlanSegment& segment : plan) {
-        segment.prepare_u = std::clamp(segment.prepare_u, 0.0, segment.step_enter_u);
+        segment.prepare_u = std::min(segment.prepare_u, segment.step_enter_u);
         segment.active_u = std::clamp(segment.active_u, segment.prepare_u, segment.step_enter_u);
         segment.step_exit_u = std::max(segment.step_exit_u, segment.step_enter_u);
         segment.release_u = std::max(segment.release_u, segment.step_exit_u);
@@ -212,7 +221,8 @@ std::vector<MainController::StepPlanSegment> MainController::build_step_plan(
 }
 
 void MainController::clear_step_runtime_state() {
-    active_step_segment_index_ = std::nullopt;
+    held_step_segment_index_ = std::nullopt;
+    step_mode_blend_factor_ = 0.0;
     step_locked_path_ = std::nullopt;
     step_locked_fixed_goal_ = false;
     step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
@@ -258,6 +268,14 @@ std::optional<size_t> MainController::find_active_step_segment_index(const doubl
 }
 
 const MainController::StepPlanSegment* MainController::active_step_segment(const double current_u) const {
+    // Hysteresis: check held segment first — once activated, stays until release
+    if (held_step_segment_index_.has_value()) {
+        const auto& segment = step_plan_[*held_step_segment_index_];
+        if (current_u < segment.release_u) {
+            return &segment;
+        }
+    }
+    // Fall through to pure positional query
     const auto index = find_active_step_segment_index(current_u);
     if (!index) return nullptr;
     return &step_plan_[*index];
@@ -271,37 +289,74 @@ const MainController::StepPlanSegment* MainController::current_step_command_segm
 }
 
 void MainController::update_active_step_segment(const ControlInput& input, const double current_u) {
+    // ── Phase 1: Check if held segment should be released ──
+    if (held_step_segment_index_.has_value()) {
+        const auto& segment = step_plan_[*held_step_segment_index_];
+        if (current_u >= segment.release_u) {
+            RCLCPP_DEBUG(
+                logger_,
+                "Step segment #%zu released (current_u=%.3f >= release_u=%.3f)",
+                *held_step_segment_index_, current_u, segment.release_u
+            );
+            held_step_segment_index_ = std::nullopt;
+            step_mode_blend_factor_ = 0.0;
+            step_locked_path_ = std::nullopt;
+            step_locked_fixed_goal_ = false;
+            step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
+            return;
+        }
+        // Still holding — update blend factor (unidirectional: only increases)
+        double raw = 0.0;
+        if (current_u >= segment.active_u) {
+            raw = 1.0;
+        } else if (current_u > segment.prepare_u) {
+            const double range = segment.active_u - segment.prepare_u;
+            if (range > 1e-12) {
+                raw = (current_u - segment.prepare_u) / range;
+            }
+        }
+        step_mode_blend_factor_ = std::max(step_mode_blend_factor_, raw);
+        return;
+    }
+
+    // ── Phase 2: No held segment — try to acquire one ──
     const auto next_index = find_active_step_segment_index(current_u);
-    if (next_index == active_step_segment_index_) {
+    if (!next_index) {
         return;
     }
 
-    active_step_segment_index_ = next_index;
-    if (!active_step_segment_index_) {
-        step_locked_path_ = std::nullopt;
-        step_locked_fixed_goal_ = false;
-        step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
-        return;
-    }
+    held_step_segment_index_ = next_index;
 
-    if (input.global_path) {
-        step_locked_path_ = input.global_path;
-        step_locked_fixed_goal_ = input.fixed_goal;
-        step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
-    }
+    // Compute initial blend factor for the newly acquired segment
+    {
+        const auto& segment = step_plan_[*held_step_segment_index_];
+        if (current_u >= segment.active_u) {
+            step_mode_blend_factor_ = 1.0;
+        } else if (current_u > segment.prepare_u) {
+            const double range = segment.active_u - segment.prepare_u;
+            if (range > 1e-12) {
+                step_mode_blend_factor_ = (current_u - segment.prepare_u) / range;
+            }
+        } else {
+            step_mode_blend_factor_ = 0.0;
+        }
 
-    const StepPlanSegment& segment = step_plan_[*active_step_segment_index_];
-    RCLCPP_DEBUG(
-        logger_,
-        "Activated step segment #%zu: prepare=[%.3f, %.3f) step=[%.3f, %.3f] active_u=%.3f mode=%s",
-        *active_step_segment_index_,
-        segment.prepare_u,
-        segment.release_u,
-        segment.step_exit_u,
-        segment.active_u,
-        segment.release_u,
-        mode_label(segment.command.mode)
-    );
+        if (input.global_path) {
+            step_locked_path_ = input.global_path;
+            step_locked_fixed_goal_ = input.fixed_goal;
+            step_locked_fixed_goal_pos_ = input.fixed_goal_pos;
+        }
+
+        RCLCPP_DEBUG(
+            logger_,
+            "Step segment #%zu acquired: prepare_u=%.3f active_u=%.3f step=[%.3f, %.3f) release_u=%.3f mode=%s blend=%.2f",
+            *held_step_segment_index_,
+            segment.prepare_u, segment.active_u,
+            segment.step_enter_u, segment.step_exit_u, segment.release_u,
+            mode_label(segment.command.mode),
+            step_mode_blend_factor_
+        );
+    }
 }
 
 uint8_t MainController::compute_step_distance_cm(const SplinePath& path, const double current_u) const {
@@ -366,7 +421,9 @@ double MainController::step_speed_from_level(const uint8_t speed_level) const {
 std::optional<ActiveStepMode> MainController::current_active_step_mode(const double current_u) const {
     const StepPlanSegment* const segment = current_step_command_segment(current_u);
     if (!segment) return std::nullopt;
-    return segment->command;
+    auto mode = segment->command;
+    mode.mode_blend_factor = step_mode_blend_factor_;
+    return mode;
 }
 
 bool MainController::is_step_active(const double current_u) const {
