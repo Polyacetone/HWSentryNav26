@@ -5,7 +5,7 @@
 #include <optional>
 #include <string>
 #include <Eigen/Dense>
-#include <path_follower/chassis_mode.hpp>
+#include <path_follower/chassis_defs.hpp>
 #include <path_follower/fddp_solver.hpp>
 #include <path_follower/nav_map.hpp>
 #include <path_follower/utils.hpp>
@@ -320,8 +320,6 @@ struct RolloutLethalObstacleInfo {
     Eigen::Vector2d position_map = Eigen::Vector2d::Zero();
     double sampled_cost = 0.0;
 };
-
-
 
 /// MPC 预测轨迹
 struct MPCPrediction {

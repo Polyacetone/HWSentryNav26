@@ -2,48 +2,6 @@
 #include <rclcpp/logging.hpp>
 
 namespace path_follower {
-namespace {
-
-enum class ChassisControlState : uint8_t {
-    DEAD,
-    COMMAND_BLOCKED,
-    MATURE,
-};
-
-constexpr uint8_t LEG_MODE_DEAD = 0u;
-constexpr uint8_t LEG_MODE_RECOVERY = 1u;
-constexpr uint8_t LEG_MODE_FLIGHT = 2u;
-constexpr uint8_t LEG_MODE_JUMP = 3u;
-constexpr uint8_t LEG_MODE_MATURE = 4u;
-constexpr uint8_t LEG_MODE_STEP = 5u;
-constexpr uint8_t LEG_MODE_ABNORMAL = 6u;
-constexpr uint8_t COMP_STAGE_MATCH = 4u;
-
-using path_follower::mode_label;
-
-ChassisControlState classify_chassis_control_state(const uint8_t leg_mode, const uint8_t comp_stage) {
-    if (comp_stage != COMP_STAGE_MATCH) {
-        return ChassisControlState::DEAD;
-    }
-
-    switch (leg_mode) {
-        case LEG_MODE_DEAD:
-        case LEG_MODE_RECOVERY:
-        case LEG_MODE_ABNORMAL:
-            return ChassisControlState::DEAD;
-        case LEG_MODE_FLIGHT:
-        case LEG_MODE_JUMP:
-        case LEG_MODE_STEP:
-            return ChassisControlState::COMMAND_BLOCKED;
-        case LEG_MODE_MATURE:
-        default:
-            return ChassisControlState::MATURE;
-    }
-}
-
-}
-
-using path_follower::is_step_mode;
 
 namespace {
 
@@ -290,9 +248,9 @@ bool MainController::check_step_block_replan(const ControlInput& input, const Sp
 
 ControlOutput MainController::update(const ControlInput& input) {
     const ChassisControlState chassis_control_state = classify_chassis_control_state(input.chassis_leg_mode, input.comp_stage);
-    const bool chassis_dead = chassis_control_state == ChassisControlState::DEAD;
-    const bool command_blocked = chassis_control_state == ChassisControlState::COMMAND_BLOCKED;
-    const bool chassis_controllable = chassis_control_state == ChassisControlState::MATURE;
+    const bool chassis_dead = chassis_control_state == ChassisControlState::STOPPED;
+    const bool command_blocked = chassis_control_state == ChassisControlState::BLOCKED;
+    const bool chassis_controllable = chassis_control_state == ChassisControlState::NORMAL;
     const bool entered_controllable = chassis_controllable && !last_cycle_chassis_controllable_;
     last_cycle_chassis_controllable_ = chassis_controllable;
 

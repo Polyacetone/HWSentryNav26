@@ -9,9 +9,6 @@ namespace {
 constexpr double ANGLE_EPSILON = 1e-6;
 constexpr double U_EPSILON = 1e-6;
 
-using path_follower::is_step_mode;
-using path_follower::mode_label;
-
 struct StepSample {
     double u = 0.0;
     Eigen::Vector2d pos_map = Eigen::Vector2d::Zero();

@@ -8,7 +8,7 @@
 #include <rclcpp/logger.hpp>
 #include <cstdint>
 
-#include <path_follower/chassis_mode.hpp>
+#include <path_follower/chassis_defs.hpp>
 #include <path_follower/state_machine.hpp>
 #include <path_follower/mpc_solver.hpp>
 #include <path_follower/nav_map.hpp>

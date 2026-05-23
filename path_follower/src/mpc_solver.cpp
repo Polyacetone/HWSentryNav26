@@ -36,8 +36,6 @@ bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) 
     return active_step_mode.has_value() && active_step_mode->mode != ChassisMode::NORMAL;
 }
 
-
-
 inline double positive_part(double x) {
     return std::max(x, 0.0);
 }
@@ -792,10 +790,10 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const double dcross_dx = cos_t * ddir_dx.y() - sin_t * ddir_dx.x();
     const double dcross_dy = cos_t * ddir_dy.y() - sin_t * ddir_dy.x();
 
-    const double a_lat = std::abs(v_act * w_act);
-
     const double dv_lim = motion_lim.acc_max * MPC_DT;
     const double dw_lim = motion_lim.alpha_max * MPC_DT;
+
+    const double a_lat = std::abs(v_cmd * w_cmd);
 
     out.r(0) = tracking_w.q_y * ey;
     out.jx(0, ix::X) = tracking_w.q_y * dey_dpx;
@@ -834,12 +832,12 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.ju(7, 1) = coeff_dw;
     out.jx(7, ix::DW) = -coeff_dw;
 
-    const double sign_lat = sign_or_zero(v_act * w_act);
+    const double sign_lat = sign_or_zero(v_cmd * w_cmd);
     const double relu_lat = positive_part(a_lat - motion_lim.a_lat_max);
     out.r(8) = motion_w.lat_acc * relu_lat;
     const double coeff_lat = motion_w.lat_acc * positive_part_derivative(a_lat - motion_lim.a_lat_max);
-    out.jx(8, ix::V) = coeff_lat * sign_lat * w_act;
-    out.jx(8, ix::W) = coeff_lat * sign_lat * v_act;
+    out.ju(8, 0) = coeff_lat * sign_lat * w_cmd;
+    out.ju(8, 1) = coeff_lat * sign_lat * v_cmd;
 
     out.r(9) = env_w.obstacle * cs.value / 255.0;
     out.jx(9, ix::X) = env_w.obstacle * cs.dx / 255.0;
@@ -991,7 +989,7 @@ double follow_running_cost_value_only_impl(
     const double dir_norm_sq = dir.squaredNorm();
     const double dir_norm = std::sqrt(dir_norm_sq);
     const double cross = std::cos(theta) * dir.y() - std::sin(theta) * dir.x();
-    const double a_lat = std::abs(v_act * w_act);
+    const double a_lat = std::abs(v_cmd * w_cmd);
 
     const double dv_lim = motion_lim.acc_max * MPC_DT;
     const double dw_lim = motion_lim.alpha_max * MPC_DT;
@@ -1311,10 +1309,10 @@ StopResidualVec stop_residual_impl(
     const double dw_cmd = w_cmd - x(ix::DW);
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
-    const double a_lat = std::abs(v_act * w_act);
 
     const double dv_lim = motion_lim.acc_max * MPC_DT;
     const double dw_lim = motion_lim.alpha_max * MPC_DT;
+    const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = command_w.q_v * v_cmd;
     r(1) = command_w.q_omega * w_cmd;
     r(2) = command_w.r_dv * dv_cmd;
@@ -1335,7 +1333,6 @@ StopResidualVec stop_residual_impl(
 
     return r;
 }
-
 
 constexpr int STOP_TERMINAL_RESIDUAL_DIM = 1;
 using StopTerminalResidualVec = Eigen::Matrix<double, STOP_TERMINAL_RESIDUAL_DIM, 1>;
@@ -1462,10 +1459,10 @@ HoldResidualVec hold_residual_impl(
     const double heading_sin = std::sin(theta - desired_theta);
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
-    const double a_lat = std::abs(v_act * w_act);
 
     const double dv_lim = motion_lim.acc_max * MPC_DT;
     const double dw_lim = motion_lim.alpha_max * MPC_DT;
+    const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = goal_w.q_goal_xy * ddx;
     r(1) = goal_w.q_goal_xy * ddy;
     r(2) = goal_w.q_goal_theta * std::abs(heading_sin);
@@ -1487,7 +1484,6 @@ HoldResidualVec hold_residual_impl(
 
     return r;
 }
-
 
 constexpr int HOLD_TERMINAL_RESIDUAL_DIM = 3;
 using HoldTerminalResidualVec = Eigen::Matrix<double, HOLD_TERMINAL_RESIDUAL_DIM, 1>;
