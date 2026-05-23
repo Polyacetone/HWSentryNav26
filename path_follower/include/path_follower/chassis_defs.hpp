@@ -58,7 +58,7 @@ enum class LegMode : uint8_t {
     JUMP = 3,
     MATURE = 4,
     STEP = 5,
-    ABNORMAL = 6
+    ABNORMAL = 6,
 };
 
 constexpr uint8_t COMP_STAGE_MATCH = 4u;
@@ -72,8 +72,8 @@ inline ChassisControlState classify_chassis_control_state(const uint8_t leg_mode
         case LegMode::DEAD:
         case LegMode::RECOVERY:
         case LegMode::ABNORMAL:
-        case LegMode::STEP:
             return ChassisControlState::STOPPED;
+        case LegMode::STEP:
         case LegMode::FLIGHT:
         case LegMode::JUMP:
             return ChassisControlState::BLOCKED;

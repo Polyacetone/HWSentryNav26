@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     map_resolution: 0.1 # 地图的每格大小，单位m
-    num_threads: 2 # 用于点云处理和粒子滤波的线程数
+    num_threads: 1 # 用于点云处理和粒子滤波的线程数
 
     debug:
       enable: true # 是否启用调试模式

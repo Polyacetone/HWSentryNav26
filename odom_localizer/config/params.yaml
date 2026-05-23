@@ -2,7 +2,7 @@
   ros__parameters:
     general:
       enable_debug: true # 是否输出 odom_localizer 的调试日志
-      num_threads: 2 # 点云预处理与 GICP 使用的线程数
+      num_threads: 1 # 点云预处理与 GICP 使用的线程数
       publish_rate_hz: 1.0 # map->odom TF 发布频率
 
     frames:
@@ -42,8 +42,8 @@
         translation_eps: 0.001 # GICP 平移收敛阈值
         rotation_eps: 0.001 # GICP 旋转收敛阈值
       quality:
-        max_normalized_error: 0.2 # GICP fitness（error / inliers）上限，越小越严格
-        min_overlap_ratio: 0.7 # 最小重叠率阈值（inliers / source_points）
+        max_normalized_error: 0.10 # GICP fitness（error / inliers）上限，越小越严格
+        min_overlap_ratio: 0.70 # 最小重叠率阈值（inliers / source_points）
         min_information_eigenvalue: 1000.0 # 信息矩阵最小特征值下限；过小视为退化
         max_information_condition_number: 1000000.0 # 信息矩阵条件数上限；过大视为病态解
 

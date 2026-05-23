@@ -174,9 +174,12 @@ private:
     PointCloud::Ptr latest_ivox_cloud_;
     std::unique_ptr<utils::EMAFilter<Eigen::Isometry3d>> odom_to_map_filter_;
     std::optional<Eigen::Isometry3d> last_accepted_registration_transform_;
-    bool initial_transform_initialized_ = false;
+    std::atomic<bool> initial_transform_initialized_{false};
     bool has_successful_registration_ = false;
     std::chrono::steady_clock::time_point initialize_time_;
+
+    rclcpp::CallbackGroup::SharedPtr registration_cb_group_;
+    mutable std::mutex odom_to_map_mutex_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr registered_cloud_sub_;
@@ -193,6 +196,7 @@ private:
 
     void publish_timer_callback();
     void registration_timer_callback();
+    Eigen::Isometry3d get_current_odom_to_map() const;
     void registered_cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void ivox_cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg);
@@ -209,7 +213,7 @@ private:
         std::string& reason
     ) const;
     bool apply_registration_update(const Eigen::Isometry3d& transform);
-    void publish_transform() const;
+    void publish_transform();
 
     PointCloud::Ptr convert_pointcloud2_to_small_gicp(const sensor_msgs::msg::PointCloud2::SharedPtr& msg) const;
     PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pcl_cloud) const;
@@ -374,16 +378,21 @@ void OdomLocalizerNode::create_subscriptions() {
         return;
     }
 
+    rclcpp::SubscriptionOptions sub_options;
+    sub_options.callback_group = registration_cb_group_;
+
     registered_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         topics_.registered_cloud,
         rclcpp::SensorDataQoS(),
-        [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { registered_cloud_callback(msg); }
+        [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { registered_cloud_callback(msg); },
+        sub_options
     );
 
     ivox_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         topics_.ivox_cloud,
         rclcpp::SensorDataQoS(),
-        [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { ivox_cloud_callback(msg); }
+        [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { ivox_cloud_callback(msg); },
+        sub_options
     );
 }
 
@@ -397,10 +406,12 @@ void OdomLocalizerNode::create_timers() {
         return;
     }
 
+    registration_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
     const auto registration_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(registration_.period_s)
     );
-    registration_timer_ = create_wall_timer(registration_period, [this]() { registration_timer_callback(); });
+    registration_timer_ = create_wall_timer(registration_period, [this]() { registration_timer_callback(); }, registration_cb_group_);
 }
 
 void OdomLocalizerNode::publish_timer_callback() {
@@ -412,7 +423,14 @@ void OdomLocalizerNode::publish_timer_callback() {
     publish_transform();
 }
 
+Eigen::Isometry3d OdomLocalizerNode::get_current_odom_to_map() const {
+    std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
+    return odom_to_map_filter_->value();
+}
+
 void OdomLocalizerNode::registration_timer_callback() {
+    const auto start_time = std::chrono::steady_clock::now();
+
     maybe_initialize_default_transform();
     if (!initial_transform_initialized_ || !map_cloud_ || !map_kd_tree_) {
         return;
@@ -428,13 +446,15 @@ void OdomLocalizerNode::registration_timer_callback() {
         return;
     }
 
-    const Eigen::Isometry3d current_odom_to_map = odom_to_map_filter_->value();
+    const Eigen::Isometry3d current_odom_to_map = get_current_odom_to_map();
     const RegistrationAssessment assessment = align_to_map(*prepared_source);
+    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+
     if (!assessment.accepted) {
         RCLCPP_WARN(
             get_logger(),
             "Registration failed (%s): %s [current=%s gicp=%s iters=%zu inliers=%zu "
-            "error=%.4f overlap=%.4f min_eig=%.3e cond=%.1f]",
+            "error=%.4f overlap=%.4f min_eig=%.3e cond=%.1f] (%.2f s)",
             prepared_source->label.c_str(),
             assessment.reason.c_str(),
             transform_to_string(current_odom_to_map).c_str(),
@@ -444,7 +464,8 @@ void OdomLocalizerNode::registration_timer_callback() {
             assessment.metrics.normalized_error,
             assessment.metrics.overlap_ratio,
             assessment.metrics.min_information_eigenvalue,
-            assessment.metrics.information_condition_number
+            assessment.metrics.information_condition_number,
+            elapsed
         );
         return;
     }
@@ -453,11 +474,11 @@ void OdomLocalizerNode::registration_timer_callback() {
         return;
     }
 
-    const Eigen::Isometry3d new_odom_to_map = odom_to_map_filter_->value();
+    const Eigen::Isometry3d new_odom_to_map = get_current_odom_to_map();
     RCLCPP_INFO(
         get_logger(),
         "Accepted registration (%s): [current=%s gicp=%s update=%s inliers=%zu "
-        "error=%.4f overlap=%.4f min_eig=%.3e cond=%.1f]",
+        "error=%.4f overlap=%.4f min_eig=%.3e cond=%.1f] (%.2f s)",
         prepared_source->label.c_str(),
         transform_to_string(current_odom_to_map).c_str(),
         transform_to_string(assessment.transform).c_str(),
@@ -466,7 +487,8 @@ void OdomLocalizerNode::registration_timer_callback() {
         assessment.metrics.normalized_error,
         assessment.metrics.overlap_ratio,
         assessment.metrics.min_information_eigenvalue,
-        assessment.metrics.information_condition_number
+        assessment.metrics.information_condition_number,
+        elapsed
     );
 }
 
@@ -527,7 +549,10 @@ void OdomLocalizerNode::maybe_initialize_default_transform() {
 }
 
 void OdomLocalizerNode::initialize_transform(const Eigen::Isometry3d& transform, const char* reason) {
-    odom_to_map_filter_->initialize(transform);
+    {
+        std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
+        odom_to_map_filter_->initialize(transform);
+    }
     initial_transform_initialized_ = true;
 
     RCLCPP_INFO(
@@ -623,7 +648,7 @@ OdomLocalizerNode::RegistrationAssessment OdomLocalizerNode::align_to_map(const 
     registration.criteria.rotation_eps = registration_.rotation_eps;
     registration.rejector.max_dist_sq = registration_.max_correspondence_distance * registration_.max_correspondence_distance;
 
-    const Eigen::Isometry3d initial_guess = odom_to_map_filter_->value();
+    const Eigen::Isometry3d initial_guess = get_current_odom_to_map();
 
     try {
         const RegistrationResult result = registration.align(*map_cloud_, *source.cloud, *map_kd_tree_, initial_guess);
@@ -727,7 +752,10 @@ bool OdomLocalizerNode::evaluate_registration_result(
 
 bool OdomLocalizerNode::apply_registration_update(const Eigen::Isometry3d& transform) {
     if (!has_successful_registration_) {
-        odom_to_map_filter_->initialize(transform);
+        {
+            std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
+            odom_to_map_filter_->initialize(transform);
+        }
         last_accepted_registration_transform_ = transform;
         has_successful_registration_ = true;
 
@@ -769,17 +797,20 @@ bool OdomLocalizerNode::apply_registration_update(const Eigen::Isometry3d& trans
         return false;
     }
 
-    odom_to_map_filter_->update(transform);
+    {
+        std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
+        odom_to_map_filter_->update(transform);
+    }
     last_accepted_registration_transform_ = transform;
     return true;
 }
 
-void OdomLocalizerNode::publish_transform() const {
+void OdomLocalizerNode::publish_transform() {
     geometry_msgs::msg::TransformStamped transform_msg;
     transform_msg.header.stamp = now() + rclcpp::Duration::from_seconds(1 / general_.publish_rate_hz + 0.1);
     transform_msg.header.frame_id = frames_.map_frame;
     transform_msg.child_frame_id = frames_.odom_frame;
-    transform_msg.transform = utils::convert_to<geometry_msgs::msg::Transform>(odom_to_map_filter_->value());
+    transform_msg.transform = utils::convert_to<geometry_msgs::msg::Transform>(get_current_odom_to_map());
     tf_broadcaster_->sendTransform(transform_msg);
 }
 
