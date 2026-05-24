@@ -38,7 +38,7 @@
       period_s: 1.0 # 周期重定位间隔；前 10s 与 10s 后都按该周期触发配准
       gicp:
         max_correspondence_distance: 0.5 # GICP 最大匹配距离
-        max_iterations: 32 # GICP 最大迭代次数
+        max_iterations: 16 # GICP 最大迭代次数
         translation_eps: 0.001 # GICP 平移收敛阈值
         rotation_eps: 0.001 # GICP 旋转收敛阈值
       quality:

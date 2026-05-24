@@ -25,8 +25,12 @@ public:
     static constexpr double U_EXTRAP_MIN = -0.5;
     static constexpr double U_EXTRAP_MAX = 1.5;
 
-    explicit SplinePath(const std::vector<Eigen::Vector2d>& cps): spline_(cps) {}
-    explicit SplinePath(std::vector<Eigen::Vector2d>&& cps): spline_(std::move(cps)) {}
+    explicit SplinePath(const std::vector<Eigen::Vector2d>& cps): spline_(cps) {
+        spline_.setExtrapolate(true);
+    }
+    explicit SplinePath(std::vector<Eigen::Vector2d>&& cps): spline_(std::move(cps)) {
+        spline_.setExtrapolate(true);
+    }
 
     [[nodiscard]] SplineEval eval(double u) const;
     [[nodiscard]] Eigen::Vector2d position(double u) const { return spline_.evaluate(u); }

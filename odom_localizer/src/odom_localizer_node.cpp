@@ -1,4 +1,5 @@
 #include <Eigen/Core>
+#include <mutex>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -174,12 +175,14 @@ private:
     PointCloud::Ptr latest_ivox_cloud_;
     std::unique_ptr<utils::EMAFilter<Eigen::Isometry3d>> odom_to_map_filter_;
     std::optional<Eigen::Isometry3d> last_accepted_registration_transform_;
-    std::atomic<bool> initial_transform_initialized_{false};
+    bool initial_transform_initialized_ = false;
     bool has_successful_registration_ = false;
     std::chrono::steady_clock::time_point initialize_time_;
 
+    rclcpp::CallbackGroup::SharedPtr non_registration_cb_group_;
     rclcpp::CallbackGroup::SharedPtr registration_cb_group_;
-    mutable std::mutex odom_to_map_mutex_;
+    mutable std::mutex transform_state_mutex_;
+    mutable std::mutex source_data_mutex_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr registered_cloud_sub_;
@@ -191,12 +194,15 @@ private:
     void load_parameters();
     void validate_parameters() const;
     void load_map();
+    void create_callback_groups();
     void create_subscriptions();
     void create_timers();
 
     void publish_timer_callback();
     void registration_timer_callback();
     Eigen::Isometry3d get_current_odom_to_map() const;
+    bool is_transform_initialized() const;
+    void disable_robot_status_subscription();
     void registered_cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void ivox_cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg);
@@ -230,6 +236,7 @@ OdomLocalizerNode::OdomLocalizerNode(const rclcpp::NodeOptions& options): Node("
 
     odom_to_map_filter_ = std::make_unique<utils::EMAFilter<Eigen::Isometry3d>>(update_.ema_ratio);
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+    create_callback_groups();
 
     load_map();
     create_subscriptions();
@@ -367,32 +374,38 @@ void OdomLocalizerNode::load_map() {
     estimate_covariances_omp(*map_cloud_, *map_kd_tree_, map_.covariance_neighbors, general_.num_threads);
 }
 
+void OdomLocalizerNode::create_callback_groups() {
+    non_registration_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    registration_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+}
+
 void OdomLocalizerNode::create_subscriptions() {
+    rclcpp::SubscriptionOptions non_registration_options;
+    non_registration_options.callback_group = non_registration_cb_group_;
+
     robot_status_sub_ = create_subscription<interfaces::msg::RobotStatus>(
         topics_.robot_status,
         1,
-        [this](const interfaces::msg::RobotStatus::SharedPtr msg) { robot_status_callback(msg); }
+        [this](const interfaces::msg::RobotStatus::SharedPtr msg) { robot_status_callback(msg); },
+        non_registration_options
     );
 
     if (!map_cloud_) {
         return;
     }
 
-    rclcpp::SubscriptionOptions sub_options;
-    sub_options.callback_group = registration_cb_group_;
-
     registered_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         topics_.registered_cloud,
         rclcpp::SensorDataQoS(),
         [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { registered_cloud_callback(msg); },
-        sub_options
+        non_registration_options
     );
 
     ivox_cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         topics_.ivox_cloud,
         rclcpp::SensorDataQoS(),
         [this](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { ivox_cloud_callback(msg); },
-        sub_options
+        non_registration_options
     );
 }
 
@@ -400,13 +413,11 @@ void OdomLocalizerNode::create_timers() {
     const auto publish_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(1.0 / general_.publish_rate_hz)
     );
-    publish_timer_ = create_wall_timer(publish_period, [this]() { publish_timer_callback(); });
+    publish_timer_ = create_wall_timer(publish_period, [this]() { publish_timer_callback(); }, non_registration_cb_group_);
 
     if (!map_cloud_) {
         return;
     }
-
-    registration_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
     const auto registration_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(registration_.period_s)
@@ -416,7 +427,7 @@ void OdomLocalizerNode::create_timers() {
 
 void OdomLocalizerNode::publish_timer_callback() {
     maybe_initialize_default_transform();
-    if (!initial_transform_initialized_) {
+    if (!is_transform_initialized()) {
         return;
     }
 
@@ -424,15 +435,25 @@ void OdomLocalizerNode::publish_timer_callback() {
 }
 
 Eigen::Isometry3d OdomLocalizerNode::get_current_odom_to_map() const {
-    std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
+    std::lock_guard<std::mutex> lock(transform_state_mutex_);
     return odom_to_map_filter_->value();
+}
+
+bool OdomLocalizerNode::is_transform_initialized() const {
+    std::lock_guard<std::mutex> lock(transform_state_mutex_);
+    return initial_transform_initialized_;
+}
+
+void OdomLocalizerNode::disable_robot_status_subscription() {
+    std::lock_guard<std::mutex> lock(transform_state_mutex_);
+    robot_status_sub_.reset();
 }
 
 void OdomLocalizerNode::registration_timer_callback() {
     const auto start_time = std::chrono::steady_clock::now();
 
     maybe_initialize_default_transform();
-    if (!initial_transform_initialized_ || !map_cloud_ || !map_kd_tree_) {
+    if (!is_transform_initialized() || !map_cloud_ || !map_kd_tree_) {
         return;
     }
 
@@ -498,6 +519,7 @@ void OdomLocalizerNode::registered_cloud_callback(const sensor_msgs::msg::PointC
         return;
     }
 
+    std::lock_guard<std::mutex> lock(source_data_mutex_);
     registered_cloud_window_.push_back(cloud);
     while (registered_cloud_window_.size() > source_.registered_window_frames) {
         registered_cloud_window_.pop_front();
@@ -510,12 +532,13 @@ void OdomLocalizerNode::ivox_cloud_callback(const sensor_msgs::msg::PointCloud2:
         return;
     }
 
+    std::lock_guard<std::mutex> lock(source_data_mutex_);
     latest_ivox_cloud_ = std::move(cloud);
 }
 
 void OdomLocalizerNode::robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg) {
-    if (initial_transform_initialized_) {
-        robot_status_sub_.reset();
+    if (is_transform_initialized()) {
+        disable_robot_status_subscription();
         return;
     }
 
@@ -525,11 +548,11 @@ void OdomLocalizerNode::robot_status_callback(const interfaces::msg::RobotStatus
         initialize_transform(startup_.initial_transform_blue, "robot color BLUE");
     }
 
-    robot_status_sub_.reset();
+    disable_robot_status_subscription();
 }
 
 void OdomLocalizerNode::maybe_initialize_default_transform() {
-    if (initial_transform_initialized_) {
+    if (is_transform_initialized()) {
         return;
     }
 
@@ -545,15 +568,20 @@ void OdomLocalizerNode::maybe_initialize_default_transform() {
         startup_.robot_color_wait_timeout_s
     );
     initialize_transform(startup_.initial_transform_default, "robot color timeout");
-    robot_status_sub_.reset();
+    disable_robot_status_subscription();
 }
 
 void OdomLocalizerNode::initialize_transform(const Eigen::Isometry3d& transform, const char* reason) {
     {
-        std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
+        std::lock_guard<std::mutex> lock(transform_state_mutex_);
+        if (initial_transform_initialized_) {
+            return;
+        }
         odom_to_map_filter_->initialize(transform);
+        last_accepted_registration_transform_ = std::nullopt;
+        has_successful_registration_ = false;
+        initial_transform_initialized_ = true;
     }
-    initial_transform_initialized_ = true;
 
     RCLCPP_INFO(
         get_logger(),
@@ -567,16 +595,21 @@ std::optional<OdomLocalizerNode::RegistrationSource> OdomLocalizerNode::select_r
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - initialize_time_).count();
 
     if (elapsed < startup_.bootstrap_duration_s) {
-        if (registered_cloud_window_.empty()) {
-            RCLCPP_WARN(
-                get_logger(),
-                "Bootstrap registration skipped: no registered_cloud data in the sliding window"
-            );
-            return std::nullopt;
+        std::deque<PointCloud::Ptr> registered_cloud_window_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(source_data_mutex_);
+            if (registered_cloud_window_.empty()) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Bootstrap registration skipped: no registered_cloud data in the sliding window"
+                );
+                return std::nullopt;
+            }
+            registered_cloud_window_snapshot = registered_cloud_window_;
         }
 
         PointCloud accumulated;
-        for (const auto& cloud : registered_cloud_window_) {
+        for (const auto& cloud : registered_cloud_window_snapshot) {
             accumulated.points.insert(accumulated.points.end(), cloud->points.begin(), cloud->points.end());
         }
 
@@ -586,16 +619,21 @@ std::optional<OdomLocalizerNode::RegistrationSource> OdomLocalizerNode::select_r
         };
     }
 
-    if (!latest_ivox_cloud_) {
-        RCLCPP_WARN(
-            get_logger(),
-            "Periodic registration skipped: no ivox_cloud received yet"
-        );
-        return std::nullopt;
+    PointCloud::Ptr latest_ivox_cloud_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(source_data_mutex_);
+        if (!latest_ivox_cloud_) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Periodic registration skipped: no ivox_cloud received yet"
+            );
+            return std::nullopt;
+        }
+        latest_ivox_cloud_snapshot = latest_ivox_cloud_;
     }
 
     return RegistrationSource {
-        .cloud = std::make_shared<PointCloud>(*latest_ivox_cloud_),
+        .cloud = std::make_shared<PointCloud>(*latest_ivox_cloud_snapshot),
         .label = "ivox_cloud periodic snapshot",
     };
 }
@@ -751,14 +789,43 @@ bool OdomLocalizerNode::evaluate_registration_result(
 }
 
 bool OdomLocalizerNode::apply_registration_update(const Eigen::Isometry3d& transform) {
-    if (!has_successful_registration_) {
-        {
-            std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
-            odom_to_map_filter_->initialize(transform);
-        }
-        last_accepted_registration_transform_ = transform;
-        has_successful_registration_ = true;
+    enum class RejectReason {
+        NONE,
+        TRANSLATION_JUMP,
+        ROTATION_JUMP,
+    };
 
+    bool accepted_first_registration = false;
+    RejectReason reject_reason = RejectReason::NONE;
+    Eigen::Isometry3d previous_registration = Eigen::Isometry3d::Identity();
+    double translation_delta = 0.0;
+    double rotation_delta = 0.0;
+
+    {
+        std::lock_guard<std::mutex> lock(transform_state_mutex_);
+
+        if (!has_successful_registration_) {
+            odom_to_map_filter_->initialize(transform);
+            last_accepted_registration_transform_ = transform;
+            has_successful_registration_ = true;
+            accepted_first_registration = true;
+        } else {
+            previous_registration = *last_accepted_registration_transform_;
+            translation_delta = translation_distance(transform, previous_registration);
+            rotation_delta = rotation_distance(transform, previous_registration);
+
+            if (translation_delta > update_.max_translation_step) {
+                reject_reason = RejectReason::TRANSLATION_JUMP;
+            } else if (rotation_delta > update_.max_rotation_step) {
+                reject_reason = RejectReason::ROTATION_JUMP;
+            } else {
+                odom_to_map_filter_->update(transform);
+                last_accepted_registration_transform_ = transform;
+            }
+        }
+    }
+
+    if (accepted_first_registration) {
         RCLCPP_INFO(
             get_logger(),
             "Accepted first successful registration directly: %s",
@@ -767,11 +834,7 @@ bool OdomLocalizerNode::apply_registration_update(const Eigen::Isometry3d& trans
         return true;
     }
 
-    const Eigen::Isometry3d& previous_registration = *last_accepted_registration_transform_;
-    const double translation_delta = translation_distance(transform, previous_registration);
-    const double rotation_delta = rotation_distance(transform, previous_registration);
-
-    if (translation_delta > update_.max_translation_step) {
+    if (reject_reason == RejectReason::TRANSLATION_JUMP) {
         RCLCPP_WARN(
             get_logger(),
             "Discarded registration update: translation jump %.3f m exceeds threshold %.3f m "
@@ -784,7 +847,7 @@ bool OdomLocalizerNode::apply_registration_update(const Eigen::Isometry3d& trans
         return false;
     }
 
-    if (rotation_delta > update_.max_rotation_step) {
+    if (reject_reason == RejectReason::ROTATION_JUMP) {
         RCLCPP_WARN(
             get_logger(),
             "Discarded registration update: rotation jump %.3f rad exceeds threshold %.3f rad "
@@ -797,11 +860,6 @@ bool OdomLocalizerNode::apply_registration_update(const Eigen::Isometry3d& trans
         return false;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(odom_to_map_mutex_);
-        odom_to_map_filter_->update(transform);
-    }
-    last_accepted_registration_transform_ = transform;
     return true;
 }
 
