@@ -4,6 +4,18 @@
 #include <vector>
 #include <opencv2/opencv.hpp>
 
+namespace map_server {
+enum class TerrainType : uint8_t {
+    FLAT = 0,
+    OBSTACLE = 1,
+    SLOPE = 2,
+    STEP_L1 = 3,
+    STEP_L2 = 4,
+    FLY_SLOPE = 5,
+    STEP_HIGH = 6
+};
+} // namespace map_server
+
 namespace map_server::map_utils {
 
 struct TerrainMapData {
@@ -20,16 +32,13 @@ struct MapInflationParams {
     double decay_alpha;
 };
 
-constexpr uint8_t TERRAIN_FLAT = 0;
-constexpr uint8_t TERRAIN_OBSTACLE = 1;
-constexpr uint8_t TERRAIN_SLOPE = 2;
-constexpr uint8_t TERRAIN_STEP_L1 = 3;
-constexpr uint8_t TERRAIN_STEP_L2 = 4;
-constexpr uint8_t TERRAIN_FLY_SLOPE = 5;
-constexpr uint8_t TERRAIN_STEP_HIGH = 6;
-
 constexpr bool is_directional_label(uint8_t label) {
-    return label >= TERRAIN_SLOPE && label <= TERRAIN_STEP_HIGH;
+    return
+        label == static_cast<uint8_t>(TerrainType::SLOPE) ||
+        label == static_cast<uint8_t>(TerrainType::STEP_L1) ||
+        label == static_cast<uint8_t>(TerrainType::STEP_L2) ||
+        label == static_cast<uint8_t>(TerrainType::FLY_SLOPE) ||
+        label == static_cast<uint8_t>(TerrainType::STEP_HIGH);
 }
 
 TerrainMapData load_terrain_msgpack(const std::string& path);

@@ -44,8 +44,8 @@
       quality:
         max_normalized_error: 0.10 # GICP fitness（error / inliers）上限，越小越严格
         min_overlap_ratio: 0.70 # 最小重叠率阈值（inliers / source_points）
-        min_information_eigenvalue: 1000.0 # 信息矩阵最小特征值下限；过小视为退化
-        max_information_condition_number: 1000000.0 # 信息矩阵条件数上限；过大视为病态解
+        min_information_eigenvalue: 1.0e+3 # 信息矩阵最小特征值下限；过小视为退化
+        max_information_condition_number: 1.0e+6 # 信息矩阵条件数上限；过大视为病态解
 
     update:
       ema_ratio: 0.6 # 成功重定位后的 map->odom EMA 平滑系数，越大越保守

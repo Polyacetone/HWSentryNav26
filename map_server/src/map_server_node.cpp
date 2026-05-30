@@ -235,7 +235,7 @@ void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::Sh
             cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
             for (int y = 0; y < map_size_y_; y++) {
                 for (int x = 0; x < map_size_x_; x++) {
-                    if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == map_utils::TERRAIN_OBSTACLE) {
+                    if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == static_cast<uint8_t>(TerrainType::OBSTACLE)) {
                         obs_mask.at<uint8_t>(y, x) = 255;
                     }
                 }
@@ -284,7 +284,7 @@ void MapServerNode::timer_callback() {
                     cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
                     for (int y = 0; y < map_size_y_; y++) {
                         for (int x = 0; x < map_size_x_; x++) {
-                            if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == map_utils::TERRAIN_OBSTACLE) {
+                            if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == static_cast<uint8_t>(TerrainType::OBSTACLE)) {
                                 obs_mask.at<uint8_t>(y, x) = 255;
                             }
                         }

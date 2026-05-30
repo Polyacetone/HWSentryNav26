@@ -5,37 +5,28 @@
 
 namespace {
 
-bool is_step_direction_pixel(const cv::Vec3b& val) {
-    const bool zero = val[0] == 0 && val[1] == 0;
-    const bool neutral = val[0] == 128 && val[1] == 128;
-    return !(zero || neutral);
-}
-
 std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> convert_direction_map(const cv::Mat& mat) {
     if (mat.type() != CV_8UC3) {
         throw std::runtime_error("Direction map must be of type CV_8UC3");
     }
 
+    const size_t num_pixels = static_cast<size_t>(mat.cols) * static_cast<size_t>(mat.rows);
     std::vector<Eigen::Vector2d> dir_vec;
-    std::vector<uint8_t> step_mode_vec;
-    dir_vec.reserve(static_cast<size_t>(mat.cols) * static_cast<size_t>(mat.rows));
-    step_mode_vec.reserve(static_cast<size_t>(mat.cols) * static_cast<size_t>(mat.rows));
+    std::vector<uint8_t> terrain_vec;
+    dir_vec.reserve(num_pixels);
+    terrain_vec.reserve(num_pixels);
 
     for (int y = 0; y < mat.rows; y++) {
         for (int x = 0; x < mat.cols; x++) {
             const cv::Vec3b val = mat.at<cv::Vec3b>(y, x);
-            if (is_step_direction_pixel(val)) {
-                const Eigen::Vector2d dir(val[0] - 128.0, val[1] - 128.0);
-                dir_vec.emplace_back(dir / 128.0);
-                step_mode_vec.push_back(val[2]);
-            } else {
-                dir_vec.emplace_back(0.0, 0.0);
-                step_mode_vec.push_back(0);
-            }
+            const double angle = static_cast<double>(val[0]) / 255.0 * 2.0 * std::numbers::pi;
+            const double mag = static_cast<double>(val[1]) / 255.0;
+            dir_vec.emplace_back(std::cos(angle) * mag, std::sin(angle) * mag);
+            terrain_vec.push_back(val[2]);
         }
     }
 
-    return {std::move(dir_vec), std::move(step_mode_vec)};
+    return {std::move(dir_vec), std::move(terrain_vec)};
 }
 
 } // namespace
@@ -43,7 +34,7 @@ std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> convert_direction_
 namespace path_planner {
 namespace {
 
-double prohibited_direction_score_impl(const Eigen::Vector2d& step_dir, uint8_t step_mode, const Eigen::Vector2d& move_dir, double dot_threshold) {
+double prohibited_direction_score_impl(const Eigen::Vector2d& step_dir, const TerrainRule& rule, const Eigen::Vector2d& move_dir, double dot_threshold) {
     if (step_dir.squaredNorm() <= 1e-12 || move_dir.squaredNorm() <= 1e-12) {
         return 0.0;
     }
@@ -54,11 +45,11 @@ double prohibited_direction_score_impl(const Eigen::Vector2d& step_dir, uint8_t 
     const double clamped_threshold = std::clamp(dot_threshold, 0.0, 1.0);
     const double denom = std::max(1.0 - clamped_threshold, 1e-6);
 
-    if (alignment > clamped_threshold && extract_up_mode(step_mode) == STEP_MODE_FORBIDDEN) {
+    if (alignment > clamped_threshold && !rule.forward_allowed) {
         return std::clamp((alignment - clamped_threshold) / denom, 0.0, 1.0);
     }
 
-    if (alignment < -clamped_threshold && extract_down_mode(step_mode) == STEP_MODE_FORBIDDEN) {
+    if (alignment < -clamped_threshold && !rule.backward_allowed) {
         return std::clamp((-alignment - clamped_threshold) / denom, 0.0, 1.0);
     }
 
@@ -145,30 +136,34 @@ Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
     return sum_grad / samples;
 }
 
-DirectionMap::DirectionMap(const cv::Mat& direction_map, double resolution, double origin_x, double origin_y):
+DirectionMap::DirectionMap(const cv::Mat& direction_map, double resolution, double origin_x, double origin_y,
+    const TerrainRuleTable& rules):
     DirectionMap(
         direction_map.cols,
         direction_map.rows,
         resolution,
         origin_x,
         origin_y,
-        convert_direction_map(direction_map)
+        convert_direction_map(direction_map),
+        rules
     ) {}
 
 DirectionMap::DirectionMap(int width, int height, double resolution, double origin_x, double origin_y,
-    std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> data_pair):
+    std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> data_pair,
+    const TerrainRuleTable& rules):
     width(width),
     height(height),
     resolution(resolution),
     origin_x(origin_x),
     origin_y(origin_y),
     data(std::move(data_pair.first)),
-    step_mode_data(std::move(data_pair.second)) {
+    terrain(std::move(data_pair.second)),
+    rules_(rules) {
     if (static_cast<int>(this->data.size()) != width * height) {
         throw std::runtime_error("DirectionMap data size does not match width*height");
     }
-    if (static_cast<int>(this->step_mode_data.size()) != width * height) {
-        throw std::runtime_error("DirectionMap step_mode_data size does not match width*height");
+    if (static_cast<int>(this->terrain.size()) != width * height) {
+        throw std::runtime_error("DirectionMap terrain size does not match width*height");
     }
 }
 
@@ -193,15 +188,9 @@ Eigen::Vector2d DirectionMap::at(const Eigen::Vector2i& grid_coord) const {
     else return {0, 0};
 }
 
-uint8_t DirectionMap::step_mode_at(const Eigen::Vector2i& grid_coord) const {
-    if (is_valid_coord(grid_coord)) return step_mode_data[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
-    return 0;
-}
-
-uint8_t DirectionMap::step_mode_at(const Eigen::Vector2d& grid_coord) const {
-    if (!is_valid_coord(grid_coord)) return 0;
-    const Eigen::Array2i floored = grid_coord.array().floor().template cast<int>();
-    return step_mode_at(Eigen::Vector2i(floored.x(), floored.y()));
+uint8_t DirectionMap::terrain_at(const Eigen::Vector2i& grid_coord) const {
+    if (is_valid_coord(grid_coord)) return terrain[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
+    return static_cast<uint8_t>(TerrainType::OBSTACLE);
 }
 
 Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) const {
@@ -213,9 +202,6 @@ Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) con
         (1 - dx) * dy * at({x0, y1}) + dx * dy * at({x1, y1});
 }
 
-// 检查插值点4个角是否完全被方向场覆盖且双向禁止。
-// 跳过无方向场的角点（台阶边缘插值时可能只有部分角点在台阶内），
-// 只要存在任一台阶角点双向禁止，则该点判定为不可通行。
 bool DirectionMap::is_fully_prohibited(const Eigen::Vector2d& grid_coord) const {
     if (!is_valid_coord(grid_coord)) return false;
 
@@ -226,10 +212,10 @@ bool DirectionMap::is_fully_prohibited(const Eigen::Vector2d& grid_coord) const 
 
     for (const Eigen::Vector2i &sample : {Eigen::Vector2i{x0, y0}, Eigen::Vector2i{x1, y0}, Eigen::Vector2i{x0, y1}, Eigen::Vector2i{x1, y1}}) {
         const Eigen::Vector2d dir = at(sample);
-        if (dir.squaredNorm() <= 1e-12) continue; // 该角点无台阶方向场，跳过
-        const uint8_t mode = step_mode_at(sample);
-        if (extract_up_mode(mode) == STEP_MODE_FORBIDDEN && extract_down_mode(mode) == STEP_MODE_FORBIDDEN) {
-            return true; // 台阶区域内双向禁止 → 该点不可通行
+        if (dir.squaredNorm() <= 1e-12) continue;
+        const TerrainRule& rule = rules_[terrain_at(sample)];
+        if (!rule.forward_allowed && !rule.backward_allowed) {
+            return true;
         }
     }
 
@@ -237,7 +223,7 @@ bool DirectionMap::is_fully_prohibited(const Eigen::Vector2d& grid_coord) const 
 }
 
 double DirectionMap::prohibited_direction_score(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
-    return prohibited_direction_score_impl(at(grid_coord), step_mode_at(grid_coord), move_dir, dot_threshold);
+    return prohibited_direction_score_impl(at(grid_coord), rules_[terrain_at(grid_coord)], move_dir, dot_threshold);
 }
 
 double DirectionMap::prohibited_direction_score(const Eigen::Vector2d& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
@@ -250,7 +236,6 @@ double DirectionMap::prohibited_direction_score(const Eigen::Vector2d& grid_coor
     const double dx = grid_coord.x() - x0;
     const double dy = grid_coord.y() - y0;
 
-    // 标准双线性插值加权和（而非保守 max）
     const double w00 = (1 - dx) * (1 - dy);
     const double w10 = dx * (1 - dy);
     const double w01 = (1 - dx) * dy;
@@ -260,9 +245,9 @@ double DirectionMap::prohibited_direction_score(const Eigen::Vector2d& grid_coor
     if (total <= 0.0) return 0.0;
 
     const double score = w00 * prohibited_direction_score(Eigen::Vector2i(x0, y0), move_dir, dot_threshold)
-                       + w10 * prohibited_direction_score(Eigen::Vector2i(x1, y0), move_dir, dot_threshold)
-                       + w01 * prohibited_direction_score(Eigen::Vector2i(x0, y1), move_dir, dot_threshold)
-                       + w11 * prohibited_direction_score(Eigen::Vector2i(x1, y1), move_dir, dot_threshold);
+        + w10 * prohibited_direction_score(Eigen::Vector2i(x1, y0), move_dir, dot_threshold)
+        + w01 * prohibited_direction_score(Eigen::Vector2i(x0, y1), move_dir, dot_threshold)
+        + w11 * prohibited_direction_score(Eigen::Vector2i(x1, y1), move_dir, dot_threshold);
     return std::clamp(score / total, 0.0, 1.0);
 }
 
@@ -276,12 +261,13 @@ bool DirectionMap::is_direction_prohibited(const Eigen::Vector2i& grid_coord, co
     const Eigen::Vector2d normalized_move_dir = move_dir.normalized();
     const double alignment = normalized_move_dir.dot(normalized_step_dir);
     const double clamped_threshold = std::clamp(dot_threshold, 0.0, 1.0);
+    const TerrainRule& rule = rules_[terrain_at(grid_coord)];
 
-    if (alignment > clamped_threshold && extract_up_mode(step_mode_at(grid_coord)) == STEP_MODE_FORBIDDEN) {
+    if (alignment > clamped_threshold && !rule.forward_allowed) {
         return true;
     }
 
-    if (alignment < -clamped_threshold && extract_down_mode(step_mode_at(grid_coord)) == STEP_MODE_FORBIDDEN) {
+    if (alignment < -clamped_threshold && !rule.backward_allowed) {
         return true;
     }
 

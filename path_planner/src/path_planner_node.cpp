@@ -21,7 +21,6 @@
 #include <path_planner/a_star_planner.hpp>
 #include <path_planner/bspline_optimizer.hpp>
 #include <common_utils/convert.hpp>
-#include <queue>
 
 namespace path_planner {
 
@@ -127,6 +126,18 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     occupied_threshold_ = static_cast<int>(declare_parameter<int>("traversability.occupied_threshold"));
     on_step_threshold_ = declare_parameter<double>("traversability.on_step_threshold");
     step_mode_dot_threshold_ = declare_parameter<double>("traversability.step_mode_dot_threshold");
+    TerrainRuleTable terrain_rules;
+    const auto load_rule = [&](const std::string& prefix, uint8_t label) {
+        terrain_rules[label] = {
+            declare_parameter<bool>(prefix + ".forward"),
+            declare_parameter<bool>(prefix + ".backward")
+        };
+    };
+    load_rule("traversability.terrain_rules.slope", static_cast<uint8_t>(TerrainType::SLOPE));
+    load_rule("traversability.terrain_rules.step_l1", static_cast<uint8_t>(TerrainType::STEP_L1));
+    load_rule("traversability.terrain_rules.step_l2", static_cast<uint8_t>(TerrainType::STEP_L2));
+    load_rule("traversability.terrain_rules.fly_slope", static_cast<uint8_t>(TerrainType::FLY_SLOPE));
+    load_rule("traversability.terrain_rules.step_high", static_cast<uint8_t>(TerrainType::STEP_HIGH));
     prediction_horizon_seconds_ = declare_parameter<double>("prediction.horizon_seconds");
     prediction_weight_decay_ = declare_parameter<double>("prediction.weight_decay");
     start_prediction_enable_ = declare_parameter<bool>("start_prediction.enable");
@@ -231,7 +242,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     const std::string global_direction_map_sub_topic = declare_parameter<std::string>("global_direction_map_sub_topic");
     global_direction_map_sub_ = create_subscription<sensor_msgs::msg::Image>(
         global_direction_map_sub_topic, 1,
-        [this](const sensor_msgs::msg::Image::SharedPtr msg) {
+        [this, terrain_rules](const sensor_msgs::msg::Image::SharedPtr msg) {
             if (!global_cost_map_) {
                 RCLCPP_WARN(get_logger(), "Received global direction map before cost map, waiting for cost map first");
                 return;
@@ -242,7 +253,8 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
                 cv_ptr->image,
                 global_cost_map_->resolution,
                 global_cost_map_->origin_x,
-                global_cost_map_->origin_y
+                global_cost_map_->origin_y,
+                terrain_rules
             );
 
             if (global_direction_map_->width != global_cost_map_->width || global_direction_map_->height != global_cost_map_->height) {
