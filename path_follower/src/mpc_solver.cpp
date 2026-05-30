@@ -15,36 +15,28 @@ namespace {
 constexpr double COST_EPS = 1e-9;
 constexpr double REACHABILITY_EPS = 1e-6;
 
-MPCFollowModeProfile select_follow_mode_profile(
+CapabilityProfile select_follow_mode_profile(
     const MPCFollowParams& params,
     std::optional<ActiveStepMode> active_step_mode
 ) {
-    if (!active_step_mode || active_step_mode->mode == ChassisMode::NORMAL) {
-        return params.mode_profiles.normal;
+    if (!active_step_mode) {
+        return params.capability_profiles[static_cast<size_t>(params.normal_capability)];
     }
 
     const double factor = active_step_mode->mode_blend_factor;
     if (factor <= 0.0) {
-        return params.mode_profiles.normal;
+        return params.capability_profiles[static_cast<size_t>(params.normal_capability)];
     }
 
-    const auto& step_profile = [&]() -> const MPCFollowModeProfile& {
-        switch (active_step_mode->mode) {
-            case ChassisMode::STEP_UP_LEG_SHORT: return params.mode_profiles.up.short_leg;
-            case ChassisMode::STEP_UP_JUMP: return params.mode_profiles.up.jump;
-            case ChassisMode::STEP_UP_LEG_LONG: return params.mode_profiles.up.long_leg;
-            case ChassisMode::STEP_DOWN_LEG_SHORT: return params.mode_profiles.down.short_leg;
-            case ChassisMode::STEP_DOWN_JUMP: return params.mode_profiles.down.jump;
-            default: return params.mode_profiles.normal;
-        }
-    }();
+    const auto& step_profile = params.capability_profiles[
+        static_cast<size_t>(active_step_mode->capability)];
 
     if (factor >= 1.0) {
         return step_profile;
     }
 
-    const auto& n = params.mode_profiles.normal;
-    return MPCFollowModeProfile {
+    const auto& n = params.capability_profiles[static_cast<size_t>(params.normal_capability)];
+    return CapabilityProfile {
         .command_bounds = {
             .vel_max = n.command_bounds.vel_max * (1.0 - factor) + step_profile.command_bounds.vel_max * factor,
             .vel_min = n.command_bounds.vel_min * (1.0 - factor) + step_profile.command_bounds.vel_min * factor,
@@ -835,20 +827,20 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(10, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
 
     if (is_active_follow_step_mode(active_step_mode)) {
-        const double target_vel = active_step_mode->target_velocity;
-        const double v_min = target_vel - follow.terrain_limits.step_vel_deadzone;
-        const double v_max = target_vel + follow.terrain_limits.step_vel_deadzone;
-        const double v_center = 0.5 * (v_min + v_max);
-        const double v_err = v_act - v_center;
+        const double speed_min = active_step_mode->speed_min;
+        const double speed_max = active_step_mode->speed_max;
+        const double v_err = v_act < speed_min
+            ? (speed_min - v_act)
+            : (v_act > speed_max ? (v_act - speed_max) : 0.0);
         const double abs_v_err = std::abs(v_err);
-        const double relu_vstep = positive_part(abs_v_err - follow.terrain_limits.step_vel_deadzone);
+        const double relu_vstep = abs_v_err;
 
         if (dir_norm_sq > 1e-10) {
             out.r(11) = terrain_w.step_vel_weight * dir_norm * relu_vstep;
             out.jx(11, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep;
             out.jx(11, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep;
             out.jx(11, ix::V) = terrain_w.step_vel_weight * dir_norm
-                * positive_part_derivative(abs_v_err - follow.terrain_limits.step_vel_deadzone) * sign_or_zero(v_err);
+                * ((v_act < speed_min) ? -1.0 : (v_act > speed_max) ? 1.0 : 0.0);
         }
 
         if (active_step_mode->step_entry_u.has_value()) {
@@ -868,7 +860,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
                 const double r_lo = std::sqrt(r_lo_arg);
                 const double r_hi = std::sqrt(r_hi_arg);
 
-                const double relu_lo = positive_part(v_min - r_lo);
+                const double relu_lo = positive_part(speed_min - r_lo);
                 out.r(12) = std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * relu_lo;
                 if (relu_lo > 0.0) {
                     const bool lo_active = r_lo_expr > REACHABILITY_EPS;
@@ -878,7 +870,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
                     out.jx(12, ix::PATH_U) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_du;
                 }
 
-                const double relu_hi = positive_part(r_hi - v_max);
+                const double relu_hi = positive_part(r_hi - speed_max);
                 out.r(13) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * relu_hi;
                 if (relu_hi > 0.0) {
                     const bool hi_active = r_hi_expr > REACHABILITY_EPS;
@@ -994,10 +986,12 @@ double follow_running_cost_value_only_impl(
     cost += 0.5 * (terrain_w.direction * std::abs(cross)) * (terrain_w.direction * std::abs(cross));
 
     if (is_active_follow_step_mode(active_step_mode)) {
-        const double target_vel = active_step_mode->target_velocity;
-        const double deadzone = follow.terrain_limits.step_vel_deadzone;
-        const double v_center = target_vel;
-        const double relu_vstep = positive_part(std::abs(v_act - v_center) - deadzone);
+        const double speed_min = active_step_mode->speed_min;
+        const double speed_max = active_step_mode->speed_max;
+        const double v_err = v_act < speed_min
+            ? (speed_min - v_act)
+            : (v_act > speed_max ? (v_act - speed_max) : 0.0);
+        const double relu_vstep = std::abs(v_err);
 
         if (dir_norm_sq > 1e-10) {
             cost += 0.5 * (terrain_w.step_vel_weight * dir_norm * relu_vstep) * (terrain_w.step_vel_weight * dir_norm * relu_vstep);
@@ -1009,13 +1003,11 @@ double follow_running_cost_value_only_impl(
             if (path_u < entry_u) {
                 const double d = spline.arc_length(path_u, entry_u, 8);
                 const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
-                const double v_min = target_vel - deadzone;
-                const double v_max = target_vel + deadzone;
                 const double r_lo = std::sqrt(std::max(REACHABILITY_EPS, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
                 const double r_hi = std::sqrt(std::max(REACHABILITY_EPS, v_act * v_act - 2.0 * a_guide * d));
 
-                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(v_min - r_lo)) * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(v_min - r_lo));
-                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - v_max)) * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - v_max));
+                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo)) * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo));
+                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max)) * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max));
             }
         }
     }

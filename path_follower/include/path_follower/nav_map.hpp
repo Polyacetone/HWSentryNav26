@@ -6,37 +6,79 @@
 
 namespace path_follower {
 
-enum class StepTraversalMode : uint8_t {
-    FORBIDDEN = 0,
-    JUMP = 1,
-    LEG_SHORT = 2,
-    LEG_LONG = 3,
+// ════════════════════════════════════════════════════════════════
+//  地形标签常量 (must match map_server::map_utils and path_planner)
+// ════════════════════════════════════════════════════════════════
+
+constexpr uint8_t TERRAIN_FLAT = 0;
+constexpr uint8_t TERRAIN_OBSTACLE = 1;
+constexpr uint8_t TERRAIN_SLOPE = 2;
+constexpr uint8_t TERRAIN_STEP_L1 = 3;
+constexpr uint8_t TERRAIN_STEP_L2 = 4;
+constexpr uint8_t TERRAIN_FLY_SLOPE = 5;
+constexpr uint8_t TERRAIN_STEP_HIGH = 6;
+constexpr size_t TERRAIN_LABEL_COUNT = 7;
+
+// ════════════════════════════════════════════════════════════════
+//  运动学能力等级
+// ════════════════════════════════════════════════════════════════
+
+struct MPCCommandBounds {
+    double vel_max;
+    double vel_min;
+    double omega_max;
+    double omega_min;
 };
 
-struct StepModeInfo {
-    StepTraversalMode up_mode;
-    StepTraversalMode down_mode;
-    uint8_t up_speed_level;
-    uint8_t down_speed_level;
+struct MPCMotionConstraints {
+    double acc_max;
+    double alpha_max;
+    double a_lat_max;
 };
 
-constexpr StepModeInfo decode_step_mode(uint8_t step_mode) {
-    return {
-        .up_mode = static_cast<StepTraversalMode>(step_mode & 0b11),
-        .down_mode = static_cast<StepTraversalMode>((step_mode >> 2) & 0b11),
-        .up_speed_level = static_cast<uint8_t>((step_mode >> 4) & 0b11),
-        .down_speed_level = static_cast<uint8_t>((step_mode >> 6) & 0b11),
-    };
+struct CapabilityProfile {
+    MPCCommandBounds command_bounds;
+    MPCMotionConstraints motion_constraints;
+};
+
+enum class CapabilityLevel : uint8_t {
+    LOW = 0,
+    MEDIUM = 1,
+    HIGH = 2,
+};
+
+inline CapabilityLevel capability_level_from_string(const std::string& s) {
+    if (s == "low") return CapabilityLevel::LOW;
+    if (s == "medium") return CapabilityLevel::MEDIUM;
+    if (s == "high") return CapabilityLevel::HIGH;
+    throw std::invalid_argument("Unknown capability level: \"" + s + "\" (expected low/medium/high)");
 }
 
-constexpr bool is_step_traversal_allowed(StepTraversalMode mode) {
-    return mode == StepTraversalMode::JUMP || mode == StepTraversalMode::LEG_SHORT || mode == StepTraversalMode::LEG_LONG;
-}
+struct TerrainSpeedRange {
+    double min = 0.0;
+    double max = 0.0;
+};
 
-static_assert(decode_step_mode(0b11100110).up_mode == StepTraversalMode::LEG_SHORT);
-static_assert(decode_step_mode(0b11100110).down_mode == StepTraversalMode::JUMP);
-static_assert(decode_step_mode(0b11100110).up_speed_level == 2);
-static_assert(decode_step_mode(0b11100110).down_speed_level == 3);
+struct TerrainStepRule {
+    uint8_t chassis_mode = 0;
+    CapabilityLevel capability = CapabilityLevel::LOW;
+    TerrainSpeedRange speed;
+};
+
+struct TerrainLabelRule {
+    TerrainStepRule up;
+    TerrainStepRule down;
+};
+
+struct TerrainProfiles {
+    std::array<CapabilityProfile, 3> capability_profiles;
+    TerrainStepRule normal;                                                 // 非台阶区域的默认规则
+    std::array<TerrainLabelRule, 5> directional_labels;                    // 有方向语义的标签: index 0=SLOPE~4=STEP_HIGH
+};
+
+// ════════════════════════════════════════════════════════════════
+//  CostMap
+// ════════════════════════════════════════════════════════════════
 
 class CostMap {
 public:
@@ -63,15 +105,35 @@ public:
     const std::vector<uint8_t> data;
 };
 
+// ════════════════════════════════════════════════════════════════
+//  DirectionMap
+// ════════════════════════════════════════════════════════════════
+
 class DirectionMap {
 public:
     using Ptr = std::shared_ptr<DirectionMap>;
     using ConstPtr = std::shared_ptr<const DirectionMap>;
 
-    explicit DirectionMap(const cv::Mat& direction_map, double resolution, double origin_x, double origin_y);
-    explicit DirectionMap(int width, int height, double resolution, double origin_x, double origin_y, std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> data_pair);
-    explicit DirectionMap(int width, int height, double resolution, double origin_x, double origin_y, std::vector<Eigen::Vector2d> data, std::vector<uint8_t> step_mode_data = {});
+    explicit DirectionMap(
+        const cv::Mat& direction_map, double resolution, double origin_x, double origin_y,
+        const TerrainProfiles& profiles);
 
+    explicit DirectionMap(
+        int width, int height, double resolution, double origin_x, double origin_y,
+        std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data,
+        const TerrainProfiles& profiles);
+
+private:
+    // Intermediate: unpacks decoded pair into primary constructor (avoids double decoding)
+    explicit DirectionMap(
+        int width, int height, double resolution, double origin_x, double origin_y,
+        std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded,
+        const TerrainProfiles& profiles);
+
+    static std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>>
+    decode_mat(const cv::Mat& mat);
+
+public:
     Eigen::Vector2d map_coord_to_grid(const Eigen::Vector2d& map_coord) const;
     Eigen::Vector2d grid_coord_to_map(const Eigen::Vector2d& grid_coord) const;
 
@@ -80,14 +142,21 @@ public:
 
     Eigen::Vector2d at(const Eigen::Vector2i& grid_coord) const;
     Eigen::Vector2d interpolate(const Eigen::Vector2d& grid_coord) const;
-    uint8_t step_mode_at(const Eigen::Vector2i& grid_coord) const;
-    uint8_t step_mode_at(const Eigen::Vector2d& grid_coord) const;
-    StepModeInfo step_mode_info_at(const Eigen::Vector2i& grid_coord) const;
-    StepModeInfo step_mode_info_at(const Eigen::Vector2d& grid_coord) const;
+
+    uint8_t terrain_at(const Eigen::Vector2i& grid_coord) const;
+    uint8_t terrain_at(const Eigen::Vector2d& grid_coord) const;
+
+    // label >= 2 (SLOPE..STEP_HIGH) → 查 directional_labels; label <= 1 (FLAT/OBSTACLE) → 返回 normal（防御）
+    const TerrainStepRule& rule_for_label(uint8_t label, bool is_up) const;
+    const TerrainProfiles& profiles() const { return profiles_; }
 
     const int width, height;
     const double resolution, origin_x, origin_y;
     const std::vector<Eigen::Vector2d> data;
-    const std::vector<uint8_t> step_mode_data;
+    const std::vector<uint8_t> terrain;
+
+private:
+    TerrainProfiles profiles_;
 };
-}
+
+} // namespace path_follower

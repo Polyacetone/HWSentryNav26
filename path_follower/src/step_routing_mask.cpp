@@ -105,7 +105,8 @@ void StepRoutingMask::update(const std::optional<SplinePath>& global_path) {
         base_direction_map_->origin_x,
         base_direction_map_->origin_y,
         std::move(masked_dir_data),
-        base_direction_map_->step_mode_data
+        base_direction_map_->terrain,
+        base_direction_map_->profiles()
     );
 }
 

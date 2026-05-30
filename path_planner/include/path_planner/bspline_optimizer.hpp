@@ -11,10 +11,6 @@ public:
     using Ptr = std::shared_ptr<BSplineOptimizer>;
     using ConstPtr = std::shared_ptr<const BSplineOptimizer>;
 
-    struct LengthPenaltyParams {
-        double weight;
-    };
-
     struct CurvaturePenaltyParams {
         double base_weight;
         double base_beta;
@@ -28,13 +24,12 @@ public:
         double obstacle_weight;
         double direction_weight;
         double step_weight;
-        double prohibited_direction_weight;
         double start_end_weight;
         double smoothness_weight;
         double samples_per_meter;
         int max_iterations;
         double max_curvature;
-        LengthPenaltyParams length_penalty;
+        double length_penalty_weight;
         CurvaturePenaltyParams curvature;
     };
 
@@ -42,7 +37,6 @@ public:
         double obstacle_weight;
         double direction_weight;
         double step_weight;
-        double prohibited_direction_weight;
         double start_end_weight;
         double smoothness_weight;
         double samples_per_meter;
@@ -53,14 +47,13 @@ public:
         double step_extension_distance;
         double step_transition_distance;
         double interval_iou_threshold;
-        LengthPenaltyParams length_penalty;
+        double length_penalty_weight;
         CurvaturePenaltyParams curvature;
     };
 
     struct Params {
         double step_norm_threshold;
         double step_norm_transition;
-        double step_mode_dot_threshold;
         double step_detection_samples_per_meter;
         WarmupParams warmup;
         MainParams main;

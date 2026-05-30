@@ -386,36 +386,21 @@ std::optional<ActiveStepMode> MainController::build_step_command(
     const double step_enter_u,
     const DirectionMap& direction_map
 ) const {
-    const auto mode_info = direction_map.step_mode_info_at(direction_map.map_coord_to_grid(step_enter_pos_map));
-    const StepTraversalMode mode = direction == StepDirection::UP ? mode_info.up_mode : mode_info.down_mode;
-    const uint8_t speed_level = direction == StepDirection::UP ? mode_info.up_speed_level : mode_info.down_speed_level;
-    if (!is_step_traversal_allowed(mode)) {
+    const Eigen::Vector2d g = direction_map.map_coord_to_grid(step_enter_pos_map);
+    const uint8_t label = direction_map.terrain_at(g);
+    const auto& rule = direction_map.rule_for_label(label, direction == StepDirection::UP);
+
+    if (rule.chassis_mode == 0) { // NORMAL — not a step command
         return std::nullopt;
     }
 
     return ActiveStepMode {
-        .mode = [&]() {
-            if (direction == StepDirection::UP) {
-                switch (mode) {
-                    case StepTraversalMode::LEG_LONG:  return ChassisMode::STEP_UP_LEG_LONG;
-                    case StepTraversalMode::LEG_SHORT: return ChassisMode::STEP_UP_LEG_SHORT;
-                    case StepTraversalMode::JUMP:      return ChassisMode::STEP_UP_JUMP;
-                    default:                           return ChassisMode::NORMAL;
-                }
-            }
-            switch (mode) {
-                case StepTraversalMode::LEG_SHORT: return ChassisMode::STEP_DOWN_LEG_SHORT;
-                case StepTraversalMode::JUMP:      return ChassisMode::STEP_DOWN_JUMP;
-                default:                           return ChassisMode::NORMAL;
-            }
-        }(),
-        .target_velocity = step_speed_from_level(speed_level),
+        .mode = static_cast<ChassisMode>(rule.chassis_mode),
+        .capability = rule.capability,
+        .speed_min = rule.speed.min,
+        .speed_max = rule.speed.max,
         .step_entry_u = step_enter_u,
     };
-}
-
-double MainController::step_speed_from_level(const uint8_t speed_level) const {
-    return mpc_controller_->params().follow.terrain_limits.step_speed_levels[std::min<size_t>(speed_level, 3)];
 }
 
 std::optional<ActiveStepMode> MainController::current_active_step_mode(const double current_u) const {

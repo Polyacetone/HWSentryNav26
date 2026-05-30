@@ -218,7 +218,6 @@ private:
         double step_enter_u,
         const DirectionMap& direction_map
     ) const;
-    double step_speed_from_level(uint8_t speed_level) const;
     std::optional<ActiveStepMode> current_active_step_mode(double current_u) const;
     bool is_step_active(double current_u) const;
 

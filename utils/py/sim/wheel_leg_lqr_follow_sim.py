@@ -162,10 +162,12 @@ class SimConfig:
     COLLISION_LOOKAHEAD_M: float = 0.05  # 前/后碰撞点额外外扩（m）
 
     # --- 台阶判定（direction map）---
-    STEP_NORM_THRESHOLD: float = 0.9  # direction 向量模长 >= 该值认为在台阶区域
+    # direction 场 max mag 从旧版 ~1.414 (dx/dy ∈ [-1,1]) 变为新版 1.0 (angle+mag)
+    # 旧阈值 ×0.7 适配新 range
+    STEP_NORM_THRESHOLD: float = 0.63  # direction 向量模长 >= 该值认为在台阶区域
     STEP_STUCK_HEADING_ERR_RAD: float = math.radians(30.0)  # 与台阶方向场夹角过大则卡住
     STEP_STUCK_MIN_SPEED_MPS: float = 0.4  # 速度过小则卡住（仅在尝试前进时）
-    STEP_RELEASE_NORM_THRESHOLD: float = 0.6  # 离开台阶区域的判定阈值（建议略小于进入阈值）
+    STEP_RELEASE_NORM_THRESHOLD: float = 0.42  # 离开台阶区域的判定阈值（略小于进入阈值）
 
     # --- 小陀螺漂移 ---
     SPIN_DRIFT_SPEED_MPS: float = 0.02  # 小陀螺位置漂移速度（m/s）
@@ -653,8 +655,9 @@ class DirectionMap2D:
 
         raw = np.frombuffer(msg.data, dtype=np.uint8)
 
-        # map_server 现在发布 8UC3：B=dx, G=dy, R=step_mode
-        # 兼容旧版 8UC2
+        # Map format: 8UC3, ch0 = direction angle (0~2π mapped to 0~255)
+        #                   ch1 = direction magnitude (0.0~1.0 mapped to 0~255)
+        #                   ch2 = terrain semantic label (0~6)
         if msg.encoding in ("8UC3", "8UC3; compressed"):
             nch = 3
         elif msg.encoding in ("8UC2", "8UC2; compressed"):
@@ -676,15 +679,17 @@ class DirectionMap2D:
         mat = raw.reshape((int(msg.height), row_bytes))[:, :pixels_per_row]
         pix = mat.reshape((int(msg.height), int(msg.width), nch))
 
-        # direction is always in the first 2 channels
-        p0 = pix[:, :, 0]
-        p1 = pix[:, :, 1]
-        mask_zero = ((p0 == 0) & (p1 == 0)) | ((p0 == 128) & (p1 == 128))
+        # ch0 → angle, ch1 → magnitude, ch2 → terrain label
+        angle_rad = pix[:, :, 0].astype(np.float32) / 255.0 * (2.0 * math.pi)
+        mag = pix[:, :, 1].astype(np.float32) / 255.0
+        vx = np.cos(angle_rad) * mag
+        vy = np.sin(angle_rad) * mag
+        vec = np.stack([vx, vy], axis=-1)
 
-        vec = pix[:, :, :2].astype(np.float32)
-        vec = (vec - 128.0) / 128.0
-        vec[mask_zero, :] = 0.0
+        # zero out pixels where magnitude is exactly zero (incl. flat/obstacle)
+        vec[mag <= 0.0, :] = 0.0
         self.data = vec  # (H,W,2)
+        self.terrain = pix[:, :, 2] if nch >= 3 else np.zeros((int(msg.height), int(msg.width)), dtype=np.uint8)
 
     def map_coord_to_grid(self, x: float, y: float) -> tuple[float, float]:
         return ((x - self.origin_x) / self.resolution, (y - self.origin_y) / self.resolution)

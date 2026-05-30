@@ -92,6 +92,9 @@ private:
     CostMap::ConstPtr step_cost_layer_;
     DirectionMap::ConstPtr masked_direction_map_;
 
+    // ─── 地形标签遍历规则 ───
+    TerrainProfiles terrain_profiles_;
+
     // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_;
     CostMap::ConstPtr current_cost_map_;                       // 当前帧动态代价图（来自 cost_maps[0]）
@@ -131,25 +134,62 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         debug_mppi_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("debug.mppi_rollouts_pub_topic"), 1);
     }
 
-    const auto load_follow_mode_profile = [this](const std::string& name) {
-        return MPCFollowModeProfile {
+    const auto load_capability_profile = [this](const std::string& prefix) {
+        return CapabilityProfile {
             .command_bounds = {
-                .vel_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".command_bounds.vel_max"),
-                .vel_min = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".command_bounds.vel_min"),
-                .omega_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".command_bounds.omega_max"),
-                .omega_min = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".command_bounds.omega_min"),
+                .vel_max = declare_parameter<double>(prefix + ".command_bounds.vel_max"),
+                .vel_min = declare_parameter<double>(prefix + ".command_bounds.vel_min"),
+                .omega_max = declare_parameter<double>(prefix + ".command_bounds.omega_max"),
+                .omega_min = declare_parameter<double>(prefix + ".command_bounds.omega_min"),
             },
             .motion_constraints = {
-                .acc_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".motion_constraints.acc_max"),
-                .alpha_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".motion_constraints.alpha_max"),
-                .a_lat_max = declare_parameter<double>("mpc.follow.mode_profiles." + name + ".motion_constraints.a_lat_max"),
+                .acc_max = declare_parameter<double>(prefix + ".motion_constraints.acc_max"),
+                .alpha_max = declare_parameter<double>(prefix + ".motion_constraints.alpha_max"),
+                .a_lat_max = declare_parameter<double>(prefix + ".motion_constraints.a_lat_max"),
             },
         };
     };
 
-    const auto step_speed_levels = declare_parameter<std::vector<double>>("mpc.follow.terrain_limits.step_speed_levels");
-    if (step_speed_levels.size() != 4) {
-        throw std::runtime_error("mpc.follow.terrain_limits.step_speed_levels must contain exactly 4 values");
+    // ─── Terrain profiles from terrain_profiles.yaml ───
+    {
+        using enum CapabilityLevel;
+        terrain_profiles_.capability_profiles[static_cast<size_t>(LOW)] = load_capability_profile("terrain_profiles.capability_profiles.low");
+        terrain_profiles_.capability_profiles[static_cast<size_t>(MEDIUM)] = load_capability_profile("terrain_profiles.capability_profiles.medium");
+        terrain_profiles_.capability_profiles[static_cast<size_t>(HIGH)] = load_capability_profile("terrain_profiles.capability_profiles.high");
+
+        // normal — 非台阶区域的默认规则
+        {
+            const auto prefix = std::string("terrain_profiles.normal");
+            auto& rule = terrain_profiles_.normal;
+            rule.chassis_mode = static_cast<uint8_t>(declare_parameter<int>(prefix + ".chassis_mode"));
+            const std::string cap_str = declare_parameter<std::string>(prefix + ".capability");
+            rule.capability = capability_level_from_string(cap_str);
+            rule.speed.min = declare_parameter<double>(prefix + ".speed.min");
+            rule.speed.max = declare_parameter<double>(prefix + ".speed.max");
+        }
+
+        // directional_labels — 有方向语义的标签 (SLOPE..STEP_HIGH)
+        struct DirEntry { const char* name; uint8_t label; };
+        const DirEntry dir_entries[] = {
+            {"slope", 2}, {"step_l1", 3}, {"step_l2", 4}, {"fly_slope", 5}, {"step_high", 6},
+        };
+        for (const auto& [name, label] : dir_entries) {
+            for (const auto& dir : {"up", "down"}) {
+                const auto prefix = std::string("terrain_profiles.directional_labels.") + name + "." + dir;
+                const size_t idx = label - 2;
+                auto& rule = (dir == std::string("up"))
+                    ? terrain_profiles_.directional_labels[idx].up
+                    : terrain_profiles_.directional_labels[idx].down;
+
+                rule.chassis_mode = static_cast<uint8_t>(declare_parameter<int>(prefix + ".chassis_mode"));
+
+                const std::string cap_str = declare_parameter<std::string>(prefix + ".capability");
+                rule.capability = capability_level_from_string(cap_str);
+
+                rule.speed.min = declare_parameter<double>(prefix + ".speed.min");
+                rule.speed.max = declare_parameter<double>(prefix + ".speed.max");
+            }
+        }
     }
 
     // ─── MPC 参数加载 ───
@@ -159,17 +199,11 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .vel_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.vel_cmd_act_gap_max"),
                 .omega_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.omega_cmd_act_gap_max")
             },
-            .mode_profiles = {
-                .normal = load_follow_mode_profile("normal"),
-                .up = {
-                    .jump = load_follow_mode_profile("up.jump"),
-                    .short_leg = load_follow_mode_profile("up.short_leg"),
-                    .long_leg = load_follow_mode_profile("up.long_leg"),
-                },
-                .down = {
-                    .jump = load_follow_mode_profile("down.jump"),
-                    .short_leg = load_follow_mode_profile("down.short_leg"),
-                },
+            .normal_capability = terrain_profiles_.normal.capability,
+            .capability_profiles = {
+                terrain_profiles_.capability_profiles[static_cast<size_t>(CapabilityLevel::LOW)],
+                terrain_profiles_.capability_profiles[static_cast<size_t>(CapabilityLevel::MEDIUM)],
+                terrain_profiles_.capability_profiles[static_cast<size_t>(CapabilityLevel::HIGH)],
             },
             .tracking_weights = {
                 .q_y = declare_parameter<double>("mpc.follow.tracking_weights.q_y"),
@@ -188,8 +222,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .lat_acc = declare_parameter<double>("mpc.follow.motion_constraint_weights.lat_acc")
             },
             .terrain_limits = {
-                .step_speed_levels = {step_speed_levels[0], step_speed_levels[1], step_speed_levels[2], step_speed_levels[3]},
-                .step_vel_deadzone = declare_parameter<double>("mpc.follow.terrain_limits.step_vel_deadzone"),
                 .step_reachability_guide_acc = declare_parameter<double>("mpc.follow.terrain_limits.step_reachability_guide_acc")
             },
             .terrain_weights = {
@@ -476,7 +508,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 return;
             }
             cv::Mat img = cv_bridge::toCvShare(msg, "8UC3")->image;
-            global_direction_map_ = std::make_shared<DirectionMap>(img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y);
+            global_direction_map_ = std::make_shared<DirectionMap>(img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y, terrain_profiles_);
             if (global_direction_map_->width != global_cost_map_->width || global_direction_map_->height != global_cost_map_->height) {
                 RCLCPP_FATAL(
                     get_logger(), "Direction map size (%d,%d) does not match cost map (%d,%d)!",

@@ -166,21 +166,17 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     const BSplineOptimizer::Params path_optimizer_params{
         .step_norm_threshold = declare_parameter<double>("path_optimizer.step_norm_threshold"),
         .step_norm_transition = declare_parameter<double>("path_optimizer.step_norm_transition"),
-        .step_mode_dot_threshold = step_mode_dot_threshold_,
         .step_detection_samples_per_meter = declare_parameter<double>("path_optimizer.step_detection_samples_per_meter"),
         .warmup = {
             .obstacle_weight = declare_parameter<double>("path_optimizer.warmup.obstacle_weight"),
             .direction_weight = declare_parameter<double>("path_optimizer.warmup.direction_weight"),
             .step_weight = declare_parameter<double>("path_optimizer.warmup.step_weight"),
-            .prohibited_direction_weight = declare_parameter<double>("path_optimizer.warmup.prohibited_direction_weight"),
             .start_end_weight = declare_parameter<double>("path_optimizer.warmup.start_end_weight"),
             .smoothness_weight = declare_parameter<double>("path_optimizer.warmup.smoothness_weight"),
             .samples_per_meter = declare_parameter<double>("path_optimizer.warmup.samples_per_meter"),
             .max_iterations = static_cast<int>(declare_parameter<int>("path_optimizer.warmup.max_iterations")),
             .max_curvature = declare_parameter<double>("path_optimizer.warmup.max_curvature"),
-            .length_penalty = {
-                .weight = declare_parameter<double>("path_optimizer.warmup.length_penalty.weight")
-            },
+            .length_penalty_weight = declare_parameter<double>("path_optimizer.warmup.length_penalty_weight"),
             .curvature = {
                 .base_weight = declare_parameter<double>("path_optimizer.warmup.curvature.base_weight"),
                 .base_beta = declare_parameter<double>("path_optimizer.warmup.curvature.base_beta"),
@@ -194,7 +190,6 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
             .obstacle_weight = declare_parameter<double>("path_optimizer.main.obstacle_weight"),
             .direction_weight = declare_parameter<double>("path_optimizer.main.direction_weight"),
             .step_weight = declare_parameter<double>("path_optimizer.main.step_weight"),
-            .prohibited_direction_weight = declare_parameter<double>("path_optimizer.main.prohibited_direction_weight"),
             .start_end_weight = declare_parameter<double>("path_optimizer.main.start_end_weight"),
             .smoothness_weight = declare_parameter<double>("path_optimizer.main.smoothness_weight"),
             .samples_per_meter = declare_parameter<double>("path_optimizer.main.samples_per_meter"),
@@ -205,9 +200,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
             .step_extension_distance = declare_parameter<double>("path_optimizer.main.step_extension_distance"),
             .step_transition_distance = declare_parameter<double>("path_optimizer.main.step_transition_distance"),
             .interval_iou_threshold = declare_parameter<double>("path_optimizer.main.interval_iou_threshold"),
-            .length_penalty = {
-                .weight = declare_parameter<double>("path_optimizer.main.length_penalty.weight")
-            },
+            .length_penalty_weight = declare_parameter<double>("path_optimizer.main.length_penalty_weight"),
             .curvature = {
                 .base_weight = declare_parameter<double>("path_optimizer.main.curvature.base_weight"),
                 .base_beta = declare_parameter<double>("path_optimizer.main.curvature.base_beta"),

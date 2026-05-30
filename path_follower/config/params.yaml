@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     control_points_sub_topic: "/path_planner/control_points" # B样条控制点
-    global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局台阶地图（8UC3: B=方向X, G=方向Y, A=台阶模式alpha）
+    global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局台阶地图（8UC3: ch0=方向角度0-255, ch1=方向模长0-255, ch2=地形标签0-6）
     global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图（OccupancyGrid）
     local_cost_maps_sub_topic: "/map_server/local_cost_maps" # 局部代价地图序列（maps[0]=当前帧，maps[1..N]=预测帧）
     comp_stage_sub_topic: "/serial_bridge/comp_stage" # 比赛阶段
@@ -99,69 +99,6 @@
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
-        mode_profiles:
-          normal:
-            command_bounds:
-              vel_max: 2.0 # 线速度上限 (m/s)
-              vel_min: -1.2 # 线速度下限 (m/s）
-              omega_max: 6.0 # 角速度上限 (rad/s)
-              omega_min: -6.0 # 角速度下限 (rad/s)
-            motion_constraints:
-              acc_max: 1.8  # 最大 dv_cmd/dt (m/s²)
-              alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-              a_lat_max: 2.5 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
-          up:
-            jump:
-              command_bounds:
-                vel_max: 2.0 # 线速度上限 (m/s)
-                vel_min: -1.2 # 线速度下限 (m/s）
-                omega_max: 6.0 # 角速度上限 (rad/s)
-                omega_min: -6.0 # 角速度下限 (rad/s)
-              motion_constraints:
-                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-                a_lat_max: 2.5 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
-            short_leg:
-              command_bounds:
-                vel_max: 2.0 # 线速度上限 (m/s)
-                vel_min: -1.2 # 线速度下限 (m/s）
-                omega_max: 6.0 # 角速度上限 (rad/s)
-                omega_min: -6.0 # 角速度下限 (rad/s)
-              motion_constraints:
-                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-                a_lat_max: 2.0 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
-            long_leg:
-              command_bounds:
-                vel_max: 1.5 # 线速度上限 (m/s)
-                vel_min: -1.2 # 线速度下限 (m/s）
-                omega_max: 6.0 # 角速度上限 (rad/s)
-                omega_min: -6.0 # 角速度下限 (rad/s)
-              motion_constraints:
-                acc_max: 1.5 # 最大 dv_cmd/dt (m/s²)
-                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-                a_lat_max: 1.2 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
-          down:
-            jump:
-              command_bounds:
-                vel_max: 2.0 # 线速度上限 (m/s)
-                vel_min: -1.2 # 线速度下限 (m/s）
-                omega_max: 6.0 # 角速度上限 (rad/s)
-                omega_min: -6.0 # 角速度下限 (rad/s)
-              motion_constraints:
-                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-                a_lat_max: 2.0 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
-            short_leg:
-              command_bounds:
-                vel_max: 2.0 # 线速度上限 (m/s)
-                vel_min: -1.2 # 线速度下限 (m/s）
-                omega_max: 6.0 # 角速度上限 (rad/s)
-                omega_min: -6.0 # 角速度下限 (rad/s)
-              motion_constraints:
-                acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-                alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-                a_lat_max: 2.0 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
         tracking_weights:
           q_y: 0.30  # 横向误差权重
           q_theta: 0.05 # 航向误差权重
@@ -176,8 +113,6 @@
           alpha_limit: 30.0 # 角速度指令变化率超限惩罚
           lat_acc: 30.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
         terrain_limits:
-          step_speed_levels: [1.2, 1.8, 2.4, 3.0] # alpha中4档速度映射为实际速度 (m/s)，对应00/01/10/11
-          step_vel_deadzone: 0.2 # 台阶速度惩罚死区，|v_act - target_v| < deadzone 时不惩罚
           step_reachability_guide_acc: 1.2 # 台阶入口可达势函数的引导加速度 (m/s^2)
         terrain_weights:
           step_vel_weight: 0.4 # 台阶内部仍保留原始速度范围惩罚，但权重降低

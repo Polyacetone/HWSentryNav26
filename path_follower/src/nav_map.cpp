@@ -1,44 +1,15 @@
 #include <path_follower/nav_map.hpp>
 
 #include <algorithm>
+#include <numbers>
 #include <stdexcept>
 
-namespace {
-
-bool is_step_direction_pixel(const cv::Vec3b& val) {
-    const bool zero = val[0] == 0 && val[1] == 0;
-    const bool neutral = val[0] == 128 && val[1] == 128;
-    return !(zero || neutral);
-}
-
-std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> convert_direction_map(const cv::Mat& mat) {
-    if (mat.type() != CV_8UC3) {
-        throw std::runtime_error("Direction map must be of type CV_8UC3");
-    }
-
-    std::vector<Eigen::Vector2d> vec;
-    std::vector<uint8_t> step_mode_vec;
-    vec.reserve(static_cast<size_t>(mat.cols * mat.rows));
-    step_mode_vec.reserve(static_cast<size_t>(mat.cols * mat.rows));
-    for (int y = 0; y < mat.rows; y++) {
-        for (int x = 0; x < mat.cols; x++) {
-            const cv::Vec3b val = mat.at<cv::Vec3b>(y, x);
-            if (is_step_direction_pixel(val)) {
-                Eigen::Vector2d dir(val[0] - 128.0, val[1] - 128.0);
-                vec.emplace_back(dir / 128.0);
-                step_mode_vec.push_back(val[2]);
-            } else {
-                vec.emplace_back(0.0, 0.0);
-                step_mode_vec.push_back(0);
-            }
-        }
-    }
-    return {std::move(vec), std::move(step_mode_vec)};
-}
-
-} // namespace
-
 namespace path_follower {
+
+// ════════════════════════════════════════════════════════════════
+//  CostMap
+// ════════════════════════════════════════════════════════════════
+
 CostMap::CostMap(int width, int height, double resolution, double origin_x, double origin_y, const std::vector<uint8_t>& data):
     width(width), height(height), resolution(resolution), origin_x(origin_x), origin_y(origin_y), data(data) {}
 
@@ -112,37 +83,72 @@ Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
     return sum_grad / samples;
 }
 
-DirectionMap::DirectionMap(const cv::Mat& direction_map, double resolution, double origin_x, double origin_y):
+// ════════════════════════════════════════════════════════════════
+//  DirectionMap
+// ════════════════════════════════════════════════════════════════
+
+/*static*/ std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>>
+DirectionMap::decode_mat(const cv::Mat& mat) {
+    if (mat.type() != CV_8UC3) {
+        throw std::runtime_error("Direction map must be of type CV_8UC3");
+    }
+
+    std::vector<Eigen::Vector2d> dir;
+    std::vector<uint8_t> terrain;
+    dir.reserve(static_cast<size_t>(mat.cols * mat.rows));
+    terrain.reserve(static_cast<size_t>(mat.cols * mat.rows));
+    for (int y = 0; y < mat.rows; y++) {
+        for (int x = 0; x < mat.cols; x++) {
+            const cv::Vec3b val = mat.at<cv::Vec3b>(y, x);
+            if (val[1] == 0) {
+                dir.emplace_back(0.0, 0.0);
+            } else {
+                const double angle = static_cast<double>(val[0]) / 255.0 * 2.0 * std::numbers::pi;
+                const double mag = static_cast<double>(val[1]) / 255.0;
+                dir.emplace_back(std::cos(angle) * mag, std::sin(angle) * mag);
+            }
+            terrain.push_back(val[2]);
+        }
+    }
+    return {std::move(dir), std::move(terrain)};
+}
+
+DirectionMap::DirectionMap(
+    const cv::Mat& direction_map, double resolution, double origin_x, double origin_y,
+    const TerrainProfiles& profiles):
     DirectionMap(
-        direction_map.cols,
-        direction_map.rows,
-        resolution,
-        origin_x,
-        origin_y,
-        convert_direction_map(direction_map)
+        direction_map.cols, direction_map.rows, resolution, origin_x, origin_y,
+        decode_mat(direction_map), profiles
     ) {}
 
-DirectionMap::DirectionMap(int width, int height, double resolution, double origin_x, double origin_y,
-    std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> data_pair):
+DirectionMap::DirectionMap(
+    int width, int height, double resolution, double origin_x, double origin_y,
+    std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded,
+    const TerrainProfiles& profiles):
+    DirectionMap(
+        width, height, resolution, origin_x, origin_y,
+        std::move(decoded.first), std::move(decoded.second), profiles
+    ) {}
+
+DirectionMap::DirectionMap(
+    int width, int height, double resolution, double origin_x, double origin_y,
+    std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data,
+    const TerrainProfiles& profiles):
     width(width),
     height(height),
     resolution(resolution),
     origin_x(origin_x),
     origin_y(origin_y),
-    data(std::move(data_pair.first)),
-    step_mode_data(data_pair.second.empty() ? std::vector<uint8_t>(static_cast<size_t>(width * height), 0) : std::move(data_pair.second)) {
+    data(std::move(dir_data)),
+    terrain(terrain_data.empty() ? std::vector<uint8_t>(static_cast<size_t>(width * height), TERRAIN_FLAT) : std::move(terrain_data)),
+    profiles_(profiles) {
     if (static_cast<int>(this->data.size()) != width * height) {
         throw std::runtime_error("DirectionMap data size does not match width*height");
     }
-    if (static_cast<int>(this->step_mode_data.size()) != width * height) {
-        throw std::runtime_error("DirectionMap step_mode_data size does not match width*height");
+    if (static_cast<int>(this->terrain.size()) != width * height) {
+        throw std::runtime_error("DirectionMap terrain size does not match width*height");
     }
 }
-
-DirectionMap::DirectionMap(int width, int height, double resolution, double origin_x, double origin_y,
-    std::vector<Eigen::Vector2d> data, std::vector<uint8_t> step_mode_data):
-    DirectionMap(width, height, resolution, origin_x, origin_y,
-        std::pair{std::move(data), std::move(step_mode_data)}) {}
 
 Eigen::Vector2d DirectionMap::map_coord_to_grid(const Eigen::Vector2d& map_coord) const {
     return {(map_coord.x() - origin_x) / resolution, (map_coord.y() - origin_y) / resolution};
@@ -180,23 +186,22 @@ Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) con
     return (1 - dx) * (1 - dy) * at({x0, y0}) + dx * (1 - dy) * at({x1, y0}) + (1 - dx) * dy * at({x0, y1}) + dx * dy * at({x1, y1});
 }
 
-uint8_t DirectionMap::step_mode_at(const Eigen::Vector2i& grid_coord) const {
+uint8_t DirectionMap::terrain_at(const Eigen::Vector2i& grid_coord) const {
     if (is_valid_coord(grid_coord)) {
-        return step_mode_data[static_cast<size_t>(grid_coord.y() * width + grid_coord.x())];
+        return terrain[static_cast<size_t>(grid_coord.y() * width + grid_coord.x())];
     }
-    return 0;
+    return TERRAIN_OBSTACLE;
 }
 
-uint8_t DirectionMap::step_mode_at(const Eigen::Vector2d& grid_coord) const {
+uint8_t DirectionMap::terrain_at(const Eigen::Vector2d& grid_coord) const {
     const Eigen::Array2i floored = grid_coord.array().floor().cast<int>();
-    return step_mode_at(Eigen::Vector2i(floored.x(), floored.y()));
+    return terrain_at(Eigen::Vector2i(floored.x(), floored.y()));
 }
 
-StepModeInfo DirectionMap::step_mode_info_at(const Eigen::Vector2i& grid_coord) const {
-    return decode_step_mode(step_mode_at(grid_coord));
+const TerrainStepRule& DirectionMap::rule_for_label(const uint8_t label, const bool is_up) const {
+    if (label <= TERRAIN_OBSTACLE) return profiles_.normal;
+    const auto& lr = profiles_.directional_labels[label - 2];
+    return is_up ? lr.up : lr.down;
 }
 
-StepModeInfo DirectionMap::step_mode_info_at(const Eigen::Vector2d& grid_coord) const {
-    return decode_step_mode(step_mode_at(grid_coord));
-}
-}
+} // namespace path_follower

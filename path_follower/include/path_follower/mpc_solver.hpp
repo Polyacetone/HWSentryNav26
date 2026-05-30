@@ -38,46 +38,15 @@ namespace ix {
 //  Parameter structs
 // ═══════════════════════════════════════════════════════════════
 
-struct MPCCommandBounds {
-    double vel_max;
-    double vel_min;
-    double omega_max;
-    double omega_min;
-};
-
 struct MPCStartCommandLimits {
     double vel_cmd_act_gap_max;
     double omega_cmd_act_gap_max;
-};
-
-struct MPCMotionConstraints {
-    double acc_max;
-    double alpha_max;
-    double a_lat_max;
 };
 
 struct MPCMotionConstraintWeights {
     double acc_limit;
     double alpha_limit;
     double lat_acc;
-};
-
-struct MPCFollowModeProfile {
-    MPCCommandBounds command_bounds;
-    MPCMotionConstraints motion_constraints;
-};
-
-struct MPCFollowModeProfiles {
-    MPCFollowModeProfile normal;
-    struct {
-        MPCFollowModeProfile jump;
-        MPCFollowModeProfile short_leg;
-        MPCFollowModeProfile long_leg;
-    } up;
-    struct {
-        MPCFollowModeProfile jump;
-        MPCFollowModeProfile short_leg;
-    } down;
 };
 
 struct MPCFollowTrackingWeights {
@@ -94,8 +63,6 @@ struct MPCFollowCommandWeights {
 };
 
 struct MPCFollowTerrainLimits {
-    std::array<double, 4> step_speed_levels;
-    double step_vel_deadzone;
     double step_reachability_guide_acc;
 };
 
@@ -224,7 +191,8 @@ struct MPCFollowRolloutSafetyParams {
 
 struct MPCFollowParams {
     MPCStartCommandLimits start_command;
-    MPCFollowModeProfiles mode_profiles;
+    CapabilityLevel normal_capability = CapabilityLevel::LOW;
+    std::array<CapabilityProfile, 3> capability_profiles;
     MPCFollowTrackingWeights tracking_weights;
     MPCFollowCommandWeights command_weights;
     MPCMotionConstraintWeights motion_constraint_weights;
@@ -306,7 +274,9 @@ struct EnergyParams {
 
 struct ActiveStepMode {
     ChassisMode mode = ChassisMode::NORMAL;
-    double target_velocity = 0.0;
+    CapabilityLevel capability = CapabilityLevel::LOW;
+    double speed_min = 0.0;
+    double speed_max = 0.0;
     std::optional<double> step_entry_u = std::nullopt;
     double prepare_u = 0.0;
     double active_u = 0.0;
