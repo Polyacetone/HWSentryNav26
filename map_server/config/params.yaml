@@ -9,12 +9,17 @@
       accumulated_cloud_pub_topic: "/map_server/debug/accumulated_local_cloud" # 累积局部点云发布话题名称
       dynamic_points_pub_topic: "/map_server/debug/dynamic_obstacle_points" # 动态障碍物点云发布话题名称
 
+    map_inflation: # 全局与局部统一的代价地图/方向场膨胀参数
+      robot_radius_px: 1 # 膨胀保持半径（像素），该距离内代价/模长保持为源值
+      cutoff_radius_px: 4 # 膨胀截断半径（像素），超过该距离不再膨胀
+      decay_alpha: 1.0 # 指数衰减系数，越大衰减越快
+
     global_map:
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图
       robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-      blue_nav_map_filename: "RMUC2026ns.png" # 全局导航地图路径（蓝方）
-      red_nav_map_filename: "RMUC2026ns.png" # 全局导航地图路径（红方）
-      default_nav_map_filename: "RMUC2026ns.png" # 获取机器人颜色超时后使用此全局导航地图
+      blue_nav_map_filename: "RMUC2026.msgpack" # 全局导航地图路径（蓝方）
+      red_nav_map_filename: "RMUC2026.msgpack" # 全局导航地图路径（红方）
+      default_nav_map_filename: "RMUC2026.msgpack" # 获取机器人颜色超时后使用此全局导航地图
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
       cloud_filename: "RMUC2026.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
@@ -38,7 +43,7 @@
         enable_prediction: false # 无全局点云时是否启用目标跟踪预测（法向量分析容易将台阶等静态结构误检为动态，轨迹预测意义不大）
         normal_num_neighbors: 12 # 法向量估计使用的K近邻数量
         vertical_normal_abs_z_max: 0.3 # |normal.z|小于该值视为法向量垂直z轴（认为是动态障碍物）
-        direction_filter_threshold: 0.1 # 台阶方向场归一化模长过滤阈值 [0,1]（0.0=关闭），当无全局点云时在create_obstacle_mask中检查每个动态点对应的方向场2D模长归一化值（B/G通道，128-centered，除以128归一化到[0,1]），超过此阈值则视为台阶等已知静态结构予以滤除
+        direction_filter_threshold: 0.1 # 台阶方向场归一化模长过滤阈值 [0,1]（0.0=关闭），当无全局点云时在create_obstacle_mask中检查每个动态点对应的方向场模长（ch1, 0-255），超过此阈值则视为台阶等已知静态结构予以滤除
       sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
       sor_std_mul: 2.0 # SOR保留阈值=均值+sor_std_mul*标准差
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
@@ -55,8 +60,3 @@
         local_grid_render_threshold: 0.3 # 局部栅格渲染阈值（0~1），低于此值不渲染
         prediction_steps: 30 # 未来预测步数
         prediction_dt: 0.1 # 预测步长（s），prediction_steps × prediction_dt = 总预测时长
-      cost_map_inflation: # 局部代价地图膨胀参数
-        inflation_radius: 0.8 # 代价地图膨胀半径，单位m
-        inscribed_radius: 0.3 # 机器人内切圆半径，单位m
-        cost_scaling_factor: 8.0 # 代价缩放因子
-        obstacle_threshold: 100 # 超过该值的格子被视为障碍物

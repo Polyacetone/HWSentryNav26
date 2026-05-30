@@ -19,46 +19,9 @@
 #include <small_gicp/util/downsampling_omp.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
 #include <map_server/object_tracker.hpp>
+#include <map_server/map_utils.hpp>
 
 namespace map_server {
-
-namespace {
-
-void load_nav_map_channels_or_exit(
-    const rclcpp::Logger& logger,
-    const std::string& nav_map_path,
-    cv::Mat& global_direction_map,
-    cv::Mat& global_cost_map,
-    int& map_size_x,
-    int& map_size_y
-) {
-    // BGRA 编码:
-    //   B (ch0): 台阶方向场 X 分量 (128-centered, 0/128=(0,0)表示无台阶)
-    //   G (ch1): 台阶方向场 Y 分量 (128-centered)
-    //   R (ch2): 全局代价地图 (0=自由, 255=障碍)
-    //   A (ch3): 台阶通行模式标记 (bit-packed: up_mode|down_mode<<2|up_speed<<4|down_speed<<6)
-    cv::Mat nav_map = cv::imread(nav_map_path, cv::IMREAD_UNCHANGED);
-    if (nav_map.empty()) {
-        RCLCPP_FATAL(logger, "Failed to load global navmap from %s", nav_map_path.c_str());
-        std::exit(EXIT_FAILURE);
-    }
-    if (nav_map.type() != CV_8UC4) {
-        RCLCPP_FATAL(logger, "Global navmap %s must be BGRA PNG (CV_8UC4), but got type=%d channels=%d", nav_map_path.c_str(), nav_map.type(), nav_map.channels());
-        std::exit(EXIT_FAILURE);
-    }
-
-    map_size_x = nav_map.cols;
-    map_size_y = nav_map.rows;
-    std::vector<cv::Mat> channels;
-    cv::split(nav_map, channels);
-
-    // direction_map: [B(dx), G(dy), A(step_mode)] — 3通道 CV_8UC3
-    cv::merge(std::array{channels[0], channels[1], channels[3]}, global_direction_map);
-    // cost_map: R(ch2) — 单通道 CV_8UC1
-    global_cost_map = channels[2];
-}
-
-} // namespace
 
 class MapServerNode: public rclcpp::Node {
 public:
@@ -88,17 +51,12 @@ private:
         int sor_num_neighbors;
         double sor_std_mul;
         int cell_obstacle_point_threshold;
-        struct {
-            double inflation_radius;
-            double inscribed_radius;
-            double cost_scaling_factor;
-            int obstacle_threshold;
-        } cost_map_inflation;
     } local_map_params_;
     bool bypass_dynamic_obstacle_;
     bool enable_prediction_with_cloud_;
     bool enable_prediction_without_cloud_;
 
+    map_utils::MapInflationParams map_inflation_params_{};
     cv::Mat global_direction_map_, global_cost_map_;
     bool global_nav_map_initialized_ = false;
     std::chrono::steady_clock::time_point initialize_time_;
@@ -133,7 +91,6 @@ private:
     small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
     cv::Mat create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const;
     cv::Mat dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const;
-    cv::Mat inflate_cost_map(const cv::Mat& cost_map) const;
     void fill_occupancy_grid(const cv::Mat& cost_map, const rclcpp::Time& stamp, nav_msgs::msg::OccupancyGrid& grid) const;
     void pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher) const;
     void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp, const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher) const;
@@ -147,6 +104,11 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     map_resolution_ = declare_parameter<double>("map_resolution");
     num_threads_ = static_cast<int>(declare_parameter<int>("num_threads"));
     robot_color_wait_timeout_ = declare_parameter<double>("global_map.robot_color_wait_timeout");
+    map_inflation_params_ = {
+        .robot_radius_px = static_cast<int>(declare_parameter<int>("map_inflation.robot_radius_px")),
+        .cutoff_radius_px = static_cast<int>(declare_parameter<int>("map_inflation.cutoff_radius_px")),
+        .decay_alpha = declare_parameter<double>("map_inflation.decay_alpha")
+    };
 
     local_map_params_ = {
         .cloud_accumulate_frames = (size_t)declare_parameter<int>("local_map.cloud_accumulate_frames"),
@@ -165,13 +127,7 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         },
         .sor_num_neighbors = (int)declare_parameter<int>("local_map.sor_num_neighbors"),
         .sor_std_mul = declare_parameter<double>("local_map.sor_std_mul"),
-        .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
-        .cost_map_inflation = {
-            .inflation_radius = declare_parameter<double>("local_map.cost_map_inflation.inflation_radius"),
-            .inscribed_radius = declare_parameter<double>("local_map.cost_map_inflation.inscribed_radius"),
-            .cost_scaling_factor = declare_parameter<double>("local_map.cost_map_inflation.cost_scaling_factor"),
-            .obstacle_threshold = (int)declare_parameter<int>("local_map.cost_map_inflation.obstacle_threshold")
-        }
+        .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold")
     };
 
     enable_debug_ = declare_parameter<bool>("debug.enable");
@@ -252,22 +208,63 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
 
 void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::SharedPtr msg) {
     if (global_nav_map_initialized_) {
-        // 已经根据机器人状态初始化过全局导航地图了，就不再接收
         robot_status_sub_.reset();
         return;
     }
     global_nav_map_initialized_ = true;
+
     std::string nav_map_filename;
-    if (msg->robot_color) { // true为红色
+    if (msg->robot_color) {
         RCLCPP_DEBUG(get_logger(), "Robot color: RED");
         nav_map_filename = declare_parameter<std::string>("global_map.red_nav_map_filename");
-    } else { // false为蓝色
+    } else {
         RCLCPP_DEBUG(get_logger(), "Robot color: BLUE");
         nav_map_filename = declare_parameter<std::string>("global_map.blue_nav_map_filename");
     }
+
     std::string nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + nav_map_filename;
-    load_nav_map_channels_or_exit(get_logger(), nav_map_path, global_direction_map_, global_cost_map_, map_size_x_, map_size_y_);
-    RCLCPP_INFO(get_logger(), "Loaded global navmap (%s) as RGBA with size_x=%d, size_y=%d", msg->robot_color ? "RED" : "BLUE", map_size_x_, map_size_y_);
+    RCLCPP_INFO(get_logger(), "Loading terrain msgpack from %s", nav_map_path.c_str());
+
+    try {
+        auto terrain_data = map_utils::load_terrain_msgpack(nav_map_path);
+        map_size_x_ = terrain_data.width;
+        map_size_y_ = terrain_data.height;
+
+        // 障碍物膨胀 → global cost map
+        {
+            cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
+            for (int y = 0; y < map_size_y_; y++) {
+                for (int x = 0; x < map_size_x_; x++) {
+                    if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == map_utils::TERRAIN_OBSTACLE) {
+                        obs_mask.at<uint8_t>(y, x) = 255;
+                    }
+                }
+            }
+            global_cost_map_ = map_utils::inflate_cost_map(obs_mask, map_inflation_params_);
+        }
+
+        // 方向场膨胀 → angle + magnitude
+        cv::Mat angle, magnitude, terrain_labels;
+        map_utils::inflate_direction_field(terrain_data, map_inflation_params_, angle, magnitude);
+
+        // raw label 直通
+        terrain_labels = cv::Mat(map_size_y_, map_size_x_, CV_8UC1, terrain_data.terrain.data()).clone();
+
+        // 合并为 3 通道: ch0=angle, ch1=magnitude, ch2=label
+        map_utils::build_terrain_3chan(angle, magnitude, terrain_labels, global_direction_map_);
+
+        RCLCPP_INFO(
+            get_logger(), "Loaded terrain msgpack (%s) size=%dx%d resolution=%.3f, "
+            "cost_map=%s, direction_map=%s",
+            msg->robot_color ? "RED" : "BLUE",
+            map_size_x_, map_size_y_, terrain_data.resolution,
+            global_cost_map_.empty() ? "empty" : "ok",
+            global_direction_map_.empty() ? "empty" : "ok"
+        );
+    } catch (const std::exception& e) {
+        RCLCPP_FATAL(get_logger(), "Failed to load/process navmap: %s", e.what());
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 void MapServerNode::timer_callback() {
@@ -279,8 +276,30 @@ void MapServerNode::timer_callback() {
             global_nav_map_initialized_ = true;
             std::string default_nav_map_filename = declare_parameter<std::string>("global_map.default_nav_map_filename");
             std::string default_nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + default_nav_map_filename;
-            load_nav_map_channels_or_exit(get_logger(), default_nav_map_path, global_direction_map_, global_cost_map_, map_size_x_, map_size_y_);
-            RCLCPP_INFO(get_logger(), "Loaded default global navmap as RGBA with size_x=%d, size_y=%d", map_size_x_, map_size_y_);
+            try {
+                auto terrain_data = map_utils::load_terrain_msgpack(default_nav_map_path);
+                map_size_x_ = terrain_data.width;
+                map_size_y_ = terrain_data.height;
+                {
+                    cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
+                    for (int y = 0; y < map_size_y_; y++) {
+                        for (int x = 0; x < map_size_x_; x++) {
+                            if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == map_utils::TERRAIN_OBSTACLE) {
+                                obs_mask.at<uint8_t>(y, x) = 255;
+                            }
+                        }
+                    }
+                    global_cost_map_ = map_utils::inflate_cost_map(obs_mask, map_inflation_params_);
+                }
+                cv::Mat angle, magnitude, terrain_labels;
+                map_utils::inflate_direction_field(terrain_data, map_inflation_params_, angle, magnitude);
+                terrain_labels = cv::Mat(map_size_y_, map_size_x_, CV_8UC1, terrain_data.terrain.data()).clone();
+                map_utils::build_terrain_3chan(angle, magnitude, terrain_labels, global_direction_map_);
+                RCLCPP_INFO(get_logger(), "Loaded default terrain msgpack size=%dx%d", map_size_x_, map_size_y_);
+            } catch (const std::exception& e) {
+                RCLCPP_FATAL(get_logger(), "Failed to load default navmap: %s", e.what());
+                std::exit(EXIT_FAILURE);
+            }
         }
         return;
     }
@@ -337,7 +356,7 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
 
     // 动态障碍物分析
     cv::Mat obstacle_mask = create_obstacle_mask(denoised_dynamic_points);
-    cv::Mat local_cost_map = inflate_cost_map(obstacle_mask);
+    cv::Mat local_cost_map = map_utils::inflate_cost_map(obstacle_mask, map_inflation_params_);
 
     // 根据当前模式（是否有全局点云）选择 prediction 开关
     const bool use_prediction = global_kdtree_
@@ -362,7 +381,7 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         const auto tracker_inflate_begin = std::chrono::steady_clock::now();
         #pragma omp parallel for num_threads(num_threads_) schedule(static)
         for (int i = 0; i < static_cast<int>(prediction_result.future_masks.size()); i++) {
-            prediction_result.future_masks[static_cast<size_t>(i)] = inflate_cost_map(prediction_result.future_masks[static_cast<size_t>(i)]);
+            prediction_result.future_masks[static_cast<size_t>(i)] = map_utils::inflate_cost_map(prediction_result.future_masks[static_cast<size_t>(i)], map_inflation_params_);
         }
         const auto tracker_inflate_end = std::chrono::steady_clock::now();
 
@@ -619,17 +638,11 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
         if (map_x < 0 || map_x >= map_size_x_ || map_y < 0 || map_y >= map_size_y_) continue;
 
         if (use_direction_filter) {
-            // direction_map: ch0=B(dx), ch1=G(dy), ch2=A(step_mode), 128-centered
-            const auto& dir_px = global_direction_map_.at<cv::Vec3b>(map_y, map_x);
-            // (0,0) 和 (128,128) 都视为无台阶方向，兼容不同的 navmap 编码
-            const bool no_direction = (dir_px[0] == 0 && dir_px[1] == 0)
-                || (dir_px[0] == 128 && dir_px[1] == 128);
-            if (!no_direction) {
-                const double dx = static_cast<double>(dir_px[0]) - 128.0;
-                const double dy = static_cast<double>(dir_px[1]) - 128.0;
-                if (std::sqrt(dx * dx + dy * dy) / 128.0 > local_map_params_.without_global_cloud.direction_filter_threshold) {
-                    continue;
-                }
+            // terrain_map: ch0=angle, ch1=magnitude (0-255), ch2=label
+            const auto& px = global_direction_map_.at<cv::Vec3b>(map_y, map_x);
+            const double magnitude = px[1] / 255.0;
+            if (magnitude > local_map_params_.without_global_cloud.direction_filter_threshold) {
+                continue;
             }
         }
 
@@ -643,7 +656,7 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
 }
 
 cv::Mat MapServerNode::dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const {
-    return inflate_cost_map(create_obstacle_mask(dynamic_points));
+    return map_utils::inflate_cost_map(create_obstacle_mask(dynamic_points), map_inflation_params_);
 }
 
 small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const {
@@ -660,69 +673,15 @@ small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::
     return small_gicp_cloud;
 }
 
-cv::Mat MapServerNode::inflate_cost_map(const cv::Mat& cost_map) const {
-    CV_Assert(cost_map.type() == CV_8UC1);
-    const float inflation_radius = static_cast<float>(local_map_params_.cost_map_inflation.inflation_radius);
-    const float inscribed_radius = static_cast<float>(local_map_params_.cost_map_inflation.inscribed_radius);
-    const float cost_scaling_factor = static_cast<float>(local_map_params_.cost_map_inflation.cost_scaling_factor);
-    const int obstacle_threshold = local_map_params_.cost_map_inflation.obstacle_threshold;
-
-    // Step 1: 创建二值障碍物掩码（1=障碍，0=非障碍）
-    cv::Mat obstacle_mask;
-    cv::threshold(cost_map, obstacle_mask, obstacle_threshold - 1, 1, cv::THRESH_BINARY);
-
-    // Step 2: 计算每个像素到最近障碍物的欧氏距离（单位：像素）
-    cv::Mat dist;
-    cv::distanceTransform(1 - obstacle_mask, dist, cv::DIST_L2, 3); // distanceTransform 要求前景为0
-
-    // Step 3: 将距离转为米
-    dist.convertTo(dist, CV_32F, map_resolution_); // dist now in meters
-
-    // Step 4: 初始化输出图为输入图（保留原始障碍物和自由区域）
-    cv::Mat cost_map_out = cost_map.clone();
-
-    // Step 5: 遍历所有像素，计算膨胀代价
-    for (int i = 0; i < cost_map_out.rows; i++) {
-        const float* dist_row = dist.ptr<float>(i);
-        uint8_t* out_row = cost_map_out.ptr<uint8_t>(i);
-        const uint8_t* in_row = cost_map.ptr<uint8_t>(i);
-
-        for (int j = 0; j < cost_map_out.cols; j++) {
-            // 跳过已知障碍物
-            if (in_row[j] >= obstacle_threshold) continue;
-            const float d = dist_row[j]; // 到最近障碍物的距离（米）
-
-            // 仅在膨胀半径内处理
-            if (d <= inflation_radius && d > 0) {
-                uint8_t new_cost;
-                if (d <= inscribed_radius) {
-                    // 机器人本体无法进入的区域 → 设为高代价
-                    new_cost = 255;
-                } else {
-                    new_cost = static_cast<uint8_t>(
-                        255 * std::clamp(std::exp(-cost_scaling_factor * (d - inscribed_radius)), 0.0f, 1.0f)
-                    );
-                }
-                // 只在原代价较低时更新（保留更高优先级的代价）
-                if (new_cost > out_row[j]) {
-                    out_row[j] = new_cost;
-                }
-            }
-        }
-    }
-
-    return cost_map_out;
-}
-
 void MapServerNode::pub_direction_map(
     const cv::Mat& direction_map,
     const rclcpp::Time& stamp,
     const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher
 ) const {
-    // direction_map 为 CV_8UC3:
-    //   ch0 = B (原始BGRA的B): 台阶方向 X (128-centered)
-    //   ch1 = G (原始BGRA的G): 台阶方向 Y (128-centered)
-    //   ch2 = B (原始BGRA的A): 台阶通行模式标记
+    // terrain_map 为 CV_8UC3:
+    //   ch0: 膨胀后的方向角度 (0-255 → 0~2π)
+    //   ch1: 膨胀后的方向模长 (0-255 → 0.0~1.0)
+    //   ch2: 原始语义标签 (0-6)
     sensor_msgs::msg::Image::SharedPtr direction_map_msg = cv_bridge::CvImage(
         std_msgs::msg::Header(), "8UC3", direction_map
     ).toImageMsg();

@@ -3,8 +3,7 @@
 build/
 install/
 log/
-__pycache__
-*.pcd
-*.pgm
-*.png
-*.pyc
+__pycache__/
+
+/map_server/maps/
+/odom_localizer/maps/

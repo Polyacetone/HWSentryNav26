@@ -26,6 +26,9 @@
 ### Boost
 推荐使用apt安装：`sudo apt install libboost-all-dev`。
 
+### MsgPack
+推荐使用apt安装：`sudo apt install libmsgpack-cxx-dev`。
+
 ### GTSAM
 推荐按照以下步骤自行构建。
 ```bash
