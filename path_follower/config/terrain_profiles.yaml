@@ -1,8 +1,15 @@
 /**:
   ros__parameters:
     terrain_profiles:
+      profile_blend: # 能力档位切换时的控制指令和约束渐变步长
+        v_step: 0.08 # vel_max / vel_min 步长 (m/s) 
+        w_step: 0.30 # omega_max / omega_min 步长 (rad/s)
+        acc_step: 0.03 # acc_max 步长 (m/s²)
+        alpha_step: 0.10 # alpha_max 步长 (rad/s²)
+        a_lat_step: 0.10 # a_lat_max 步长 (m/s²)
+
       capability_profiles:
-        low:
+        low: # 低能力档位（适用于高腿长）
           command_bounds:
             vel_max: 1.5
             vel_min: -0.8
@@ -12,7 +19,7 @@
             acc_max: 1.5
             alpha_max: 7.0
             a_lat_max: 1.2
-        medium:
+        medium: # 中等能力档位（一般等同于正常模式，适用于低腿长）
           command_bounds:
             vel_max: 2.0
             vel_min: -1.2
@@ -22,7 +29,7 @@
             acc_max: 1.8
             alpha_max: 7.0
             a_lat_max: 2.0
-        high:
+        high: # 高能力档位（适用于飞坡）
           command_bounds:
             vel_max: 2.8
             vel_min: -1.2
@@ -34,18 +41,18 @@
             a_lat_max: 2.0
 
       directional_labels:
-        slope:
+        slope: # 斜坡
           up:   { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 } }
           down: { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 } }
-        step_l1:
+        step_l1: # 一级台阶
           up:   { chassis_mode: 4, capability: low, speed: { min: 1.2, max: 1.5 } }
           down: { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 } }
-        step_l2:
+        step_l2: # 二级台阶
           up:   { chassis_mode: 4, capability: low, speed: { min: 1.2, max: 1.5 } }
           down: { chassis_mode: 9, capability: medium, speed: { min: 1.6, max: 2.0 } }
-        fly_slope:
-          up:   { chassis_mode: 10, capability: high, speed: { min: 2.8, max: 3.0 } }
+        fly_slope: # 飞坡
+          up:   { chassis_mode: 10, capability: high, speed: { min: 2.8, max: 3.2 } }
           down: { chassis_mode: 11, capability: medium, speed: { min: 1.8, max: 2.0 } }
-        step_high:
+        step_high: # 高地台阶
           up:   { chassis_mode: 6, capability: medium, speed: { min: 1.8, max: 2.0 } }
           down: { chassis_mode: 9, capability: medium, speed: { min: 1.8, max: 2.0 } }

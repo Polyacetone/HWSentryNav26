@@ -281,7 +281,6 @@ struct ActiveStepMode {
     double prepare_u = 0.0;
     double active_u = 0.0;
     double release_u = 1.0;
-    double mode_blend_factor = 0.0;
 
     bool operator==(const ActiveStepMode&) const = default;
 };
@@ -394,6 +393,7 @@ public:
         const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit,
+        const CapabilityProfile& blended_profile,
         std::optional<ActiveStepMode> active_step_mode,
         double current_path_u
     );
@@ -439,6 +439,7 @@ private:
     GridInfo dir_info_;
     double remaining_energy_;
     double rfr_pwr_limit_;
+    CapabilityProfile blended_profile_;
     std::optional<ActiveStepMode> active_step_mode_;
     double current_path_u_;
 };
@@ -604,6 +605,7 @@ public:
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
         const DirectionMap& direction_map,
+        const CapabilityProfile& blended_profile,
         std::optional<ActiveStepMode> active_step_mode
     );
 

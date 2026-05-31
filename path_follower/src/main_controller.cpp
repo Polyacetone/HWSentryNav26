@@ -10,10 +10,13 @@ MainController::MainController(
     const NavigationParams& nav_params,
     const FsmParams& fsm_params,
     std::shared_ptr<MPCSolver> mpc_controller,
+    const CapabilityProfile& normal_profile,
+    const std::array<CapabilityProfile, 3>& capability_profiles,
+    const ProfileBlendParams& blend_params,
     rclcpp::Logger logger
 ) : control_fsm_(std::make_unique<StateMachine>(fsm_params, logger)),
     mpc_controller_(std::move(mpc_controller)),
-    step_controller_(nav_params.step_detection, nav_params.step_block_replan, nav_params.step_dist_offset, logger),
+    step_controller_(nav_params.step_detection, nav_params.step_block_replan, nav_params.step_dist_offset, normal_profile, capability_profiles, blend_params, logger),
     progress_monitor_(logger),
     safety_monitor_(fsm_params, logger),
     logger_(logger),
@@ -385,11 +388,13 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
     const double u0 = last_reference_u_;
 
+    step_controller_.tick_profile_blend();
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_follow(
         *input.global_path, input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, *input.masked_global_cost_map, input.per_step_cost_maps, input.prediction_dt,
         *input.masked_direction_map,
+        step_controller_.current_blended_profile(),
         step_controller_.current_active_step_mode(u0)
     );
     if (!result) {

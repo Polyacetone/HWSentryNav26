@@ -121,6 +121,9 @@ public:
         const NavigationParams& nav_params,
         const FsmParams& fsm_params,
         std::shared_ptr<MPCSolver> mpc_controller,
+        const CapabilityProfile& normal_profile,
+        const std::array<CapabilityProfile, 3>& capability_profiles,
+        const ProfileBlendParams& blend_params,
         rclcpp::Logger logger
     );
 

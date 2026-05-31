@@ -468,8 +468,23 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     };
     nav_params.step_dist_offset = declare_parameter<double>("step.step_dist_offset");
 
+    // ─── Profile blend 参数 ───
+    const ProfileBlendParams blend_params = {
+        .v_step = declare_parameter<double>("terrain_profiles.profile_blend.v_step"),
+        .w_step = declare_parameter<double>("terrain_profiles.profile_blend.w_step"),
+        .acc_step = declare_parameter<double>("terrain_profiles.profile_blend.acc_step"),
+        .alpha_step = declare_parameter<double>("terrain_profiles.profile_blend.alpha_step"),
+        .a_lat_step = declare_parameter<double>("terrain_profiles.profile_blend.a_lat_step"),
+    };
+
     // ─── 创建 MainController ───
-    nav_controller_ = std::make_unique<MainController>(nav_params, fsm_params, mpc_controller, get_logger());
+    nav_controller_ = std::make_unique<MainController>(
+        nav_params, fsm_params, mpc_controller,
+        mpc_params.follow.normal_profile,
+        mpc_params.follow.capability_profiles,
+        blend_params,
+        get_logger()
+    );
 
     // ─── 读取台阶路径掩码相关参数 ───
     StepRoutingMaskParams step_params;

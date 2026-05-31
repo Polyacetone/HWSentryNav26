@@ -33,6 +33,14 @@ struct StepBlockReplanParams {
     double predicted_obstacle_ratio_threshold;
 };
 
+struct ProfileBlendParams {
+    double v_step; // m/s, 用于 vel_max / vel_min
+    double w_step; // rad/s, 用于 omega_max / omega_min
+    double acc_step; // m/s², 用于 acc_max
+    double alpha_step; // rad/s², 用于 alpha_max
+    double a_lat_step; // m/s², 用于 a_lat_max
+};
+
 // ═══════════════════════ 台阶规划段 ═══════════════════════
 
 class StepController {
@@ -49,12 +57,16 @@ public:
         Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
         StepDirection direction = StepDirection::UP;
         ActiveStepMode command;
+        uint8_t terrain_label = 0;
     };
 
     StepController(
         const StepDetectionParams& step_detection,
         const StepBlockReplanParams& step_block_replan,
         double step_dist_offset,
+        const CapabilityProfile& normal_profile,
+        const std::array<CapabilityProfile, 3>& capability_profiles,
+        const ProfileBlendParams& blend_params,
         rclcpp::Logger logger
     );
 
@@ -84,6 +96,10 @@ public:
     [[nodiscard]] bool is_step_active(double current_u) const;
     [[nodiscard]] bool should_activate_step_mode(double current_u) const;
     [[nodiscard]] uint8_t compute_step_distance_cm(const SplinePath& path, double current_u) const;
+
+    // ─── 时间域 profile 融合 ───
+    void tick_profile_blend();
+    [[nodiscard]] const CapabilityProfile& current_blended_profile() const { return current_profile_; }
 
     // ─── 台阶阻塞重规划检测 ───
     [[nodiscard]] bool check_block_replan(
@@ -143,7 +159,14 @@ private:
     StepDetectionParams step_detection_;
     StepBlockReplanParams step_block_replan_;
     double step_dist_offset_;
+    ProfileBlendParams blend_params_;
+    CapabilityProfile normal_profile_;
+    std::array<CapabilityProfile, 3> capability_profiles_;
     rclcpp::Logger logger_;
+
+    // ─── 时间域 profile 融合状态 ───
+    CapabilityProfile current_profile_;
+    CapabilityProfile target_profile_;
 
     int path_version_ = 0;
 
@@ -152,11 +175,11 @@ private:
 
     // ─── 台阶锁存状态 ───
     std::optional<size_t> held_step_segment_index_;
-    double step_mode_blend_factor_ = 0.0;
     std::optional<SplinePath> step_locked_path_;
     bool step_locked_fixed_goal_ = false;
     Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
     bool deferred_external_path_update_ = false;
+
 };
 
 } // namespace path_follower

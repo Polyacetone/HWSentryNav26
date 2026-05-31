@@ -124,7 +124,7 @@
         terrain_limits:
           step_reachability_guide_acc: 1.2 # 台阶入口可达势函数的引导加速度 (m/s^2)
         terrain_weights:
-          step_vel_weight: 0.4 # 台阶内部仍保留原始速度范围惩罚，但权重降低
+          step_vel_weight: 0.8 # 台阶内部仍保留原始速度范围惩罚，但权重降低
           step_reachability_lo: 0.8 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
           step_reachability_hi: 0.8 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
           direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）

@@ -15,42 +15,6 @@ namespace {
 constexpr double COST_EPS = 1e-9;
 constexpr double REACHABILITY_EPS = 1e-6;
 
-CapabilityProfile select_follow_mode_profile(
-    const MPCFollowParams& params,
-    std::optional<ActiveStepMode> active_step_mode
-) {
-    if (!active_step_mode) {
-        return params.normal_profile;
-    }
-
-    const double factor = active_step_mode->mode_blend_factor;
-    if (factor <= 0.0) {
-        return params.normal_profile;
-    }
-
-    const auto& step_profile = params.capability_profiles[
-        static_cast<size_t>(active_step_mode->capability)];
-
-    if (factor >= 1.0) {
-        return step_profile;
-    }
-
-    const auto& n = params.normal_profile;
-    return CapabilityProfile {
-        .command_bounds = {
-            .vel_max = n.command_bounds.vel_max * (1.0 - factor) + step_profile.command_bounds.vel_max * factor,
-            .vel_min = n.command_bounds.vel_min * (1.0 - factor) + step_profile.command_bounds.vel_min * factor,
-            .omega_max = n.command_bounds.omega_max * (1.0 - factor) + step_profile.command_bounds.omega_max * factor,
-            .omega_min = n.command_bounds.omega_min * (1.0 - factor) + step_profile.command_bounds.omega_min * factor,
-        },
-        .motion_constraints = {
-            .acc_max = n.motion_constraints.acc_max * (1.0 - factor) + step_profile.motion_constraints.acc_max * factor,
-            .alpha_max = n.motion_constraints.alpha_max * (1.0 - factor) + step_profile.motion_constraints.alpha_max * factor,
-            .a_lat_max = n.motion_constraints.a_lat_max * (1.0 - factor) + step_profile.motion_constraints.a_lat_max * factor,
-        }
-    };
-}
-
 bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) {
     return active_step_mode.has_value() && active_step_mode->mode != chassis_mode::NORMAL;
 }
@@ -613,6 +577,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit,
+    const CapabilityProfile& blended_profile,
     std::optional<ActiveStepMode> active_step_mode,
     double current_path_u
 ):
@@ -627,6 +592,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
+    blended_profile_(blended_profile),
     active_step_mode_(active_step_mode),
     current_path_u_(current_path_u) {
     goal_xy_ = spline_.eval(1.0).p;
@@ -651,14 +617,12 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_lower() const {
-    const auto profile = select_follow_mode_profile(p_.follow, active_step_mode_);
-    return ControlVec(profile.command_bounds.vel_min, profile.command_bounds.omega_min);
+    return ControlVec(blended_profile_.command_bounds.vel_min, blended_profile_.command_bounds.omega_min);
 }
 
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_upper() const {
-    const auto profile = select_follow_mode_profile(p_.follow, active_step_mode_);
-    return ControlVec(profile.command_bounds.vel_max, profile.command_bounds.omega_max);
+    return ControlVec(blended_profile_.command_bounds.vel_max, blended_profile_.command_bounds.omega_max);
 }
 
 template<int Horizon>
@@ -680,6 +644,7 @@ FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const Splin
         dir_info_,
         remaining_energy_,
         rfr_pwr_limit_,
+        blended_profile_,
         active_step_mode_,
         current_path_u_
     );
@@ -706,6 +671,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const DirectionMapGridView& dg,
     const GridInfo& di,
     double rfr_pwr_limit,
+    const MPCMotionConstraints& motion_lim,
     std::optional<ActiveStepMode> active_step_mode
 ) {
     const auto& follow = p.follow;
@@ -714,7 +680,6 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const auto& motion_w = follow.motion_constraint_weights;
     const auto& terrain_w = follow.terrain_weights;
     const auto& env_w = follow.environment_weights;
-    const auto& motion_lim = select_follow_mode_profile(follow, active_step_mode).motion_constraints;
 
     FollowResidualLinearization out;
     out.r.setZero();
@@ -922,6 +887,7 @@ double follow_running_cost_value_only_impl(
     const DirectionMapGridView& dg,
     const GridInfo& di,
     double rfr_pwr_limit,
+    const MPCMotionConstraints& motion_lim,
     std::optional<ActiveStepMode> active_step_mode,
     double* cached_cost_value = nullptr
 ) {
@@ -931,7 +897,6 @@ double follow_running_cost_value_only_impl(
     const auto& motion_w = follow.motion_constraint_weights;
     const auto& terrain_w = follow.terrain_weights;
     const auto& env_w = follow.environment_weights;
-    const auto& motion_lim = select_follow_mode_profile(follow, active_step_mode).motion_constraints;
 
     const double px = x(ix::X);
     const double py = x(ix::Y);
@@ -1165,7 +1130,8 @@ double FollowProblemT<Horizon>::running_cost_value_only(int k, const StateVec& x
     return follow_running_cost_value_only_impl(
         x, u, spline_, p_,
         cost_grid_for_step(k), cost_info_, dir_grid_, dir_info_,
-        rfr_pwr_limit_, active_step_mode_, cached_cost_value
+        rfr_pwr_limit_, blended_profile_.motion_constraints,
+        active_step_mode_, cached_cost_value
     );
 }
 
@@ -1183,7 +1149,8 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     const auto& cg = cost_grid_for_step(k);
     const auto lin = follow_residual_linearized_impl(
         x, u, spline_, p_, cg, cost_info_, dir_grid_, dir_info_,
-        rfr_pwr_limit_, active_step_mode_
+        rfr_pwr_limit_, blended_profile_.motion_constraints,
+        active_step_mode_
     );
 
     lx = lin.jx.transpose() * lin.r;
@@ -1755,6 +1722,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
     const DirectionMap& direction_map,
+    const CapabilityProfile& blended_profile,
     std::optional<ActiveStepMode> active_step_mode
 ) {
     const bool path_changed = !(prev_ref_control_points_ && *prev_ref_control_points_ == global_path);
@@ -1771,20 +1739,19 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
     last_u_ = u0;
 
-    const auto& follow_mode_profile = select_follow_mode_profile(params_.follow, active_step_mode);
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
             last_cmd_.x(),
             chassis_state.velocity,
             params_.follow.start_command.vel_cmd_act_gap_max,
-            follow_mode_profile.motion_constraints.acc_max,
+            blended_profile.motion_constraints.acc_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_state.omega,
             params_.follow.start_command.omega_cmd_act_gap_max,
-            follow_mode_profile.motion_constraints.alpha_max,
+            blended_profile.motion_constraints.alpha_max,
             MPC_DT
         )
     );
@@ -1819,7 +1786,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const FollowProblem problem(
         global_path, params_, step_cost_grids_cache_, ci, masked_global_grid, pred_dt, schedule_rho,
-        dg, di, remaining_energy_, rfr_pwr_limit_, active_step_mode, u0
+        dg, di, remaining_energy_, rfr_pwr_limit_, blended_profile, active_step_mode, u0
     );
 
     fddp::SolverOptions opts;

@@ -23,11 +23,19 @@ StepController::StepController(
     const StepDetectionParams& step_detection,
     const StepBlockReplanParams& step_block_replan,
     const double step_dist_offset,
+    const CapabilityProfile& normal_profile,
+    const std::array<CapabilityProfile, 3>& capability_profiles,
+    const ProfileBlendParams& blend_params,
     rclcpp::Logger logger
 ) : step_detection_(step_detection),
     step_block_replan_(step_block_replan),
     step_dist_offset_(step_dist_offset),
-    logger_(logger) {}
+    blend_params_(blend_params),
+    normal_profile_(normal_profile),
+    capability_profiles_(capability_profiles),
+    logger_(logger),
+    current_profile_(normal_profile),
+    target_profile_(normal_profile) {}
 
 // ═══════════════════════ 路径工具 ═══════════════════════════
 
@@ -185,6 +193,10 @@ std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
             segment.dir_map = first.dir_map;
             segment.direction = first.direction;
             segment.command = *command;
+            {
+                const Eigen::Vector2d label_g = direction_map.map_coord_to_grid(first.pos_map);
+                segment.terrain_label = direction_map.terrain_at(label_g);
+            }
             plan.push_back(segment);
         } else {
             RCLCPP_WARN(
@@ -208,25 +220,52 @@ std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
         segment.release_u = advance_path_u_by_distance(path, segment.step_exit_u, step_detection_.release_distance);
     }
 
+    //
+    // 段间重叠仲裁规则（优先级从高到低）：
+    //   1. step_enter / step_exit  — 绝不修改（地形的真实范围）
+    //   2. active_u                — 可向 step_enter_u 压缩
+    //   3. release_u               — 可向 step_exit_u 拉回
+    //   4. prepare_u               — 可向 step_enter_u 后推
+    //
+    // 当 cur.prepare_u < prev.release_u 时，按以下顺序解决：
+    //   步骤 A — 后推 cur.prepare_u，但不超过 cur.step_enter_u
+    //   步骤 B — 前拉 prev.release_u，但不早于 prev.step_exit_u
+    //
+    // 保证结果：相邻段的 prepare/release 范围不再交叉，
+    //           find_active_segment_index 返回唯一匹配。
+    //
     for (size_t i = 1; i < plan.size(); ++i) {
-        StepPlanSegment& prev_segment = plan[i - 1];
-        StepPlanSegment& cur_segment = plan[i];
+        StepPlanSegment& prev = plan[i - 1];
+        StepPlanSegment& cur = plan[i];
 
-        if (cur_segment.prepare_u < prev_segment.release_u) {
-            cur_segment.prepare_u = prev_segment.release_u;
-        }
-        if (cur_segment.active_u < cur_segment.prepare_u) {
-            cur_segment.active_u = cur_segment.prepare_u;
+        // 无重叠，跳过
+        if (cur.prepare_u >= prev.release_u) {
+            // 自身一致性修正
+            if (cur.active_u < cur.prepare_u) cur.active_u = cur.prepare_u;
+            if (prev.active_u > prev.step_enter_u) prev.active_u = prev.step_enter_u;
+            continue;
         }
 
-        if (prev_segment.active_u > prev_segment.step_enter_u) {
-            prev_segment.active_u = prev_segment.step_enter_u;
+        // 步骤 A：后推 cur.prepare_u（优先级最低），但不超过 cur.step_enter_u
+        cur.prepare_u = std::min(prev.release_u, cur.step_enter_u);
+        // 步骤 B：若仍重叠，前拉 prev.release_u（优先级次低），但不早于 prev.step_exit_u
+        if (cur.prepare_u < prev.release_u) {
+            prev.release_u = std::max(prev.step_exit_u, cur.prepare_u);
         }
-        if (cur_segment.prepare_u > cur_segment.step_enter_u) {
-            cur_segment.prepare_u = cur_segment.step_enter_u;
-        }
-        if (cur_segment.active_u > cur_segment.step_enter_u) {
-            cur_segment.active_u = cur_segment.step_enter_u;
+
+        // 自身一致性修正
+        if (cur.active_u < cur.prepare_u) cur.active_u = cur.prepare_u;
+        if (prev.active_u > prev.step_enter_u) prev.active_u = prev.step_enter_u;
+
+        // 步骤 B 之后若仍重叠，说明两个段的 step 区域真实交叉（方向场问题），记录警告
+        if (cur.prepare_u < prev.release_u) {
+            RCLCPP_WARN(
+                logger_,
+                "Step segment #%zu (step=[%.3f,%.3f)) and #%zu (step=[%.3f,%.3f)) "
+                "overlap after arbitration — terrain labels may be inconsistent",
+                i - 1, prev.step_enter_u, prev.step_exit_u,
+                i, cur.step_enter_u, cur.step_exit_u
+            );
         }
     }
 
@@ -246,10 +285,11 @@ std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
 
 void StepController::clear_runtime_state() {
     held_step_segment_index_ = std::nullopt;
-    step_mode_blend_factor_ = 0.0;
     step_locked_path_ = std::nullopt;
     step_locked_fixed_goal_ = false;
     step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
+    current_profile_ = normal_profile_;
+    target_profile_ = normal_profile_;
 }
 
 void StepController::clear_plan() {
@@ -273,7 +313,21 @@ void StepController::update_plan_for_path_change(
 
     step_plan_ = build_step_plan(*path, *direction_map);
     if (!step_plan_.empty()) {
-        RCLCPP_DEBUG(logger_, "Built step plan with %zu segments for path_version=%d", step_plan_.size(), path_version_);
+        RCLCPP_DEBUG(logger_, "Built step plan with %zu segments for path_version=%d:", step_plan_.size(), path_version_);
+        for (size_t i = 0; i < step_plan_.size(); ++i) {
+            const auto& seg = step_plan_[i];
+            RCLCPP_DEBUG(
+                logger_,
+                "  #%zu: label=%hhu dir=%s "
+                "prepare=%.3f active=%.3f step=[%.3f,%.3f) release=%.3f "
+                "mode=%hhu",
+                i, seg.terrain_label,
+                seg.direction == StepDirection::UP ? "UP" : "DOWN",
+                seg.prepare_u, seg.active_u,
+                seg.step_enter_u, seg.step_exit_u, seg.release_u,
+                seg.command.mode
+            );
+        }
     }
 }
 
@@ -319,6 +373,7 @@ void StepController::update_active_segment(
     const bool fixed_goal,
     const Eigen::Vector2d& fixed_goal_pos
 ) {
+    // ── 持有段已过期 → 释放，fall through 尝试获取下一段 ──
     if (held_step_segment_index_.has_value()) {
         const auto& segment = step_plan_[*held_step_segment_index_];
         if (current_u >= segment.release_u) {
@@ -328,27 +383,19 @@ void StepController::update_active_segment(
                 *held_step_segment_index_, current_u, segment.release_u
             );
             held_step_segment_index_ = std::nullopt;
-            step_mode_blend_factor_ = 0.0;
-            step_locked_path_ = std::nullopt;
-            step_locked_fixed_goal_ = false;
-            step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
-            return;
+            // 暂不清除锁存/profile — fall through 到下面尝试获取下一段
+        } else {
+            return; // 仍在有效范围内，保持
         }
-        double raw = 0.0;
-        if (current_u >= segment.active_u) {
-            raw = 1.0;
-        } else if (current_u > segment.prepare_u) {
-            const double range = segment.active_u - segment.prepare_u;
-            if (range > 1e-12) {
-                raw = (current_u - segment.prepare_u) / range;
-            }
-        }
-        step_mode_blend_factor_ = std::max(step_mode_blend_factor_, raw);
-        return;
     }
 
+    // ── 尝试获取下一个有效段 ──
     const auto next_index = find_active_segment_index(current_u);
     if (!next_index) {
+        step_locked_path_ = std::nullopt;
+        step_locked_fixed_goal_ = false;
+        step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
+        target_profile_ = normal_profile_;
         return;
     }
 
@@ -356,16 +403,7 @@ void StepController::update_active_segment(
 
     {
         const auto& segment = step_plan_[*held_step_segment_index_];
-        if (current_u >= segment.active_u) {
-            step_mode_blend_factor_ = 1.0;
-        } else if (current_u > segment.prepare_u) {
-            const double range = segment.active_u - segment.prepare_u;
-            if (range > 1e-12) {
-                step_mode_blend_factor_ = (current_u - segment.prepare_u) / range;
-            }
-        } else {
-            step_mode_blend_factor_ = 0.0;
-        }
+        target_profile_ = capability_profiles_[static_cast<size_t>(segment.command.capability)];
 
         if (global_path) {
             step_locked_path_ = global_path;
@@ -375,13 +413,75 @@ void StepController::update_active_segment(
 
         RCLCPP_DEBUG(
             logger_,
-            "Step segment #%zu acquired: prepare_u=%.3f active_u=%.3f step=[%.3f, %.3f) release_u=%.3f mode=%hhu blend=%.2f",
+            "Step segment #%zu acquired: "
+            "label=%hhu dir=%s "
+            "prepare=%.3f active=%.3f step=[%.3f,%.3f) release=%.3f "
+            "mode=%hhu",
             *held_step_segment_index_,
+            segment.terrain_label,
+            segment.direction == StepDirection::UP ? "UP" : "DOWN",
             segment.prepare_u, segment.active_u,
             segment.step_enter_u, segment.step_exit_u, segment.release_u,
-            segment.command.mode,
-            step_mode_blend_factor_
+            segment.command.mode
         );
+    }
+}
+
+// ═══════════════════════ 时间域 profile 融合 ═══════════════
+
+void StepController::tick_profile_blend() {
+    auto& cur = current_profile_;
+    const auto& tgt = target_profile_;
+
+    // ── command_bounds ──
+    {
+        auto& c = cur.command_bounds;
+        const auto& t = tgt.command_bounds;
+        const double v_step = blend_params_.v_step;
+        const double w_step = blend_params_.w_step;
+
+        if (t.vel_max >= c.vel_max) {
+            c.vel_max = t.vel_max;
+        } else {
+            c.vel_max = std::max(t.vel_max, c.vel_max - v_step);
+        }
+        if (t.vel_min >= c.vel_min) {
+            c.vel_min = t.vel_min;
+        } else {
+            c.vel_min = std::max(t.vel_min, c.vel_min - v_step);
+        }
+        if (t.omega_max >= c.omega_max) {
+            c.omega_max = t.omega_max;
+        } else {
+            c.omega_max = std::max(t.omega_max, c.omega_max - w_step);
+        }
+        if (t.omega_min >= c.omega_min) {
+            c.omega_min = t.omega_min;
+        } else {
+            c.omega_min = std::max(t.omega_min, c.omega_min - w_step);
+        }
+    }
+
+    // ── motion_constraints ──
+    {
+        auto& c = cur.motion_constraints;
+        const auto& t = tgt.motion_constraints;
+
+        if (t.acc_max >= c.acc_max) {
+            c.acc_max = t.acc_max;
+        } else {
+            c.acc_max = std::max(t.acc_max, c.acc_max - blend_params_.acc_step);
+        }
+        if (t.alpha_max >= c.alpha_max) {
+            c.alpha_max = t.alpha_max;
+        } else {
+            c.alpha_max = std::max(t.alpha_max, c.alpha_max - blend_params_.alpha_step);
+        }
+        if (t.a_lat_max >= c.a_lat_max) {
+            c.a_lat_max = t.a_lat_max;
+        } else {
+            c.a_lat_max = std::max(t.a_lat_max, c.a_lat_max - blend_params_.a_lat_step);
+        }
     }
 }
 
@@ -390,9 +490,7 @@ void StepController::update_active_segment(
 std::optional<ActiveStepMode> StepController::current_active_step_mode(const double current_u) const {
     const StepPlanSegment* const segment = current_command_segment(current_u);
     if (!segment) return std::nullopt;
-    auto mode = segment->command;
-    mode.mode_blend_factor = step_mode_blend_factor_;
-    return mode;
+    return segment->command;
 }
 
 bool StepController::is_step_active(const double current_u) const {
