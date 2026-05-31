@@ -51,13 +51,11 @@ private:
     void publish_chassis_cmd(const ControlOutput& output);
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     void publish_mppi_rollouts(const std::vector<std::vector<Eigen::Vector2d>>& rollouts);
-    bool should_use_prediction_maps() const;
     bool is_step_routing_context_locked() const;
     void refresh_deferred_step_layers();
 
     // ─── 台阶掩码层更新 ───
     void update_step_layers();
-    void update_masked_cost_maps();
 
     // ─── ROS 通信 ───
     rclcpp::Subscription<interfaces::msg::GlobalPath>::SharedPtr control_points_sub_;
@@ -99,8 +97,6 @@ private:
     CostMap::ConstPtr global_cost_map_;
     CostMap::ConstPtr current_cost_map_;                       // 当前帧动态代价图（来自 cost_maps[0]）
     std::vector<CostMap::ConstPtr> prediction_maps_;           // 预测代价地图（cost_maps[1..N]，可为空）
-    std::vector<CostMap::ConstPtr> per_step_final_cost_maps_;  // 逐步融合后的最终代价地图
-    CostMap::ConstPtr masked_global_cost_map_, final_cost_map_;
     DirectionMap::ConstPtr global_direction_map_;
     std::optional<SplinePath> global_path_;
     bool path_updated_ = false;
@@ -157,17 +153,6 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
         terrain_profiles_.capability_profiles[static_cast<size_t>(MEDIUM)] = load_capability_profile("terrain_profiles.capability_profiles.medium");
         terrain_profiles_.capability_profiles[static_cast<size_t>(HIGH)] = load_capability_profile("terrain_profiles.capability_profiles.high");
 
-        // normal — 非台阶区域的默认规则
-        {
-            const auto prefix = std::string("terrain_profiles.normal");
-            auto& rule = terrain_profiles_.normal;
-            rule.chassis_mode = static_cast<uint8_t>(declare_parameter<int>(prefix + ".chassis_mode"));
-            const std::string cap_str = declare_parameter<std::string>(prefix + ".capability");
-            rule.capability = capability_level_from_string(cap_str);
-            rule.speed.min = declare_parameter<double>(prefix + ".speed.min");
-            rule.speed.max = declare_parameter<double>(prefix + ".speed.max");
-        }
-
         // directional_labels — 有方向语义的标签 (SLOPE..STEP_HIGH)
         struct DirEntry { const char* name; uint8_t label; };
         const DirEntry dir_entries[] = {
@@ -199,7 +184,19 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .vel_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.vel_cmd_act_gap_max"),
                 .omega_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.omega_cmd_act_gap_max")
             },
-            .normal_capability = terrain_profiles_.normal.capability,
+            .normal_profile = {
+                .command_bounds = {
+                    .vel_max = declare_parameter<double>("mpc.follow.command_bounds.vel_max"),
+                    .vel_min = declare_parameter<double>("mpc.follow.command_bounds.vel_min"),
+                    .omega_max = declare_parameter<double>("mpc.follow.command_bounds.omega_max"),
+                    .omega_min = declare_parameter<double>("mpc.follow.command_bounds.omega_min"),
+                },
+                .motion_constraints = {
+                    .acc_max = declare_parameter<double>("mpc.follow.motion_constraints.acc_max"),
+                    .alpha_max = declare_parameter<double>("mpc.follow.motion_constraints.alpha_max"),
+                    .a_lat_max = declare_parameter<double>("mpc.follow.motion_constraints.a_lat_max"),
+                },
+            },
             .capability_profiles = {
                 terrain_profiles_.capability_profiles[static_cast<size_t>(CapabilityLevel::LOW)],
                 terrain_profiles_.capability_profiles[static_cast<size_t>(CapabilityLevel::MEDIUM)],
@@ -654,14 +651,9 @@ void PathFollowerNode::local_cost_maps_callback(const interfaces::msg::CostMaps:
         ));
     }
 
-    update_masked_cost_maps();
 }
 
 // ═══════════════════ 台阶掩码层更新 ════════════════════════════════
-
-bool PathFollowerNode::should_use_prediction_maps() const {
-    return !prediction_maps_.empty();
-}
 
 bool PathFollowerNode::is_step_routing_context_locked() const {
     return nav_controller_ && nav_controller_->fsm_state() == FsmState::STEPPING;
@@ -696,36 +688,6 @@ void PathFollowerNode::update_step_layers() {
     step_cost_layer_ = step_routing_mask_->step_cost_layer();
     masked_direction_map_ = step_routing_mask_->masked_direction_map();
     step_layer_update_deferred_ = false;
-    update_masked_cost_maps();
-}
-
-void PathFollowerNode::update_masked_cost_maps() {
-    if (!global_cost_map_) return;
-
-    try {
-        if (step_cost_layer_) {
-            masked_global_cost_map_ = std::make_shared<CostMap>(global_cost_map_->merge(*step_cost_layer_));
-        } else {
-            masked_global_cost_map_ = global_cost_map_;
-        }
-
-        per_step_final_cost_maps_.clear();
-        if (should_use_prediction_maps()) {
-            for (const auto& pred_map : prediction_maps_) {
-                per_step_final_cost_maps_.push_back(
-                    std::make_shared<CostMap>(masked_global_cost_map_->merge(*pred_map))
-                );
-            }
-        }
-
-        if (current_cost_map_) {
-            final_cost_map_ = std::make_shared<CostMap>(masked_global_cost_map_->merge(*current_cost_map_));
-        } else {
-            final_cost_map_ = masked_global_cost_map_;
-        }
-    } catch (const std::exception& e) {
-        RCLCPP_ERROR(get_logger(), "Failed to merge cost maps: %s", e.what());
-    }
 }
 
 // ═══════════════════ 控制主循环 ══════════════════════════════
@@ -733,20 +695,44 @@ void PathFollowerNode::update_masked_cost_maps() {
 void PathFollowerNode::control_timer_callback() {
     refresh_deferred_step_layers();
 
-    if (!global_cost_map_ || !final_cost_map_ || !masked_direction_map_) return;
+    if (!global_cost_map_ || !masked_direction_map_) return;
+
+    // ── 合并代价地图（按需构建，不保留中间状态）──
+    // Layer 1: 全局先验 + 台阶掩码 = masked_global（不含动态障碍物）
+    CostMap::ConstPtr masked_global = step_cost_layer_
+        ? std::make_shared<CostMap>(global_cost_map_->merge(*step_cost_layer_))
+        : global_cost_map_;
+
+    // Layer 2: masked_global + 当前动态障碍物 = final（当前控制周期使用）
+    CostMap::ConstPtr final_cost_map = current_cost_map_
+        ? std::make_shared<CostMap>(masked_global->merge(*current_cost_map_))
+        : masked_global;
+
+    // Layer 3: masked_global + 各预测帧动态障碍物 = per_step（MPC 预测步使用）
+    std::vector<CostMap::ConstPtr> per_step_owned;
+    std::vector<const CostMap*> per_step_ptrs;
+    if (!prediction_maps_.empty()) {
+        per_step_owned.reserve(prediction_maps_.size());
+        per_step_ptrs.reserve(prediction_maps_.size());
+        for (const auto& pred : prediction_maps_) {
+            per_step_owned.push_back(
+                std::make_shared<CostMap>(masked_global->merge(*pred)));
+            per_step_ptrs.push_back(per_step_owned.back().get());
+        }
+    }
 
     if (enable_debug_) {
         nav_msgs::msg::OccupancyGrid grid_msg;
         grid_msg.header.stamp = now();
         grid_msg.header.frame_id = "map";
-        grid_msg.info.width = static_cast<uint32_t>(final_cost_map_->width);
-        grid_msg.info.height = static_cast<uint32_t>(final_cost_map_->height);
-        grid_msg.info.resolution = static_cast<float>(final_cost_map_->resolution);
-        grid_msg.info.origin.position.x = final_cost_map_->origin_x;
-        grid_msg.info.origin.position.y = final_cost_map_->origin_y;
-        grid_msg.data.resize(final_cost_map_->data.size());
-        for (size_t idx = 0; idx < final_cost_map_->data.size(); idx++) {
-            grid_msg.data[idx] = static_cast<int8_t>(final_cost_map_->data[idx]);
+        grid_msg.info.width = static_cast<uint32_t>(final_cost_map->width);
+        grid_msg.info.height = static_cast<uint32_t>(final_cost_map->height);
+        grid_msg.info.resolution = static_cast<float>(final_cost_map->resolution);
+        grid_msg.info.origin.position.x = final_cost_map->origin_x;
+        grid_msg.info.origin.position.y = final_cost_map->origin_y;
+        grid_msg.data.resize(final_cost_map->data.size());
+        for (size_t idx = 0; idx < final_cost_map->data.size(); idx++) {
+            grid_msg.data[idx] = static_cast<int8_t>(final_cost_map->data[idx]);
         }
         debug_final_cost_map_pub_->publish(grid_msg);
     }
@@ -754,14 +740,8 @@ void PathFollowerNode::control_timer_callback() {
     Eigen::Vector3d chassis_pose_map;
     if (!get_chassis_pose(chassis_pose_map)) return;
 
-    // 构建逐步代价地图指针数组
-    std::vector<const CostMap*> per_step_ptrs;
-    for (const auto& m : per_step_final_cost_maps_) {
-        per_step_ptrs.push_back(m.get());
-    }
-
     // 组装控制输入
-    const bool has_prediction = should_use_prediction_maps();
+    const bool has_prediction = !prediction_maps_.empty();
     const ControlInput input = {
         .global_path = global_path_,
         .path_updated = path_updated_,
@@ -777,8 +757,8 @@ void PathFollowerNode::control_timer_callback() {
         .spin_high_priority = spin_high_priority_,
         .spin_slow = (spin_state_ == SpinState::SPIN_SLOW),
         .spin_fast = (spin_state_ == SpinState::SPIN_FAST),
-        .final_cost_map = final_cost_map_.get(),
-        .masked_global_cost_map = masked_global_cost_map_.get(),
+        .final_cost_map = final_cost_map.get(),
+        .masked_global_cost_map = masked_global.get(),
         .masked_direction_map = masked_direction_map_.get(),
         .base_direction_map = global_direction_map_.get(),
         .current_dynamic_cost_map = current_cost_map_.get(),
@@ -848,7 +828,7 @@ void PathFollowerNode::publish_chassis_cmd(const ControlOutput& output) {
     interfaces::msg::ChassisCmd msg;
     msg.velocity = static_cast<float>(output.velocity);
     msg.omega = static_cast<float>(output.omega);
-    msg.mode = static_cast<uint8_t>(output.mode);
+    msg.mode = output.mode;
     msg.step_dist = output.step_dist_cm;
     chassis_cmd_pub_->publish(msg);
 }

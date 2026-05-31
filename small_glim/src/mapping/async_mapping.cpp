@@ -593,10 +593,10 @@ std::string AsyncMapping::make_timestamp_string() {
 double AsyncMapping::rotation_angle_deg(const Eigen::Matrix3d& R) {
     Eigen::AngleAxisd aa(R);
     double angle = aa.angle();
-    if (angle > M_PI) {
-        angle = 2.0 * M_PI - angle;
+    if (angle > std::numbers::pi) {
+        angle = 2.0 * std::numbers::pi - angle;
     }
-    return angle * 180.0 / M_PI;
+    return angle * 180.0 / std::numbers::pi;
 }
 
 }

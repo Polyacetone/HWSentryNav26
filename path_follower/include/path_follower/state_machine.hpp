@@ -126,9 +126,6 @@ struct FsmOutput {
     // 状态机要求上层消费当前路径（例如到达终点或脱困链重置任务）
     bool consume_global_path = false;
 
-    // HAZARD_RECOVERY 完成标记
-    bool recovery_finished = false;
-
     // 请求 path_planner 立即重规划
     bool request_replan = false;
 };

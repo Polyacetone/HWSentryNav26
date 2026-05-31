@@ -19,7 +19,7 @@
 #include <small_gicp/util/downsampling_omp.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
 #include <map_server/object_tracker.hpp>
-#include <map_server/map_utils.hpp>
+#include <map_server/utils.hpp>
 
 namespace map_server {
 
@@ -227,6 +227,7 @@ void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::Sh
 
     try {
         auto terrain_data = map_utils::load_terrain_msgpack(nav_map_path);
+        map_resolution_ = terrain_data.resolution;
         map_size_x_ = terrain_data.width;
         map_size_y_ = terrain_data.height;
 
@@ -278,6 +279,7 @@ void MapServerNode::timer_callback() {
             std::string default_nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + default_nav_map_filename;
             try {
                 auto terrain_data = map_utils::load_terrain_msgpack(default_nav_map_path);
+                map_resolution_ = terrain_data.resolution;
                 map_size_x_ = terrain_data.width;
                 map_size_y_ = terrain_data.height;
                 {

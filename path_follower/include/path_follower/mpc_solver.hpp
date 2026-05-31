@@ -191,7 +191,7 @@ struct MPCFollowRolloutSafetyParams {
 
 struct MPCFollowParams {
     MPCStartCommandLimits start_command;
-    CapabilityLevel normal_capability = CapabilityLevel::LOW;
+    CapabilityProfile normal_profile;
     std::array<CapabilityProfile, 3> capability_profiles;
     MPCFollowTrackingWeights tracking_weights;
     MPCFollowCommandWeights command_weights;
@@ -273,7 +273,7 @@ struct EnergyParams {
 };
 
 struct ActiveStepMode {
-    ChassisMode mode = ChassisMode::NORMAL;
+    uint8_t mode = chassis_mode::NORMAL;
     CapabilityLevel capability = CapabilityLevel::LOW;
     double speed_min = 0.0;
     double speed_max = 0.0;

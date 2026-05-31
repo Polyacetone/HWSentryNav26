@@ -191,8 +191,8 @@ namespace mid360_driver {
                     }
                     Point point;// NOLINT(cppcoreguidelines-pro-type-member-init)
                     double radius = raw_point.depth / 1000.0;
-                    double theta = raw_point.theta / 100.0 / 180 * M_PI;
-                    double phi = raw_point.phi / 100.0 / 180 * M_PI;
+                    double theta = raw_point.theta / 100.0 / 180 * std::numbers::pi;
+                    double phi = raw_point.phi / 100.0 / 180 * std::numbers::pi;
                     point.x = static_cast<float>(radius * sin(theta) * cos(phi));
                     point.y = static_cast<float>(radius * sin(theta) * sin(phi));
                     point.z = static_cast<float>(radius * cos(theta));

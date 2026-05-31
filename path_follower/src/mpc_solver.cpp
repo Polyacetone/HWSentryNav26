@@ -20,12 +20,12 @@ CapabilityProfile select_follow_mode_profile(
     std::optional<ActiveStepMode> active_step_mode
 ) {
     if (!active_step_mode) {
-        return params.capability_profiles[static_cast<size_t>(params.normal_capability)];
+        return params.normal_profile;
     }
 
     const double factor = active_step_mode->mode_blend_factor;
     if (factor <= 0.0) {
-        return params.capability_profiles[static_cast<size_t>(params.normal_capability)];
+        return params.normal_profile;
     }
 
     const auto& step_profile = params.capability_profiles[
@@ -35,7 +35,7 @@ CapabilityProfile select_follow_mode_profile(
         return step_profile;
     }
 
-    const auto& n = params.capability_profiles[static_cast<size_t>(params.normal_capability)];
+    const auto& n = params.normal_profile;
     return CapabilityProfile {
         .command_bounds = {
             .vel_max = n.command_bounds.vel_max * (1.0 - factor) + step_profile.command_bounds.vel_max * factor,
@@ -52,7 +52,7 @@ CapabilityProfile select_follow_mode_profile(
 }
 
 bool is_active_follow_step_mode(std::optional<ActiveStepMode> active_step_mode) {
-    return active_step_mode.has_value() && active_step_mode->mode != ChassisMode::NORMAL;
+    return active_step_mode.has_value() && active_step_mode->mode != chassis_mode::NORMAL;
 }
 
 inline double positive_part(double x) {

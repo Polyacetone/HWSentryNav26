@@ -1,4 +1,5 @@
 #include <path_follower/nav_map.hpp>
+#include <path_follower/chassis_defs.hpp>
 
 #include <algorithm>
 #include <numbers>
@@ -140,7 +141,7 @@ DirectionMap::DirectionMap(
     origin_x(origin_x),
     origin_y(origin_y),
     data(std::move(dir_data)),
-    terrain(terrain_data.empty() ? std::vector<uint8_t>(static_cast<size_t>(width * height), TERRAIN_FLAT) : std::move(terrain_data)),
+    terrain(terrain_data.empty() ? std::vector<uint8_t>(static_cast<size_t>(width * height), static_cast<uint8_t>(TerrainType::FLAT)) : std::move(terrain_data)),
     profiles_(profiles) {
     if (static_cast<int>(this->data.size()) != width * height) {
         throw std::runtime_error("DirectionMap data size does not match width*height");
@@ -190,7 +191,7 @@ uint8_t DirectionMap::terrain_at(const Eigen::Vector2i& grid_coord) const {
     if (is_valid_coord(grid_coord)) {
         return terrain[static_cast<size_t>(grid_coord.y() * width + grid_coord.x())];
     }
-    return TERRAIN_OBSTACLE;
+    return static_cast<uint8_t>(TerrainType::OBSTACLE);
 }
 
 uint8_t DirectionMap::terrain_at(const Eigen::Vector2d& grid_coord) const {
@@ -199,7 +200,14 @@ uint8_t DirectionMap::terrain_at(const Eigen::Vector2d& grid_coord) const {
 }
 
 const TerrainStepRule& DirectionMap::rule_for_label(const uint8_t label, const bool is_up) const {
-    if (label <= TERRAIN_OBSTACLE) return profiles_.normal;
+    if (label <= static_cast<uint8_t>(TerrainType::OBSTACLE)) {
+        static const TerrainStepRule kFlatRule = {
+            .chassis_mode = chassis_mode::NORMAL,
+            .capability = CapabilityLevel::LOW,
+            .speed = {0.0, 0.0},
+        };
+        return kFlatRule;
+    }
     const auto& lr = profiles_.directional_labels[label - 2];
     return is_up ? lr.up : lr.down;
 }

@@ -420,7 +420,6 @@ struct StHazardRecovery final : sc::state<StHazardRecovery, Machine> {
             return transit<StStuckReverse>();
         }
         if (in.is_recovery_safe) {
-            m.output.recovery_finished = true;
 
             if (m.replan_after_recovery) {
                 m.replan_after_recovery = false;

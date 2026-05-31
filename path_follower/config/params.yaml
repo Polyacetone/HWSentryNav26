@@ -96,6 +96,15 @@
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解连续命中 N 帧则退化为 solve_stop
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
           fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
+        command_bounds:
+          vel_max: 2.0  # 线速度上限 (m/s)
+          vel_min: -1.2 # 线速度下限 (m/s)
+          omega_max: 6.0  # 角速度上限 (rad/s)
+          omega_min: -6.0 # 角速度下限 (rad/s)
+        motion_constraints:
+          acc_max: 1.8   # 最大 dv_cmd/dt (m/s²)
+          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+          a_lat_max: 2.0 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
@@ -145,16 +154,16 @@
           alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
           a_lat_max: 2.4 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
         command_weights:
-          q_v: 0.6 # 线速度正则
-          q_omega: 0.6 # 角速度正则
-          r_dv: 0.8 # 线速度指令平滑
-          r_domega: 0.2 # 角速度指令平滑
+          q_v: 0.1 # 线速度正则
+          q_omega: 0.1 # 角速度正则
+          r_dv: 0.2 # 线速度指令平滑
+          r_domega: 0.1 # 角速度指令平滑
         motion_constraint_weights:
           acc_limit: 30.0 # 速度指令变化率超限惩罚
           alpha_limit: 30.0 # 角速度指令变化率超限惩罚
           lat_acc: 30.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
         environment_weights:
-          obstacle: 6.0 # 避障惩罚（台阶区域已转为障碍物）
+          obstacle: 1.0 # 避障惩罚（台阶区域已转为障碍物）
         terminal_weights:
           obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
 
@@ -177,16 +186,16 @@
           q_goal_theta: 0.2 # 朝向目标点
           goal_deadzone: 0.2 # 目标吸引死区半径，进入后不再因目标位置误差来回抽动 (m)
         command_weights:
-          r_v: 0.02 # 线速度正则
-          r_omega: 0.08 # 角速度正则
-          r_dv: 0.8 # 线速度指令平滑
-          r_domega: 0.2 # 角速度指令平滑
+          r_v: 0.01 # 线速度正则
+          r_omega: 0.01 # 角速度正则
+          r_dv: 0.2 # 线速度指令平滑
+          r_domega: 0.1 # 角速度指令平滑
         motion_constraint_weights:
           acc_limit: 30.0 # 速度指令变化率超限惩罚
           alpha_limit: 30.0 # 角速度指令变化率超限惩罚
           lat_acc: 30.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
         environment_weights:
-          obstacle: 6.0 # 全程避障惩罚
+          obstacle: 1.0 # 全程避障惩罚
         terminal_weights:
           q_goal_xy_terminal: 3.0 # 终端目标点吸引
           obstacle_terminal: 12.0 # 终端避障惩罚

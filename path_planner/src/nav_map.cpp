@@ -19,9 +19,13 @@ std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> convert_direction_
     for (int y = 0; y < mat.rows; y++) {
         for (int x = 0; x < mat.cols; x++) {
             const cv::Vec3b val = mat.at<cv::Vec3b>(y, x);
-            const double angle = static_cast<double>(val[0]) / 255.0 * 2.0 * std::numbers::pi;
-            const double mag = static_cast<double>(val[1]) / 255.0;
-            dir_vec.emplace_back(std::cos(angle) * mag, std::sin(angle) * mag);
+            if (val[1] == 0) {
+                dir_vec.emplace_back(0.0, 0.0);
+            } else {
+                const double angle = static_cast<double>(val[0]) / 255.0 * 2.0 * std::numbers::pi;
+                const double mag = static_cast<double>(val[1]) / 255.0;
+                dir_vec.emplace_back(std::cos(angle) * mag, std::sin(angle) * mag);
+            }
             terrain_vec.push_back(val[2]);
         }
     }

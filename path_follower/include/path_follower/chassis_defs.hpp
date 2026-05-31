@@ -1,54 +1,32 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <utility>
 
 namespace path_follower {
 
-// ═══════════════════════ 底盘模式 ═════════════════════════════
+namespace chassis_mode {
+inline constexpr uint8_t NORMAL = 0;
+inline constexpr uint8_t SPIN_SLOW = 1;
+inline constexpr uint8_t SPIN_FAST = 2;
+} // namespace chassis_mode
 
-enum class ChassisMode : uint8_t {
-    NORMAL = 0,
-    SPIN_SLOW = 1,
-    SPIN_FAST = 2,
-    STEP_UP_LEG_LONG = 3,
-    STEP_UP_LEG_SHORT = 4,
-    STEP_UP_JUMP = 5,
-    STEP_DOWN_LEG_SHORT = 6,
-    STEP_DOWN_JUMP = 7,
+inline bool is_step_mode(const uint8_t mode) {
+    return mode != chassis_mode::NORMAL
+        && mode != chassis_mode::SPIN_SLOW
+        && mode != chassis_mode::SPIN_FAST;
+}
+
+enum class StepDirection : uint8_t {
+    UP = 0,
+    DOWN = 1,
 };
 
-inline bool is_step_mode(const ChassisMode mode) {
-    switch (mode) {
-        case ChassisMode::STEP_UP_LEG_SHORT:
-        case ChassisMode::STEP_UP_JUMP:
-        case ChassisMode::STEP_UP_LEG_LONG:
-        case ChassisMode::STEP_DOWN_LEG_SHORT:
-        case ChassisMode::STEP_DOWN_JUMP:
-            return true;
-        default:
-            return false;
-    }
-}
-
-inline const char* mode_label(const ChassisMode m) {
-    switch (m) {
-        case ChassisMode::STEP_UP_LEG_SHORT: return "UP_LEG_SHORT";
-        case ChassisMode::STEP_UP_JUMP: return "UP_JUMP";
-        case ChassisMode::STEP_UP_LEG_LONG: return "UP_LEG_LONG";
-        case ChassisMode::STEP_DOWN_LEG_SHORT: return "DOWN_LEG_SHORT";
-        case ChassisMode::STEP_DOWN_JUMP: return "DOWN_JUMP";
-        case ChassisMode::NORMAL: return "NORMAL";
-        default: return "?";
-    }
-}
-
-// ═══════════════════════ 底盘控制状态 ═════════════════════════
-
 enum class ChassisControlState : uint8_t {
-    STOPPED,
-    BLOCKED,
-    NORMAL,
+    STOPPED = 0,
+    BLOCKED = 1,
+    NORMAL = 2,
 };
 
 enum class LegMode : uint8_t {

@@ -1,6 +1,5 @@
 #include <map_server/object_tracker.hpp>
 #include <opencv2/imgproc.hpp>
-#include <omp.h>
 #include <algorithm>
 #include <cmath>
 

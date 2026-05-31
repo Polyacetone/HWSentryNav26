@@ -1,4 +1,4 @@
-#include "map_server/map_utils.hpp"
+#include <map_server/utils.hpp>
 #include <fstream>
 #include <cmath>
 #include <msgpack.hpp>
@@ -119,7 +119,7 @@ void inflate_direction_field(
             const size_t src_idx = static_cast<size_t>(sy) * static_cast<size_t>(w) + static_cast<size_t>(sx);
             if (!is_directional_label(data.terrain[src_idx])) continue;
 
-            const double raw_angle = data.direction[src_idx] / 255.0 * 2.0 * M_PI;
+            const double raw_angle = data.direction[src_idx] / 255.0 * 2.0 * std::numbers::pi;
             const float src_vx = static_cast<float>(std::cos(raw_angle));
             const float src_vy = static_cast<float>(std::sin(raw_angle));
 
@@ -162,8 +162,8 @@ void inflate_direction_field(
             const float fx = sum_vx[i] / total * final_mag;
             const float fy = sum_vy[i] / total * final_mag;
             double angle_rad = std::atan2(fy, fx);
-            if (angle_rad < 0) angle_rad += 2.0 * M_PI;
-            angle_row[i] = static_cast<uint8_t>(angle_rad / (2.0 * M_PI) * 255.0);
+            if (angle_rad < 0) angle_rad += 2.0 * std::numbers::pi;
+            angle_row[i] = static_cast<uint8_t>(angle_rad / (2.0 * std::numbers::pi) * 255.0);
             mag_row[i] = static_cast<uint8_t>(std::clamp(final_mag * 255.0f, 0.0f, 255.0f));
         }
     }

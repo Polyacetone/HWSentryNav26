@@ -12,14 +12,11 @@
 #include <path_follower/state_machine.hpp>
 #include <path_follower/mpc_solver.hpp>
 #include <path_follower/nav_map.hpp>
-#include <path_follower/utils.hpp>
+#include <path_follower/step_controller.hpp>
+#include <path_follower/progress_monitor.hpp>
+#include <path_follower/safety_monitor.hpp>
 
 namespace path_follower {
-
-enum class StepDirection : uint8_t {
-    UP,
-    DOWN,
-};
 
 // ═══════════════════════ 控制器输入 ═══════════════════════════
 
@@ -74,7 +71,7 @@ struct ControlOutput {
     // ─── 底盘指令 ───
     double velocity = 0.0;
     double omega = 0.0;
-    ChassisMode mode = ChassisMode::NORMAL;
+    uint8_t mode = chassis_mode::NORMAL;
     uint8_t step_dist_cm = 0;
 
     // ─── 状态信息 ───
@@ -101,29 +98,6 @@ struct FollowProjectionGuardParams {
     int cost_samples;
 };
 
-struct StepDetectionParams {
-    double detect_norm_threshold;
-    double detect_dot_threshold;
-    double path_sample_resolution;
-    double prepare_distance;
-    double active_distance;
-    double release_distance;
-};
-
-struct NoProgressGuardParams {
-    double landmark_spacing;
-    double timeout;
-};
-
-struct StepBlockReplanParams {
-    bool enable;
-    double lookahead_distance;
-    double sample_resolution;
-    double step_norm_threshold;
-    double obstacle_cost_threshold;
-    double predicted_obstacle_ratio_threshold;
-};
-
 struct NavigationParams {
     double stop_threshold_dist;
     double stop_threshold_u;
@@ -134,7 +108,7 @@ struct NavigationParams {
     NoProgressGuardParams stepping_no_progress_guard;
     StepBlockReplanParams step_block_replan;
 
-    double step_dist_offset; // 补偿代价地图膨胀导致的台阶检测距离偏差 (m)
+    double step_dist_offset;
 };
 
 // ═══════════════════ MainController ═════════════════════
@@ -175,51 +149,9 @@ private:
     void remember_command_output(const ControlOutput& output);
 
     void on_state_transition(FsmState prev, FsmState next, bool allow_warm_start_reset);
-    void update_recovery_goal_if_needed(const ControlInput& input);
-    bool check_stuck(const ControlInput& input);
-    bool compute_is_hazard(const ControlInput& input) const;
-    bool update_recovery_safe_flag(const ControlInput& input);
-    void recompute_follow_landmarks(const SplinePath& path);
-    bool check_no_progress(const ControlInput& input, double current_u, const NoProgressGuardParams& params, FsmState current_state);
-
-    // ─── 工具函数 ───
-    struct StepPlanSegment {
-        int path_version = 0;
-        double prepare_u = 0.0;
-        double active_u = 0.0;
-        double step_enter_u = 0.0;
-        double step_exit_u = 0.0;
-        double release_u = 1.0;
-        Eigen::Vector2d step_enter_pos_map = Eigen::Vector2d::Zero();
-        Eigen::Vector2d step_exit_pos_map = Eigen::Vector2d::Zero();
-        Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
-        StepDirection direction = StepDirection::UP;
-        ActiveStepMode command;
-    };
 
     [[nodiscard]] double project_path_u(const ControlInput& input, const SplinePath& path, double seed_u) const;
-    double advance_path_u_by_distance(const SplinePath& path, double start_u, double distance) const;
-    double retreat_path_u_by_distance(const SplinePath& path, double start_u, double distance) const;
     [[nodiscard]] bool check_follow_projection_guard(const ControlInput& input, const SplinePath& path, double current_u) const;
-    [[nodiscard]] bool check_step_block_replan(const ControlInput& input, const SplinePath& path, double current_u) const;
-    std::vector<StepPlanSegment> build_step_plan(const SplinePath& path, const DirectionMap& direction_map) const;
-    void clear_step_runtime_state();
-    void clear_step_plan();
-    void update_step_plan_for_path_change(bool has_new_path, const std::optional<SplinePath>& path, const DirectionMap* direction_map);
-    void update_active_step_segment(const ControlInput& input, double current_u);
-    [[nodiscard]] std::optional<size_t> find_active_step_segment_index(double current_u) const;
-    [[nodiscard]] const StepPlanSegment* active_step_segment(double current_u) const;
-    [[nodiscard]] const StepPlanSegment* current_step_command_segment(double current_u) const;
-    [[nodiscard]] uint8_t compute_step_distance_cm(const SplinePath& path, double current_u) const;
-    [[nodiscard]] bool should_activate_step_mode(double current_u) const;
-    std::optional<ActiveStepMode> build_step_command(
-        StepDirection direction,
-        const Eigen::Vector2d& step_enter_pos_map,
-        double step_enter_u,
-        const DirectionMap& direction_map
-    ) const;
-    std::optional<ActiveStepMode> current_active_step_mode(double current_u) const;
-    bool is_step_active(double current_u) const;
 
     static double wrap_pi(double a) {
         return std::atan2(std::sin(a), std::cos(a));
@@ -228,48 +160,26 @@ private:
     // ─── 核心组件 ───
     std::unique_ptr<StateMachine> control_fsm_;
     std::shared_ptr<MPCSolver> mpc_controller_;
+    StepController step_controller_;
+    ProgressMonitor progress_monitor_;
+    SafetyMonitor safety_monitor_;
     rclcpp::Logger logger_;
 
     // ─── 参数 ───
     NavigationParams nav_params_;
     FsmParams fsm_params_;
 
-    // ─── 内部状态 ───
+    // ─── 内部状态（仅编排层持有） ───
     double last_reference_u_ = 0.0;
-    std::optional<Eigen::Vector2d> recovery_goal_map_;
-    std::optional<std::chrono::steady_clock::time_point> recovery_goal_set_time_;
-    std::optional<std::chrono::steady_clock::time_point> recovery_safe_since_;
     FsmState last_fsm_state_ = FsmState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
-    int path_version_ = 0;
-
-    // ─── 外部安全观测状态 ───
-    bool stuck_active_ = false;
-    std::chrono::steady_clock::time_point stuck_start_time_;
-    Eigen::Vector2d stuck_start_pos_ = Eigen::Vector2d::Zero();
-
-    // ─── 台阶检测 / 锁存 / 执行状态 ───
-    std::vector<StepPlanSegment> step_plan_;
-    std::optional<size_t> held_step_segment_index_;
-    double step_mode_blend_factor_ = 0.0;
-    std::optional<SplinePath> step_locked_path_;
-    bool step_locked_fixed_goal_ = false;
-    Eigen::Vector2d step_locked_fixed_goal_pos_ = Eigen::Vector2d::Zero();
-    bool deferred_external_path_update_ = false;
 
     // ─── 最近一次实际下发到底盘的控制指令 ───
     ControlOutput last_command_output_;
     bool has_last_command_output_ = false;
 
     bool follow_stop_and_wait_replan_pending_ = false;
-
     bool last_cycle_chassis_controllable_ = false;
-
-    // ─── Follow/Stepping 路标点无进度检测状态 ───
-    std::vector<double> follow_landmarks_u_;                 // 每隔 ~landmark_spacing 的路径参数 u
-    int follow_max_landmark_idx_ = -1;                       // 已到达的最高路标点索引（-1=未初始化）
-    std::chrono::steady_clock::time_point follow_max_landmark_time_;  // 最后一次路标更新时刻
-    FsmState last_no_progress_check_state_ = FsmState::IDLE; // 上次调用 check_no_progress 的状态，用于模式切换时重置计时
 };
 
-}
+} // namespace path_follower

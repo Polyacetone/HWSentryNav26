@@ -10,13 +10,15 @@ namespace path_follower {
 //  地形标签常量 (must match map_server::map_utils and path_planner)
 // ════════════════════════════════════════════════════════════════
 
-constexpr uint8_t TERRAIN_FLAT = 0;
-constexpr uint8_t TERRAIN_OBSTACLE = 1;
-constexpr uint8_t TERRAIN_SLOPE = 2;
-constexpr uint8_t TERRAIN_STEP_L1 = 3;
-constexpr uint8_t TERRAIN_STEP_L2 = 4;
-constexpr uint8_t TERRAIN_FLY_SLOPE = 5;
-constexpr uint8_t TERRAIN_STEP_HIGH = 6;
+enum class TerrainType : uint8_t {
+    FLAT = 0,
+    OBSTACLE = 1,
+    SLOPE = 2,
+    STEP_L1 = 3,
+    STEP_L2 = 4,
+    FLY_SLOPE = 5,
+    STEP_HIGH = 6,
+};
 constexpr size_t TERRAIN_LABEL_COUNT = 7;
 
 // ════════════════════════════════════════════════════════════════
@@ -72,7 +74,6 @@ struct TerrainLabelRule {
 
 struct TerrainProfiles {
     std::array<CapabilityProfile, 3> capability_profiles;
-    TerrainStepRule normal;                                                 // 非台阶区域的默认规则
     std::array<TerrainLabelRule, 5> directional_labels;                    // 有方向语义的标签: index 0=SLOPE~4=STEP_HIGH
 };
 
@@ -116,19 +117,21 @@ public:
 
     explicit DirectionMap(
         const cv::Mat& direction_map, double resolution, double origin_x, double origin_y,
-        const TerrainProfiles& profiles);
+        const TerrainProfiles& profiles
+    );
 
     explicit DirectionMap(
         int width, int height, double resolution, double origin_x, double origin_y,
         std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data,
-        const TerrainProfiles& profiles);
+        const TerrainProfiles& profiles
+    );
 
 private:
-    // Intermediate: unpacks decoded pair into primary constructor (avoids double decoding)
     explicit DirectionMap(
         int width, int height, double resolution, double origin_x, double origin_y,
         std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded,
-        const TerrainProfiles& profiles);
+        const TerrainProfiles& profiles
+    );
 
     static std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>>
     decode_mat(const cv::Mat& mat);

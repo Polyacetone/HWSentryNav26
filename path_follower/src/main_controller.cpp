@@ -1,95 +1,10 @@
 #include <path_follower/main_controller.hpp>
+#include <path_follower/utils.hpp>
 #include <rclcpp/logging.hpp>
 
 namespace path_follower {
 
-namespace {
-
-struct FollowStepBlockSampleStats {
-    int sample_count = 0;
-    int step_sample_count = 0;
-    int blocked_step_sample_count = 0;
-};
-
-std::optional<FollowStepBlockSampleStats> sample_step_block_replan_stats(
-    const NavigationParams& params,
-    const SplinePath& path,
-    const double start_u,
-    const CostMap* const dynamic_cost_map,
-    const std::vector<const CostMap*>& dynamic_prediction_maps,
-    const DirectionMap& direction_map
-) {
-    const auto& p = params.step_block_replan;
-    const double lookahead_distance = std::max(0.0, p.lookahead_distance);
-    const double resolution = std::max(1e-3, p.sample_resolution);
-    const bool using_predicted = !dynamic_prediction_maps.empty();
-
-    FollowStepBlockSampleStats stats;
-    const int samples = using_predicted
-        ? static_cast<int>(dynamic_prediction_maps.size())
-        : std::max(1, static_cast<int>(std::ceil(lookahead_distance / resolution)) + 1);
-    if (samples <= 0) return stats;
-
-    auto advance_path_u = [&](const double distance) {
-        double u = std::clamp(start_u, 0.0, 1.0);
-        double travelled = 0.0;
-        while (u < 1.0 && travelled < distance) {
-            const Eigen::Vector2d d1 = path.tangent(u);
-            const double speed = d1.norm();
-            if (speed < 1e-12) {
-                u = std::min(1.0, u + 1e-3);
-                continue;
-            }
-            const double du = resolution / speed;
-            const double next_u = std::min(1.0, u + du);
-            travelled += (path.position(next_u) - path.position(u)).norm();
-            u = next_u;
-        }
-        return u;
-    };
-
-    for (int i = 0; i < samples; ++i) {
-        const double t = samples == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(samples - 1);
-        const double u = advance_path_u(lookahead_distance * t);
-
-        const Eigen::Vector2d pos = path.position(u);
-        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(pos);
-        if (!direction_map.is_valid_coord(dir_grid)) return std::nullopt;
-
-        const double step_norm = direction_map.interpolate(dir_grid).norm();
-        const bool on_step = step_norm >= p.step_norm_threshold;
-
-        bool blocked_dynamic = false;
-        if (using_predicted) {
-            const CostMap* const cost_map = dynamic_prediction_maps[static_cast<size_t>(i)];
-            if (!cost_map) return std::nullopt;
-            const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
-            if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
-            blocked_dynamic = cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
-        } else if (dynamic_cost_map) {
-            const Eigen::Vector2d cost_grid = dynamic_cost_map->map_coord_to_grid(pos);
-            if (!dynamic_cost_map->is_valid_coord(cost_grid)) return std::nullopt;
-            blocked_dynamic = dynamic_cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
-        }
-
-        stats.sample_count++;
-        if (!on_step) continue;
-
-        stats.step_sample_count++;
-        if (blocked_dynamic) {
-            stats.blocked_step_sample_count++;
-        }
-    }
-
-    return stats;
-}
-
-}
-}  // namespace path_follower
-
 // ═══════════════════════ 构造函数 ════════════════════════════
-
-namespace path_follower {
 
 MainController::MainController(
     const NavigationParams& nav_params,
@@ -98,6 +13,9 @@ MainController::MainController(
     rclcpp::Logger logger
 ) : control_fsm_(std::make_unique<StateMachine>(fsm_params, logger)),
     mpc_controller_(std::move(mpc_controller)),
+    step_controller_(nav_params.step_detection, nav_params.step_block_replan, nav_params.step_dist_offset, logger),
+    progress_monitor_(logger),
+    safety_monitor_(fsm_params, logger),
     logger_(logger),
     nav_params_(nav_params),
     fsm_params_(fsm_params) {
@@ -126,7 +44,7 @@ void MainController::apply_held_command(ControlOutput& output) const {
     if (!has_last_command_output_) {
         output.velocity = 0.0;
         output.omega = 0.0;
-        output.mode = ChassisMode::NORMAL;
+        output.mode = chassis_mode::NORMAL;
         output.step_dist_cm = 0;
         output.valid = true;
         return;
@@ -199,51 +117,6 @@ bool MainController::check_follow_projection_guard(const ControlInput& input, co
     return false;
 }
 
-bool MainController::check_step_block_replan(const ControlInput& input, const SplinePath& path, const double current_u) const {
-    const auto& p = nav_params_.step_block_replan;
-    if (!p.enable || !input.masked_direction_map) return false;
-
-    const auto stats = sample_step_block_replan_stats(
-        nav_params_,
-        path,
-        current_u,
-        input.current_dynamic_cost_map,
-        input.per_step_dynamic_cost_maps,
-        *input.masked_direction_map
-    );
-    if (!stats || stats->step_sample_count == 0) {
-        return false;
-    }
-
-    if (input.per_step_dynamic_cost_maps.empty()) {
-        if (stats->blocked_step_sample_count > 0) {
-            RCLCPP_WARN(
-                logger_,
-                "Follow replan: detected blocked step ahead within %.2f m (blocked_step_samples=%d/%d)",
-                p.lookahead_distance,
-                stats->blocked_step_sample_count,
-                stats->step_sample_count
-            );
-            return true;
-        }
-        return false;
-    }
-
-    const double blocked_ratio = static_cast<double>(stats->blocked_step_sample_count) / static_cast<double>(stats->step_sample_count);
-    if (blocked_ratio >= p.predicted_obstacle_ratio_threshold) {
-        RCLCPP_WARN(
-            logger_,
-            "Follow replan: predicted blocked step ahead within %.2f m (ratio=%.2f >= %.2f)",
-            p.lookahead_distance,
-            blocked_ratio,
-            p.predicted_obstacle_ratio_threshold
-        );
-        return true;
-    }
-
-    return false;
-}
-
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
 ControlOutput MainController::update(const ControlInput& input) {
@@ -259,7 +132,7 @@ ControlOutput MainController::update(const ControlInput& input) {
         ControlOutput out;
         out.velocity = 0.0;
         out.omega = 0.0;
-        out.mode = ChassisMode::NORMAL;
+        out.mode = chassis_mode::NORMAL;
         out.step_dist_cm = 0;
         out.fsm_state = FsmState::DEAD;
         out.valid = true;
@@ -267,8 +140,8 @@ ControlOutput MainController::update(const ControlInput& input) {
         last_cmd_ = Eigen::Vector2d::Zero();
         reset_all_mpc_warm_start();
         reset_all_mpc_observer();
-        stuck_active_ = false;
-        recovery_safe_since_ = std::nullopt;
+        safety_monitor_.reset_stuck();
+        safety_monitor_.reset_recovery();
         remember_command_output(out);
         return out;
     }
@@ -281,53 +154,71 @@ ControlOutput MainController::update(const ControlInput& input) {
         reset_all_mpc_observer();
     }
 
+    // ─── 路径锁存替换 ───
     ControlInput effective_input = input;
     bool had_deferred_update = false;
-    const bool step_path_locked = held_step_segment_index_.has_value() && step_locked_path_.has_value();
+    const bool step_path_locked = step_controller_.is_path_locked();
     if (step_path_locked) {
         if (input.path_updated || !input.global_path.has_value()) {
-            deferred_external_path_update_ = true;
+            step_controller_.set_deferred_update();
         }
-        effective_input.global_path = step_locked_path_;
+        effective_input.global_path = step_controller_.locked_path();
         effective_input.path_updated = false;
-        effective_input.fixed_goal = step_locked_fixed_goal_;
-        effective_input.fixed_goal_pos = step_locked_fixed_goal_pos_;
+        effective_input.fixed_goal = step_controller_.locked_fixed_goal();
+        effective_input.fixed_goal_pos = step_controller_.locked_fixed_goal_pos();
     } else {
-        had_deferred_update = deferred_external_path_update_;
-        effective_input.path_updated = input.path_updated || deferred_external_path_update_;
-        deferred_external_path_update_ = false;
+        had_deferred_update = step_controller_.consume_deferred_update();
+        effective_input.path_updated = input.path_updated || had_deferred_update;
     }
 
     const FsmState prev_state = last_fsm_state_;
     sync_mpc_context(effective_input, chassis_controllable);
 
-    if (prev_state == FsmState::HAZARD_RECOVERY) {
-        update_recovery_goal_if_needed(effective_input);
+    if (prev_state == FsmState::HAZARD_RECOVERY
+        && effective_input.masked_global_cost_map
+        && effective_input.masked_direction_map
+    ) {
+        safety_monitor_.update_recovery_goal_if_needed(
+            effective_input.chassis_pose_map,
+            *effective_input.masked_global_cost_map,
+            *effective_input.masked_direction_map,
+            effective_input.base_direction_map,
+            effective_input.stamp
+        );
     }
 
     const bool has_path = effective_input.global_path.has_value();
     const bool has_new_path = has_path && effective_input.path_updated;
 
-    update_step_plan_for_path_change(has_new_path, effective_input.global_path, effective_input.masked_direction_map);
+    step_controller_.update_plan_for_path_change(
+        has_new_path, effective_input.global_path, effective_input.base_direction_map
+    );
     if (!has_path) {
-        clear_step_plan();
+        step_controller_.clear_plan();
     }
 
     if (has_new_path) {
-        recompute_follow_landmarks(*effective_input.global_path);
-        follow_max_landmark_idx_ = -1;
+        const double spacing = std::max(0.1, std::min(
+            nav_params_.follow_no_progress_guard.landmark_spacing,
+            nav_params_.stepping_no_progress_guard.landmark_spacing
+        ));
+        progress_monitor_.recompute_landmarks(*effective_input.global_path, spacing);
     } else if (!has_path) {
-        follow_landmarks_u_.clear();
-        follow_max_landmark_idx_ = -1;
+        progress_monitor_.clear();
     }
 
     const double current_u = has_path ? project_path_u(effective_input, *effective_input.global_path, last_reference_u_) : 0.0;
     if (has_path) {
         last_reference_u_ = current_u;
         if (prev_state == FsmState::FOLLOW || prev_state == FsmState::STEPPING) {
-            update_active_step_segment(effective_input, current_u);
+            step_controller_.update_active_segment(
+                current_u,
+                effective_input.global_path,
+                effective_input.fixed_goal,
+                effective_input.fixed_goal_pos
+            );
         } else {
-            clear_step_runtime_state();
+            step_controller_.clear_runtime_state();
         }
     }
 
@@ -338,21 +229,30 @@ ControlOutput MainController::update(const ControlInput& input) {
     if (!command_blocked && has_path && prev_state == FsmState::FOLLOW) {
         request_replan_now = request_replan_now
             || check_follow_projection_guard(effective_input, *effective_input.global_path, current_u)
-            || check_step_block_replan(effective_input, *effective_input.global_path, current_u);
+            || step_controller_.check_block_replan(
+                *effective_input.global_path,
+                current_u,
+                effective_input.masked_direction_map,
+                effective_input.current_dynamic_cost_map,
+                effective_input.per_step_dynamic_cost_maps
+            );
     }
 
     // 无进度检测（Follow / Stepping 模式均使用统一的路标点方式，参数不同）
     bool no_progress_detected = false;
     if (!command_blocked && has_path) {
         if (prev_state == FsmState::FOLLOW) {
-            no_progress_detected = check_no_progress(effective_input, current_u, nav_params_.follow_no_progress_guard, FsmState::FOLLOW);
+            no_progress_detected = progress_monitor_.check_no_progress(
+                current_u, nav_params_.follow_no_progress_guard, FsmState::FOLLOW, prev_state, effective_input.stamp
+            );
         } else if (prev_state == FsmState::STEPPING) {
-            no_progress_detected = check_no_progress(effective_input, current_u, nav_params_.stepping_no_progress_guard, FsmState::STEPPING);
+            no_progress_detected = progress_monitor_.check_no_progress(
+                current_u, nav_params_.stepping_no_progress_guard, FsmState::STEPPING, prev_state, effective_input.stamp
+            );
         }
     }
 
-    // stepping 期间若有路径更新被延迟锁存，stepping 结束后强制重规划，
-    // 避免使用在新位置下已失效的旧路径触发 follow_proj_guard 等问题。
+    // stepping 期间若有路径更新被延迟锁存，stepping 结束后强制重规划
     if (!request_replan_now && had_deferred_update) {
         request_replan_now = true;
     }
@@ -366,7 +266,7 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.chassis_pos_map = effective_input.chassis_pose_map.head<2>();
     fsm_input.fixed_goal_flag = effective_input.fixed_goal;
     fsm_input.reach_goal = dist_reached || u_reached;
-    fsm_input.step_active = is_step_active(current_u);
+    fsm_input.step_active = step_controller_.is_step_active(current_u);
     fsm_input.replan_requested = request_replan_now;
     fsm_input.replan_failed = !has_path && effective_input.path_updated;
     fsm_input.command_blocked = command_blocked;
@@ -374,15 +274,41 @@ ControlOutput MainController::update(const ControlInput& input) {
     fsm_input.spin_high_priority = effective_input.spin_high_priority;
     const bool hazard_allowed = (prev_state == FsmState::IDLE) || (prev_state == FsmState::SPIN)
         || (prev_state == FsmState::HAZARD_RECOVERY)
-        || (prev_state == FsmState::STUCK_REVERSE);  // 用于退出 STUCK_REVERSE 时判断是否真需进 HAZARD_RECOVERY
-    fsm_input.is_hazard = !command_blocked && hazard_allowed && compute_is_hazard(effective_input);
-    // 无进度触发时允许在 Follow/Stepping 状态下重新检查 hazard
+        || (prev_state == FsmState::STUCK_REVERSE);
     if (no_progress_detected) {
-        fsm_input.is_hazard = !command_blocked && compute_is_hazard(effective_input);
+        fsm_input.is_hazard = !command_blocked
+            && effective_input.masked_global_cost_map
+            && effective_input.masked_direction_map
+            && safety_monitor_.compute_is_hazard(
+                *effective_input.masked_global_cost_map,
+                *effective_input.masked_direction_map,
+                effective_input.chassis_pose_map.head<2>()
+            );
+    } else {
+        fsm_input.is_hazard = !command_blocked && hazard_allowed
+            && effective_input.masked_global_cost_map
+            && effective_input.masked_direction_map
+            && safety_monitor_.compute_is_hazard(
+                *effective_input.masked_global_cost_map,
+                *effective_input.masked_direction_map,
+                effective_input.chassis_pose_map.head<2>()
+            );
     }
     fsm_input.no_progress_detected = no_progress_detected;
-    fsm_input.is_stuck = !command_blocked && check_stuck(effective_input);
-    fsm_input.is_recovery_safe = !command_blocked && update_recovery_safe_flag(effective_input);
+    fsm_input.is_stuck = !command_blocked && safety_monitor_.check_stuck(
+        effective_input.chassis_pose_map.head<2>(),
+        last_cmd_.x(),
+        effective_input.stamp
+    );
+    fsm_input.is_recovery_safe = !command_blocked
+        && effective_input.final_cost_map
+        && effective_input.masked_direction_map
+        && safety_monitor_.update_recovery_safe_flag(
+            *effective_input.final_cost_map,
+            *effective_input.masked_direction_map,
+            effective_input.chassis_pose_map.head<2>(),
+            effective_input.stamp
+        );
     fsm_input.velocity = last_cmd_.x();
     fsm_input.omega = last_cmd_.y();
     fsm_input.stamp = effective_input.stamp;
@@ -417,11 +343,9 @@ ControlOutput MainController::update(const ControlInput& input) {
     output.keep_goal_on_path_consume = output.request_replan || state == FsmState::WAIT_REPLAN;
     if (output.consume_global_path) {
         last_reference_u_ = 0.0;
-        clear_step_plan();
+        step_controller_.clear_plan();
     }
 
-    // 4. 同步已发布指令到 FSM / MPC；IDLE / SPIN / STUCK_REVERSE 无 track 连续性，
-    //    进入这些状态后 MPC warm start 已无意义，直接重置。
     if (output.valid) {
         last_cmd_ = Eigen::Vector2d(output.velocity, output.omega);
         mpc_controller_->set_last_cmd(last_cmd_);
@@ -448,7 +372,7 @@ ControlOutput MainController::execute_idle(const ControlInput& input) {
     ControlOutput out;
     out.velocity = 0.0;
     out.omega = 0.0;
-    out.mode = ChassisMode::NORMAL;
+    out.mode = chassis_mode::NORMAL;
     out.valid = true;
     return out;
 }
@@ -460,14 +384,13 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     if (!input.global_path || !input.final_cost_map || !input.masked_global_cost_map || !input.masked_direction_map) return out;
 
     const double u0 = last_reference_u_;
-    last_reference_u_ = u0;
 
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_follow(
         *input.global_path, input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map, *input.masked_global_cost_map, input.per_step_cost_maps, input.prediction_dt,
         *input.masked_direction_map,
-        current_active_step_mode(u0)
+        step_controller_.current_active_step_mode(u0)
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
@@ -498,18 +421,18 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
         } else {
             RCLCPP_WARN(logger_, "Follow rollout entered lethal obstacle; outputting solve_stop and requesting wait_replan next cycle");
         }
-        clear_step_plan();
+        step_controller_.clear_plan();
     }
 
     out.velocity = cmd.x();
     out.omega = cmd.y();
 
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
-        out.mode = ChassisMode::NORMAL;
-    } else if (const auto active_step_mode = current_active_step_mode(u0); active_step_mode && should_activate_step_mode(u0)) {
+        out.mode = chassis_mode::NORMAL;
+    } else if (const auto active_step_mode = step_controller_.current_active_step_mode(u0); active_step_mode && step_controller_.should_activate_step_mode(u0)) {
         out.mode = active_step_mode->mode;
     } else {
-        out.mode = ChassisMode::NORMAL;
+        out.mode = chassis_mode::NORMAL;
     }
 
     out.predicted_path_map = prediction.path_map;
@@ -518,7 +441,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
     if (!prediction.rollout_paths.empty()) {
         out.mppi_rollouts = std::move(prediction.rollout_paths);
     }
-    out.step_dist_cm = compute_step_distance_cm(*input.global_path, u0);
+    out.step_dist_cm = step_controller_.compute_step_distance_cm(*input.global_path, u0);
     out.valid = true;
 
     return out;
@@ -528,7 +451,7 @@ ControlOutput MainController::execute_follow(const ControlInput& input) {
 
 ControlOutput MainController::execute_spin(const ControlInput& input) {
     ControlOutput out;
-    out.mode = input.spin_fast ? ChassisMode::SPIN_FAST : ChassisMode::SPIN_SLOW;
+    out.mode = input.spin_fast ? chassis_mode::SPIN_FAST : chassis_mode::SPIN_SLOW;
     out.valid = true;
     return out;
 }
@@ -556,7 +479,7 @@ ControlOutput MainController::execute_stop(const ControlInput& input) {
 
     out.velocity = std::get<0>(*result).x();
     out.omega = std::get<0>(*result).y();
-    out.mode = ChassisMode::NORMAL;
+    out.mode = chassis_mode::NORMAL;
     out.predicted_path_map = std::get<1>(*result).path_map;
     out.predicted_v = std::get<1>(*result).v_pred;
     out.predicted_w = std::get<1>(*result).w_pred;
@@ -570,15 +493,14 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
     const bool prev_follow_like = (prev == FsmState::FOLLOW) || (prev == FsmState::STEPPING);
     const bool next_follow_like = (next == FsmState::FOLLOW) || (next == FsmState::STEPPING);
 
-    // 离开 STUCK_REVERSE 或 HAZARD_RECOVERY 时，必须重置卡死检测
     if (prev == FsmState::STUCK_REVERSE || prev == FsmState::HAZARD_RECOVERY) {
-        stuck_active_ = false;
+        safety_monitor_.reset_stuck();
     }
 
     if (prev_follow_like && !next_follow_like) {
-        clear_step_runtime_state();
+        step_controller_.clear_runtime_state();
         last_reference_u_ = 0.0;
-        follow_max_landmark_idx_ = -1;
+        progress_monitor_.reset();
         follow_stop_and_wait_replan_pending_ = false;
         if (allow_warm_start_reset) {
             mpc_controller_->reset_warm_start();
@@ -586,7 +508,7 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
     }
 
     if (next == FsmState::WAIT_REPLAN) {
-        clear_step_plan();
+        step_controller_.clear_plan();
         last_reference_u_ = 0.0;
         follow_stop_and_wait_replan_pending_ = false;
     }
@@ -596,125 +518,17 @@ void MainController::on_state_transition(const FsmState prev, const FsmState nex
     }
 
     if (next == FsmState::HAZARD_RECOVERY) {
-        recovery_goal_map_ = std::nullopt;
-        recovery_goal_set_time_ = std::nullopt;
-        recovery_safe_since_ = std::nullopt;
+        safety_monitor_.reset_recovery();
     }
     if (prev == FsmState::HAZARD_RECOVERY && next != FsmState::HAZARD_RECOVERY) {
-        recovery_goal_map_ = std::nullopt;
-        recovery_goal_set_time_ = std::nullopt;
-        recovery_safe_since_ = std::nullopt;
+        safety_monitor_.reset_recovery();
     }
 
-    // Hold 求解器由 HAZARD_RECOVERY / FIXED 共享，二者之间切换不应互相清空 warm start。
     const bool next_uses_hold = (next == FsmState::FIXED);
     const bool prev_uses_hold = (prev == FsmState::FIXED) || (prev == FsmState::HAZARD_RECOVERY);
     if (allow_warm_start_reset && next_uses_hold && !prev_uses_hold) {
         mpc_controller_->reset_warm_start();
     }
-}
-
-void MainController::update_recovery_goal_if_needed(const ControlInput& input) {
-    const auto& p = fsm_params_.recovery;
-    if (!input.masked_global_cost_map || !input.masked_direction_map) return;
-
-    const bool need_new = (!recovery_goal_map_) || (!recovery_goal_set_time_) || (std::chrono::duration<double>(input.stamp - *recovery_goal_set_time_).count() >= p.goal_timeout);
-
-    if (!need_new) return;
-
-    recovery_goal_map_ = recovery_helpers::find_goal(
-        p, *input.masked_global_cost_map, *input.masked_direction_map, input.chassis_pose_map,
-        input.base_direction_map
-    );
-    recovery_goal_set_time_ = input.stamp;
-
-    if (!recovery_goal_map_) {
-        RCLCPP_ERROR(logger_, "HAZARD_RECOVERY failed to find a recovery goal");
-        return;
-    }
-
-    const auto s = recovery_helpers::sample_fields(*input.masked_global_cost_map, *input.masked_direction_map, *recovery_goal_map_);
-    if (!s) {
-        RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (field sample invalid)", recovery_goal_map_->x(), recovery_goal_map_->y());
-        return;
-    }
-
-    if (recovery_helpers::is_safe_goal(p, *s)) {
-        RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (SAFE cost=%.1f step=%.3f)", recovery_goal_map_->x(), recovery_goal_map_->y(), s->cost, s->step_norm);
-    } else {
-        RCLCPP_WARN(logger_, "HAZARD_RECOVERY new goal=(%.2f, %.2f) (UNSAFE cost=%.1f step=%.3f)", recovery_goal_map_->x(), recovery_goal_map_->y(), s->cost, s->step_norm);
-    }
-}
-
-bool MainController::check_stuck(const ControlInput& input) {
-    const auto& p = fsm_params_.stuck;
-    if (std::abs(last_cmd_.x()) < p.cmd_vel_threshold) {
-        stuck_active_ = false;
-        return false;
-    }
-
-    const Eigen::Vector2d pos = input.chassis_pose_map.head<2>();
-    if (!stuck_active_) {
-        stuck_active_ = true;
-        stuck_start_time_ = input.stamp;
-        stuck_start_pos_ = pos;
-        return false;
-    }
-
-    const double dt = std::chrono::duration<double>(input.stamp - stuck_start_time_).count();
-    const double disp = (pos - stuck_start_pos_).norm();
-    if (disp > p.max_displacement) {
-        stuck_start_time_ = input.stamp;
-        stuck_start_pos_ = pos;
-        return false;
-    }
-
-    return dt >= p.timeout;
-}
-
-bool MainController::compute_is_hazard(const ControlInput& input) const {
-    const auto& p = fsm_params_.recovery;
-    if (!input.masked_global_cost_map || !input.masked_direction_map) return false;
-
-    // 注意：危险判断的 cost_map 使用的是 masked_global 而非 final，避免动态障碍物导致车进入危险恢复模式
-    const auto sample = recovery_helpers::sample_fields(
-        *input.masked_global_cost_map,
-        *input.masked_direction_map,
-        input.chassis_pose_map.head<2>()
-    );
-    if (!sample) return false;
-
-    return (sample->cost >= p.hazard_cost_threshold) ||
-        (sample->step_norm >= p.hazard_step_norm_threshold);
-}
-
-bool MainController::update_recovery_safe_flag(const ControlInput& input) {
-    const auto& p = fsm_params_.recovery;
-    if (!input.final_cost_map || !input.masked_direction_map || !recovery_goal_map_) {
-        recovery_safe_since_ = std::nullopt;
-        return false;
-    }
-
-    const auto sample = recovery_helpers::sample_fields(
-        *input.final_cost_map,
-        *input.masked_direction_map,
-        input.chassis_pose_map.head<2>()
-    );
-    if (!sample) {
-        recovery_safe_since_ = std::nullopt;
-        return false;
-    }
-
-    const bool safe_now = recovery_helpers::is_safe_goal(p, *sample);
-    if (!safe_now) {
-        recovery_safe_since_ = std::nullopt;
-        return false;
-    }
-
-    if (!recovery_safe_since_) {
-        recovery_safe_since_ = input.stamp;
-    }
-    return std::chrono::duration<double>(input.stamp - *recovery_safe_since_).count() >= p.safe_hold_time;
 }
 
 // ═══════════════════ HAZARD_RECOVERY: MPC 驱动恢复 ═══════════
@@ -723,18 +537,28 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
     ControlOutput out;
     if (!input.final_cost_map || !input.masked_direction_map) return out;
 
-    update_recovery_goal_if_needed(input);
-    if (!recovery_goal_map_) {
+    if (input.masked_global_cost_map) {
+        safety_monitor_.update_recovery_goal_if_needed(
+            input.chassis_pose_map,
+            *input.masked_global_cost_map,
+            *input.masked_direction_map,
+            input.base_direction_map,
+            input.stamp
+        );
+    }
+
+    const auto& recovery_goal = safety_monitor_.recovery_goal();
+    if (!recovery_goal) {
         out.velocity = 0.0;
         out.omega = 0.0;
-        out.mode = ChassisMode::NORMAL;
+        out.mode = chassis_mode::NORMAL;
         out.valid = true;
         return out;
     }
 
     auto start_time = std::chrono::steady_clock::now();
     const auto result = mpc_controller_->solve_hold(
-        *recovery_goal_map_,
+        *recovery_goal,
         input.chassis_pose_map, input.chassis_state,
         *input.final_cost_map
     );
@@ -750,7 +574,7 @@ ControlOutput MainController::execute_recovery(const ControlInput& input) {
 
     out.velocity = std::get<0>(*result).x();
     out.omega = std::get<0>(*result).y();
-    out.mode = ChassisMode::NORMAL;
+    out.mode = chassis_mode::NORMAL;
     out.predicted_path_map = std::get<1>(*result).path_map;
     out.predicted_v = std::get<1>(*result).v_pred;
     out.predicted_w = std::get<1>(*result).w_pred;
@@ -765,7 +589,7 @@ ControlOutput MainController::execute_stuck_reverse(const ControlInput& input) {
     ControlOutput out;
     out.velocity = -fsm_params_.stuck.reverse_speed;
     out.omega = 0.0;
-    out.mode = ChassisMode::NORMAL;
+    out.mode = chassis_mode::NORMAL;
     out.valid = true;
     return out;
 }
@@ -794,7 +618,7 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
 
     out.velocity = std::get<0>(*result).x();
     out.omega = std::get<0>(*result).y();
-    out.mode = ChassisMode::NORMAL;
+    out.mode = chassis_mode::NORMAL;
     out.predicted_path_map = std::get<1>(*result).path_map;
     out.predicted_v = std::get<1>(*result).v_pred;
     out.predicted_w = std::get<1>(*result).w_pred;
@@ -802,104 +626,4 @@ ControlOutput MainController::execute_fixed(const ControlInput& input) {
     return out;
 }
 
-// ═══════════════════ Follow 路标点无进度检测 ══════════════════
-
-void MainController::recompute_follow_landmarks(const SplinePath& path) {
-    follow_landmarks_u_.clear();
-    // 使用两种模式中较小的间距，确保 Follow 和 Stepping 的路标粒度都足够
-    const double spacing = std::max(0.1, std::min(
-        nav_params_.follow_no_progress_guard.landmark_spacing,
-        nav_params_.stepping_no_progress_guard.landmark_spacing
-    ));
-
-    // 先粗略估计路径弧长，动态确定采样数
-    constexpr int ESTIMATE_SAMPLES = 100;
-    double est_length = 0.0;
-    Eigen::Vector2d est_prev = path.position(0.0);
-    for (int i = 1; i <= ESTIMATE_SAMPLES; ++i) {
-        const double u = static_cast<double>(i) / static_cast<double>(ESTIMATE_SAMPLES);
-        const Eigen::Vector2d cur = path.position(u);
-        est_length += (cur - est_prev).norm();
-        est_prev = cur;
-    }
-
-    // 确保每米弧长至少有足够的采样点来准确捕捉弧长
-    const double sample_density = std::max(
-        10.0, 1.0 / std::max(spacing, 0.01)
-    );
-    const int N = std::max(10, static_cast<int>(std::ceil(est_length * sample_density)));
-
-    double arc = 0.0;
-    double next_threshold = 0.0;
-    Eigen::Vector2d prev = path.position(0.0);
-
-    for (int i = 0; i <= N; i++) {
-        const double u = static_cast<double>(i) / static_cast<double>(N);
-        const Eigen::Vector2d cur = path.position(u);
-        if (i > 0) arc += (cur - prev).norm();
-        prev = cur;
-        if (arc >= next_threshold) {
-            follow_landmarks_u_.push_back(u);
-            next_threshold += spacing;
-        }
-    }
-
-    if (follow_landmarks_u_.empty() || follow_landmarks_u_.back() < 1.0) {
-        follow_landmarks_u_.push_back(1.0);
-    }
-}
-
-bool MainController::check_no_progress(const ControlInput& input, const double current_u, const NoProgressGuardParams& params, const FsmState current_state) {
-    if (last_fsm_state_ != FsmState::FOLLOW && last_fsm_state_ != FsmState::STEPPING) return false;
-    if (follow_landmarks_u_.empty()) return false;
-
-    const int n = static_cast<int>(follow_landmarks_u_.size());
-
-    // 状态切换时重置计时器（例如 FOLLOW→STEPPING 或 STEPPING→FOLLOW），
-    // 避免前一个模式的计时残留导致新模式下过早触发。
-    if (current_state != last_no_progress_check_state_) {
-        last_no_progress_check_state_ = current_state;
-        follow_max_landmark_time_ = input.stamp;
-    }
-
-    // 安全性说明：
-    //   follow_max_landmark_idx_ == -1 时下方条件恒成立，确保 FOLLOW/STEPPING 的首个
-    //   周期必重置计时器。该索引在以下时机归 -1：
-    //     - 构造函数默认值
-    //     - has_new_path 时
-    //     - !has_path 时
-    //     - 离开 follow-like 状态时
-    // 因此除首个 FOLLOW/STEPPING 周期外，每次新路径或重入后首 cycle 必重置计时。
-    // follow_max_landmark_time_ 默认构造为 epoch，但首个周期
-    // follow_max_landmark_idx_ < 0 保证其立即被覆盖，不会误触发超时。
-
-    // 寻找当前 u 能覆盖的最高路标点索引
-    int new_max = follow_max_landmark_idx_;
-    for (int i = std::max(0, new_max + 1); i < n; i++) {
-        if (current_u >= follow_landmarks_u_[static_cast<size_t>(i)]) {
-            new_max = i;
-        } else {
-            break;
-        }
-    }
-
-    // 路标点前进（包括首次初始化）：重置计时器
-    if (follow_max_landmark_idx_ < 0 || new_max > follow_max_landmark_idx_) {
-        follow_max_landmark_idx_ = new_max;
-        follow_max_landmark_time_ = input.stamp;
-        return false;
-    }
-
-    const double elapsed = std::chrono::duration<double>(input.stamp - follow_max_landmark_time_).count();
-    if (elapsed >= params.timeout) {
-        const double landmark_u = follow_max_landmark_idx_ >= 0 ? follow_landmarks_u_[static_cast<size_t>(follow_max_landmark_idx_)] : -1.0;
-        const char* mode_name = (current_state == FsmState::STEPPING) ? "Stepping" : "Follow";
-        RCLCPP_WARN(logger_,
-            "%s replan: no progress at landmark %d/%d (landmark_u=%.3f, progress_u=%.3f) for %.1fs",
-            mode_name, follow_max_landmark_idx_, n - 1, landmark_u, current_u, elapsed);
-        return true;
-    }
-    return false;
-}
-
-}
+} // namespace path_follower
