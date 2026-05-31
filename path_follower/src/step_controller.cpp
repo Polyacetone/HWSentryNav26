@@ -8,13 +8,6 @@ namespace {
 constexpr double ANGLE_EPSILON = 1e-6;
 constexpr double U_EPSILON = 1e-6;
 
-struct StepSample {
-    double u = 0.0;
-    Eigen::Vector2d pos_map = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
-    StepDirection direction = StepDirection::UP;
-};
-
 } // anonymous namespace
 
 // ═══════════════════════ 构造函数 ════════════════════════════
@@ -113,6 +106,16 @@ std::optional<ActiveStepMode> StepController::build_step_command(
 }
 
 // ═══════════════════════ 台阶规划构建 ═══════════════════════
+//
+// 设计选择：基于 terrain label 扫描（而非采样点间 gap 检测）。
+// 遍历均匀 u 采样点，跟踪地形标签的变化：
+//   - label >= SLOPE 且与上一个采样点不同 → 结束上一段（如有），
+//     如果路径在此处的穿越方向有效则开启新段
+//   - label < SLOPE → 结束上一段
+// 段边界完全由 terrain label 在路径上的连续分布决定，
+// 不依赖样条参数化质量或 arc_length 积分。
+// 方向过滤（detect_dot_threshold）仅在段入口处做一次，
+// 避免每个采样点逐个判断带来的偶发碎片化。
 
 std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
     const SplinePath& path,
@@ -120,6 +123,7 @@ std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
 ) const {
     const double resolution = std::max(1e-3, step_detection_.path_sample_resolution);
 
+    // 估算路径长度，确定均匀 u 采样点数
     double estimated_length = 0.0;
     Eigen::Vector2d prev = path.position(0.0);
     constexpr int length_estimate_samples = 100;
@@ -131,21 +135,77 @@ std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
     }
 
     const int sample_count = std::max(2, static_cast<int>(std::ceil(estimated_length / resolution)) + 1);
-    std::vector<StepSample> step_samples;
-    step_samples.reserve(static_cast<size_t>(sample_count));
+    const double u_step = 1.0 / static_cast<double>(sample_count - 1);
+
+    // 当前正在构建的段
+    struct ActiveSegment {
+        int start_index;
+        uint8_t label;
+        StepDirection direction;
+        Eigen::Vector2d step_enter_pos_map;
+        Eigen::Vector2d dir_map;
+    };
+    std::optional<ActiveSegment> active;
+    std::vector<StepPlanSegment> plan;
+
+    // 结束当前段、构造 StepPlanSegment 并添加到 plan
+    auto finalize = [&](int end_index) {
+        if (!active) return;
+
+        const double step_exit_u = static_cast<double>(end_index - 1) * u_step;
+        const Eigen::Vector2d step_exit_pos = path.position(step_exit_u);
+        const double step_enter_u = static_cast<double>(active->start_index) * u_step;
+
+        auto command = build_step_command(
+            active->direction, active->step_enter_pos_map, step_enter_u, direction_map
+        );
+        if (command) {
+            StepPlanSegment seg;
+            seg.path_version = path_version_;
+            seg.step_enter_u = step_enter_u;
+            seg.step_exit_u = step_exit_u;
+            seg.step_enter_pos_map = active->step_enter_pos_map;
+            seg.step_exit_pos_map = step_exit_pos;
+            seg.dir_map = active->dir_map;
+            seg.direction = active->direction;
+            seg.command = *command;
+            seg.terrain_label = active->label;
+            plan.push_back(std::move(seg));
+        }
+        active.reset();
+    };
 
     for (int i = 0; i < sample_count; ++i) {
-        const double u = sample_count == 1
-            ? 0.0
-            : static_cast<double>(i) / static_cast<double>(sample_count - 1);
+        const double u = static_cast<double>(i) * u_step;
         const Eigen::Vector2d pos = path.position(u);
-        const Eigen::Vector2d tangent = path.tangent(u);
         const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
-        if (!direction_map.is_valid_coord(g)) continue;
+
+        // 网格边界处 → 终止段（如有）
+        if (!direction_map.is_valid_coord(g)) {
+            finalize(i);
+            continue;
+        }
 
         const uint8_t label = direction_map.terrain_at(g);
-        if (label < static_cast<uint8_t>(TerrainType::SLOPE)) continue;
 
+        // 非台阶地形 → 终止段（如有）
+        if (label < static_cast<uint8_t>(TerrainType::SLOPE)) {
+            finalize(i);
+            continue;
+        }
+
+        // ── 在此采样点上是台阶地形 ──
+
+        if (active && label == active->label) {
+            // 与当前段 label 相同 → 继续扩展（不检查 gap 或 direction）
+            continue;
+        }
+
+        // label 变更或无活跃段 → 结束上一段（如有）, 尝试开启新段
+        finalize(i);
+
+        // 在段入口确定穿越方向；若 dot 过小说明路径不顺台阶方向，放弃此段
+        const Eigen::Vector2d tangent = path.tangent(u);
         const Eigen::Vector2d dir = direction_map.interpolate(g);
         if (dir.norm() < ANGLE_EPSILON) continue;
 
@@ -154,65 +214,21 @@ std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
 
         const StepDirection direction = dot > 0.0 ? StepDirection::UP : StepDirection::DOWN;
 
-        step_samples.push_back(StepSample {
-            .u = u,
-            .pos_map = pos,
-            .dir_map = dir,
+        active = ActiveSegment{
+            .start_index = i,
+            .label = label,
             .direction = direction,
-        });
+            .step_enter_pos_map = pos,
+            .dir_map = dir,
+        };
     }
 
-    std::vector<StepPlanSegment> plan;
-    if (step_samples.empty()) return plan;
-
-    size_t segment_begin = 0;
-    while (segment_begin < step_samples.size()) {
-        size_t segment_end = segment_begin + 1;
-        while (segment_end < step_samples.size()) {
-            const bool direction_changed = step_samples[segment_end].direction != step_samples[segment_begin].direction;
-            const bool gap_too_large = path.arc_length(
-                step_samples[segment_end - 1].u,
-                step_samples[segment_end].u
-            ) > resolution * 1.5;
-            if (direction_changed || gap_too_large) {
-                break;
-            }
-            ++segment_end;
-        }
-
-        const StepSample& first = step_samples[segment_begin];
-        const StepSample& last = step_samples[segment_end - 1];
-        auto command = build_step_command(first.direction, first.pos_map, first.u, direction_map);
-        if (command) {
-            StepPlanSegment segment;
-            segment.path_version = path_version_;
-            segment.step_enter_u = first.u;
-            segment.step_exit_u = last.u;
-            segment.step_enter_pos_map = first.pos_map;
-            segment.step_exit_pos_map = last.pos_map;
-            segment.dir_map = first.dir_map;
-            segment.direction = first.direction;
-            segment.command = *command;
-            {
-                const Eigen::Vector2d label_g = direction_map.map_coord_to_grid(first.pos_map);
-                segment.terrain_label = direction_map.terrain_at(label_g);
-            }
-            plan.push_back(segment);
-        } else {
-            RCLCPP_WARN(
-                logger_,
-                "Step plan skipped forbidden segment at (%.2f, %.2f) dir=%s",
-                first.pos_map.x(),
-                first.pos_map.y(),
-                first.direction == StepDirection::UP ? "UP" : "DOWN"
-            );
-        }
-
-        segment_begin = segment_end;
-    }
+    // 结束最后一个段
+    finalize(sample_count);
 
     if (plan.empty()) return plan;
 
+    // ── 计算 prepare / active / release u 边界 ──
     for (size_t i = 0; i < plan.size(); ++i) {
         StepPlanSegment& segment = plan[i];
         segment.prepare_u = retreat_path_u_by_distance(path, segment.step_enter_u, step_detection_.prepare_distance);
@@ -220,44 +236,25 @@ std::vector<StepController::StepPlanSegment> StepController::build_step_plan(
         segment.release_u = advance_path_u_by_distance(path, segment.step_exit_u, step_detection_.release_distance);
     }
 
-    //
-    // 段间重叠仲裁规则（优先级从高到低）：
-    //   1. step_enter / step_exit  — 绝不修改（地形的真实范围）
-    //   2. active_u                — 可向 step_enter_u 压缩
-    //   3. release_u               — 可向 step_exit_u 拉回
-    //   4. prepare_u               — 可向 step_enter_u 后推
-    //
-    // 当 cur.prepare_u < prev.release_u 时，按以下顺序解决：
-    //   步骤 A — 后推 cur.prepare_u，但不超过 cur.step_enter_u
-    //   步骤 B — 前拉 prev.release_u，但不早于 prev.step_exit_u
-    //
-    // 保证结果：相邻段的 prepare/release 范围不再交叉，
-    //           find_active_segment_index 返回唯一匹配。
-    //
+    // ── 段间重叠仲裁 ──
     for (size_t i = 1; i < plan.size(); ++i) {
         StepPlanSegment& prev = plan[i - 1];
         StepPlanSegment& cur = plan[i];
 
-        // 无重叠，跳过
         if (cur.prepare_u >= prev.release_u) {
-            // 自身一致性修正
             if (cur.active_u < cur.prepare_u) cur.active_u = cur.prepare_u;
             if (prev.active_u > prev.step_enter_u) prev.active_u = prev.step_enter_u;
             continue;
         }
 
-        // 步骤 A：后推 cur.prepare_u（优先级最低），但不超过 cur.step_enter_u
         cur.prepare_u = std::min(prev.release_u, cur.step_enter_u);
-        // 步骤 B：若仍重叠，前拉 prev.release_u（优先级次低），但不早于 prev.step_exit_u
         if (cur.prepare_u < prev.release_u) {
             prev.release_u = std::max(prev.step_exit_u, cur.prepare_u);
         }
 
-        // 自身一致性修正
         if (cur.active_u < cur.prepare_u) cur.active_u = cur.prepare_u;
         if (prev.active_u > prev.step_enter_u) prev.active_u = prev.step_enter_u;
 
-        // 步骤 B 之后若仍重叠，说明两个段的 step 区域真实交叉（方向场问题），记录警告
         if (cur.prepare_u < prev.release_u) {
             RCLCPP_WARN(
                 logger_,
