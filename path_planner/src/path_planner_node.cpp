@@ -62,7 +62,6 @@ public:
     explicit PathPlannerNode(const rclcpp::NodeOptions& options);
 
 private:
-    enum class ReplanReason { GOAL_UPDATE, EXTERNAL_TRIGGER };
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_cost_map_sub_;
     rclcpp::Subscription<interfaces::msg::CostMaps>::SharedPtr local_cost_maps_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr global_direction_map_sub_;
@@ -104,7 +103,7 @@ private:
 
     void update_merged_cost_map();
     bool is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& map_pt) const;
-    void plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, bool fixed, const ReplanReason reason);
+    void plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, bool fixed, const char* reason);
     Eigen::Vector2d adjust_reachable_start_on_segment(const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const;
     std::optional<Eigen::Vector2d> nudge_point_to_free(
         const Eigen::Vector2d& map_pt,
@@ -113,10 +112,10 @@ private:
     Eigen::Vector2d predict_start_map(const Eigen::Vector2d& current_map) const;
     void publish_path(
         const std::vector<Eigen::Vector2d>& control_points,
-        const std::vector<Eigen::Vector2d>& rough_path,
         const std::vector<Eigen::Vector2d>& optimized_path,
         bool fixed = false
     );
+    std::vector<Eigen::Vector2d> grid_to_map(const std::vector<Eigen::Vector2d>& points) const;
 };
 
 PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path_planner", options) {
@@ -278,7 +277,7 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
                 return;
             }
             RCLCPP_INFO(get_logger(), "Received external replan trigger, replanning from current pose");
-            plan_and_publish_to_goal(*last_goal_map_, last_goal_fixed_, ReplanReason::EXTERNAL_TRIGGER);
+            plan_and_publish_to_goal(*last_goal_map_, last_goal_fixed_, "external trigger");
         }
     );
 
@@ -304,7 +303,7 @@ bool PathPlannerNode::is_map_point_feasible(const CostMap& cost_map, const Direc
 
     return cost_map.interpolate(cost_grid) < occupied_threshold_ &&
         direction_map.interpolate(dir_grid).norm() < on_step_threshold_ &&
-        !direction_map.is_fully_prohibited(dir_grid);
+        !direction_map.has_blocked_corner(dir_grid);
 }
 
 void PathPlannerNode::local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg) {
@@ -415,13 +414,8 @@ std::optional<Eigen::Vector2d> PathPlannerNode::nudge_point_to_free(
 
     // 检查原位置是否已经是 free
     if (merged_cost_map_->is_valid_coord(grid_pt)) {
-        if (merged_cost_map_->interpolate(grid_pt) < occupied_threshold_) {
-            const Eigen::Vector2d dir_grid = global_direction_map_->map_coord_to_grid(map_pt);
-            if (global_direction_map_->is_valid_coord(dir_grid) &&
-                global_direction_map_->interpolate(dir_grid).norm() < on_step_threshold_ &&
-                !global_direction_map_->is_fully_prohibited(dir_grid)) {
-                return map_pt;
-            }
+        if (is_map_point_feasible(*merged_cost_map_, *global_direction_map_, map_pt)) {
+            return map_pt;
         }
     }
 
@@ -446,14 +440,9 @@ std::optional<Eigen::Vector2d> PathPlannerNode::nudge_point_to_free(
         const double dist = (current.cast<double>() - grid_pt).norm() * merged_cost_map_->resolution;
         if (dist > max_nudge_distance) continue;
 
-        if (merged_cost_map_->at(current) < occupied_threshold_) {
-            const Eigen::Vector2d candidate_map = merged_cost_map_->grid_coord_to_map(current.cast<double>());
-            const Eigen::Vector2d dir_grid = global_direction_map_->map_coord_to_grid(candidate_map);
-            if (global_direction_map_->is_valid_coord(dir_grid) &&
-                global_direction_map_->interpolate(dir_grid).norm() < on_step_threshold_ &&
-                !global_direction_map_->is_fully_prohibited(dir_grid)) {
-                return candidate_map;
-            }
+        const Eigen::Vector2d candidate_map = merged_cost_map_->grid_coord_to_map(current.cast<double>());
+        if (is_map_point_feasible(*merged_cost_map_, *global_direction_map_, candidate_map)) {
+            return candidate_map;
         }
 
         for (int i = 0; i < 8; i++) {
@@ -504,20 +493,17 @@ Eigen::Vector2d PathPlannerNode::predict_start_map(const Eigen::Vector2d& curren
 void PathPlannerNode::goal_callback(const interfaces::msg::NavGoal::SharedPtr msg) {
     last_goal_map_ = Eigen::Vector2d(msg->x, msg->y);
     last_goal_fixed_ = msg->fixed;
-    plan_and_publish_to_goal(Eigen::Vector2d(msg->x, msg->y), msg->fixed, ReplanReason::GOAL_UPDATE);
+    plan_and_publish_to_goal(Eigen::Vector2d(msg->x, msg->y), msg->fixed, "goal update");
 }
 
-void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, bool fixed, const ReplanReason reason) {
-    const char* reason_label = reason == ReplanReason::GOAL_UPDATE
-        ? "goal update"
-        : "external trigger";
+void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, bool fixed, const char* reason) {
     const auto publish_empty_path = [&](const std::string& message, const bool is_error) {
         if (is_error) {
-            RCLCPP_ERROR(get_logger(), "%s (%s)", message.c_str(), reason_label);
+            RCLCPP_ERROR(get_logger(), "%s (%s)", message.c_str(), reason);
         } else {
-            RCLCPP_WARN(get_logger(), "%s (%s)", message.c_str(), reason_label);
+            RCLCPP_WARN(get_logger(), "%s (%s)", message.c_str(), reason);
         }
-        publish_path({}, {}, {}, false);
+        publish_path({}, {}, false);
     };
 
     if (!merged_cost_map_ || !global_direction_map_) {
@@ -599,13 +585,13 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     }
 
     const CostMap& planning_cost_map = *merged_cost_map_;
-    const Eigen::Vector2d start_grid = global_cost_map_->map_coord_to_grid(start_map);
-    const Eigen::Vector2d goal_grid = global_cost_map_->map_coord_to_grid(goal_plan);
+    const Eigen::Vector2d start_grid = planning_cost_map.map_coord_to_grid(start_map);
+    const Eigen::Vector2d goal_grid = planning_cost_map.map_coord_to_grid(goal_plan);
     const double dist = (goal_plan - start_map).norm();
 
     RCLCPP_INFO(
         get_logger(), "Planning (%s): Src(%.2f, %.2f) -> Dst(%.2f, %.2f) %s",
-        reason_label,
+        reason,
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : ""
     );
@@ -624,7 +610,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
         );
         if (!optimize_result) {
             RCLCPP_ERROR(get_logger(), "Path optimization failed: %s", optimize_result.error().c_str());
-            publish_path({}, {}, {}, false);
+            publish_path({}, {}, false);
             return;
         }
 
@@ -635,7 +621,10 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
             static_cast<int>(control_points.size()),
             static_cast<int>(optimized_path.size())
         );
-        publish_path(control_points, init_path, optimized_path, fixed);
+        publish_path(control_points, optimized_path, fixed);
+        if (enable_debug_) {
+            debug_rough_path_pub_->publish(path_to_nav_msg(grid_to_map(init_path)));
+        }
     };
 
     if (dist < skip_distance_) {
@@ -645,7 +634,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
             optimize_and_publish(rough_path);
         } else {
             RCLCPP_INFO(get_logger(), "Goal is within lazy distance (%.2f m)", skip_distance_);
-            publish_path({}, {}, {}, fixed);
+            publish_path({}, {}, fixed);
         }
         return;
     }
@@ -658,7 +647,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     );
     if (!plan_result) {
         RCLCPP_ERROR(get_logger(), "Path planning failed: %s", plan_result.error().c_str());
-        publish_path({}, {}, {}, false);
+        publish_path({}, {}, false);
         return;
     }
 
@@ -676,21 +665,21 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     optimize_and_publish(rough_path);
 }
 
+std::vector<Eigen::Vector2d> PathPlannerNode::grid_to_map(const std::vector<Eigen::Vector2d>& points) const {
+    std::vector<Eigen::Vector2d> map_points;
+    map_points.reserve(points.size());
+    for (const auto& pt: points) {
+        map_points.push_back(merged_cost_map_->grid_coord_to_map(pt));
+    }
+    return map_points;
+}
+
 void PathPlannerNode::publish_path(
     const std::vector<Eigen::Vector2d>& control_points,
-    const std::vector<Eigen::Vector2d>& rough_path,
     const std::vector<Eigen::Vector2d>& optimized_path,
     bool fixed
 ) {
-    // 发布路径转换到地图坐标系
-    const auto to_map_coord = [&](const std::vector<Eigen::Vector2d>& points) {
-        std::vector<Eigen::Vector2d> map_points;
-        for (const auto& pt: points) {
-            map_points.push_back(merged_cost_map_->grid_coord_to_map(pt));
-        }
-        return map_points;
-    };
-    const auto map_cps = to_map_coord(control_points);
+    const auto map_cps = grid_to_map(control_points);
     interfaces::msg::GlobalPath gp_msg;
     gp_msg.x.reserve(map_cps.size());
     gp_msg.y.reserve(map_cps.size());
@@ -700,11 +689,7 @@ void PathPlannerNode::publish_path(
     }
     gp_msg.fixed = fixed;
     control_points_pub_->publish(gp_msg);
-    const auto optimized_path_map = to_map_coord(optimized_path);
-    optimized_path_pub_->publish(path_to_nav_msg(optimized_path_map));
-    if (enable_debug_) {
-        debug_rough_path_pub_->publish(path_to_nav_msg(to_map_coord(rough_path)));
-    }
+    optimized_path_pub_->publish(path_to_nav_msg(grid_to_map(optimized_path)));
 }
 
 nav_msgs::msg::Path PathPlannerNode::path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const {

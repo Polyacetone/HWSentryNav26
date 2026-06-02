@@ -14,10 +14,10 @@
 #include <interfaces/msg/robot_status.hpp>
 #include <interfaces/msg/cost_maps.hpp>
 #include <common_utils/convert.hpp>
-#include <small_gicp/ann/kdtree_omp.hpp>
+#include <small_gicp/ann/kdtree.hpp>
 #include <small_gicp/points/point_cloud.hpp>
-#include <small_gicp/util/downsampling_omp.hpp>
-#include <small_gicp/util/normal_estimation_omp.hpp>
+#include <small_gicp/util/downsampling.hpp>
+#include <small_gicp/util/normal_estimation.hpp>
 #include <map_server/object_tracker.hpp>
 #include <map_server/utils.hpp>
 
@@ -30,7 +30,6 @@ public:
 private:
     double map_resolution_;
     double robot_color_wait_timeout_;
-    int num_threads_;
     int map_size_x_, map_size_y_;
     bool enable_debug_;
     struct {
@@ -88,9 +87,8 @@ private:
     small_gicp::PointCloud extract_dynamic_points_with_global_map(const small_gicp::PointCloud& cloud) const;
     small_gicp::PointCloud extract_dynamic_points_without_global_map(const small_gicp::PointCloud& cloud) const;
     small_gicp::PointCloud remove_statistical_outliers(const small_gicp::PointCloud& cloud) const;
-    small_gicp::PointCloud::Ptr convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const;
+    void load_nav_map(const std::string& filename);
     cv::Mat create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const;
-    cv::Mat dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const;
     void fill_occupancy_grid(const cv::Mat& cost_map, const rclcpp::Time& stamp, nav_msgs::msg::OccupancyGrid& grid) const;
     void pub_direction_map(const cv::Mat& direction_map, const rclcpp::Time& stamp, const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher) const;
     void pub_cost_map(const cv::Mat& cost_map, const rclcpp::Time& stamp, const rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr publisher) const;
@@ -101,8 +99,6 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     // 参数加载
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
-    map_resolution_ = declare_parameter<double>("map_resolution");
-    num_threads_ = static_cast<int>(declare_parameter<int>("num_threads"));
     robot_color_wait_timeout_ = declare_parameter<double>("global_map.robot_color_wait_timeout");
     map_inflation_params_ = {
         .robot_radius_px = static_cast<int>(declare_parameter<int>("map_inflation.robot_radius_px")),
@@ -156,7 +152,6 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .local_grid_render_threshold = declare_parameter<double>("local_map.object_tracker.local_grid_render_threshold"),
         .prediction_steps = (int)declare_parameter<int>("local_map.object_tracker.prediction_steps"),
         .prediction_dt = declare_parameter<double>("local_map.object_tracker.prediction_dt"),
-        .num_threads = num_threads_
     };
     bypass_dynamic_obstacle_ = declare_parameter<bool>("local_map.bypass_dynamic_obstacle");
     enable_prediction_with_cloud_ = declare_parameter<bool>("local_map.with_global_cloud.enable_prediction");
@@ -173,13 +168,15 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
             RCLCPP_FATAL(get_logger(), "Failed to load global point cloud from %s", global_cloud_path.c_str());
             throw std::runtime_error("Failed to load global point cloud");
         }
-        global_point_cloud_ = convert_pcl_to_small_gicp(global_cloud);
+        global_point_cloud_ = std::make_shared<small_gicp::PointCloud>(
+            utils::convert_to<small_gicp::PointCloud>(*global_cloud)
+        );
         RCLCPP_INFO(get_logger(), "Loaded global point cloud with %zu points", global_point_cloud_->size());
         double global_downsample_voxel_size = declare_parameter<double>("global_map.downsample_voxel_size");
         if (global_downsample_voxel_size > 0.0) {
-            global_point_cloud_ = small_gicp::voxelgrid_sampling_omp(*global_point_cloud_, global_downsample_voxel_size, num_threads_);
+            global_point_cloud_ = small_gicp::voxelgrid_sampling(*global_point_cloud_, global_downsample_voxel_size);
         }
-        global_kdtree_ = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(global_point_cloud_, small_gicp::KdTreeBuilderOMP(num_threads_));
+        global_kdtree_ = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(global_point_cloud_, small_gicp::KdTreeBuilder());
         RCLCPP_INFO(get_logger(), "Downsampled global point cloud to %zu points", global_point_cloud_->size());
     } else {
         RCLCPP_WARN(get_logger(), "No global point cloud specified, enabling fallback dynamic obstacle detection from local cloud only");
@@ -226,39 +223,12 @@ void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::Sh
     RCLCPP_INFO(get_logger(), "Loading terrain msgpack from %s", nav_map_path.c_str());
 
     try {
-        auto terrain_data = map_utils::load_terrain_msgpack(nav_map_path);
-        map_resolution_ = terrain_data.resolution;
-        map_size_x_ = terrain_data.width;
-        map_size_y_ = terrain_data.height;
-
-        // 障碍物膨胀 → global cost map
-        {
-            cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
-            for (int y = 0; y < map_size_y_; y++) {
-                for (int x = 0; x < map_size_x_; x++) {
-                    if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == static_cast<uint8_t>(TerrainType::OBSTACLE)) {
-                        obs_mask.at<uint8_t>(y, x) = 255;
-                    }
-                }
-            }
-            global_cost_map_ = map_utils::inflate_cost_map(obs_mask, map_inflation_params_);
-        }
-
-        // 方向场膨胀 → angle + magnitude
-        cv::Mat angle, magnitude, terrain_labels;
-        map_utils::inflate_direction_field(terrain_data, map_inflation_params_, angle, magnitude);
-
-        // raw label 直通
-        terrain_labels = cv::Mat(map_size_y_, map_size_x_, CV_8UC1, terrain_data.terrain.data()).clone();
-
-        // 合并为 3 通道: ch0=angle, ch1=magnitude, ch2=label
-        map_utils::build_terrain_3chan(angle, magnitude, terrain_labels, global_direction_map_);
-
+        load_nav_map(nav_map_path);
         RCLCPP_INFO(
             get_logger(), "Loaded terrain msgpack (%s) size=%dx%d resolution=%.3f, "
             "cost_map=%s, direction_map=%s",
             msg->robot_color ? "RED" : "BLUE",
-            map_size_x_, map_size_y_, terrain_data.resolution,
+            map_size_x_, map_size_y_, map_resolution_,
             global_cost_map_.empty() ? "empty" : "ok",
             global_direction_map_.empty() ? "empty" : "ok"
         );
@@ -278,25 +248,7 @@ void MapServerNode::timer_callback() {
             std::string default_nav_map_filename = declare_parameter<std::string>("global_map.default_nav_map_filename");
             std::string default_nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + default_nav_map_filename;
             try {
-                auto terrain_data = map_utils::load_terrain_msgpack(default_nav_map_path);
-                map_resolution_ = terrain_data.resolution;
-                map_size_x_ = terrain_data.width;
-                map_size_y_ = terrain_data.height;
-                {
-                    cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
-                    for (int y = 0; y < map_size_y_; y++) {
-                        for (int x = 0; x < map_size_x_; x++) {
-                            if (terrain_data.terrain[static_cast<size_t>(y) * static_cast<size_t>(map_size_x_) + static_cast<size_t>(x)] == static_cast<uint8_t>(TerrainType::OBSTACLE)) {
-                                obs_mask.at<uint8_t>(y, x) = 255;
-                            }
-                        }
-                    }
-                    global_cost_map_ = map_utils::inflate_cost_map(obs_mask, map_inflation_params_);
-                }
-                cv::Mat angle, magnitude, terrain_labels;
-                map_utils::inflate_direction_field(terrain_data, map_inflation_params_, angle, magnitude);
-                terrain_labels = cv::Mat(map_size_y_, map_size_x_, CV_8UC1, terrain_data.terrain.data()).clone();
-                map_utils::build_terrain_3chan(angle, magnitude, terrain_labels, global_direction_map_);
+                load_nav_map(default_nav_map_path);
                 RCLCPP_INFO(get_logger(), "Loaded default terrain msgpack size=%dx%d", map_size_x_, map_size_y_);
             } catch (const std::exception& e) {
                 RCLCPP_FATAL(get_logger(), "Failed to load default navmap: %s", e.what());
@@ -338,10 +290,9 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
     }
     RCLCPP_DEBUG(get_logger(), "Accumulated local cloud has %zu points", accumulated.points.size());
     if (local_map_params_.downsample_voxel_size > 0.0) {
-        accumulated = *small_gicp::voxelgrid_sampling_omp(
+        accumulated = *small_gicp::voxelgrid_sampling(
             accumulated,
-            local_map_params_.downsample_voxel_size,
-            num_threads_
+            local_map_params_.downsample_voxel_size
         );
         RCLCPP_DEBUG(get_logger(), "Downsampled local cloud has %zu points", accumulated.points.size());
     }
@@ -379,11 +330,10 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         auto prediction_result = object_tracker_->update(obstacle_mask, dt);
         const auto tracker_update_end = std::chrono::steady_clock::now();
 
-        // 并行膨胀预测栅格
+        // 膨胀预测栅格
         const auto tracker_inflate_begin = std::chrono::steady_clock::now();
-        #pragma omp parallel for num_threads(num_threads_) schedule(static)
-        for (int i = 0; i < static_cast<int>(prediction_result.future_masks.size()); i++) {
-            prediction_result.future_masks[static_cast<size_t>(i)] = map_utils::inflate_cost_map(prediction_result.future_masks[static_cast<size_t>(i)], map_inflation_params_);
+        for (size_t i = 0; i < prediction_result.future_masks.size(); i++) {
+            prediction_result.future_masks[i] = map_utils::inflate_cost_map(prediction_result.future_masks[i], map_inflation_params_);
         }
         const auto tracker_inflate_end = std::chrono::steady_clock::now();
 
@@ -522,7 +472,7 @@ small_gicp::PointCloud MapServerNode::remove_statistical_outliers(const small_gi
     }
 
     auto cloud_ptr = std::make_shared<small_gicp::PointCloud>(cloud);
-    small_gicp::KdTree<small_gicp::PointCloud> tree(cloud_ptr, small_gicp::KdTreeBuilderOMP(num_threads_));
+    small_gicp::KdTree<small_gicp::PointCloud> tree(cloud_ptr, small_gicp::KdTreeBuilder());
 
     std::vector<double> mean_knn_dist(cloud.size(), 0.0);
     std::vector<size_t> knn_indices(knn_query_size);
@@ -603,8 +553,8 @@ small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(
     }
 
     auto cloud_with_normals_ptr = std::make_shared<small_gicp::PointCloud>(cloud);
-    auto local_tree = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(cloud_with_normals_ptr, small_gicp::KdTreeBuilderOMP(num_threads_));
-    small_gicp::estimate_normals_omp(*cloud_with_normals_ptr, *local_tree, normal_knn, num_threads_);
+    auto local_tree = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(cloud_with_normals_ptr, small_gicp::KdTreeBuilder());
+    small_gicp::estimate_normals(*cloud_with_normals_ptr, *local_tree, normal_knn);
 
     const double max_abs_nz = std::clamp(local_map_params_.without_global_cloud.vertical_normal_abs_z_max, 0.0, 1.0);
     dynamic_points.points.reserve(cloud_with_normals_ptr->size());
@@ -657,22 +607,34 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
     return mask;
 }
 
-cv::Mat MapServerNode::dynamic_obstacle_analysis(const small_gicp::PointCloud& dynamic_points) const {
-    return map_utils::inflate_cost_map(create_obstacle_mask(dynamic_points), map_inflation_params_);
-}
+void MapServerNode::load_nav_map(const std::string& filename) {
+    auto terrain_data = map_utils::load_terrain_msgpack(filename);
+    map_resolution_ = terrain_data.resolution;
+    map_size_x_ = terrain_data.width;
+    map_size_y_ = terrain_data.height;
 
-small_gicp::PointCloud::Ptr MapServerNode::convert_pcl_to_small_gicp(const pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud) const {
-    auto small_gicp_cloud = std::make_shared<small_gicp::PointCloud>();
-    small_gicp_cloud->points.resize(pcl_cloud->size());
-    for (size_t i = 0; i < pcl_cloud->size(); i++) {
-        small_gicp_cloud->points[i] = Eigen::Vector4d(
-            pcl_cloud->points[i].x,
-            pcl_cloud->points[i].y,
-            pcl_cloud->points[i].z,
-            1.0
-        );
+    // 障碍物膨胀 → global cost map
+    cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
+    for (int y = 0; y < map_size_y_; y++) {
+        const size_t base = static_cast<size_t>(y) * static_cast<size_t>(map_size_x_);
+        uint8_t* row = obs_mask.ptr<uint8_t>(y);
+        for (int x = 0; x < map_size_x_; x++) {
+            if (terrain_data.terrain[base + static_cast<size_t>(x)] == static_cast<uint8_t>(map_utils::TerrainType::OBSTACLE)) {
+                row[x] = 255;
+            }
+        }
     }
-    return small_gicp_cloud;
+    global_cost_map_ = map_utils::inflate_cost_map(obs_mask, map_inflation_params_);
+
+    // 方向场膨胀 → angle + magnitude
+    cv::Mat angle, magnitude, terrain_labels;
+    map_utils::inflate_direction_field(terrain_data, map_inflation_params_, angle, magnitude);
+
+    // raw label 直通
+    terrain_labels = cv::Mat(map_size_y_, map_size_x_, CV_8UC1, terrain_data.terrain.data()).clone();
+
+    // 合并为 3 通道: ch0=angle, ch1=magnitude, ch2=label
+    map_utils::build_terrain_3chan(angle, magnitude, terrain_labels, global_direction_map_);
 }
 
 void MapServerNode::pub_direction_map(
@@ -702,8 +664,7 @@ void MapServerNode::fill_occupancy_grid(
     grid.info.resolution = static_cast<float>(map_resolution_);
     grid.info.height = static_cast<uint32_t>(map_size_y_);
     grid.info.width = static_cast<uint32_t>(map_size_x_);
-    grid.data.resize(static_cast<size_t>(map_size_x_ * map_size_y_));
-    std::copy(cost_map.data, cost_map.data + map_size_x_ * map_size_y_, grid.data.data());
+    grid.data.assign(cost_map.begin<uint8_t>(), cost_map.end<uint8_t>());
 }
 
 void MapServerNode::pub_cost_map(

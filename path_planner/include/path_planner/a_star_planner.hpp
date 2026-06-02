@@ -32,11 +32,6 @@ private:
         const CostMap& cost_map,
         const Eigen::Vector2i& coord
     ) const;
-    std::vector<Eigen::Vector2i> downsample_path(
-        const std::vector<Eigen::Vector2i>& path,
-        const int start, const int end
-    ) const;
-
     const std::vector<Eigen::Vector2i> directions_ = {
         {1, 0}, {0, 1}, {-1, 0}, {0, -1}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}
     };

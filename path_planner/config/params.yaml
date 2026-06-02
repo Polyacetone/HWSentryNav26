@@ -82,7 +82,7 @@
       main:
         samples_per_meter: 10.0 # 优化采样密度 (/m)
         max_iterations: 60 # 单轮最大迭代次数
-        max_refinement_iterations: 0 # 台阶扫描-优化耦合的最大重建轮数（0=不迭代）
+        max_refinement_iterations: 1 # 台阶扫描-优化耦合的最大重建轮数
         near_max_curvature: 0.4 # 台阶附近曲率上限，对齐MPC侧向加速度约束 (1/m)
         far_max_curvature: 1.2 # 远离台阶时曲率上限 (1/m)
         step_extension_distance: 1.0 # 台阶检测区间前后扩展距离 (m)

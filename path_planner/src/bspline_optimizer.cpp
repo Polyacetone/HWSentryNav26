@@ -14,7 +14,16 @@ using path_planner::DirectionMap;
 using path_planner::Spline;
 
 constexpr double EPS = 1e-9;
-constexpr double FINITE_DIFF_STEP_METERS = 0.02;
+
+ceres::Solver::Options default_solver_options(int max_iterations) {
+    ceres::Solver::Options options;
+    options.minimizer_type = ceres::TRUST_REGION;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    options.linear_solver_type = ceres::DENSE_QR;
+    options.use_nonmonotonic_steps = true;
+    options.max_num_iterations = std::max(max_iterations, 1);
+    return options;
+}
 
 inline double smoothstep01(double t) {
     t = std::clamp(t, 0.0, 1.0);
@@ -37,20 +46,20 @@ Eigen::Vector2d interpolate_direction_from_path_grid(
     return direction_map.interpolate(direction_map.map_coord_to_grid(map_coord));
 }
 
-double direction_norm_from_path_grid(
-    const CostMap& cost_map,
-    const DirectionMap& direction_map,
-    const Eigen::Vector2d& path_grid
-) {
-    return interpolate_direction_from_path_grid(cost_map, direction_map, path_grid).norm();
-}
-
 double step_gate(double direction_norm, double threshold, double transition) {
     if (transition <= 0.0) {
         return direction_norm >= threshold ? 1.0 : 0.0;
     }
 
     return smoothstep01((direction_norm - threshold) / transition);
+}
+
+double step_gate_derivative(double direction_norm, double threshold, double transition) {
+    if (transition <= 0.0 || direction_norm <= threshold || direction_norm >= threshold + transition) {
+        return 0.0;
+    }
+    const double t = (direction_norm - threshold) / transition;
+    return 6.0 * t * (1.0 - t) / transition;
 }
 
 double estimate_polyline_length_grid(const std::vector<Eigen::Vector2d>& path) {
@@ -121,7 +130,7 @@ SampledSpline sample_spline(
             .u = u,
             .arc_length_m = arc_length_m,
             .pos_grid = pos_grid,
-            .step_norm = direction_norm_from_path_grid(cost_map, direction_map, pos_grid),
+            .step_norm = interpolate_direction_from_path_grid(cost_map, direction_map, pos_grid).norm(),
         });
         prev = pos_grid;
     }
@@ -353,48 +362,61 @@ public:
     }
 
     bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override {
-        Eigen::Vector2d pos;
-        Eigen::Vector2d vel;
+        Eigen::Vector2d pos, vel;
         pos_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], pos.data());
         vel_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], vel.data());
 
-        const Eigen::Vector2d dir = interpolate_direction_from_path_grid(cost_map_, direction_map_, pos);
-        const double gate = step_gate(dir.norm(), step_norm_threshold_, step_norm_transition_);
+        // interpolate_direction_from_path_grid 在 map 几何一致时退化为 direction_map.interpolate(pos)
+        const auto sample = direction_map_.interpolate_with_gradient(pos);
+        const Eigen::Vector2d& dir = sample.value;
+        const Eigen::Matrix2d& dir_grad = sample.gradient; // d(dir)/d(pos), 每列为偏导向量
+
+        const double dir_norm = dir.norm();
+        const double gate = step_gate(dir_norm, step_norm_threshold_, step_norm_transition_);
         const double cross = (vel.x() * dir.y() - vel.y() * dir.x()) * cost_map_.resolution;
-        const double alignment_cost = gate * std::abs(cross);
-        residuals[0] = weight_ * alignment_cost;
+        const double abs_cross = std::abs(cross);
+        residuals[0] = weight_ * gate * abs_cross;
 
         if (jacobians) {
             const double sign = cross >= 0.0 ? 1.0 : -1.0;
-            const Eigen::Vector2d d_alignment_d_vel = gate * sign * Eigen::Vector2d(dir.y(), -dir.x()) * cost_map_.resolution;
+            const double res = cost_map_.resolution;
+            const double eps = 1e-12;
 
-            const auto alignment_at = [&](const Eigen::Vector2d& query_pos) {
-                const Eigen::Vector2d query_dir = interpolate_direction_from_path_grid(cost_map_, direction_map_, query_pos);
-                const double query_gate = step_gate(query_dir.norm(), step_norm_threshold_, step_norm_transition_);
-                const double query_cross = (vel.x() * query_dir.y() - vel.y() * query_dir.x()) * cost_map_.resolution;
-                return query_gate * std::abs(query_cross);
-            };
+            // d(gate)/d(norm) — smoothstep 导数（门控过渡区外为 0）
+            const double dgate_dnorm = step_gate_derivative(dir_norm, step_norm_threshold_, step_norm_transition_);
 
-            const double step_fd = FINITE_DIFF_STEP_METERS / cost_map_.resolution;
-            const double xp = alignment_at(pos + Eigen::Vector2d(step_fd, 0.0));
-            const double xm = alignment_at(pos - Eigen::Vector2d(step_fd, 0.0));
-            const double yp = alignment_at(pos + Eigen::Vector2d(0.0, step_fd));
-            const double ym = alignment_at(pos - Eigen::Vector2d(0.0, step_fd));
-            const Eigen::Vector2d d_alignment_d_pos(
-                (xp - xm) / (2.0 * step_fd),
-                (yp - ym) / (2.0 * step_fd)
-            );
+            // d(norm)/d(dir) = dir / norm（零向量时为零）
+            Eigen::Vector2d dnorm_ddir = Eigen::Vector2d::Zero();
+            if (dir_norm > eps) dnorm_ddir = dir / dir_norm;
 
-            for (size_t i = 0; i < vel_evaluator_.ControlPointsSupport; ++i) {
-                if (!jacobians[i]) {
-                    continue;
-                }
+            // d(gate)/d(pos) = dgate_dnorm * (dir/norm)ᵀ * dir_grad
+            const Eigen::Vector2d dgate_dpos = dgate_dnorm * dir_grad.transpose() * dnorm_ddir;
 
-                const double basis_pos = pos_evaluator_.basisVals_[i];
-                const double basis_vel = vel_evaluator_.basisVals_[i];
-                const Eigen::Vector2d jac = basis_pos * d_alignment_d_pos + basis_vel * d_alignment_d_vel;
-                jacobians[i][0] = weight_ * jac.x();
-                jacobians[i][1] = weight_ * jac.y();
+            // d(cross)/d(pos) = res * (vel.x * ∂dir.y/∂pos - vel.y * ∂dir.x/∂pos)
+            // dir_grad.row(0) = ∂dir.x/∂pos, dir_grad.row(1) = ∂dir.y/∂pos
+            const Eigen::Vector2d dcross_dpos = res * (vel.x() * dir_grad.row(1) - vel.y() * dir_grad.row(0));
+
+            // d(cross)/d(vel) = res * (dir.y, -dir.x)
+            const Eigen::Vector2d dcross_dvel = res * Eigen::Vector2d(dir.y(), -dir.x());
+
+            const size_t n = pos_evaluator_.ControlPointsSupport;
+            for (size_t i = 0; i < n; ++i) {
+                if (!jacobians[i]) continue;
+
+                const double bp = pos_evaluator_.basisVals_[i];
+                const double bv = vel_evaluator_.basisVals_[i];
+
+                // ∂pos/∂cp_i = bp * I, ∂vel/∂cp_i = bv * I
+                // ∂residual/∂cp_i = w * [(∂gate/∂pos * |c| + gate*sign*∂cross/∂pos)·∂pos/∂cp_i
+                //                       + gate*sign*∂cross/∂vel·∂vel/∂cp_i]
+                jacobians[i][0] = weight_ * (
+                    bp * (dgate_dpos.x() * abs_cross + gate * sign * dcross_dpos.x())
+                  + bv * (gate * sign * dcross_dvel.x())
+                );
+                jacobians[i][1] = weight_ * (
+                    bp * (dgate_dpos.y() * abs_cross + gate * sign * dcross_dpos.y())
+                  + bv * (gate * sign * dcross_dvel.y())
+                );
             }
         }
 
@@ -438,40 +460,25 @@ public:
         Eigen::Vector2d pos;
         pos_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], pos.data());
 
-        const double gate = step_gate(
-            direction_norm_from_path_grid(cost_map_, direction_map_, pos),
-            step_norm_threshold_,
-            step_norm_transition_
-        );
+        const auto sample = direction_map_.interpolate_with_gradient(pos);
+        const double dir_norm = sample.value.norm();
+        const double gate = step_gate(dir_norm, step_norm_threshold_, step_norm_transition_);
         residuals[0] = weight_ * gate;
 
         if (jacobians) {
-            const auto gate_at = [&](const Eigen::Vector2d& query_pos) {
-                return step_gate(
-                    direction_norm_from_path_grid(cost_map_, direction_map_, query_pos),
-                    step_norm_threshold_,
-                    step_norm_transition_
-                );
-            };
+            const double eps = 1e-12;
+            const double dgate_dnorm = step_gate_derivative(dir_norm, step_norm_threshold_, step_norm_transition_);
+            Eigen::Vector2d dnorm_ddir = Eigen::Vector2d::Zero();
+            if (dir_norm > eps) dnorm_ddir = sample.value / dir_norm;
+            // d(gate)/d(pos) = dgate_dnorm * (dir/norm)ᵀ * d(dir)/d(pos)
+            const Eigen::Vector2d dgate_dpos = dgate_dnorm * sample.gradient.transpose() * dnorm_ddir;
 
-            const double step_fd = FINITE_DIFF_STEP_METERS / cost_map_.resolution;
-            const double xp = gate_at(pos + Eigen::Vector2d(step_fd, 0.0));
-            const double xm = gate_at(pos - Eigen::Vector2d(step_fd, 0.0));
-            const double yp = gate_at(pos + Eigen::Vector2d(0.0, step_fd));
-            const double ym = gate_at(pos - Eigen::Vector2d(0.0, step_fd));
-            const Eigen::Vector2d grad(
-                (xp - xm) / (2.0 * step_fd),
-                (yp - ym) / (2.0 * step_fd)
-            );
-
-            for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; ++i) {
-                if (!jacobians[i]) {
-                    continue;
-                }
-
-                const Eigen::Vector2d jac = weight_ * pos_evaluator_.basisVals_[i] * grad;
-                jacobians[i][0] = jac.x();
-                jacobians[i][1] = jac.y();
+            const size_t n = pos_evaluator_.ControlPointsSupport;
+            for (size_t i = 0; i < n; ++i) {
+                if (!jacobians[i]) continue;
+                const double bp = pos_evaluator_.basisVals_[i];
+                jacobians[i][0] = weight_ * bp * dgate_dpos.x();
+                jacobians[i][1] = weight_ * bp * dgate_dpos.y();
             }
         }
 
@@ -703,12 +710,7 @@ std::expected<void, std::string> solve_stage(
         );
     }
 
-    ceres::Solver::Options options;
-    options.minimizer_type = ceres::TRUST_REGION;
-    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.linear_solver_type = ceres::DENSE_QR;
-    options.use_nonmonotonic_steps = true;
-    options.max_num_iterations = std::max(params.max_iterations, 1);
+    const ceres::Solver::Options options = default_solver_options(params.max_iterations);
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
@@ -798,7 +800,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         .curvature = params_.main.curvature,
     };
 
-    const int main_refinement_iterations = std::max(params_.main.max_refinement_iterations, 1);
+    const int main_refinement_iterations = params_.main.max_refinement_iterations;
     for (int iter = 0; iter < main_refinement_iterations; ++iter) {
         const SampledSpline detection_before = sample_spline(
             spline,

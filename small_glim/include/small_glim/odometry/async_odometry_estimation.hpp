@@ -3,7 +3,7 @@
 #include <thread>
 #include <atomic>
 #include <small_glim/odometry/odometry_estimation.hpp>
-#include <small_glim/common/concurrent_vector.hpp>
+#include <small_glim/common/concurrent_queue.hpp>
 
 namespace small_glim {
 
@@ -68,13 +68,13 @@ private:
     std::thread thread;
 
     // Input queues
-    ConcurrentVector<Eigen::Matrix<double, 7, 1>> input_imu_queue {DataStorePolicy::UPTO(100)};
-    ConcurrentVector<PreprocessedFrame::Ptr> input_frame_queue {DataStorePolicy::UPTO(100)};
+    ConcurrentQueue<Eigen::Matrix<double, 7, 1>> input_imu_queue {DataStorePolicy::UPTO(100)};
+    ConcurrentQueue<PreprocessedFrame::Ptr> input_frame_queue {DataStorePolicy::UPTO(100)};
 
     // Output queues
-    ConcurrentVector<EstimationFrame::ConstPtr> output_estimation_results {DataStorePolicy::UPTO(10)};
-    ConcurrentVector<EstimationFrame::ConstPtr> output_target_ivox_frames {DataStorePolicy::UPTO(10)};
-    ConcurrentVector<EstimationFrame::ConstPtr> output_marginalized_frames {DataStorePolicy::UPTO(10)};
+    ConcurrentQueue<EstimationFrame::ConstPtr> output_estimation_results {DataStorePolicy::UPTO(10)};
+    ConcurrentQueue<EstimationFrame::ConstPtr> output_target_ivox_frames {DataStorePolicy::UPTO(10)};
+    ConcurrentQueue<EstimationFrame::ConstPtr> output_marginalized_frames {DataStorePolicy::UPTO(10)};
 
     std::atomic_size_t internal_frame_queue_size;
     std::shared_ptr<OdometryEstimationCPU> odometry_estimation;

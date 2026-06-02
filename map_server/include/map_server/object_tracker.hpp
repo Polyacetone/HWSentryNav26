@@ -19,7 +19,6 @@ struct ObjectTrackerParams {
     double local_grid_render_threshold; // 局部栅格渲染阈值（0~1）
     int prediction_steps; // 未来预测步数
     double prediction_dt; // 预测时间步长（s）
-    int num_threads;
 };
 
 class ObjectTracker {
@@ -50,10 +49,6 @@ private:
         cv::Mat local_grid; // CV_32FC1 局部栅格 [0,1]
     };
 
-    struct ManageTracksResult {
-        std::vector<bool> detections_with_motion_prediction;
-    };
-
     struct Track {
         int id;
         Eigen::Vector4d x; // 状态 [px, py, vx, vy]
@@ -70,10 +65,9 @@ private:
     void kf_predict(Track& track, double dt) const;
     void kf_update(Track& track, const Eigen::Vector2d& z) const;
     std::vector<int> associate(const std::vector<Detection>& detections) const;
-    ManageTracksResult manage_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment);
+    std::vector<bool> update_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment);
     cv::Mat shift_local_grid(const cv::Mat& local_grid, double dx_px, double dy_px) const;
     void rasterize_local_grid(cv::Mat& mask, const cv::Mat& local_grid, const Eigen::Vector2i& centroid_px, uint8_t value) const;
-    bool is_motion_predictable(const Track& track) const;
     cv::Mat render_motion_prediction(double t_future) const;
     cv::Mat build_static_fallback_mask(
         const cv::Mat& obstacle_mask,

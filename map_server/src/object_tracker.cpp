@@ -13,74 +13,74 @@ hungarian_solve(const std::vector<std::vector<double>>& cost, int n_rows, int n_
 
     const int n = std::max(n_rows, n_cols);
     const double BIG = gate + 1.0;
+    const auto idx = [](int x) noexcept { return static_cast<size_t>(x); };
 
     // 1-indexed cost matrix, padded with BIG
     std::vector<std::vector<double>> a(
-        static_cast<size_t>(n + 1),
-        std::vector<double>(static_cast<size_t>(n + 1), BIG)
+        idx(n + 1),
+        std::vector<double>(idx(n + 1), BIG)
     );
     for (int i = 0; i < n_rows; i++) {
         for (int j = 0; j < n_cols; j++) {
-            a[static_cast<size_t>(i + 1)][static_cast<size_t>(j + 1)] =
-                std::min(cost[static_cast<size_t>(i)][static_cast<size_t>(j)], BIG);
+            a[idx(i + 1)][idx(j + 1)] =
+                std::min(cost[idx(i)][idx(j)], BIG);
         }
     }
 
-    std::vector<double> u(static_cast<size_t>(n + 1), 0.0);
-    std::vector<double> v(static_cast<size_t>(n + 1), 0.0);
-    std::vector<int> p(static_cast<size_t>(n + 1), 0);
-    std::vector<int> way(static_cast<size_t>(n + 1), 0);
+    std::vector<double> u(idx(n + 1), 0.0);
+    std::vector<double> v(idx(n + 1), 0.0);
+    std::vector<int> p(idx(n + 1), 0);
+    std::vector<int> way(idx(n + 1), 0);
 
     for (int i = 1; i <= n; i++) {
         p[0] = i;
         int j0 = 0;
-        std::vector<double> minv(static_cast<size_t>(n + 1), 1e18);
-        std::vector<bool> used(static_cast<size_t>(n + 1), false);
+        std::vector<double> minv(idx(n + 1), 1e18);
+        std::vector<bool> used(idx(n + 1), false);
 
         do {
-            used[static_cast<size_t>(j0)] = true;
-            int i0 = p[static_cast<size_t>(j0)];
+            used[idx(j0)] = true;
+            int i0 = p[idx(j0)];
             int j1 = 0;
             double delta = 1e18;
             for (int j = 1; j <= n; j++) {
-                if (used[static_cast<size_t>(j)]) continue;
-                double cur = a[static_cast<size_t>(i0)][static_cast<size_t>(j)] - u[static_cast<size_t>(i0)]
-                    - v[static_cast<size_t>(j)];
-                if (cur < minv[static_cast<size_t>(j)]) {
-                    minv[static_cast<size_t>(j)] = cur;
-                    way[static_cast<size_t>(j)] = j0;
+                if (used[idx(j)]) continue;
+                double cur = a[idx(i0)][idx(j)] - u[idx(i0)] - v[idx(j)];
+                if (cur < minv[idx(j)]) {
+                    minv[idx(j)] = cur;
+                    way[idx(j)] = j0;
                 }
-                if (minv[static_cast<size_t>(j)] < delta) {
-                    delta = minv[static_cast<size_t>(j)];
+                if (minv[idx(j)] < delta) {
+                    delta = minv[idx(j)];
                     j1 = j;
                 }
             }
             for (int j = 0; j <= n; j++) {
-                if (used[static_cast<size_t>(j)]) {
-                    u[static_cast<size_t>(p[static_cast<size_t>(j)])] += delta;
-                    v[static_cast<size_t>(j)] -= delta;
+                if (used[idx(j)]) {
+                    u[idx(p[idx(j)])] += delta;
+                    v[idx(j)] -= delta;
                 } else {
-                    minv[static_cast<size_t>(j)] -= delta;
+                    minv[idx(j)] -= delta;
                 }
             }
             j0 = j1;
-        } while (p[static_cast<size_t>(j0)] != 0);
+        } while (p[idx(j0)] != 0);
 
         do {
-            int j1 = way[static_cast<size_t>(j0)];
-            p[static_cast<size_t>(j0)] = p[static_cast<size_t>(j1)];
+            int j1 = way[idx(j0)];
+            p[idx(j0)] = p[idx(j1)];
             j0 = j1;
         } while (j0);
     }
 
     // Extract assignment, filter by gate
-    std::vector<int> result(static_cast<size_t>(n_rows), -1);
+    std::vector<int> result(idx(n_rows), -1);
     for (int j = 1; j <= n; j++) {
-        int row = p[static_cast<size_t>(j)] - 1;
+        int row = p[idx(j)] - 1;
         int col = j - 1;
         if (row >= 0 && row < n_rows && col >= 0 && col < n_cols) {
-            if (cost[static_cast<size_t>(row)][static_cast<size_t>(col)] < gate) {
-                result[static_cast<size_t>(row)] = col;
+            if (cost[idx(row)][idx(col)] < gate) {
+                result[idx(row)] = col;
             }
         }
     }
@@ -110,23 +110,22 @@ ObjectTracker::PredictionResult ObjectTracker::update(const cv::Mat& obstacle_ma
     const std::vector<int> assignment = associate(detections);
 
     // Track management: update matched, create new, delete lost
-    const ManageTracksResult manage_result = manage_tracks(detections, assignment);
+    const std::vector<bool> detections_with_motion_prediction = update_tracks(detections, assignment);
 
     PredictionResult result;
     result.motion_track_count = static_cast<size_t>(std::count_if(
         tracks_.begin(),
         tracks_.end(),
-        [this](const Track& track) { return is_motion_predictable(track); }
+        [](const Track& track) { return track.confirmed; }
     ));
     result.static_fallback_mask = build_static_fallback_mask(
         obstacle_mask,
         detections,
-        manage_result.detections_with_motion_prediction
+        detections_with_motion_prediction
     );
     result.future_masks.resize(static_cast<size_t>(params_.prediction_steps));
 
     // 未来预测 = 运动预测 + 当前帧未被覆盖的静态障碍保底。
-    #pragma omp parallel for num_threads(params_.num_threads) schedule(static)
     for (int i = 0; i < params_.prediction_steps; i++) {
         cv::Mat motion_prediction = render_motion_prediction(static_cast<double>(i + 1) * params_.prediction_dt);
         cv::max(motion_prediction, result.static_fallback_mask, result.future_masks[static_cast<size_t>(i)]);
@@ -278,10 +277,9 @@ std::vector<int> ObjectTracker::associate(const std::vector<Detection>& detectio
 
 // ═══════════════ Track Management ═══════════════
 
-ObjectTracker::ManageTracksResult ObjectTracker::manage_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment) {
+std::vector<bool> ObjectTracker::update_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment) {
     std::vector<bool> det_used(detections.size(), false);
-    ManageTracksResult result;
-    result.detections_with_motion_prediction.resize(detections.size(), false);
+    std::vector<bool> detections_with_motion_prediction(detections.size(), false);
 
     // Update matched tracks / age unmatched tracks
     for (size_t i = 0; i < tracks_.size(); i++) {
@@ -319,7 +317,7 @@ ObjectTracker::ManageTracksResult ObjectTracker::manage_tracks(const std::vector
             tracks_[i].confirmed = tracks_[i].confirmed || tracks_[i].hit_streak >= params_.min_hits_to_confirm;
             tracks_[i].lost_frames = 0;
             if (tracks_[i].confirmed) {
-                result.detections_with_motion_prediction[j] = true;
+                detections_with_motion_prediction[j] = true;
             }
         } else {
             tracks_[i].hit_streak = 0;
@@ -359,7 +357,7 @@ ObjectTracker::ManageTracksResult ObjectTracker::manage_tracks(const std::vector
         t.age = 1;
         tracks_.push_back(std::move(t));
     }
-    return result;
+    return detections_with_motion_prediction;
 }
 
 // ═══════════════ Prediction Rendering ═══════════════
@@ -404,15 +402,11 @@ void ObjectTracker::rasterize_local_grid(
     }
 }
 
-bool ObjectTracker::is_motion_predictable(const Track& track) const {
-    return track.confirmed;
-}
-
 cv::Mat ObjectTracker::render_motion_prediction(double t_future) const {
     cv::Mat prediction = cv::Mat::zeros(height_, width_, CV_8UC1);
     const double inv_res = 1.0 / resolution_;
     for (const auto& track: tracks_) {
-        if (!is_motion_predictable(track)) continue;
+        if (!track.confirmed) continue;
         const double pred_x_m = track.x[0] + track.x[2] * t_future;
         const double pred_y_m = track.x[1] + track.x[3] * t_future;
         const Eigen::Vector2i centroid_px(

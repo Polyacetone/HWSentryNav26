@@ -55,12 +55,17 @@ CloudPreprocessor::CloudPreprocessor(const Config::Ptr config) {
 }
 
 PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr raw_points) {
+    // Create mutable local copies so we can safely point into them without const_cast
+    std::vector<double> times(raw_points->times);
+    std::vector<Eigen::Vector4d> points(raw_points->points);
+    std::vector<double> intensities(raw_points->intensities);
+
     auto frame = std::make_shared<gtsam_points::PointCloud>();
     frame->num_points = raw_points->size();
-    frame->times = const_cast<double*>(raw_points->times.data());
-    frame->points = const_cast<Eigen::Vector4d*>(raw_points->points.data());
-    if (raw_points->intensities.size()) {
-        frame->intensities = const_cast<double*>(raw_points->intensities.data());
+    frame->times = times.data();
+    frame->points = points.data();
+    if (!intensities.empty()) {
+        frame->intensities = intensities.data();
     }
 
     // Downsampling
@@ -117,26 +122,14 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
 
     // Cropbox filter
     if (params->enable_cropbox_filter) {
-        if (params->crop_bbox_frame == CloudPreprocessorParams::CropBBoxFrame::LIDAR) {
-            auto is_inside_bbox = [&](const Eigen::Vector3d& p_lidar) {
-                return (p_lidar.array() >= params->crop_bbox_min.array()).all()
-                    && (p_lidar.array() <= params->crop_bbox_max.array()).all();
-            };
-
-            frame = gtsam_points::filter(frame, [&](const auto& pt) {
-                return !is_inside_bbox(pt.template head<3>());
-            });
-        } else if (params->crop_bbox_frame == CloudPreprocessorParams::CropBBoxFrame::IMU) {
-            auto is_inside_bbox = [&](const Eigen::Vector3d& p_lidar) {
-                const auto p_imu = params->T_imu_lidar * p_lidar;
-                return (p_imu.array() >= params->crop_bbox_min.array()).all()
-                    && (p_imu.array() <= params->crop_bbox_max.array()).all();
-            };
-
-            frame = gtsam_points::filter(frame, [&](const auto& pt) {
-                return !is_inside_bbox(pt.template head<3>());
-            });
-        }
+        const bool use_imu_frame = (params->crop_bbox_frame == CloudPreprocessorParams::CropBBoxFrame::IMU);
+        frame = gtsam_points::filter(frame, [&](const auto& pt) {
+            const Eigen::Vector3d p = use_imu_frame
+                ? (params->T_imu_lidar * pt.template head<3>())
+                : pt.template head<3>();
+            return (p.array() < params->crop_bbox_min.array()).any()
+                || (p.array() > params->crop_bbox_max.array()).any();
+        });
     }
 
     // Outlier removal
@@ -161,7 +154,7 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
     }
 
     preprocessed->k_neighbors = static_cast<size_t>(params->k_correspondences);
-    preprocessed->neighbors = find_neighbors(frame->points, frame->size(), static_cast<size_t>(params->k_correspondences));
+    preprocessed->neighbor_indices = find_neighbors(frame->points, frame->size(), static_cast<size_t>(params->k_correspondences));
 
     logger::debug("cloud_preprocess", "Preprocessed: {} -> {} points", raw_points->size(), preprocessed->size());
     return preprocessed;

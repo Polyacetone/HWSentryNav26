@@ -24,11 +24,11 @@
 #include <interfaces/msg/follower_state.hpp>
 
 #include <common_utils/convert.hpp>
-#include <path_follower/nav_map.hpp>
-#include <path_follower/main_controller.hpp>
-#include <path_follower/mpc_solver.hpp>
-#include <path_follower/step_routing_mask.hpp>
-#include <path_follower/utils.hpp>
+#include <path_follower/common/nav_map.hpp>
+#include <path_follower/control/main_controller.hpp>
+#include <path_follower/solver/mpc_solver.hpp>
+#include <path_follower/step/step_routing_mask.hpp>
+#include <path_follower/safety/recovery_helpers.hpp>
 
 namespace path_follower {
 

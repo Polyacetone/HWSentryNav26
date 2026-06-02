@@ -67,7 +67,7 @@ void InitialStateEstimation::insert_frame(const PreprocessedFrame::ConstPtr raw_
     }
 
     auto frame = std::make_shared<gtsam_points::PointCloudCPU>(raw_frame->points);
-    frame->add_covs(covariance_estimation->estimate(raw_frame->points, raw_frame->neighbors));
+    frame->add_covs(covariance_estimation->estimate(raw_frame->points, raw_frame->neighbor_indices));
 
     gtsam::Pose3 estimated_T_odom_lidar = gtsam::Pose3(T_lidar_imu.inverse().matrix());
 
@@ -101,8 +101,6 @@ void InitialStateEstimation::insert_frame(const PreprocessedFrame::ConstPtr raw_
     target_ivox->insert(*transformed);
 
     T_odom_lidar.emplace_back(raw_frame->stamp, Eigen::Isometry3d(estimated_T_odom_lidar.matrix()));
-
-    Eigen::Isometry3d pose(estimated_T_odom_lidar.matrix());
 }
 
 void InitialStateEstimation::insert_imu(double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) {

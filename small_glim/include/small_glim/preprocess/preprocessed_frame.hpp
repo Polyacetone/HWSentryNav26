@@ -29,7 +29,7 @@ public:
     std::vector<Eigen::Vector4d> points; // Points (homogeneous coordinates)
 
     size_t k_neighbors; // Number of neighbors of each point
-    std::vector<size_t> neighbors; // k-nearest neighbors of each point
+    std::vector<size_t> neighbor_indices; // k-nearest neighbor indices of each point
 };
 
 }

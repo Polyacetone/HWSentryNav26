@@ -14,9 +14,6 @@ file(GLOB sources "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-find_package(OpenMP REQUIRED)
-target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
-
 find_package(Eigen3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 

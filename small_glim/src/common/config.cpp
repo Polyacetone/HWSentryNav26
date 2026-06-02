@@ -57,8 +57,11 @@ template<> std::vector<bool> Config::param<std::vector<bool>>(const std::string&
 template<> std::vector<int32_t> Config::param<std::vector<int32_t>>(const std::string& name) {
     if (!config_map_.contains(name)) {
         const std::vector<int64_t> i64vec = node_->declare_parameter<std::vector<int64_t>>(name);
-        std::vector<int32_t> i32vec(i64vec.size());
-        std::for_each(i64vec.begin(), i64vec.end(), [&](const int64_t x) { i32vec.push_back(static_cast<int32_t>(x)); });
+        std::vector<int32_t> i32vec;
+        i32vec.reserve(i64vec.size());
+        for (const auto x : i64vec) {
+            i32vec.push_back(static_cast<int32_t>(x));
+        }
         config_map_[name] = std::make_any<std::vector<int32_t>>(i32vec);
     }
     return std::any_cast<std::vector<int32_t>>(config_map_[name]);

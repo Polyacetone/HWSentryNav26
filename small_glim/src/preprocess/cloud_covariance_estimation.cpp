@@ -42,45 +42,7 @@ void CloudCovarianceEstimation::estimate(
     assert(k_correspondences * points.size() == neighbors.size());
     assert(k_neighbors <= k_correspondences);
 
-    // Precompute pt * pt.transpose()
-    std::vector<Eigen::Matrix4d> pt_cross(points.size());
-    #pragma omp parallel for num_threads(num_threads) schedule(guided, 64)
-    for (size_t i = 0; i < points.size(); i++) {
-        pt_cross[i] = points[i] * points[i].transpose();
-    }
-
-    normals.resize(points.size());
-    covs.resize(points.size());
-
-    const auto calc_cov = [&](size_t i) {
-        Eigen::Vector4d sum_points = Eigen::Vector4d::Zero();
-        Eigen::Matrix4d sum_cross = Eigen::Matrix4d::Zero();
-
-        const size_t begin = k_correspondences * i;
-        for (size_t j = 0; j < k_neighbors; j++) {
-            const size_t index = neighbors[begin + j];
-            sum_points += points[index];
-            sum_cross += pt_cross[index];
-        }
-
-        const Eigen::Vector4d mean = sum_points / k_neighbors;
-        const Eigen::Matrix4d cov = (sum_cross - mean * sum_points.transpose()) / k_neighbors;
-
-        Eigen::Matrix3d eigenvectors;
-        covs[i] = regularize(cov, nullptr, &eigenvectors);
-        covs[i](3, 3) = 0.0;
-
-        normals[i] << eigenvectors.col(0), 0.0;
-        if (points[i].dot(normals[i]) > 0.0) {
-            normals[i] = -normals[i];
-        }
-    };
-
-    // Calculate covariances
-    #pragma omp parallel for num_threads(num_threads) schedule(guided, 8)
-    for (size_t i = 0; i < points.size(); i++) {
-        calc_cov(i);
-    }
+    compute_covariances(points, neighbors, k_neighbors, k_correspondences, &normals, covs);
 }
 
 std::vector<Eigen::Matrix4d> CloudCovarianceEstimation::estimate(
@@ -96,31 +58,8 @@ std::vector<Eigen::Matrix4d> CloudCovarianceEstimation::estimate(
     assert(k_correspondences * points.size() == neighbors.size());
     assert(k_neighbors <= k_correspondences);
 
-    // Precompute pt * pt.transpose()
-    std::vector<Eigen::Matrix4d> pt_cross(points.size());
-    for (size_t i = 0; i < points.size(); i++) {
-        pt_cross[i] = points[i] * points[i].transpose();
-    }
-
-    // Calculate covariances
-    std::vector<Eigen::Matrix4d> covs(points.size());
-    for (size_t i = 0; i < points.size(); i++) {
-        Eigen::Vector4d sum_points = Eigen::Vector4d::Zero();
-        Eigen::Matrix4d sum_cross = Eigen::Matrix4d::Zero();
-
-        const size_t begin = k_correspondences * i;
-        for (size_t j = 0; j < k_neighbors; j++) {
-            const size_t index = neighbors[begin + j];
-            sum_points += points[index];
-            sum_cross += pt_cross[index];
-        }
-
-        const Eigen::Vector4d mean = sum_points / k_neighbors;
-        const Eigen::Matrix4d cov = (sum_cross - mean * sum_points.transpose()) / (k_neighbors - 1);
-        covs[i] = regularize(cov);
-        covs[i](3, 3) = 0.0;
-    }
-
+    std::vector<Eigen::Matrix4d> covs;
+    compute_covariances(points, neighbors, k_neighbors, k_correspondences, nullptr, covs);
     return covs;
 }
 
@@ -139,6 +78,61 @@ std::vector<Eigen::Matrix4d> CloudCovarianceEstimation::estimate(
     }
 
     return estimate(points, neighbors, k);
+}
+
+void CloudCovarianceEstimation::compute_covariances(
+    const std::vector<Eigen::Vector4d>& points,
+    const std::vector<size_t>& neighbors,
+    const size_t k_neighbors,
+    const size_t k_correspondences,
+    std::vector<Eigen::Vector4d>* normals,
+    std::vector<Eigen::Matrix4d>& covs
+) const {
+    // Precompute pt * pt.transpose()
+    std::vector<Eigen::Matrix4d> pt_cross(points.size());
+    #pragma omp parallel for num_threads(num_threads) schedule(guided, 64)
+    for (size_t i = 0; i < points.size(); i++) {
+        pt_cross[i] = points[i] * points[i].transpose();
+    }
+
+    const double inv_k = 1.0 / static_cast<double>(k_neighbors);
+
+    covs.resize(points.size());
+    if (normals) {
+        normals->resize(points.size());
+    }
+
+    const auto calc_cov = [&](size_t i) {
+        Eigen::Vector4d sum_points = Eigen::Vector4d::Zero();
+        Eigen::Matrix4d sum_cross = Eigen::Matrix4d::Zero();
+
+        const size_t begin = k_correspondences * i;
+        for (size_t j = 0; j < k_neighbors; j++) {
+            const size_t index = neighbors[begin + j];
+            sum_points += points[index];
+            sum_cross += pt_cross[index];
+        }
+
+        const Eigen::Vector4d mean = sum_points * inv_k;
+        const Eigen::Matrix4d cov = (sum_cross - mean * sum_points.transpose()) * inv_k;
+
+        if (normals) {
+            Eigen::Matrix3d eigenvectors;
+            covs[i] = regularize(cov, nullptr, &eigenvectors);
+            (*normals)[i] << eigenvectors.col(0), 0.0;
+            if (points[i].dot((*normals)[i]) > 0.0) {
+                (*normals)[i] = -(*normals)[i];
+            }
+        } else {
+            covs[i] = regularize(cov);
+        }
+        covs[i](3, 3) = 0.0;
+    };
+
+    #pragma omp parallel for num_threads(num_threads) schedule(guided, 8)
+    for (size_t i = 0; i < points.size(); i++) {
+        calc_cov(i);
+    }
 }
 
 Eigen::Matrix4d CloudCovarianceEstimation::regularize(

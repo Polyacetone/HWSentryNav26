@@ -56,31 +56,31 @@ bool TimeKeeper::process(const small_glim::RawPoints::Ptr points) {
     replace_points_stamp(points);
 
     if (points->points.size() != points->times.size()) {
-        // Here must not be reached
-        logger::error(
+        logger::fatal(
             "time_keeper",
             "inconsistent # of points and # of timestamps found after time conversion!! |points|={} |times|={}",
             points->points.size(),
             points->times.size()
         );
+        std::exit(EXIT_FAILURE);
     }
     if (points->times.front() < 0.0 || points->times.back() < 0.0) {
-        // Here must not be reached
-        logger::error(
+        logger::fatal(
             "time_keeper",
             "negative per-point timestamp is found after time conversion!! front={:.6f} back={:.6f}",
             points->times.front(),
             points->times.back()
         );
+        std::exit(EXIT_FAILURE);
     }
     if (points->times.front() > 1.0 || points->times.back() > 1.0) {
-        // Here must not be reached
-        logger::error(
+        logger::fatal(
             "time_keeper",
             "large per-point timestamp is found after time conversion!! front={:.6f} back={:.6f}",
             points->times.front(),
             points->times.back()
         );
+        std::exit(EXIT_FAILURE);
     }
     if (points->stamp < 0.0) {
         logger::warn("time_keeper", "frame timestamp is negative!! frame={:.6f}", points->stamp);

@@ -302,7 +302,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
         std::vector<Eigen::Vector4d> normals;
         std::vector<Eigen::Matrix4d> covs;
-        covariance_estimation->estimate(points_imu, raw_frame->neighbors, normals, covs);
+        covariance_estimation->estimate(points_imu, raw_frame->neighbor_indices, normals, covs);
 
         auto frame = std::make_shared<gtsam_points::PointCloudCPU>(points_imu);
         if (raw_frame->intensities.size()) {
@@ -493,7 +493,7 @@ EstimationFrame::ConstPtr OdometryEstimationCPU::insert_frame(
 
     std::vector<Eigen::Vector4d> deskewed_normals;
     std::vector<Eigen::Matrix4d> deskewed_covs;
-    covariance_estimation->estimate(deskewed, raw_frame->neighbors, deskewed_normals, deskewed_covs);
+    covariance_estimation->estimate(deskewed, raw_frame->neighbor_indices, deskewed_normals, deskewed_covs);
 
     auto frame = std::make_shared<gtsam_points::PointCloudCPU>(deskewed);
     if (raw_frame->intensities.size()) {

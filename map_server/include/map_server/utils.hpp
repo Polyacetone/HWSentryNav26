@@ -4,7 +4,8 @@
 #include <vector>
 #include <opencv2/opencv.hpp>
 
-namespace map_server {
+namespace map_server::map_utils {
+
 enum class TerrainType : uint8_t {
     FLAT = 0,
     OBSTACLE = 1,
@@ -14,9 +15,6 @@ enum class TerrainType : uint8_t {
     FLY_SLOPE = 5,
     STEP_HIGH = 6
 };
-} // namespace map_server
-
-namespace map_server::map_utils {
 
 struct TerrainMapData {
     int width;

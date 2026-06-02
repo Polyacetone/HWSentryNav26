@@ -10,11 +10,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-file(GLOB sources "src/*.cpp")
+file(GLOB_RECURSE sources "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
-
-find_package(Boost REQUIRED)
-target_include_directories(${PROJECT_NAME} PRIVATE ${Boost_INCLUDE_DIRS})
 
 find_package(OpenMP REQUIRED)
 target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)

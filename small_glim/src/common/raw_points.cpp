@@ -57,7 +57,7 @@ RawPoints::RawPoints(
         throw std::runtime_error("missing point coordinate fields");
     }
 
-    if ((x_type != PointField::FLOAT32 && x_type != PointField::FLOAT64) || x_type != y_type || x_type != y_type) {
+    if ((x_type != PointField::FLOAT32 && x_type != PointField::FLOAT64) || x_type != y_type || y_type != z_type) {
         throw std::runtime_error("unsupported points type");
     }
 

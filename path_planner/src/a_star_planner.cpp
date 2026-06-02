@@ -11,7 +11,7 @@ struct Node {
     using Ptr = std::shared_ptr<Node>;
     Eigen::Vector2i coord;
     double g, h;
-    Node::Ptr parent;
+    Node* parent;
     double f() const { return g + h; }
 };
 }
@@ -85,7 +85,8 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
         return std::pair{alignment, proximity};
     };
 
-    Node::Ptr meet_fwd = nullptr, meet_bwd = nullptr;
+    Node* meet_fwd = nullptr;
+    Node* meet_bwd = nullptr;
     double best_cost = std::numeric_limits<double>::max();
 
     while (!open_fwd.empty() && !open_bwd.empty()) {
@@ -106,8 +107,8 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 const double total_cost = current->g + closed_bwd[c_key];
                 if (total_cost < best_cost) {
                     best_cost = total_cost;
-                    meet_fwd = current;
-                    meet_bwd = all_bwd[c_key];
+                    meet_fwd = current.get();
+                    meet_bwd = all_bwd[c_key].get();
                 }
             }
             for (const auto& dir : directions_) {
@@ -123,7 +124,7 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
 
                 const double cost = current->g + dir.norm() + obstacle_cost + step_alignment + step_proximity;
                 if (all_fwd[n_key] && all_fwd[n_key]->g <= cost) continue;
-                const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, goal_grid), current);
+                const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, goal_grid), current.get());
                 open_fwd.push(neighbor);
                 all_fwd[n_key] = neighbor;
             }
@@ -139,8 +140,8 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 double total_cost = current->g + closed_fwd[c_key];
                 if (total_cost < best_cost) {
                     best_cost = total_cost;
-                    meet_fwd = all_fwd[c_key];
-                    meet_bwd = current;
+                    meet_fwd = all_fwd[c_key].get();
+                    meet_bwd = current.get();
                 }
             }
             for (const auto& dir : directions_) {
@@ -148,19 +149,17 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 const size_t n_key = get_key(next);
                 if (!is_valid(costmap, next) || closed_bwd[n_key] != 0) continue;
 
-                const Eigen::Vector2d move_dir = dir.cast<double>().normalized();
-                // 反向搜索扩展方向与遍历方向相反:
-                //   扩展: current → next  (dir = next - current)
-                //   最终路径: ... → next → current → ... (进入 current 方向 = current - next)
-                // 因此检查进入 current 而非 next
-                if (direction_map.is_direction_prohibited(current->coord, -move_dir, step_mode_dot_threshold_)) continue;
-
+                // 反向搜索: 路径真实方向为 next → current
+                const Eigen::Vector2d travel_dir = -dir.cast<double>().normalized();
+                if (direction_map.is_direction_prohibited(current->coord, -travel_dir, step_mode_dot_threshold_)) continue;
+                // 注: step_costs 内部使用 |dot|, travel_dir 与 -travel_dir 结果相同;
+                // 此处传 -travel_dir 使语义与正向搜索一致（"进入该栅格的路径方向"）
                 const double obstacle_cost = costmap.at(next) * obstacle_weight_;
-                const auto [step_alignment, step_proximity] = step_costs(next, move_dir);
+                const auto [step_alignment, step_proximity] = step_costs(next, -travel_dir);
 
                 const double cost = current->g + dir.norm() + obstacle_cost + step_alignment + step_proximity;
                 if (all_bwd[n_key] && all_bwd[n_key]->g <= cost) continue;
-                const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, start_grid), current);
+                const Node::Ptr neighbor = std::make_shared<Node>(next, cost, heuristic(next, start_grid), current.get());
                 open_bwd.push(neighbor);
                 all_bwd[n_key] = neighbor;
             }
@@ -168,7 +167,7 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
 
         if (meet_fwd && meet_bwd) break;
     }
-    if (!meet_bwd || !meet_fwd) {
+    if (!meet_fwd || !meet_bwd) {
         return std::unexpected("No feasible path found");
     }
 
