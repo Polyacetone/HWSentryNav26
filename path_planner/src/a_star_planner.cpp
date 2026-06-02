@@ -151,9 +151,9 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
 
                 // 反向搜索: 路径真实方向为 next → current
                 const Eigen::Vector2d travel_dir = -dir.cast<double>().normalized();
-                if (direction_map.is_direction_prohibited(current->coord, -travel_dir, step_mode_dot_threshold_)) continue;
+                if (direction_map.is_direction_prohibited(current->coord, travel_dir, step_mode_dot_threshold_)) continue;
                 // 注: step_costs 内部使用 |dot|, travel_dir 与 -travel_dir 结果相同;
-                // 此处传 -travel_dir 使语义与正向搜索一致（"进入该栅格的路径方向"）
+                // 进入当前栅格的方向为 travel_dir (next→current), 与正向搜索语义一致
                 const double obstacle_cost = costmap.at(next) * obstacle_weight_;
                 const auto [step_alignment, step_proximity] = step_costs(next, -travel_dir);
 
