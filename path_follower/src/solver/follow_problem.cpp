@@ -3,8 +3,6 @@
 #include <path_follower/solver/bilinear_sampling.hpp>
 #include <path_follower/solver/lpv_model.hpp>
 #include <path_follower/solver/mppi_sampler.hpp>
-#include <array>
-#include <cmath>
 
 namespace path_follower {
 

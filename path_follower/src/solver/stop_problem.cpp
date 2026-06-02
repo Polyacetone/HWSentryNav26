@@ -35,7 +35,7 @@ ControlVec StopProblem::u_upper() const {
     return ControlVec(p_.stop.command_bounds.vel_max, p_.stop.command_bounds.omega_max);
 }
 
-constexpr int STOP_RESIDUAL_DIM = 11;
+constexpr int STOP_RESIDUAL_DIM = 9;
 using StopResidualVec = Eigen::Matrix<double, STOP_RESIDUAL_DIM, 1>;
 
 StopResidualVec stop_residual_impl(
@@ -54,7 +54,6 @@ StopResidualVec stop_residual_impl(
 
     StopResidualVec r = StopResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y);
-    const double v_act = x(ix::V), w_act = x(ix::W);
     const double v_cmd = u(0), w_cmd = u(1);
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
@@ -64,22 +63,20 @@ StopResidualVec stop_residual_impl(
     const double dv_lim = motion_lim.acc_max * MPC_DT;
     const double dw_lim = motion_lim.alpha_max * MPC_DT;
     const double a_lat = std::abs(v_cmd * w_cmd);
-    r(0) = command_w.q_v * v_cmd;
-    r(1) = command_w.q_omega * w_cmd;
+    r(0) = command_w.r_v * v_cmd;
+    r(1) = command_w.r_omega * w_cmd;
     r(2) = command_w.r_dv * dv_cmd;
     r(3) = command_w.r_domega * dw_cmd;
     r(4) = motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim);
     r(5) = motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim);
     r(6) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
     r(7) = env_w.obstacle * cs.value / 255.0;
-    r(8) = motion_w.acc_limit * std::abs(v_act);
-    r(9) = motion_w.alpha_limit * std::abs(w_act);
 
     if (p.energy.enable) {
-        const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
+        const double pwr = predict_power(p.power_model, x(ix::V), x(ix::W), 0.0, 0.0);
         const double thr = std::max(p.energy.threshold, 1.0);
         const double excess = (pwr - rfr_pwr_limit) / thr;
-        r(10) = p.energy.weight * positive_part(excess);
+        r(8) = p.energy.weight * positive_part(excess);
     }
 
     return r;

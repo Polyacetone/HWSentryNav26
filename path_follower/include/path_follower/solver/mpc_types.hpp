@@ -192,8 +192,8 @@ struct MPCFollowParams {
 };
 
 struct MPCStopCommandWeights {
-    double q_v;
-    double q_omega;
+    double r_v;
+    double r_omega;
     double r_dv;
     double r_domega;
 };

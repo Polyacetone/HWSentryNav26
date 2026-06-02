@@ -2,7 +2,7 @@
   ros__parameters:
     terrain_profiles:
       profile_blend: # 能力档位切换时的控制指令和约束渐变步长
-        v_step: 0.08 # vel_max / vel_min 步长 (m/s) 
+        v_step: 0.06 # vel_max / vel_min 步长 (m/s) 
         w_step: 0.30 # omega_max / omega_min 步长 (rad/s)
         acc_step: 0.03 # acc_max 步长 (m/s²)
         alpha_step: 0.10 # alpha_max 步长 (rad/s²)

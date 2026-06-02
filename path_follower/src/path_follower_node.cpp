@@ -282,8 +282,8 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
                 .a_lat_max = declare_parameter<double>("mpc.stop.motion_constraints.a_lat_max")
             },
             .command_weights = {
-                .q_v = declare_parameter<double>("mpc.stop.command_weights.q_v"),
-                .q_omega = declare_parameter<double>("mpc.stop.command_weights.q_omega"),
+                .r_v = declare_parameter<double>("mpc.stop.command_weights.r_v"),
+                .r_omega = declare_parameter<double>("mpc.stop.command_weights.r_omega"),
                 .r_dv = declare_parameter<double>("mpc.stop.command_weights.r_dv"),
                 .r_domega = declare_parameter<double>("mpc.stop.command_weights.r_domega")
             },

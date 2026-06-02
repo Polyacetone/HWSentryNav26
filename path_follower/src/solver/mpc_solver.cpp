@@ -33,13 +33,6 @@ void rollout_solver_states(SolverT& solver, const ProblemT& prob, const StateVec
 }
 
 template<typename SolverT>
-void zero_solver_controls(SolverT& solver) {
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        solver.us[k].setZero();
-    }
-}
-
-template<typename SolverT>
 void fill_solver_controls(SolverT& solver, const ControlVec& u) {
     for (size_t k = 0; k < SolverT::N; ++k) {
         solver.us[k] = u;
@@ -67,17 +60,6 @@ void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
             u(i) = std::clamp(u(i), u_lo(i), u_hi(i));
         }
     }
-}
-
-template<typename SolverT, typename ProblemT>
-void initialize_primal_trajectory(SolverT& solver, const ProblemT& prob, const StateVec& x0, bool use_warm_start) {
-    if (use_warm_start) {
-        shift_warm_start(solver);
-    } else {
-        zero_solver_controls(solver);
-    }
-    scale_solver_controls(solver, prob);
-    rollout_solver_states(solver, prob, x0);
 }
 
 template<typename SolverT>
@@ -413,7 +395,13 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
     StopProblem prob(params_, cg, ci, schedule_rho, remaining_energy_, rfr_pwr_limit_);
-    initialize_primal_trajectory(stop_solver_, prob, x0, stop_warm_);
+    if (stop_warm_) {
+        shift_warm_start(stop_solver_);
+    } else {
+        fill_solver_controls(stop_solver_, cmd0);
+    }
+    scale_solver_controls(stop_solver_, prob);
+    rollout_solver_states(stop_solver_, prob, x0);
 
     fddp::SolverOptions opts;
     opts.max_iters = params_.stop.max_iters;
@@ -456,7 +444,13 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
     HoldProblem prob(goal_map, params_, cg, ci, schedule_rho, remaining_energy_, rfr_pwr_limit_);
-    initialize_primal_trajectory(hold_solver_, prob, x0, hold_warm_);
+    if (hold_warm_) {
+        shift_warm_start(hold_solver_);
+    } else {
+        fill_solver_controls(hold_solver_, cmd0);
+    }
+    scale_solver_controls(hold_solver_, prob);
+    rollout_solver_states(hold_solver_, prob, x0);
 
     fddp::SolverOptions opts;
     opts.max_iters = params_.hold.max_iters;
