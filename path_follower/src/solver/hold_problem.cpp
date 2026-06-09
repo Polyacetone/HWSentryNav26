@@ -22,11 +22,15 @@ HoldProblem::HoldProblem(
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec HoldProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    return mpc_dynamics(x, u, model_);
+    StateVec xn = mpc_dynamics(x, u, model_);
+    apply_capacitor_energy_dynamics(xn, x, p_.power_model, rfr_pwr_limit_);
+    return xn;
 }
 
 void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
     mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
+    const StateVec xn = mpc_dynamics(x, u, model_);
+    apply_capacitor_energy_jacobian(dfx, dfu, x, xn, p_.power_model);
 }
 
 ControlVec HoldProblem::u_lower() const {
@@ -37,7 +41,7 @@ ControlVec HoldProblem::u_upper() const {
     return ControlVec(p_.hold.command_bounds.vel_max, p_.hold.command_bounds.omega_max);
 }
 
-constexpr int HOLD_RESIDUAL_DIM = 12;
+constexpr int HOLD_RESIDUAL_DIM = 11;
 using HoldResidualVec = Eigen::Matrix<double, HOLD_RESIDUAL_DIM, 1>;
 
 HoldResidualVec hold_residual_impl(
@@ -47,7 +51,7 @@ HoldResidualVec hold_residual_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    double rfr_pwr_limit
+    double /*rfr_pwr_limit*/
 ) {
     const auto& hold = p.hold;
     const auto& goal_w = hold.goal_weights;
@@ -58,7 +62,6 @@ HoldResidualVec hold_residual_impl(
 
     HoldResidualVec r = HoldResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
-    const double v_act = x(ix::V), w_act = x(ix::W);
     const double v_cmd = u(0), w_cmd = u(1);
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
@@ -87,13 +90,6 @@ HoldResidualVec hold_residual_impl(
     r(8) = motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim);
     r(9) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
     r(10) = env_w.obstacle * cs.value / 255.0;
-
-    if (p.energy.enable) {
-        const double pwr = predict_power(p.power_model, v_act, w_act, 0.0, 0.0);
-        const double thr = std::max(p.energy.threshold, 1.0);
-        const double excess = (pwr - rfr_pwr_limit) / thr;
-        r(11) = p.energy.weight * positive_part(excess);
-    }
 
     return r;
 }
@@ -126,7 +122,7 @@ double HoldProblem::running_cost(int k, const StateVec& x, const ControlVec& u) 
     (void)k;
     return residual_cost(
         hold_residual_impl(x, u, goal_, p_, cost_grid_, cost_info_, rfr_pwr_limit_)
-    );
+    ) + energy_hinge_cost(p_.energy, x(ix::ENERGY));
 }
 
 void HoldProblem::running_cost_derivatives(
@@ -144,6 +140,7 @@ void HoldProblem::running_cost_derivatives(
         return hold_residual_impl(xv, uv, goal_, p_, cost_grid_, cost_info_, rfr_pwr_limit_);
     };
     gauss_newton_running_derivatives<HOLD_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
+    add_energy_hinge_gradient(p_.energy, x, lx);
 }
 
 double HoldProblem::terminal_cost(const StateVec& x) const {

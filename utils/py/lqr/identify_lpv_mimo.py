@@ -1159,10 +1159,9 @@ def generate_plots(series: Sequence[SeriesMPC], results: Sequence[Dict[str, obje
 
         ax = fig.add_subplot(gs[5, 0])
         ax.plot(s.t, s.leg_h, "c", lw=0.9, label="leg_h")
-        ax.plot(s.t, s.leg_psi, "b", lw=0.9, label="leg_psi")
         ax.plot(s.t, s.z, "g", lw=0.9, label="leg_h*cos(leg_psi)")
         ax.set_xlabel("t [s]")
-        ax.set_ylabel("leg / schedule")
+        ax.set_ylabel("leg / schedule [m]")
         ax.grid(True, alpha=0.25)
         ax.legend(fontsize=8)
         fig.savefig(plots_dir / f"{s.name}.png", dpi=150, bbox_inches="tight")

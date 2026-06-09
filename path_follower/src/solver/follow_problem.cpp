@@ -24,7 +24,7 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
 
 // ─── 残差实现 ───
 
-constexpr int FOLLOW_RESIDUAL_DIM = 16;
+constexpr int FOLLOW_RESIDUAL_DIM = 15;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct FollowResidualLinearization {
@@ -42,7 +42,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const GridInfo& ci,
     const DirectionMapGridView& dg,
     const GridInfo& di,
-    double rfr_pwr_limit,
+    double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
     std::optional<ActiveStepMode> active_step_mode
 ) {
@@ -59,7 +59,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.ju.setZero();
 
     const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
-    const double v_act = x(ix::V), w_act = x(ix::W);
+    const double v_act = x(ix::V);
     const double v_cmd = u(0), w_cmd = u(1);
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
@@ -192,17 +192,16 @@ FollowResidualLinearization follow_residual_linearized_impl(
                 const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
                 const double r_lo_expr = std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d;
                 const double r_hi_expr = v_act * v_act - 2.0 * a_guide * d;
-                const double r_lo_arg = std::max(REACHABILITY_EPS, r_lo_expr);
-                const double r_hi_arg = std::max(REACHABILITY_EPS, r_hi_expr);
-                const double r_lo = std::sqrt(r_lo_arg);
-                const double r_hi = std::sqrt(r_hi_arg);
+                const double r_lo = std::sqrt(std::max(0.0, r_lo_expr));
+                const double r_hi = std::sqrt(std::max(0.0, r_hi_expr));
 
                 const double relu_lo = positive_part(speed_min - r_lo);
                 out.r(12) = std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * relu_lo;
                 if (relu_lo > 0.0) {
-                    const bool lo_active = r_lo_expr > REACHABILITY_EPS;
-                    const double drlo_dv = (lo_active && v_act > 0.0) ? (v_act / r_lo) : 0.0;
-                    const double drlo_du = (lo_active) ? (-a_guide * ds_du / r_lo) : 0.0;
+                    const bool lo_active = r_lo_expr > 0.0;
+                    const double inv_r_lo = 1.0 / std::max(r_lo, REACHABILITY_EPS);
+                    const double drlo_dv = (lo_active && v_act > 0.0) ? (v_act * inv_r_lo) : 0.0;
+                    const double drlo_du = lo_active ? (-a_guide * ds_du * inv_r_lo) : 0.0;
                     out.jx(12, ix::V) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_dv;
                     out.jx(12, ix::PATH_U) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_du;
                 }
@@ -210,9 +209,10 @@ FollowResidualLinearization follow_residual_linearized_impl(
                 const double relu_hi = positive_part(r_hi - speed_max);
                 out.r(13) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * relu_hi;
                 if (relu_hi > 0.0) {
-                    const bool hi_active = r_hi_expr > REACHABILITY_EPS;
-                    const double drhi_dv = hi_active ? (v_act / r_hi) : 0.0;
-                    const double drhi_du = (hi_active) ? (a_guide * ds_du / r_hi) : 0.0;
+                    const bool hi_active = r_hi_expr > 0.0;
+                    const double inv_r_hi = 1.0 / std::max(r_hi, REACHABILITY_EPS);
+                    const double drhi_dv = hi_active ? (v_act * inv_r_hi) : 0.0;
+                    const double drhi_du = hi_active ? (a_guide * ds_du * inv_r_hi) : 0.0;
                     out.jx(13, ix::V) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_dv;
                     out.jx(13, ix::PATH_U) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_du;
                 }
@@ -234,18 +234,6 @@ FollowResidualLinearization follow_residual_linearized_impl(
         out.jx(14, ix::PATH_U) = -terminal_w.q_v_final * dv_allowed_ds * ds_dpathu;
     }
 
-    if (p.energy.enable) {
-        const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
-        const double thr = std::max(p.energy.threshold, 1.0);
-        const double excess = (pwr.value - rfr_pwr_limit) / thr;
-        if (excess > 0.0) {
-            out.r(15) = p.energy.weight * excess;
-            const double common = p.energy.weight / thr;
-            out.jx(15, ix::V) = common * pwr.dv;
-            out.jx(15, ix::W) = common * pwr.dw;
-        }
-    }
-
     return out;
 }
 
@@ -258,7 +246,7 @@ double follow_running_cost_value_only_impl(
     const GridInfo& ci,
     const DirectionMapGridView& dg,
     const GridInfo& di,
-    double rfr_pwr_limit,
+    double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
     std::optional<ActiveStepMode> active_step_mode,
     double* cached_cost_value
@@ -274,7 +262,6 @@ double follow_running_cost_value_only_impl(
     const double py = x(ix::Y);
     const double theta = x(ix::THETA);
     const double v_act = x(ix::V);
-    const double w_act = x(ix::W);
     const double v_cmd = u(0);
     const double w_cmd = u(1);
     const double dv_cmd = v_cmd - x(ix::DV);
@@ -340,8 +327,8 @@ double follow_running_cost_value_only_impl(
             if (path_u < entry_u) {
                 const double d = spline.arc_length(path_u, entry_u, 8);
                 const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
-                const double r_lo = std::sqrt(std::max(REACHABILITY_EPS, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
-                const double r_hi = std::sqrt(std::max(REACHABILITY_EPS, v_act * v_act - 2.0 * a_guide * d));
+                const double r_lo = std::sqrt(std::max(0.0, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
+                const double r_hi = std::sqrt(std::max(0.0, v_act * v_act - 2.0 * a_guide * d));
 
                 cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo)) * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo));
                 cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max)) * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max));
@@ -350,10 +337,7 @@ double follow_running_cost_value_only_impl(
     }
 
     if (p.energy.enable) {
-        const auto pwr = predict_power_eval_vw(p.power_model, v_act, w_act);
-        const double thr = std::max(p.energy.threshold, 1.0);
-        const double excess = (pwr.value - rfr_pwr_limit) / thr;
-        cost += 0.5 * (p.energy.weight * positive_part(excess)) * (p.energy.weight * positive_part(excess));
+        cost += energy_hinge_cost(p.energy, x(ix::ENERGY));
     }
 
     const double uc_clamped = std::clamp(uc, 0.0, 1.0);
@@ -486,6 +470,7 @@ template<int Horizon>
 StateVec FollowProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
     StateVec xn = mpc_dynamics(x, u, model_);
     xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, spline_);
+    apply_capacitor_energy_dynamics(xn, x, p_.power_model, rfr_pwr_limit_);
     return xn;
 }
 
@@ -497,6 +482,9 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
     const double dout_din = clamp_derivative_piecewise(adv.u_next_extrap, SplinePath::U_EXTRAP_MIN, SplinePath::U_EXTRAP_MAX);
     dfx.row(ix::PATH_U) = (dout_din * adv.du_next_dx).transpose();
     dfu.row(ix::PATH_U).setZero();
+    StateVec xn = mpc_dynamics(x, u, model_);
+    xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, spline_);
+    apply_capacitor_energy_jacobian(dfx, dfu, x, xn, p_.power_model);
 }
 
 template<int Horizon>
@@ -605,6 +593,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 
     lx = lin.jx.transpose() * lin.r;
     lu = lin.ju.transpose() * lin.r;
+    add_energy_hinge_gradient(p_.energy, x, lx);
 
     {
         const double uc_raw = x(ix::PATH_U);

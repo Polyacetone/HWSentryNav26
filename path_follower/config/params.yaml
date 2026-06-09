@@ -73,7 +73,7 @@
       energy:
         enable: true # 是否启用能量约束（电容电量不足时限制功率）
         threshold: 600.0 # 电容能量惩罚阈值 (J)，低于此值开始惩罚
-        weight: 6.0 # 能量软约束权重
+        weight: 0.0003 # 能量软约束权重
 
       follow:
         max_iters: 40 # FDDP 求解器最大迭代次数

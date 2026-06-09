@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <path_follower/solver/mpc_types.hpp>
 
 namespace path_follower {
@@ -20,6 +21,15 @@ inline double sign_or_zero(double x) {
     return 0.0;
 }
 
+inline double smooth_abs(double x) {
+    constexpr double EPS = 0.05;
+    return std::sqrt(x * x + EPS * EPS);
+}
+
+inline double smooth_abs_derivative(double x) {
+    return x / smooth_abs(x);
+}
+
 inline double clamp_derivative_piecewise(double x, double lo, double hi) {
     return (x > lo && x < hi) ? 1.0 : 0.0;
 }
@@ -30,6 +40,19 @@ inline double wrap_pi(double a) {
 
 inline double brake_speed_limit(double remaining_s, const MPCFollowTerminalWeights& w) {
     return std::sqrt(std::max(0.0, 2.0 * w.a_brake * remaining_s) + w.slow_down_target_vel * w.slow_down_target_vel);
+}
+
+inline double energy_hinge_cost(const EnergyParams& energy, double remaining_energy) {
+    if (!energy.enable) {
+        return 0.0;
+    }
+    return energy.weight * positive_part(energy.threshold - remaining_energy);
+}
+
+inline void add_energy_hinge_gradient(const EnergyParams& energy, const StateVec& x, StateVec& lx) {
+    if (energy.enable && x(ix::ENERGY) < energy.threshold) {
+        lx(ix::ENERGY) -= energy.weight;
+    }
 }
 
 inline double clamp_lpv_rho(double rho, double rho_clip) {
@@ -54,29 +77,82 @@ inline double clamp_prev_cmd(double cmd_prev, double status, double cmd_act_diff
 inline double predict_power(const PowerModelParams& power_model, double v, double w, double a, double alpha) {
     const auto& c = power_model.coeffs;
     return c[0] + c[1] * v * a + c[2] * w * alpha + c[3] * a * a + c[4] * alpha * alpha
-        + c[5] * std::abs(v) + c[6] * std::abs(w) + c[7] * v * v + c[8] * w * w + c[9] * std::abs(a)
-        + c[10] * std::abs(alpha) + c[11] * std::abs(v * w);
+        + c[5] * smooth_abs(v) + c[6] * smooth_abs(w) + c[7] * v * v + c[8] * w * w + c[9] * smooth_abs(a)
+        + c[10] * smooth_abs(alpha) + c[11] * smooth_abs(v * w);
 }
 
 struct PowerEval {
     double value;
     double dv;
     double dw;
+    double da;
+    double dalpha;
 };
 
-inline PowerEval predict_power_eval_vw(const PowerModelParams& power_model, double v, double w) {
+inline PowerEval predict_power_eval(const PowerModelParams& power_model, double v, double w, double a, double alpha) {
     const auto& c = power_model.coeffs;
     const double vw = v * w;
-    const double sign_v = sign_or_zero(v);
-    const double sign_w = sign_or_zero(w);
-    const double sign_vw = sign_or_zero(vw);
+    const double ds_v = smooth_abs_derivative(v);
+    const double ds_w = smooth_abs_derivative(w);
+    const double ds_a = smooth_abs_derivative(a);
+    const double ds_alpha = smooth_abs_derivative(alpha);
+    const double ds_vw = smooth_abs_derivative(vw);
 
     PowerEval out {};
-    out.value = c[0] + c[5] * std::abs(v) + c[6] * std::abs(w) + c[7] * v * v + c[8] * w * w + c[11] * std::abs(vw);
-
-    out.dv = c[5] * sign_v + 2.0 * c[7] * v + c[11] * sign_vw * w;
-    out.dw = c[6] * sign_w + 2.0 * c[8] * w + c[11] * sign_vw * v;
+    out.value = predict_power(power_model, v, w, a, alpha);
+    out.dv = c[1] * a + c[5] * ds_v + 2.0 * c[7] * v + c[11] * ds_vw * w;
+    out.dw = c[2] * alpha + c[6] * ds_w + 2.0 * c[8] * w + c[11] * ds_vw * v;
+    out.da = c[1] * v + 2.0 * c[3] * a + c[9] * ds_a;
+    out.dalpha = c[2] * w + 2.0 * c[4] * alpha + c[10] * ds_alpha;
     return out;
+}
+
+inline void apply_capacitor_energy_dynamics(
+    StateVec& xn,
+    const StateVec& x,
+    const PowerModelParams& power_model,
+    double charge_power
+) {
+    const double a = (xn(ix::V) - x(ix::V)) / MPC_DT;
+    const double alpha = (xn(ix::W) - x(ix::W)) / MPC_DT;
+    const auto pwr = predict_power_eval(power_model, xn(ix::V), xn(ix::W), a, alpha);
+    xn(ix::ENERGY) = x(ix::ENERGY) + (charge_power - pwr.value) * MPC_DT;
+}
+
+inline void apply_capacitor_energy_jacobian(
+    MatXX& fx,
+    MatXU& fu,
+    const StateVec& x,
+    const StateVec& xn,
+    const PowerModelParams& power_model
+) {
+    const double a = (xn(ix::V) - x(ix::V)) / MPC_DT;
+    const double alpha = (xn(ix::W) - x(ix::W)) / MPC_DT;
+    const auto pwr = predict_power_eval(power_model, xn(ix::V), xn(ix::W), a, alpha);
+
+    const Eigen::Matrix<double, 1, MPC_NX> dv_next_dx = fx.row(ix::V);
+    const Eigen::Matrix<double, 1, MPC_NX> dw_next_dx = fx.row(ix::W);
+    const Eigen::Matrix<double, 1, MPC_NU> dv_next_du = fu.row(ix::V);
+    const Eigen::Matrix<double, 1, MPC_NU> dw_next_du = fu.row(ix::W);
+    Eigen::Matrix<double, 1, MPC_NX> da_dx = dv_next_dx;
+    Eigen::Matrix<double, 1, MPC_NX> dalpha_dx = dw_next_dx;
+    da_dx(ix::V) -= 1.0;
+    dalpha_dx(ix::W) -= 1.0;
+    da_dx /= MPC_DT;
+    dalpha_dx /= MPC_DT;
+    const Eigen::Matrix<double, 1, MPC_NU> da_du = dv_next_du / MPC_DT;
+    const Eigen::Matrix<double, 1, MPC_NU> dalpha_du = dw_next_du / MPC_DT;
+
+    const Eigen::Matrix<double, 1, MPC_NX> dp_dx = pwr.dv * dv_next_dx + pwr.dw * dw_next_dx
+        + pwr.da * da_dx + pwr.dalpha * dalpha_dx;
+    const Eigen::Matrix<double, 1, MPC_NU> dp_du = pwr.dv * dv_next_du + pwr.dw * dw_next_du
+        + pwr.da * da_du + pwr.dalpha * dalpha_du;
+
+    fx.row(ix::ENERGY).setZero();
+    fu.row(ix::ENERGY).setZero();
+    fx(ix::ENERGY, ix::ENERGY) = 1.0;
+    fx.row(ix::ENERGY) -= MPC_DT * dp_dx;
+    fu.row(ix::ENERGY) -= MPC_DT * dp_du;
 }
 
 // ─── 中等大小工具函数（定义在 mpc_utils.cpp）───

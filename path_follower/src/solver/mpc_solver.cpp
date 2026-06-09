@@ -204,6 +204,7 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::DV) = cmd_clamped.x();
     x0(ix::DW) = cmd_clamped.y();
     x0(ix::PATH_U) = path_u;
+    x0(ix::ENERGY) = remaining_energy_;
     return x0;
 }
 

@@ -12,7 +12,7 @@ namespace path_follower {
 
 constexpr int MPC_HORIZON = 60;
 constexpr double MPC_DT = 0.05;
-constexpr int MPC_NX = 9;
+constexpr int MPC_NX = 10;
 constexpr int MPC_NU = 2;
 constexpr int PWR_N = 12;
 
@@ -20,7 +20,7 @@ constexpr double SOLVER_TOL_GRAD = 1e-6;
 constexpr double SOLVER_TOL_COST = 1e-8;
 
 namespace ix {
-    enum { X = 0, Y, THETA, XH, V, W, DV, DW, PATH_U };
+    enum { X = 0, Y, THETA, XH, V, W, DV, DW, PATH_U, ENERGY };
 }
 
 struct MPCStartCommandLimits {

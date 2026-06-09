@@ -20,11 +20,15 @@ StopProblem::StopProblem(
     rfr_pwr_limit_(rfr_pwr_limit) {}
 
 StateVec StopProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    return mpc_dynamics(x, u, model_);
+    StateVec xn = mpc_dynamics(x, u, model_);
+    apply_capacitor_energy_dynamics(xn, x, p_.power_model, rfr_pwr_limit_);
+    return xn;
 }
 
 void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
     mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
+    const StateVec xn = mpc_dynamics(x, u, model_);
+    apply_capacitor_energy_jacobian(dfx, dfu, x, xn, p_.power_model);
 }
 
 ControlVec StopProblem::u_lower() const {
@@ -35,7 +39,7 @@ ControlVec StopProblem::u_upper() const {
     return ControlVec(p_.stop.command_bounds.vel_max, p_.stop.command_bounds.omega_max);
 }
 
-constexpr int STOP_RESIDUAL_DIM = 9;
+constexpr int STOP_RESIDUAL_DIM = 8;
 using StopResidualVec = Eigen::Matrix<double, STOP_RESIDUAL_DIM, 1>;
 
 StopResidualVec stop_residual_impl(
@@ -44,7 +48,7 @@ StopResidualVec stop_residual_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    double rfr_pwr_limit
+    double /*rfr_pwr_limit*/
 ) {
     const auto& stop = p.stop;
     const auto& motion_lim = stop.motion_constraints;
@@ -72,13 +76,6 @@ StopResidualVec stop_residual_impl(
     r(6) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
     r(7) = env_w.obstacle * cs.value / 255.0;
 
-    if (p.energy.enable) {
-        const double pwr = predict_power(p.power_model, x(ix::V), x(ix::W), 0.0, 0.0);
-        const double thr = std::max(p.energy.threshold, 1.0);
-        const double excess = (pwr - rfr_pwr_limit) / thr;
-        r(8) = p.energy.weight * positive_part(excess);
-    }
-
     return r;
 }
 
@@ -100,7 +97,8 @@ StopTerminalResidualVec stop_terminal_residual_impl(
 
 double StopProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     (void)k;
-    return residual_cost(stop_residual_impl(x, u, p_, cost_grid_, cost_info_, rfr_pwr_limit_));
+    return residual_cost(stop_residual_impl(x, u, p_, cost_grid_, cost_info_, rfr_pwr_limit_))
+        + energy_hinge_cost(p_.energy, x(ix::ENERGY));
 }
 
 void StopProblem::running_cost_derivatives(
@@ -118,6 +116,7 @@ void StopProblem::running_cost_derivatives(
         return stop_residual_impl(xv, uv, p_, cost_grid_, cost_info_, rfr_pwr_limit_);
     };
     gauss_newton_running_derivatives<STOP_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
+    add_energy_hinge_gradient(p_.energy, x, lx);
 }
 
 double StopProblem::terminal_cost(const StateVec& x) const {

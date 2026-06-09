@@ -494,7 +494,7 @@ PathFollowerNode::PathFollowerNode(const rclcpp::NodeOptions& options) : Node("p
     step_params.length_num_samples = static_cast<int>(declare_parameter<int>("step_mask.length_num_samples"));
     step_routing_mask_ = std::make_unique<StepRoutingMask>(step_params);
 
-    // ─── 功率限制滤波参数 ───
+    // ─── 电容能量滤波参数 ───
     remaining_energy_filter_alpha_ = declare_parameter<double>("misc.remaining_energy_filter_alpha");
 
     // ─── 订阅 / 发布 ───
