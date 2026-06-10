@@ -63,6 +63,11 @@ private:
     void run();
 
 private:
+    double max_scan_duration;
+    double max_imu_wait_time_gap;
+    double max_imu_wait_wall_time;
+    int max_internal_frame_queue;
+
     std::atomic_bool kill_switch;      // Flag to stop the thread immediately (Hard kill switch)
     std::atomic_bool end_of_sequence;  // Flag to stop the thread when the input queues become empty (Soft kill switch)
     std::thread thread;

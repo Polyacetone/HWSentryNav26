@@ -1,7 +1,50 @@
 #include <small_glim/common/raw_points.hpp>
 #include <format>
+#include <stdexcept>
 
 namespace small_glim {
+
+void validate_pointcloud_layout(const sensor_msgs::msg::PointCloud2& points_msg) {
+    const size_t num_points = static_cast<size_t>(points_msg.width) * static_cast<size_t>(points_msg.height);
+    if (points_msg.height != 1) {
+        throw std::runtime_error("organized PointCloud2 is not supported");
+    }
+    if (points_msg.point_step == 0) {
+        throw std::runtime_error("PointCloud2 point_step is zero");
+    }
+    if (points_msg.row_step < points_msg.point_step * points_msg.width) {
+        throw std::runtime_error("PointCloud2 row_step is smaller than point_step * width");
+    }
+    if (points_msg.data.size() < points_msg.point_step * num_points) {
+        throw std::runtime_error("PointCloud2 data is smaller than point_step * points");
+    }
+    for (const auto& field: points_msg.fields) {
+        size_t datatype_size = 0;
+        switch (field.datatype) {
+            case sensor_msgs::msg::PointField::UINT8:
+            case sensor_msgs::msg::PointField::INT8:
+                datatype_size = 1;
+                break;
+            case sensor_msgs::msg::PointField::UINT16:
+            case sensor_msgs::msg::PointField::INT16:
+                datatype_size = 2;
+                break;
+            case sensor_msgs::msg::PointField::UINT32:
+            case sensor_msgs::msg::PointField::INT32:
+            case sensor_msgs::msg::PointField::FLOAT32:
+                datatype_size = 4;
+                break;
+            case sensor_msgs::msg::PointField::FLOAT64:
+                datatype_size = 8;
+                break;
+            default:
+                continue;
+        }
+        if (field.count == 0 || field.offset + datatype_size * field.count > points_msg.point_step) {
+            throw std::runtime_error(std::format("PointCloud2 field {} exceeds point_step", field.name));
+        }
+    }
+}
 
 template <typename T>
 Eigen::Vector4d get_vec4(const void* x, const void* y, const void* z) {
@@ -13,6 +56,7 @@ RawPoints::RawPoints(
     const std::string& intensity_channel,
     const std::string& ring_channel
 ) {
+    validate_pointcloud_layout(points_msg);
     using sensor_msgs::msg::PointField;
     size_t num_points = points_msg.width * points_msg.height;
 

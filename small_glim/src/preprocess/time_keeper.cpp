@@ -1,5 +1,7 @@
 #include <small_glim/preprocess/time_keeper.hpp>
 #include <small_glim/common/logger.hpp>
+#include <algorithm>
+#include <cmath>
 
 namespace small_glim {
 
@@ -14,6 +16,10 @@ PerPointTimeSettings::PerPointTimeSettings(const Config::Ptr config) {
         prefer_frame_time = config->param<bool>("sensors.autoconf_prefer_frame_time");
         point_time_scale = config->param<double>("sensors.perpoint_time_scale");
     }
+    max_scan_duration = config->param<double>("sensors.max_scan_duration");
+    max_frame_time_gap = config->param<double>("sensors.max_frame_time_gap");
+    max_imu_time_gap = config->param<double>("sensors.max_imu_time_gap");
+    max_invalid_time_ratio = config->param<double>("sensors.max_invalid_time_ratio");
 }
 
 TimeKeeper::TimeKeeper(const Config::Ptr config) {
@@ -26,13 +32,16 @@ TimeKeeper::TimeKeeper(const Config::Ptr config) {
 
 bool TimeKeeper::validate_imu_stamp(const double imu_stamp) {
     const double imu_diff = imu_stamp - last_imu_stamp;
-    if (last_imu_stamp < 0.0) {
+    if (!std::isfinite(imu_stamp)) {
+        logger::warn("time_keeper", "non-finite IMU timestamp detected!! stamp={:.6f}", imu_stamp);
+        return false;
+    } else if (last_imu_stamp < 0.0) {
         // First IMU frame
     } else if (imu_stamp < last_imu_stamp) {
         logger::warn("time_keeper", "IMU timestamp rewind detected!!");
         logger::warn("time_keeper", "current={:.6f} last={:.6f} diff={:.6f}", imu_stamp, last_imu_stamp, imu_diff);
         return false;
-    } else if (imu_stamp - last_imu_stamp > 0.1) {
+    } else if (imu_stamp - last_imu_stamp > settings->max_imu_time_gap) {
         logger::warn("time_keeper", "large time gap between consecutive IMU data!!");
         logger::warn("time_keeper", "current={:.6f} last={:.6f} diff={:.6f}", imu_stamp, last_imu_stamp, imu_diff);
     }
@@ -56,31 +65,78 @@ bool TimeKeeper::process(const small_glim::RawPoints::Ptr points) {
     replace_points_stamp(points);
 
     if (points->points.size() != points->times.size()) {
-        logger::fatal(
+        logger::warn(
             "time_keeper",
             "inconsistent # of points and # of timestamps found after time conversion!! |points|={} |times|={}",
             points->points.size(),
             points->times.size()
         );
-        std::exit(EXIT_FAILURE);
+        return false;
     }
-    if (points->times.front() < 0.0 || points->times.back() < 0.0) {
-        logger::fatal(
-            "time_keeper",
-            "negative per-point timestamp is found after time conversion!! front={:.6f} back={:.6f}",
-            points->times.front(),
-            points->times.back()
-        );
-        std::exit(EXIT_FAILURE);
+    if (points->points.empty()) {
+        logger::warn("time_keeper", "drop empty LiDAR frame");
+        return false;
     }
-    if (points->times.front() > 1.0 || points->times.back() > 1.0) {
-        logger::fatal(
+
+    const size_t original_size = points->size();
+    std::vector<Eigen::Vector4d> valid_points;
+    std::vector<double> valid_times;
+    std::vector<double> valid_intensities;
+    std::vector<uint32_t> valid_rings;
+    std::vector<Eigen::Vector4d> valid_colors;
+    valid_points.reserve(original_size);
+    valid_times.reserve(original_size);
+    if (!points->intensities.empty()) valid_intensities.reserve(original_size);
+    if (!points->rings.empty()) valid_rings.reserve(original_size);
+    if (!points->colors.empty()) valid_colors.reserve(original_size);
+
+    for (size_t i = 0; i < original_size; i++) {
+        const auto& point = points->points[i];
+        const double time = points->times[i];
+        const bool valid = std::isfinite(time)
+            && time >= -1e-6
+            && time <= settings->max_scan_duration
+            && point.allFinite();
+        if (!valid) {
+            continue;
+        }
+        valid_points.push_back(point);
+        valid_times.push_back(std::max(0.0, time));
+        if (!points->intensities.empty()) valid_intensities.push_back(points->intensities[i]);
+        if (!points->rings.empty()) valid_rings.push_back(points->rings[i]);
+        if (!points->colors.empty()) valid_colors.push_back(points->colors[i]);
+    }
+
+    const size_t num_dropped = original_size - valid_points.size();
+    if (num_dropped != 0) {
+        const double invalid_ratio = static_cast<double>(num_dropped) / static_cast<double>(original_size);
+        logger::warn(
             "time_keeper",
-            "large per-point timestamp is found after time conversion!! front={:.6f} back={:.6f}",
-            points->times.front(),
-            points->times.back()
+            "drop {} invalid points by timestamp/finite check (ratio={:.4f}, max_scan_duration={:.3f})",
+            num_dropped,
+            invalid_ratio,
+            settings->max_scan_duration
         );
-        std::exit(EXIT_FAILURE);
+        if (invalid_ratio > settings->max_invalid_time_ratio || valid_points.empty()) {
+            logger::warn("time_keeper", "drop LiDAR frame due to too many invalid point timestamps");
+            return false;
+        }
+        points->points = std::move(valid_points);
+        points->times = std::move(valid_times);
+        points->intensities = std::move(valid_intensities);
+        points->rings = std::move(valid_rings);
+        points->colors = std::move(valid_colors);
+    }
+
+    const auto minmax_times = std::minmax_element(points->times.begin(), points->times.end());
+    if (*minmax_times.first < -1e-6 || *minmax_times.second > settings->max_scan_duration) {
+        logger::warn(
+            "time_keeper",
+            "drop LiDAR frame with invalid per-point timestamp range min={:.6f} max={:.6f}",
+            *minmax_times.first,
+            *minmax_times.second
+        );
+        return false;
     }
     if (points->stamp < 0.0) {
         logger::warn("time_keeper", "frame timestamp is negative!! frame={:.6f}", points->stamp);
@@ -104,7 +160,7 @@ bool TimeKeeper::process(const small_glim::RawPoints::Ptr points) {
             time_diff
         );
         return false;
-    } else if (time_diff > 0.5) {
+    } else if (time_diff > settings->max_frame_time_gap) {
         logger::warn("time_keeper", "large time gap between consecutive LiDAR frames!!");
         logger::warn("time_keeper", 
             "current={:.6f} last={:.6f} diff={:.6f}",

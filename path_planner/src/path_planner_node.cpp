@@ -71,6 +71,7 @@ private:
     rclcpp::Publisher<interfaces::msg::GlobalPath>::SharedPtr control_points_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_warmup_path_pub_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
 
@@ -149,6 +150,8 @@ PathPlannerNode::PathPlannerNode(const rclcpp::NodeOptions& options): Node("path
     if (enable_debug_) {
         std::string rough_path_pub_topic = declare_parameter<std::string>("debug.rough_path_pub_topic");
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(rough_path_pub_topic, 1);
+        std::string warmup_path_pub_topic = declare_parameter<std::string>("debug.warmup_path_pub_topic");
+        debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(warmup_path_pub_topic, 1);
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         RCLCPP_DEBUG(get_logger(), "Debug mode enabled");
     }
@@ -600,7 +603,7 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
     std::vector<Eigen::Vector2d> rough_path;
 
     const auto optimize_and_publish = [&](const std::vector<Eigen::Vector2d>& init_path) {
-        std::vector<Eigen::Vector2d> control_points, optimized_path;
+        std::vector<Eigen::Vector2d> control_points, warmup_path, optimized_path;
         const auto optimize_result = path_optimizer_->optimize(
             planning_cost_map,
             *global_direction_map_,
@@ -614,16 +617,18 @@ void PathPlannerNode::plan_and_publish_to_goal(const Eigen::Vector2d& goal_map, 
             return;
         }
 
-        std::tie(control_points, optimized_path) = *optimize_result;
+        std::tie(control_points, warmup_path, optimized_path) = *optimize_result;
         RCLCPP_DEBUG(
-            get_logger(), "Path optimization took %.2f ms, control points: %d, optimized path length: %d",
+            get_logger(), "Path optimization took %.2f ms, control points: %d, warmup path: %d, optimized path length: %d",
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time).count(),
             static_cast<int>(control_points.size()),
+            static_cast<int>(warmup_path.size()),
             static_cast<int>(optimized_path.size())
         );
         publish_path(control_points, optimized_path, fixed);
         if (enable_debug_) {
             debug_rough_path_pub_->publish(path_to_nav_msg(grid_to_map(init_path)));
+            debug_warmup_path_pub_->publish(path_to_nav_msg(grid_to_map(warmup_path)));
         }
     };
 

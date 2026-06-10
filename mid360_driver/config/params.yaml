@@ -7,3 +7,10 @@
     lidar_publish_time_interval: 0.05 # 雷达点云发布间隔，单位秒
     host_ip: 192.168.1.50 # 主机ip地址
     is_topic_name_with_lidar_ip: false # 是否在话题名后面加雷达ip，可以用于区分多个雷达
+    validate_crc: true # 是否校验Livox数据包CRC32
+    max_packet_time_jump: 0.5 # 单个雷达UDP包时间戳允许的最大跳变，单位秒
+    max_packet_time_span: 0.1 # 单个雷达包/发布帧允许的最大点时间跨度，单位秒
+    max_point_range: 300.0 # driver接受的最大点距离，单位米
+    max_imu_acc: 100.0 # driver接受的最大IMU加速度模长
+    max_imu_gyro: 100.0 # driver接受的最大IMU角速度模长
+    min_drop_log_interval: 0.1 # 丢包日志最小打印间隔，单位秒，避免刷屏

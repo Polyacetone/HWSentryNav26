@@ -27,6 +27,9 @@
       # Delayed target map update & impact pause
       ivox_update_delay: 0.5 # Time delay before inserting frames into target map [sec]
       ivox_impact_pause_duration: 0.5 # Duration to pause target map updates after impact [sec]
+      max_imu_wait_time_gap: 0.3 # Drop a LiDAR frame if its scan_end_time is this far ahead of latest IMU
+      max_imu_wait_wall_time: 1.0 # Drop a LiDAR frame if wall-clock wait for IMU exceeds this duration
+      max_internal_frame_queue: 20 # Drop oldest queued frames when odometry input backlog exceeds this limit
 
       # VGICP
       vgicp_resolution: 0.25 # Voxelmap resolution (for VGICP)

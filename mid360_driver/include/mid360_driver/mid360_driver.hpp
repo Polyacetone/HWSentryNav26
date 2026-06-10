@@ -15,6 +15,16 @@
 
 namespace mid360_driver {
 
+    struct DriverRobustnessConfig {
+        bool validate_crc;
+        double max_packet_time_jump;
+        double max_packet_time_span;
+        double max_point_range;
+        double max_imu_acc;
+        double max_imu_gyro;
+        double min_drop_log_interval;
+    };
+
     struct Point {
         double timestamp;
         float x, y, z;
@@ -41,13 +51,17 @@ namespace mid360_driver {
         asio::ip::address host_ip;
         asio::ip::udp::socket receive_pointcloud_socket;
         asio::ip::udp::socket receive_imu_socket;
+        DriverRobustnessConfig robustness_config;
         std::unordered_map<asio::ip::address, double, IpAddressHasher> delta_time_map;
+        std::unordered_map<asio::ip::address, double, IpAddressHasher> last_lidar_timestamp_map;
+        std::unordered_map<asio::ip::address, double, IpAddressHasher> last_imu_timestamp_map;
         std::function<void(const asio::ip::address &lidar_ip, const std::vector<Point> &points)> on_receive_pointcloud;
         std::function<void(const asio::ip::address &lidar_ip, const ImuMsg &imu_msg)> on_receive_imu;
 
     public:
         Mid360Driver(asio::io_context &io_context,
                      const asio::ip::address &host_ip,
+                     DriverRobustnessConfig robustness_config,
                      std::function<void(const asio::ip::address &lidar_ip, const std::vector<Point> &points)> on_receive_pointcloud,
                      std::function<void(const asio::ip::address &lidar_ip, const ImuMsg &imu_msg)> on_receive_imu);
 

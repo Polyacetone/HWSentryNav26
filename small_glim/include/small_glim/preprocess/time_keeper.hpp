@@ -18,6 +18,10 @@ public:
     ///          when per-point timestamps are relative and negative, add an offset to the frame timestamp to make per-point ones positive.
     bool prefer_frame_time;
     double point_time_scale; ///< Scale factor to convert per-point timestamps to seconds.
+    double max_scan_duration;
+    double max_frame_time_gap;
+    double max_imu_time_gap;
+    double max_invalid_time_ratio;
 };
 
 /**

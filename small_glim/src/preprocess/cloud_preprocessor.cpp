@@ -48,6 +48,8 @@ CloudPreprocessorParams::CloudPreprocessorParams(const Config::Ptr config) {
 
     k_correspondences = config->param<int>("preprocess.k_correspondences");
     num_threads = config->param<int>("preprocess.num_threads");
+    max_scan_duration = config->param<double>("sensors.max_scan_duration");
+    min_points_after_filter = config->param<int>("preprocess.min_points_after_filter");
 }
 
 CloudPreprocessor::CloudPreprocessor(const Config::Ptr config) {
@@ -109,6 +111,14 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
     if (indices.size() < 100) {
         logger::warn("cloud_preprocess", "Too few points in the filtered cloud ({} points)", indices.size());
     }
+    if (indices.size() < static_cast<size_t>(params->min_points_after_filter)) {
+        logger::warn(
+            "cloud_preprocess",
+            "drop LiDAR frame with too few valid points after distance filtering ({} points)",
+            indices.size()
+        );
+        return nullptr;
+    }
 
     // Sort by time
     std::sort(indices.begin(), indices.end(), [&](const int lhs, const int rhs) {
@@ -118,6 +128,22 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
 
     if (params->global_shutter) {
         std::fill(frame->times, frame->times + frame->size(), 0.0);
+    }
+
+    if (frame->size() == 0) {
+        logger::warn("cloud_preprocess", "drop empty LiDAR frame after downsampling/filtering");
+        return nullptr;
+    }
+    const double min_time = frame->times[0];
+    const double max_time = frame->times[frame->size() - 1];
+    if (!std::isfinite(min_time) || !std::isfinite(max_time) || min_time < -1e-6 || max_time > params->max_scan_duration) {
+        logger::warn(
+            "cloud_preprocess",
+            "drop LiDAR frame with invalid preprocessed timestamp range min={:.6f} max={:.6f}",
+            min_time,
+            max_time
+        );
+        return nullptr;
     }
 
     // Cropbox filter
@@ -141,11 +167,31 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr r
             params->num_threads
         );
     }
+    if (frame->size() < static_cast<size_t>(params->min_points_after_filter)) {
+        logger::warn(
+            "cloud_preprocess",
+            "drop LiDAR frame with too few valid points after preprocessing ({} points)",
+            frame->size()
+        );
+        return nullptr;
+    }
 
     // Create a preprocessed frame
     auto preprocessed = std::make_shared<PreprocessedFrame>();
     preprocessed->stamp = raw_points->stamp;
     preprocessed->scan_end_time = frame->size() ? raw_points->stamp + frame->times[frame->size() - 1] : raw_points->stamp;
+    if (!std::isfinite(preprocessed->stamp)
+        || !std::isfinite(preprocessed->scan_end_time)
+        || preprocessed->scan_end_time < preprocessed->stamp
+        || preprocessed->scan_end_time - preprocessed->stamp > params->max_scan_duration) {
+        logger::warn(
+            "cloud_preprocess",
+            "drop LiDAR frame with invalid scan_end_time stamp={:.6f} scan_end_time={:.6f}",
+            preprocessed->stamp,
+            preprocessed->scan_end_time
+        );
+        return nullptr;
+    }
 
     preprocessed->times.assign(frame->times, frame->times + frame->size());
     preprocessed->points.assign(frame->points, frame->points + frame->size());

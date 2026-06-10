@@ -726,7 +726,7 @@ namespace path_planner {
 BSplineOptimizer::BSplineOptimizer(BSplineOptimizer::Params params): params_(std::move(params)) {
 }
 
-std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> BSplineOptimizer::optimize(
+std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> BSplineOptimizer::optimize(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const std::vector<Eigen::Vector2d>& init_path,
@@ -779,6 +779,20 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         );
         !warmup_result) {
         return std::unexpected("Warmup optimization failed: " + warmup_result.error());
+    }
+
+    // 采样 warmup 后的路径，用于 debug 对比
+    const SampledSpline warmup_path_sampling = sample_spline(
+        spline,
+        cost_map,
+        direction_map,
+        params_.warmup.samples_per_meter,
+        length_hint_m
+    );
+    std::vector<Eigen::Vector2d> warmup_path;
+    warmup_path.reserve(warmup_path_sampling.samples.size());
+    for (const SplineSample& sample : warmup_path_sampling.samples) {
+        warmup_path.push_back(sample.pos_grid);
     }
 
     length_hint_m = std::max(sample_spline(
@@ -879,6 +893,6 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         sample_points.push_back(sample.pos_grid);
     }
 
-    return std::tuple{spline.getControlPoints(), sample_points};
+    return std::tuple{spline.getControlPoints(), warmup_path, sample_points};
 }
 } // namespace path_planner

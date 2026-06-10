@@ -11,6 +11,7 @@
       imu_acc_saturation_thresh: 235.0 # Accelerometer saturation threshold (m/s^2)
       imu_gyro_saturation_thresh: 34.5 # Gyroscope saturation threshold (rad/s)
       imu_saturation_mult: 1.0 # Covariance multiplier when saturated
+      imu_max_integration_dt: 0.05 # Maximum allowed dt for a single IMU integration step
 
       # LiDAR
       global_shutter_lidar: false # If true, fill per-point timestamps with zero and disable points deskewing
@@ -18,3 +19,7 @@
       intensity_field: "intensity" # Field name used for extracting point intensity from PointCloud2 message
       ring_field: "line" # Field name used for extracting ring number (laser ID) from PointCloud2 message
       autoconf_perpoint_times: true # If true, automatically configure per-point timestamps. If false, use the following settings.
+      max_scan_duration: 0.2 # Maximum allowed LiDAR scan duration inferred from per-point timestamps
+      max_frame_time_gap: 0.5 # Maximum allowed gap between consecutive LiDAR frame timestamps
+      max_imu_time_gap: 0.1 # Maximum allowed gap between consecutive IMU timestamps
+      max_invalid_time_ratio: 0.01 # Drop a LiDAR frame if more than this ratio of points has invalid timestamps

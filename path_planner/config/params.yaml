@@ -14,6 +14,7 @@
     debug:
       enable: true # 是否启用调试模式
       rough_path_pub_topic: "/path_planner/debug/rough_path" # A*原始路径发布话题
+      warmup_path_pub_topic: "/path_planner/debug/warmup_path" # Warmup后路径发布话题
 
     # ── 可行性判定 ──
     traversability:
@@ -65,15 +66,15 @@
         max_iterations: 60 # 最大迭代次数
         max_curvature: 1.2 # 统一曲率上限 (1/m)
         obstacle_weight: 2.0 # 避障权重
-        direction_weight: 10.0 # 台阶方向对齐权重（cross product惩罚偏离方向场）
+        direction_weight: 3.0 # 台阶方向对齐权重（cross product惩罚偏离方向场）
         step_weight: 0.25 # 台阶位置惩罚（鼓励避开台阶区域）
         start_end_weight: 30.0 # 起终点位置保持权重
         smoothness_weight: 0.005 # 二阶平滑正则（抑制局部抖动）
         length_penalty_weight: 0.03 # 路径长度惩罚（最小化|d1|²，促进u均匀分布）
         curvature:
-          base_weight: 0.1 # 低曲率基础惩罚（抑制直道zigzag）
+          base_weight: 0.1 # 低曲率基础惩罚
           base_beta: 4.0 # 基础惩罚平滑斜率
-          limit_weight: 15.0 # 超曲率上限惩罚
+          limit_weight: 10.0 # 超曲率上限惩罚
           limit_beta: 16.0 # 超限惩罚平滑斜率
           min_speed_epsilon: 0.05 # 曲率计算时速度保护的epsilon (m)
           speed_gate_threshold: 0.15 # 低速区下调曲率惩罚的gate (m)
@@ -83,7 +84,7 @@
         samples_per_meter: 10.0 # 优化采样密度 (/m)
         max_iterations: 60 # 单轮最大迭代次数
         max_refinement_iterations: 1 # 台阶扫描-优化耦合的最大重建轮数
-        near_max_curvature: 0.4 # 台阶附近曲率上限，对齐MPC侧向加速度约束 (1/m)
+        near_max_curvature: 0.2 # 台阶附近曲率上限，对齐MPC侧向加速度约束 (1/m)
         far_max_curvature: 1.2 # 远离台阶时曲率上限 (1/m)
         step_extension_distance: 1.0 # 台阶检测区间前后扩展距离 (m)
         step_transition_distance: 1.0 # 近/远曲率限制平滑过渡距离 (m)

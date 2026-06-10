@@ -162,6 +162,10 @@ void SmallGlimNode::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
     const double imu_stamp = msg->header.stamp.sec + msg->header.stamp.nanosec / 1e9 + imu_time_offset;
     const Eigen::Vector3d linear_acc = acc_scale * utils::convert_to<Eigen::Vector3d>(msg->linear_acceleration);
     const Eigen::Vector3d angular_vel = utils::convert_to<Eigen::Vector3d>(msg->angular_velocity);
+    if (!std::isfinite(imu_stamp) || !linear_acc.allFinite() || !angular_vel.allFinite()) {
+        logger::warn("node", "skip invalid IMU data (stamp={:.6f})", imu_stamp);
+        return;
+    }
     if (!time_keeper->validate_imu_stamp(imu_stamp)) {
         logger::warn("node", "skip an invalid IMU data (stamp={})", imu_stamp);
         return;
@@ -170,14 +174,23 @@ void SmallGlimNode::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
 }
 
 size_t SmallGlimNode::lidar_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
-    const auto raw_points = std::make_shared<RawPoints>(*msg, intensity_field, ring_field);
-    if (raw_points == nullptr) {
-        logger::warn("node", "failed to extract points from message");
+    RawPoints::Ptr raw_points;
+    try {
+        raw_points = std::make_shared<RawPoints>(*msg, intensity_field, ring_field);
+    } catch (const std::exception& e) {
+        logger::warn("node", "failed to extract points from message: {}", e.what());
         return 0;
     }
     raw_points->stamp += lidar_time_offset;
-    time_keeper->process(raw_points);
+    if (!time_keeper->process(raw_points)) {
+        logger::warn("node", "skip invalid LiDAR frame (stamp={:.6f})", raw_points->stamp);
+        return 0;
+    }
     auto preprocessed = preprocessor->preprocess(raw_points);
+    if (!preprocessed) {
+        logger::warn("node", "skip LiDAR frame rejected by preprocessing (stamp={:.6f})", raw_points->stamp);
+        return 0;
+    }
     odometry_estimation->insert_frame(preprocessed);
     const size_t workload = odometry_estimation->workload();
     logger::debug("node", "workload={}", workload);

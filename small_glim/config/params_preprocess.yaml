@@ -13,3 +13,4 @@
       enable_cropbox_filter: false # If true, filter points out points within box
       k_correspondences: 10 # Number of neighbors for covariance estimation
       num_threads: 6 # Number of threads for preprocessing
+      min_points_after_filter: 100 # Drop frame if preprocessing leaves fewer points than this

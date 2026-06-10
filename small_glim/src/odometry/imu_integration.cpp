@@ -196,6 +196,7 @@ IMUIntegrationParams::IMUIntegrationParams(const Config::Ptr config) {
     acc_saturation_thresh = config->param<double>("sensors.imu_acc_saturation_thresh");
     gyro_saturation_thresh = config->param<double>("sensors.imu_gyro_saturation_thresh");
     saturation_mult = config->param<double>("sensors.imu_saturation_mult");
+    max_integration_dt = config->param<double>("sensors.imu_max_integration_dt");
 }
 
 IMUIntegration::IMUIntegration(const Config::Ptr config) {
@@ -255,6 +256,10 @@ size_t IMUIntegration::integrate_imu(
         if (dt <= 0.0) {
             continue;
         }
+        if (!std::isfinite(dt) || dt > params->max_integration_dt) {
+            logger::warn("imu_integration", "skip IMU integration with invalid dt={:.6f}", dt);
+            continue;
+        }
 
         const auto& a = imu_frame.block<3, 1>(1, 0);
         const auto& w = imu_frame.block<3, 1>(4, 0);
@@ -274,7 +279,7 @@ size_t IMUIntegration::integrate_imu(
     }
 
     const double dt = end_time - last_stamp;
-    if (dt > 0.0) {
+    if (dt > 0.0 && dt <= params->max_integration_dt) {
         Eigen::Matrix<double, 7, 1> last_imu_frame = imu_itr == imu_queue.end() ? *(imu_itr - 1) : *imu_itr;
         const auto& a = last_imu_frame.block<3, 1>(1, 0);
         const auto& w = last_imu_frame.block<3, 1>(4, 0);
@@ -336,6 +341,10 @@ size_t IMUIntegration::integrate_imu(
         if (dt <= 0.0) {
             continue;
         }
+        if (!std::isfinite(dt) || dt > params->max_integration_dt) {
+            logger::warn("imu_integration", "skip IMU pose prediction with invalid dt={:.6f}", dt);
+            continue;
+        }
 
         const auto& a = imu_frame.block<3, 1>(1, 0);
         const auto& w = imu_frame.block<3, 1>(4, 0);
@@ -357,7 +366,7 @@ size_t IMUIntegration::integrate_imu(
     }
 
     const double dt = end_time - last_stamp;
-    if (dt > 0.0) {
+    if (dt > 0.0 && dt <= params->max_integration_dt) {
         Eigen::Matrix<double, 7, 1> last_imu_frame = imu_itr == imu_queue.end() ? *(imu_itr - 1) : *imu_itr;
         const auto& a = last_imu_frame.block<3, 1>(1, 0);
         const auto& w = last_imu_frame.block<3, 1>(4, 0);
@@ -409,6 +418,10 @@ size_t IMUIntegration::find_imu_data(
         if (dt <= 0.0) {
             continue;
         }
+        if (!std::isfinite(dt) || dt > params->max_integration_dt) {
+            logger::warn("imu_integration", "skip IMU lookup with invalid dt={:.6f}", dt);
+            continue;
+        }
 
         delta_times.emplace_back(dt);
         imu_data.emplace_back(imu_frame);
@@ -416,7 +429,7 @@ size_t IMUIntegration::find_imu_data(
     }
 
     const double dt = end_time - last_stamp;
-    if (dt > 0.0) {
+    if (dt > 0.0 && dt <= params->max_integration_dt) {
         Eigen::Matrix<double, 7, 1> last_imu_frame = imu_itr == imu_queue.end() ? *(imu_itr - 1) : *imu_itr;
         delta_times.emplace_back(dt);
         imu_data.emplace_back(last_imu_frame);

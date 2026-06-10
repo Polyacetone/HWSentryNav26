@@ -5,8 +5,14 @@
  */
 
 #include "mid360_driver/mid360_driver_node.hpp"
+#include <algorithm>
+#include <cmath>
 
 namespace mid360_driver {
+
+    void LidarPublisher::configure_robustness(const DriverRobustnessConfig &config) {
+        robustness_config = config;
+    }
 
     void LidarPublisher::ensure_initialized(rclcpp::Node &node, const std::string &lidar_topic, const std::string &imu_topic) {
         if (!is_initialized) {
@@ -63,17 +69,53 @@ namespace mid360_driver {
         if (points_to_publish.empty()) {
             return;
         }
-        double timestamp = std::numeric_limits<double>::max();
+        double min_timestamp = std::numeric_limits<double>::max();
+        double max_timestamp = std::numeric_limits<double>::lowest();
         for (const auto &point: points_to_publish) {
-            if (point.timestamp < timestamp) {
-                timestamp = point.timestamp;
+            if (std::isfinite(point.timestamp)) {
+                min_timestamp = std::min(min_timestamp, point.timestamp);
+                max_timestamp = std::max(max_timestamp, point.timestamp);
             }
         }
+        if (!std::isfinite(min_timestamp) || !std::isfinite(max_timestamp)) {
+            return;
+        }
+        const double frame_time_span = max_timestamp - min_timestamp;
+        if (frame_time_span < 0.0 || frame_time_span > robustness_config.max_packet_time_span * 2.0) {
+            RCLCPP_WARN(
+                rclcpp::get_logger("mid360_driver"),
+                "drop point cloud with invalid timestamp span: min=%.6f max=%.6f span=%.6f points=%zu",
+                min_timestamp,
+                max_timestamp,
+                frame_time_span,
+                points_to_publish.size()
+            );
+            return;
+        }
+
+        std::vector<const Point *> valid_points;
+        valid_points.reserve(points_to_publish.size());
+        const double max_range2 = robustness_config.max_point_range * robustness_config.max_point_range;
+        for (const auto &point: points_to_publish) {
+            const double range2 = point.x * point.x + point.y * point.y + point.z * point.z;
+            if (std::isfinite(point.timestamp)
+                && std::isfinite(point.x)
+                && std::isfinite(point.y)
+                && std::isfinite(point.z)
+                && std::isfinite(point.intensity)
+                && range2 <= max_range2) {
+                valid_points.push_back(&point);
+            }
+        }
+        if (valid_points.empty()) {
+            return;
+        }
+
         sensor_msgs::msg::PointCloud2 msg;
-        msg.header.stamp.sec = static_cast<int32_t>(std::floor(timestamp));
-        msg.header.stamp.nanosec = static_cast<uint32_t>((timestamp - msg.header.stamp.sec) * 1e9);
+        msg.header.stamp.sec = static_cast<int32_t>(std::floor(min_timestamp));
+        msg.header.stamp.nanosec = static_cast<uint32_t>((min_timestamp - msg.header.stamp.sec) * 1e9);
         msg.header.frame_id = frame_id;
-        msg.width = static_cast<uint32_t>(points_to_publish.size());
+        msg.width = static_cast<uint32_t>(valid_points.size());
         msg.height = 1;
         msg.fields.reserve(4);
         sensor_msgs::msg::PointField field;
@@ -107,16 +149,16 @@ namespace mid360_driver {
         msg.row_step = msg.width * msg.point_step;
         msg.data.resize(msg.row_step * msg.height);
         auto* pointer = reinterpret_cast<float*>(msg.data.data());
-        for (const auto &point: points_to_publish) {
-            *pointer = point.x;
+        for (const auto *point: valid_points) {
+            *pointer = point->x;
             ++pointer;
-            *pointer = point.y;
+            *pointer = point->y;
             ++pointer;
-            *pointer = point.z;
+            *pointer = point->z;
             ++pointer;
-            *pointer = point.intensity;
+            *pointer = point->intensity;
             ++pointer;
-            *reinterpret_cast<double *>(pointer) = point.timestamp;
+            *reinterpret_cast<double *>(pointer) = point->timestamp;
             pointer += 2;
         }
         msg.is_dense = true;
@@ -147,25 +189,37 @@ namespace mid360_driver {
         std::string host_ip = declare_parameter<std::string>("host_ip");
         double lidar_publish_time_interval = declare_parameter<double>("lidar_publish_time_interval");
         bool is_topic_name_with_lidar_ip = declare_parameter<bool>("is_topic_name_with_lidar_ip");
+        DriverRobustnessConfig robustness_config;
+        robustness_config.validate_crc = declare_parameter<bool>("validate_crc");
+        robustness_config.max_packet_time_jump = declare_parameter<double>("max_packet_time_jump");
+        robustness_config.max_packet_time_span = declare_parameter<double>("max_packet_time_span");
+        robustness_config.max_point_range = declare_parameter<double>("max_point_range");
+        robustness_config.max_imu_acc = declare_parameter<double>("max_imu_acc");
+        robustness_config.max_imu_gyro = declare_parameter<double>("max_imu_gyro");
+        robustness_config.min_drop_log_interval = declare_parameter<double>("min_drop_log_interval");
         if (!is_topic_name_with_lidar_ip) {
+            lidar_publisher.configure_robustness(robustness_config);
             lidar_publisher.ensure_initialized(*this, lidar_topic, imu_topic);
         }
         mid360_driver = std::make_unique<mid360_driver::Mid360Driver>(
                 io_context,
                 asio::ip::make_address(host_ip),
-                [this, is_topic_name_with_lidar_ip](const asio::ip::address &lidar_ip, const std::vector<Point> &points) {
+                robustness_config,
+                [this, is_topic_name_with_lidar_ip, robustness_config](const asio::ip::address &lidar_ip, const std::vector<Point> &points) {
                     std::lock_guard lock(multi_lidar_mutex_);
                     if (is_topic_name_with_lidar_ip) {
                         auto iter = multi_lidar_publishers.try_emplace(lidar_ip).first;
+                        iter->second.configure_robustness(robustness_config);
                         iter->second.on_receive_pointcloud(points);
                     } else {
                         lidar_publisher.on_receive_pointcloud(points);
                     }
                 },
-                [this, is_topic_name_with_lidar_ip](const asio::ip::address &lidar_ip, const ImuMsg &imu_msg) {
+                [this, is_topic_name_with_lidar_ip, robustness_config](const asio::ip::address &lidar_ip, const ImuMsg &imu_msg) {
                     std::lock_guard lock(multi_lidar_mutex_);
                     if (is_topic_name_with_lidar_ip) {
                         auto iter = multi_lidar_publishers.try_emplace(lidar_ip).first;
+                        iter->second.configure_robustness(robustness_config);
                         iter->second.on_receive_imu(imu_msg);
                     } else {
                         lidar_publisher.on_receive_imu(imu_msg);

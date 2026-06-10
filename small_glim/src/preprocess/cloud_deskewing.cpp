@@ -1,4 +1,5 @@
 #include <small_glim/preprocess/cloud_deskewing.hpp>
+#include <small_glim/common/logger.hpp>
 #include <gtsam/geometry/Pose3.h>
 
 namespace small_glim {
@@ -12,6 +13,15 @@ std::vector<Eigen::Vector4d> CloudDeskewing::deskew(
 ) {
     if (times.empty()) {
         return std::vector<Eigen::Vector4d>();
+    }
+    if (!std::isfinite(times.front()) || !std::isfinite(times.back()) || times.back() < times.front() || times.back() - times.front() > 1.0) {
+        logger::warn(
+            "cloud_deskewing",
+            "skip deskewing due to invalid timestamp range front={:.6f} back={:.6f}",
+            times.front(),
+            times.back()
+        );
+        return points;
     }
 
     const Eigen::Isometry3d T_lidar_imu = T_imu_lidar.inverse();
@@ -58,6 +68,15 @@ std::vector<Eigen::Vector4d> CloudDeskewing::deskew(
 ) {
     if (times.empty()) {
         return std::vector<Eigen::Vector4d>();
+    }
+    if (!std::isfinite(times.front()) || !std::isfinite(times.back()) || times.back() < times.front() || times.back() - times.front() > 1.0) {
+        logger::warn(
+            "cloud_deskewing",
+            "skip deskewing due to invalid timestamp range front={:.6f} back={:.6f}",
+            times.front(),
+            times.back()
+        );
+        return points;
     }
 
     if (imu_poses.empty()) {

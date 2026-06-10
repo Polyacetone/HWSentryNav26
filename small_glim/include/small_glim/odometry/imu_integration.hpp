@@ -22,6 +22,7 @@ struct IMUIntegrationParams {
     double acc_saturation_thresh; // Accelerometer saturation threshold
     double gyro_saturation_thresh; // Gyroscope saturation threshold
     double saturation_mult; // Covariance multiplier when saturated
+    double max_integration_dt; // Maximum IMU integration dt
 };
 
 /**

@@ -61,8 +61,8 @@ public:
 
     explicit BSplineOptimizer(Params params);
 
-    // 返回优化后的控制点和采样点
-    std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> optimize(
+    // 返回优化后的控制点、warmup路径、最终采样点
+    std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> optimize(
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const std::vector<Eigen::Vector2d>& init_path,

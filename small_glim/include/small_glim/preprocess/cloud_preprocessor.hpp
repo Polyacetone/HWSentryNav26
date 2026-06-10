@@ -34,6 +34,8 @@ public:
     Eigen::Isometry3d T_imu_lidar; ///< LiDAR-IMU transformation when cropbox is defined in IMU frame
     int k_correspondences; ///< Number of neighboring points
     int num_threads; ///< Number of threads
+    double max_scan_duration; ///< Maximum allowed scan duration after preprocessing
+    int min_points_after_filter; ///< Minimum number of points required after preprocessing
 };
 
 /**

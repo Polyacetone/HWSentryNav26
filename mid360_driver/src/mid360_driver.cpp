@@ -5,9 +5,14 @@
  */
 
 #include "mid360_driver/mid360_driver.hpp"
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cmath>
+#include <mutex>
 #include <numbers>
+#include <rclcpp/rclcpp.hpp>
+#include <string>
 
 namespace mid360_driver {
 
@@ -73,6 +78,85 @@ namespace mid360_driver {
         uint8_t tag;
     } __attribute__((packed));
 
+    constexpr std::uint32_t make_crc_entry(std::uint32_t value) noexcept {
+        for (int i = 0; i < 8; i++) {
+            value = (value & 1U) ? (0xEDB88320U ^ (value >> 1U)) : (value >> 1U);
+        }
+        return value;
+    }
+
+    constexpr std::array<std::uint32_t, 256> make_crc_table() noexcept {
+        std::array<std::uint32_t, 256> table {};
+        for (std::size_t i = 0; i < table.size(); i++) {
+            table[i] = make_crc_entry(static_cast<std::uint32_t>(i));
+        }
+        return table;
+    }
+
+    std::uint32_t crc32(const std::uint8_t *data, const std::size_t size) noexcept {
+        static constexpr auto table = make_crc_table();
+        std::uint32_t crc = 0xFFFFFFFFU;
+        for (std::size_t i = 0; i < size; i++) {
+            crc = table[(crc ^ data[i]) & 0xFFU] ^ (crc >> 8U);
+        }
+        return crc ^ 0xFFFFFFFFU;
+    }
+
+    void log_packet_drop(const char *reason, const double min_interval) {
+        static std::mutex mutex;
+        static auto last_log_time = std::chrono::steady_clock::time_point{};
+        static std::size_t total_drops = 0;
+        std::lock_guard lock(mutex);
+        const auto now = std::chrono::steady_clock::now();
+        ++total_drops;
+        if (last_log_time == std::chrono::steady_clock::time_point{} ||
+            now - last_log_time >= std::chrono::duration<double>(min_interval)) {
+            last_log_time = now;
+            RCLCPP_WARN(
+                rclcpp::get_logger("mid360_driver"),
+                "dropped packet: %s (total drops: %zu)",
+                reason,
+                total_drops
+            );
+        }
+    }
+
+    std::size_t point_size(const DataType data_type) noexcept {
+        switch (data_type) {
+            case LIVOX_LIDAR_CARTESIAN_COORDINATE_HIGH_DATA:
+                return sizeof(CartesianHighPoint);
+            case LIVOX_LIDAR_CARTESIAN_COORDINATE_LOW_DATA:
+                return sizeof(CartesianLowPoint);
+            case LIVOX_LIDAR_SPHERICAL_COORDINATE_DATA:
+                return sizeof(SphericalPoint);
+            default:
+                return 0;
+        }
+    }
+
+    bool is_timestamp_plausible(
+        std::unordered_map<asio::ip::address, double, IpAddressHasher> &last_timestamp_map,
+        const asio::ip::address &address,
+        const double timestamp,
+        const double max_time_jump
+    ) {
+        if (!std::isfinite(timestamp) || timestamp <= 0.0) {
+            return false;
+        }
+
+        auto [iter, inserted] = last_timestamp_map.try_emplace(address, timestamp);
+        if (inserted) {
+            return true;
+        }
+
+        const double diff = timestamp - iter->second;
+        if (diff < -1e-3 || diff > max_time_jump) {
+            return false;
+        }
+        iter->second = timestamp;
+        return true;
+    }
+
     bool is_point_valid(uint8_t tag) noexcept {
         constexpr uint8_t kDualReturnMask = 0b00110000;
         constexpr uint8_t kTagTypeMask = 0b00001100;
@@ -105,11 +189,13 @@ namespace mid360_driver {
 
     Mid360Driver::Mid360Driver(asio::io_context &io_context,
                                const asio::ip::address &host_ip,
+                               DriverRobustnessConfig robustness_config,
                                std::function<void(const asio::ip::address &lidar_ip, const std::vector<Point> &points)> on_receive_pointcloud,
                                std::function<void(const asio::ip::address &lidar_ip, const ImuMsg &imu_msg)> on_receive_imu)
         : host_ip(host_ip),
           receive_pointcloud_socket(io_context),
           receive_imu_socket(io_context),
+          robustness_config(robustness_config),
           on_receive_pointcloud(std::move(on_receive_pointcloud)),
           on_receive_imu(std::move(on_receive_imu)) {
         receive_pointcloud_socket.open(asio::ip::udp::v4());
@@ -137,17 +223,47 @@ namespace mid360_driver {
         std::vector<Point> points;
         while (is_running.load(std::memory_order_relaxed)) {
             asio::error_code error_code;
-            co_await receive_pointcloud_socket.async_receive_from(
+            const std::size_t received_size = co_await receive_pointcloud_socket.async_receive_from(
                     asio::buffer(buffer, MAX_PACKET_SIZE),
                     sender_endpoint,
                     asio::redirect_error(asio::use_awaitable, error_code));
             if (error_code || sender_endpoint.port() != 56300) [[unlikely]] {
                 continue;
             }
+            if (received_size < sizeof(DataHeader)) [[unlikely]] {
+                log_packet_drop("lidar: packet smaller than header", robustness_config.min_drop_log_interval);
+                continue;
+            }
+
             const auto &header = *reinterpret_cast<const DataHeader *>(buffer);
-            // CRC32 is intentionally not validated here: the protocol's CRC covers
-            // only timestamp + point data, and the cost of per-packet CRC-32 on a
-            // local GigE link exceeds the practical benefit.
+            const std::size_t raw_point_size = point_size(header.data_type);
+            if (raw_point_size == 0 || header.dot_num == 0) [[unlikely]] {
+                log_packet_drop("lidar: invalid data_type or dot_num", robustness_config.min_drop_log_interval);
+                continue;
+            }
+            const std::size_t payload_size = static_cast<std::size_t>(header.dot_num) * raw_point_size;
+            const std::size_t expected_size = sizeof(DataHeader) + payload_size;
+            if (expected_size > received_size) [[unlikely]] {
+                log_packet_drop("lidar: packet smaller than declared payload", robustness_config.min_drop_log_interval);
+                continue;
+            }
+            if (header.time_type != TIMESTAMP_TYPE_NO_SYNC && header.time_type != TIMESTAMP_TYPE_GPTP_OR_PTP && header.time_type != TIMESTAMP_TYPE_GPS) [[unlikely]] {
+                log_packet_drop("lidar: invalid timestamp type", robustness_config.min_drop_log_interval);
+                continue;
+            }
+            const double packet_time_span = static_cast<double>(header.time_interval) * 1e-10;
+            if (!std::isfinite(packet_time_span) || packet_time_span < 0.0 || packet_time_span > robustness_config.max_packet_time_span) [[unlikely]] {
+                log_packet_drop("lidar: invalid packet time span", robustness_config.min_drop_log_interval);
+                continue;
+            }
+            if (robustness_config.validate_crc && header.crc32 != 0) {
+                const auto computed_crc = crc32(buffer + offsetof(DataHeader, timestamp), sizeof(header.timestamp) + payload_size);
+                if (computed_crc != header.crc32) [[unlikely]] {
+                    log_packet_drop("lidar: CRC mismatch", robustness_config.min_drop_log_interval);
+                    continue;
+                }
+            }
+
             double header_timestamp = static_cast<double>(header.timestamp) * 1e-9;
             if (header.time_type == TIMESTAMP_TYPE_NO_SYNC) {
                 auto [iter, inserted] = delta_time_map.try_emplace(sender_endpoint.address());
@@ -159,8 +275,12 @@ namespace mid360_driver {
                     header_timestamp += iter->second;
                 }
             }
+            if (!is_timestamp_plausible(last_lidar_timestamp_map, sender_endpoint.address(), header_timestamp, robustness_config.max_packet_time_jump)) [[unlikely]] {
+                log_packet_drop("lidar: implausible timestamp", robustness_config.min_drop_log_interval);
+                continue;
+            }
             auto interpolate_timestamp = [&](std::size_t i) {
-                return header_timestamp + static_cast<double>(header.time_interval * i) / header.dot_num * 1e-10;
+                return header_timestamp + packet_time_span * static_cast<double>(i) / static_cast<double>(header.dot_num);
             };
             points.clear();
             points.reserve(header.dot_num);
@@ -177,7 +297,9 @@ namespace mid360_driver {
                     point.y = static_cast<float>(raw_point.y * 0.001);
                     point.z = static_cast<float>(raw_point.z * 0.001);
                     point.intensity = raw_point.reflectivity;
-                    points.push_back(point);
+                    if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z) && point.x * point.x + point.y * point.y + point.z * point.z <= robustness_config.max_point_range * robustness_config.max_point_range) {
+                        points.push_back(point);
+                    }
                 }
             } else if (header.data_type == LIVOX_LIDAR_CARTESIAN_COORDINATE_LOW_DATA) {
                 const auto *raw_points = reinterpret_cast<const CartesianLowPoint *>(buffer + sizeof(DataHeader));
@@ -192,7 +314,9 @@ namespace mid360_driver {
                     point.y = static_cast<float>(raw_point.y * 0.001);
                     point.z = static_cast<float>(raw_point.z * 0.001);
                     point.intensity = raw_point.reflectivity;
-                    points.push_back(point);
+                    if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z) && point.x * point.x + point.y * point.y + point.z * point.z <= robustness_config.max_point_range * robustness_config.max_point_range) {
+                        points.push_back(point);
+                    }
                 }
             } else if (header.data_type == LIVOX_LIDAR_SPHERICAL_COORDINATE_DATA) {
                 const auto *raw_points = reinterpret_cast<const SphericalPoint *>(buffer + sizeof(DataHeader));
@@ -210,7 +334,9 @@ namespace mid360_driver {
                     point.y = static_cast<float>(radius * sin(theta) * sin(phi));
                     point.z = static_cast<float>(radius * cos(theta));
                     point.intensity = raw_point.reflectivity;
-                    points.push_back(point);
+                    if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z) && point.x * point.x + point.y * point.y + point.z * point.z <= robustness_config.max_point_range * robustness_config.max_point_range) {
+                        points.push_back(point);
+                    }
                 }
             }
             on_receive_pointcloud(sender_endpoint.address(), points);
@@ -222,14 +348,33 @@ namespace mid360_driver {
         asio::ip::udp::endpoint sender_endpoint;
         while (is_running.load(std::memory_order_relaxed)) {
             asio::error_code error_code;
-            co_await receive_imu_socket.async_receive_from(
+            const std::size_t received_size = co_await receive_imu_socket.async_receive_from(
                     asio::buffer(buffer, MAX_PACKET_SIZE),
                     sender_endpoint,
                     asio::redirect_error(asio::use_awaitable, error_code));
             if (error_code || sender_endpoint.port() != 56400) [[unlikely]] {
                 continue;
             }
+            if (received_size < sizeof(DataHeader) + sizeof(Imu)) [[unlikely]] {
+                log_packet_drop("imu: packet smaller than IMU payload", robustness_config.min_drop_log_interval);
+                continue;
+            }
             const auto &header = *reinterpret_cast<const DataHeader *>(buffer);
+            if (header.data_type != LIVOX_LIDAR_IMU_DATA) [[unlikely]] {
+                log_packet_drop("imu: invalid data_type", robustness_config.min_drop_log_interval);
+                continue;
+            }
+            if (header.time_type != TIMESTAMP_TYPE_NO_SYNC && header.time_type != TIMESTAMP_TYPE_GPTP_OR_PTP && header.time_type != TIMESTAMP_TYPE_GPS) [[unlikely]] {
+                log_packet_drop("imu: invalid timestamp type", robustness_config.min_drop_log_interval);
+                continue;
+            }
+            if (robustness_config.validate_crc && header.crc32 != 0) {
+                const auto computed_crc = crc32(buffer + offsetof(DataHeader, timestamp), sizeof(header.timestamp) + sizeof(Imu));
+                if (computed_crc != header.crc32) [[unlikely]] {
+                    log_packet_drop("imu: CRC mismatch", robustness_config.min_drop_log_interval);
+                    continue;
+                }
+            }
             double header_timestamp = static_cast<double>(header.timestamp) * 1e-9;
             if (header.time_type == TIMESTAMP_TYPE_NO_SYNC) {
                 auto [iter, inserted] = delta_time_map.try_emplace(sender_endpoint.address());
@@ -241,6 +386,10 @@ namespace mid360_driver {
                     header_timestamp += iter->second;
                 }
             }
+            if (!is_timestamp_plausible(last_imu_timestamp_map, sender_endpoint.address(), header_timestamp, robustness_config.max_packet_time_jump)) [[unlikely]] {
+                log_packet_drop("imu: implausible timestamp", robustness_config.min_drop_log_interval);
+                continue;
+            }
             const auto &raw_imu = *reinterpret_cast<const Imu *>(buffer + sizeof(DataHeader));
             ImuMsg imu_msg;
             imu_msg.timestamp = header_timestamp;
@@ -250,8 +399,14 @@ namespace mid360_driver {
             imu_msg.linear_acceleration_x = raw_imu.linear_acceleration_x;
             imu_msg.linear_acceleration_y = raw_imu.linear_acceleration_y;
             imu_msg.linear_acceleration_z = raw_imu.linear_acceleration_z;
+            const double acc_norm = std::hypot(imu_msg.linear_acceleration_x, imu_msg.linear_acceleration_y, imu_msg.linear_acceleration_z);
+            const double gyro_norm = std::hypot(imu_msg.angular_velocity_x, imu_msg.angular_velocity_y, imu_msg.angular_velocity_z);
+            if (!std::isfinite(acc_norm) || !std::isfinite(gyro_norm) || acc_norm > robustness_config.max_imu_acc || gyro_norm > robustness_config.max_imu_gyro) [[unlikely]] {
+                log_packet_drop("imu: invalid IMU measurement", robustness_config.min_drop_log_interval);
+                continue;
+            }
             on_receive_imu(sender_endpoint.address(), imu_msg);
         }
     }
 
-}// namespace mid360_driver
+} // namespace mid360_driver
