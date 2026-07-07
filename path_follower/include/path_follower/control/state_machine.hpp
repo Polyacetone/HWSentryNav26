@@ -150,6 +150,7 @@ private:
     FsmOutput on_hazard_recovery(const FsmInput& in);
     FsmOutput on_wait_replan(const FsmInput& in);
 
+    FsmOutput transition_to(FsmState next);
     bool stopping_ready(const FsmInput& in) const;
     FsmOutput route_to_terminal(const FsmInput& in);
     FsmOutput exit_reverse(const FsmInput& in, double displacement, double mature_elapsed);
@@ -169,6 +170,7 @@ private:
     std::chrono::steady_clock::time_point pending_reverse_start_time_;
     Eigen::Vector2d pending_reverse_start_pos_ = Eigen::Vector2d::Zero();
 
+    bool reverse_entry_initialized_ = false;
     double reverse_mature_accumulated_ = 0.0;
     Eigen::Vector2d reverse_entry_pos_ = Eigen::Vector2d::Zero();
     std::chrono::steady_clock::time_point reverse_last_mature_stamp_;

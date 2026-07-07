@@ -7,6 +7,7 @@ ProgressMonitor::ProgressMonitor(rclcpp::Logger logger) : logger_(logger) {}
 
 void ProgressMonitor::recompute_landmarks(const SplinePath& path, const double spacing) {
     follow_landmarks_u_.clear();
+    reset();
 
     constexpr int ESTIMATE_SAMPLES = 100;
     double est_length = 0.0;
@@ -60,6 +61,11 @@ bool ProgressMonitor::update_and_check_no_progress(
         follow_max_landmark_time_ = stamp;
     }
 
+    if (follow_max_landmark_idx_ >= n) {
+        follow_max_landmark_idx_ = -1;
+        follow_max_landmark_time_ = stamp;
+    }
+
     int new_max = follow_max_landmark_idx_;
     for (int i = std::max(0, new_max + 1); i < n; i++) {
         if (current_u >= follow_landmarks_u_[static_cast<size_t>(i)]) {
@@ -90,11 +96,12 @@ bool ProgressMonitor::update_and_check_no_progress(
 void ProgressMonitor::reset() {
     follow_max_landmark_idx_ = -1;
     follow_max_landmark_time_ = {};
+    last_no_progress_check_state_ = FsmState::IDLE;
 }
 
 void ProgressMonitor::clear() {
     follow_landmarks_u_.clear();
-    follow_max_landmark_idx_ = -1;
+    reset();
 }
 
 } // namespace path_follower

@@ -25,6 +25,14 @@ FsmOutput StateMachine::update(const FsmInput& input) {
 
 // ═══════════════════════════ 辅助 ═══════════════════════════
 
+FsmOutput StateMachine::transition_to(const FsmState next) {
+    if (active_state_ == FsmState::STUCK_REVERSE && next != FsmState::STUCK_REVERSE) {
+        reverse_entry_initialized_ = false;
+    }
+    active_state_ = next;
+    return { .state = next };
+}
+
 bool StateMachine::stopping_ready(const FsmInput& in) const {
     const auto& t = params_.transition;
     switch (stopping_dest_) {
@@ -45,12 +53,11 @@ bool StateMachine::stopping_ready(const FsmInput& in) const {
 FsmOutput StateMachine::route_to_terminal(const FsmInput& in) {
     const bool should_spin = in.spin_requested
         && (in.spin_high_priority || (!in.has_path && !in.fixed_goal_flag));
-    if (should_spin) return { .state = FsmState::SPIN };
-    if (in.has_path) return { .state = FsmState::FOLLOW };
-    if (in.fixed_goal_flag) return { .state = FsmState::FIXED };
+    if (should_spin) return transition_to(FsmState::SPIN);
+    if (in.has_path) return transition_to(FsmState::FOLLOW);
+    if (in.fixed_goal_flag) return transition_to(FsmState::FIXED);
 
-    FsmOutput out;
-    out.state = FsmState::IDLE;
+    FsmOutput out = transition_to(FsmState::IDLE);
     out.consume_global_path = true;
     return out;
 }
@@ -62,7 +69,7 @@ FsmOutput StateMachine::exit_reverse(const FsmInput& in, double displacement, do
             "STUCK_REVERSE: displaced %.2f m (mature=%.1f s), current position IS hazard, entering HAZARD_RECOVERY",
             displacement, mature_elapsed
         );
-        return { .state = FsmState::HAZARD_RECOVERY };
+        return transition_to(FsmState::HAZARD_RECOVERY);
     }
 
     RCLCPP_WARN(
@@ -74,8 +81,7 @@ FsmOutput StateMachine::exit_reverse(const FsmInput& in, double displacement, do
     if (replan_after_recovery_) {
         replan_after_recovery_ = false;
         pending_wait_replan_start_time_ = in.stamp;
-        FsmOutput out;
-        out.state = FsmState::WAIT_REPLAN;
+        FsmOutput out = transition_to(FsmState::WAIT_REPLAN);
         out.consume_global_path = true;
         out.request_replan = true;
         return out;
@@ -88,17 +94,16 @@ FsmOutput StateMachine::exit_reverse(const FsmInput& in, double displacement, do
 
 FsmOutput StateMachine::on_idle(const FsmInput& in) {
     if (in.is_hazard) {
-        return { .state = FsmState::HAZARD_RECOVERY };
+        RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY");
+        return transition_to(FsmState::HAZARD_RECOVERY);
     }
     if (in.has_new_path) {
-        active_state_ = FsmState::FOLLOW;
         RCLCPP_INFO(logger_, "FSM -> FOLLOW");
-        return { .state = FsmState::FOLLOW };
+        return transition_to(FsmState::FOLLOW);
     }
     if (in.spin_requested) {
-        active_state_ = FsmState::SPIN;
         RCLCPP_INFO(logger_, "FSM -> SPIN");
-        return { .state = FsmState::SPIN };
+        return transition_to(FsmState::SPIN);
     }
     return { .state = FsmState::IDLE };
 }
@@ -110,21 +115,18 @@ FsmOutput StateMachine::on_fixed(const FsmInput& in) {
         replan_after_recovery_ = true;
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        active_state_ = FsmState::STUCK_REVERSE;
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE");
-        return { .state = FsmState::STUCK_REVERSE };
+        return transition_to(FsmState::STUCK_REVERSE);
     }
     if (in.spin_requested && in.spin_high_priority) {
         stopping_dest_ = DestState::SPIN;
         stopping_start_time_ = in.stamp;
-        active_state_ = FsmState::STOPPING;
         RCLCPP_INFO(logger_, "FSM -> STOPPING");
-        return { .state = FsmState::STOPPING };
+        return transition_to(FsmState::STOPPING);
     }
     if (in.has_new_path) {
-        active_state_ = FsmState::FOLLOW;
         RCLCPP_INFO(logger_, "FSM -> FOLLOW");
-        return { .state = FsmState::FOLLOW };
+        return transition_to(FsmState::FOLLOW);
     }
     return { .state = FsmState::FIXED };
 }
@@ -135,17 +137,14 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
     // step_active has highest priority: stepping locks the path and
     // must not be interrupted by replan/stuck/no_progress signals.
     if (in.step_active) {
-        active_state_ = FsmState::STEPPING;
         RCLCPP_INFO(logger_, "FSM -> STEPPING");
-        return { .state = FsmState::STEPPING };
+        return transition_to(FsmState::STEPPING);
     }
 
     if (in.replan_requested) {
         pending_wait_replan_start_time_ = in.stamp;
-        active_state_ = FsmState::WAIT_REPLAN;
         RCLCPP_INFO(logger_, "FSM -> WAIT_REPLAN");
-        FsmOutput out;
-        out.state = FsmState::WAIT_REPLAN;
+        FsmOutput out = transition_to(FsmState::WAIT_REPLAN);
         out.consume_global_path = true;
         out.request_replan = true;
         return out;
@@ -154,15 +153,12 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
     if (in.no_progress_detected) {
         if (in.is_hazard) {
             replan_after_recovery_ = true;
-            active_state_ = FsmState::HAZARD_RECOVERY;
             RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY");
-            return { .state = FsmState::HAZARD_RECOVERY };
+            return transition_to(FsmState::HAZARD_RECOVERY);
         }
         pending_wait_replan_start_time_ = in.stamp;
-        active_state_ = FsmState::WAIT_REPLAN;
         RCLCPP_INFO(logger_, "FSM -> WAIT_REPLAN");
-        FsmOutput out;
-        out.state = FsmState::WAIT_REPLAN;
+        FsmOutput out = transition_to(FsmState::WAIT_REPLAN);
         out.consume_global_path = true;
         out.request_replan = true;
         return out;
@@ -178,34 +174,30 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
             stopping_dest_ = DestState::IDLE;
         }
         stopping_start_time_ = in.stamp;
-        active_state_ = FsmState::STOPPING;
         RCLCPP_INFO(logger_, "FSM -> STOPPING");
-        return { .state = FsmState::STOPPING };
+        return transition_to(FsmState::STOPPING);
     }
 
     if (in.is_stuck) {
         replan_after_recovery_ = true;
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        active_state_ = FsmState::STUCK_REVERSE;
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE");
-        return { .state = FsmState::STUCK_REVERSE };
+        return transition_to(FsmState::STUCK_REVERSE);
     }
 
     if (in.spin_requested && in.spin_high_priority) {
         stopping_dest_ = DestState::SPIN;
         stopping_start_time_ = in.stamp;
-        active_state_ = FsmState::STOPPING;
         RCLCPP_INFO(logger_, "FSM -> STOPPING");
-        return { .state = FsmState::STOPPING };
+        return transition_to(FsmState::STOPPING);
     }
 
     if (in.reach_goal) {
         stopping_dest_ = in.fixed_goal_flag ? DestState::FIXED : DestState::IDLE;
         stopping_start_time_ = in.stamp;
-        active_state_ = FsmState::STOPPING;
         RCLCPP_INFO(logger_, "FSM -> STOPPING");
-        return { .state = FsmState::STOPPING };
+        return transition_to(FsmState::STOPPING);
     }
 
     return { .state = FsmState::FOLLOW };
@@ -217,15 +209,12 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
     if (in.no_progress_detected) {
         if (in.is_hazard) {
             replan_after_recovery_ = true;
-            active_state_ = FsmState::HAZARD_RECOVERY;
             RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY");
-            return { .state = FsmState::HAZARD_RECOVERY };
+            return transition_to(FsmState::HAZARD_RECOVERY);
         }
         pending_wait_replan_start_time_ = in.stamp;
-        active_state_ = FsmState::WAIT_REPLAN;
         RCLCPP_INFO(logger_, "FSM -> WAIT_REPLAN");
-        FsmOutput out;
-        out.state = FsmState::WAIT_REPLAN;
+        FsmOutput out = transition_to(FsmState::WAIT_REPLAN);
         out.consume_global_path = true;
         out.request_replan = true;
         return out;
@@ -235,9 +224,8 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
         replan_after_recovery_ = false;
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        active_state_ = FsmState::STUCK_REVERSE;
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE");
-        return { .state = FsmState::STUCK_REVERSE };
+        return transition_to(FsmState::STUCK_REVERSE);
     }
 
     if (in.step_active) {
@@ -246,18 +234,15 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
 
     if (in.replan_requested) {
         pending_wait_replan_start_time_ = in.stamp;
-        active_state_ = FsmState::WAIT_REPLAN;
         RCLCPP_INFO(logger_, "FSM -> WAIT_REPLAN");
-        FsmOutput out;
-        out.state = FsmState::WAIT_REPLAN;
+        FsmOutput out = transition_to(FsmState::WAIT_REPLAN);
         out.consume_global_path = true;
         out.request_replan = true;
         return out;
     }
 
-    active_state_ = FsmState::FOLLOW;
     RCLCPP_INFO(logger_, "FSM -> FOLLOW");
-    return { .state = FsmState::FOLLOW };
+    return transition_to(FsmState::FOLLOW);
 }
 
 // ═══════════════════════════ SPIN ═══════════════════════════
@@ -265,7 +250,7 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
 FsmOutput StateMachine::on_spin(const FsmInput& in) {
     if (in.is_hazard) {
         RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY");
-        return { .state = FsmState::HAZARD_RECOVERY };
+        return transition_to(FsmState::HAZARD_RECOVERY);
     }
 
     const bool keep_spinning = in.spin_requested
@@ -280,9 +265,8 @@ FsmOutput StateMachine::on_spin(const FsmInput& in) {
             stopping_dest_ = DestState::IDLE;
         }
         stopping_start_time_ = in.stamp;
-        active_state_ = FsmState::STOPPING;
         RCLCPP_INFO(logger_, "FSM -> STOPPING");
-        return { .state = FsmState::STOPPING };
+        return transition_to(FsmState::STOPPING);
     }
 
     return { .state = FsmState::SPIN };
@@ -293,7 +277,7 @@ FsmOutput StateMachine::on_spin(const FsmInput& in) {
 FsmOutput StateMachine::on_stopping(const FsmInput& in) {
     if (stopping_dest_ != DestState::FOLLOW && in.has_new_path) {
         RCLCPP_INFO(logger_, "FSM -> FOLLOW");
-        return { .state = FsmState::FOLLOW };
+        return transition_to(FsmState::FOLLOW);
     }
 
     const bool timeout = std::chrono::duration<double>(in.stamp - stopping_start_time_).count()
@@ -302,30 +286,24 @@ FsmOutput StateMachine::on_stopping(const FsmInput& in) {
     if (stopping_ready(in) || timeout) {
         switch (stopping_dest_) {
             case DestState::IDLE: {
-                active_state_ = FsmState::IDLE;
                 RCLCPP_INFO(logger_, "FSM -> IDLE");
-                FsmOutput out;
-                out.state = FsmState::IDLE;
+                FsmOutput out = transition_to(FsmState::IDLE);
                 out.consume_global_path = true;
                 return out;
             }
             case DestState::FIXED: {
-                active_state_ = FsmState::FIXED;
                 RCLCPP_INFO(logger_, "FSM -> FIXED");
-                FsmOutput out;
-                out.state = FsmState::FIXED;
+                FsmOutput out = transition_to(FsmState::FIXED);
                 out.consume_global_path = true;
                 return out;
             }
             case DestState::SPIN: {
-                active_state_ = FsmState::SPIN;
                 RCLCPP_INFO(logger_, "FSM -> SPIN");
-                return { .state = FsmState::SPIN };
+                return transition_to(FsmState::SPIN);
             }
             case DestState::FOLLOW: {
-                active_state_ = FsmState::FOLLOW;
                 RCLCPP_INFO(logger_, "FSM -> FOLLOW");
-                return { .state = FsmState::FOLLOW };
+                return transition_to(FsmState::FOLLOW);
             }
         }
     }
@@ -336,9 +314,9 @@ FsmOutput StateMachine::on_stopping(const FsmInput& in) {
 // ═══════════════════════════ STUCK_REVERSE ══════════════════
 
 FsmOutput StateMachine::on_stuck_reverse(const FsmInput& in) {
-    if (reverse_mature_accumulated_ == 0.0) {
+    if (!reverse_entry_initialized_) {
         // 首次进入，初始化
-        active_state_ = FsmState::STUCK_REVERSE;
+        reverse_entry_initialized_ = true;
         reverse_mature_accumulated_ = 0.0;
         reverse_last_mature_stamp_ = pending_reverse_start_time_;
         reverse_entry_pos_ = pending_reverse_start_pos_;
@@ -382,19 +360,16 @@ FsmOutput StateMachine::on_hazard_recovery(const FsmInput& in) {
         replan_after_recovery_ = false;
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        active_state_ = FsmState::STUCK_REVERSE;
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE");
-        return { .state = FsmState::STUCK_REVERSE };
+        return transition_to(FsmState::STUCK_REVERSE);
     }
 
     if (in.is_recovery_safe) {
         if (replan_after_recovery_) {
             replan_after_recovery_ = false;
             pending_wait_replan_start_time_ = in.stamp;
-            active_state_ = FsmState::WAIT_REPLAN;
             RCLCPP_INFO(logger_, "FSM -> WAIT_REPLAN");
-            FsmOutput out;
-            out.state = FsmState::WAIT_REPLAN;
+            FsmOutput out = transition_to(FsmState::WAIT_REPLAN);
             out.consume_global_path = true;
             out.request_replan = true;
             return out;
@@ -409,23 +384,19 @@ FsmOutput StateMachine::on_hazard_recovery(const FsmInput& in) {
 
 FsmOutput StateMachine::on_wait_replan(const FsmInput& in) {
     if (in.has_new_path) {
-        active_state_ = FsmState::FOLLOW;
         RCLCPP_INFO(logger_, "FSM -> FOLLOW");
-        return { .state = FsmState::FOLLOW };
+        return transition_to(FsmState::FOLLOW);
     }
 
     if (in.replan_failed) {
         RCLCPP_WARN(logger_, "WAIT_REPLAN: replan failed (empty path)");
         const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.fixed_goal_flag));
         if (should_spin) {
-            active_state_ = FsmState::SPIN;
             RCLCPP_INFO(logger_, "FSM -> SPIN");
-            return { .state = FsmState::SPIN };
+            return transition_to(FsmState::SPIN);
         }
-        active_state_ = FsmState::IDLE;
         RCLCPP_INFO(logger_, "FSM -> IDLE");
-        FsmOutput out;
-        out.state = FsmState::IDLE;
+        FsmOutput out = transition_to(FsmState::IDLE);
         out.consume_global_path = true;
         return out;
     }
@@ -437,20 +408,16 @@ FsmOutput StateMachine::on_wait_replan(const FsmInput& in) {
             params_.transition.wait_replan_timeout);
         const bool should_spin = in.spin_requested && (in.spin_high_priority || (!in.fixed_goal_flag));
         if (should_spin) {
-            active_state_ = FsmState::SPIN;
             RCLCPP_INFO(logger_, "FSM -> SPIN");
-            return { .state = FsmState::SPIN };
+            return transition_to(FsmState::SPIN);
         }
-        active_state_ = FsmState::IDLE;
         RCLCPP_INFO(logger_, "FSM -> IDLE");
-        FsmOutput out;
-        out.state = FsmState::IDLE;
+        FsmOutput out = transition_to(FsmState::IDLE);
         out.consume_global_path = true;
         return out;
     }
 
-    FsmOutput out;
-    out.state = FsmState::WAIT_REPLAN;
+    FsmOutput out = transition_to(FsmState::WAIT_REPLAN);
     out.consume_global_path = true;
     out.request_replan = true;
     return out;
