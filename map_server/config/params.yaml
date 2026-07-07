@@ -57,3 +57,5 @@
         local_grid_render_threshold: 0.3 # 局部栅格渲染阈值（0~1），低于此值不渲染
         prediction_steps: 30 # 未来预测步数
         prediction_dt: 0.1 # 预测步长（s），prediction_steps × prediction_dt = 总预测时长
+        prediction_velocity_decay_tau: 1.6 # 预测渲染速度指数衰减时间常数（s），越小越保守，<=0表示恒速外推
+        prediction_max_speed: 2.4 # 预测渲染速度上限（m/s），抑制噪声导致的过大外推，<=0表示不限制

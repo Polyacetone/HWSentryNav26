@@ -152,6 +152,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         .local_grid_render_threshold = declare_parameter<double>("local_map.object_tracker.local_grid_render_threshold"),
         .prediction_steps = (int)declare_parameter<int>("local_map.object_tracker.prediction_steps"),
         .prediction_dt = declare_parameter<double>("local_map.object_tracker.prediction_dt"),
+        .prediction_velocity_decay_tau = declare_parameter<double>("local_map.object_tracker.prediction_velocity_decay_tau"),
+        .prediction_max_speed = declare_parameter<double>("local_map.object_tracker.prediction_max_speed"),
     };
     bypass_dynamic_obstacle_ = declare_parameter<bool>("local_map.bypass_dynamic_obstacle");
     enable_prediction_with_cloud_ = declare_parameter<bool>("local_map.with_global_cloud.enable_prediction");

@@ -19,6 +19,8 @@ struct ObjectTrackerParams {
     double local_grid_render_threshold; // 局部栅格渲染阈值（0~1）
     int prediction_steps; // 未来预测步数
     double prediction_dt; // 预测时间步长（s）
+    double prediction_velocity_decay_tau; // 预测渲染速度指数衰减时间常数（s，<=0 表示不衰减）
+    double prediction_max_speed; // 预测渲染速度上限（m/s，<=0 表示不限制）
 };
 
 class ObjectTracker {

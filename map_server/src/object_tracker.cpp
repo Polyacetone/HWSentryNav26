@@ -407,11 +407,19 @@ cv::Mat ObjectTracker::render_motion_prediction(double t_future) const {
     const double inv_res = 1.0 / resolution_;
     for (const auto& track: tracks_) {
         if (!track.confirmed) continue;
-        const double pred_x_m = track.x[0] + track.x[2] * t_future;
-        const double pred_y_m = track.x[1] + track.x[3] * t_future;
+        Eigen::Vector2d velocity = track.x.tail<2>();
+        const double speed = velocity.norm();
+        if (params_.prediction_max_speed > 0.0 && speed > params_.prediction_max_speed) {
+            velocity *= params_.prediction_max_speed / speed;
+        }
+
+        const double prediction_time = params_.prediction_velocity_decay_tau > 0.0
+            ? params_.prediction_velocity_decay_tau * (1.0 - std::exp(-t_future / params_.prediction_velocity_decay_tau))
+            : t_future;
+        const Eigen::Vector2d pred_m = track.x.head<2>() + velocity * prediction_time;
         const Eigen::Vector2i centroid_px(
-            static_cast<int>(std::round(pred_x_m * inv_res)),
-            static_cast<int>(std::round(pred_y_m * inv_res))
+            static_cast<int>(std::round(pred_m.x() * inv_res)),
+            static_cast<int>(std::round(pred_m.y() * inv_res))
         );
         rasterize_local_grid(prediction, track.local_grid, centroid_px, 255);
     }
