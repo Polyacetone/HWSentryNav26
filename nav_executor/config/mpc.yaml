@@ -1,0 +1,132 @@
+/**:
+  ros__parameters:
+    mpc:
+      energy:
+        enable: true # 是否启用能量约束（电容电量不足时限制功率）
+        threshold: 600.0 # 电容能量惩罚阈值 (J)，低于此值开始惩罚
+        weight: 0.0003 # 能量软约束权重
+
+      follow:
+        max_iters: 40 # FDDP 求解器最大迭代次数
+        mppi:
+          enable: false # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
+          num_threads: 2 # MPPI并行线程数
+          batch_size: 256 # 每次迭代采样轨迹数
+          iteration_count: 2 # MPPI迭代次数
+          temperature: 0.3 # 软最优权重温度，越小越偏向最优样本
+          gamma: 0.015 # 控制噪声正则权重，抑制大幅偏离名义控制
+          sampling_std:
+            velocity: 0.4 # 线速度采样标准差 (m/s)
+            omega: 1.0 # 角速度采样标准差 (rad/s)
+          noise_smoothing:
+            window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
+            passes: 2 # 平滑迭代次数
+          include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免MPPI退化时丢掉已有好解
+          fallback_to_best_sample: true # 最终优先采用历史最佳可行样本，增强跳出局部最优的稳定性
+        rollout_safety:
+          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解连续命中 N 帧则退化为 solve_stop
+          lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
+          fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
+        command_bounds:
+          vel_max: 2.0  # 线速度上限 (m/s)
+          vel_min: -1.2 # 线速度下限 (m/s)
+          omega_max: 6.0  # 角速度上限 (rad/s)
+          omega_min: -6.0 # 角速度下限 (rad/s)
+        motion_constraints:
+          acc_max: 1.8   # 最大 dv_cmd/dt (m/s²)
+          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+          a_lat_max: 2.0 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
+        start_command:
+          vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
+          omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
+        tracking_weights:
+          q_y: 0.30  # 横向误差权重
+          q_theta: 0.05 # 航向误差权重
+          q_u: 0.8  # 每步进度权重
+        command_weights:
+          r_v: 0.01 # 线速度正则
+          r_omega: 0.01 # 角速度正则
+          r_dv: 0.2 # 线速度平滑
+          r_domega: 0.1 # 角速度平滑
+        motion_constraint_weights:
+          acc_limit: 12.0 # 速度指令变化率超限惩罚
+          alpha_limit: 12.0 # 角速度指令变化率超限惩罚
+          lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
+        terrain_limits:
+          step_reachability_guide_acc: 1.2 # 台阶入口可达势函数的引导加速度 (m/s^2)
+        terrain_weights:
+          step_vel_weight: 2.4 # 台阶内部仍保留原始速度范围惩罚，但权重降低
+          step_reachability_lo: 0.8 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
+          step_reachability_hi: 0.8 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
+          direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
+        environment_weights:
+          obstacle: 1.0 # 避障权重（全局+局部融合代价）
+        terminal_weights:
+          q_v_final: 0.2 # 终端减速权重（全程激活）：v_allowed = sqrt(2 * a_brake * s + v_target^2)
+          a_brake: 2.0 # m/s², 期望制动减速度
+          slow_down_target_vel: 0.1 # m/s, 终点目标速度
+        projection:
+          num_samples: 50 # 投影到样条参数u的采样数
+          search_window: 0.1 # 局部搜索窗口 (0~1)
+          local_search_lazy_distance: 0.1 # 局部搜索找到合适投影点的距离阈值 (m)
+
+      stop:
+        max_iters: 20 # FDDP 求解器最大迭代次数
+        command_bounds:
+          vel_max: 2.8 # 线速度上限 (m/s)
+          vel_min: 0.0  # 线速度下限 (m/s）
+          omega_max: 12.5 # 角速度上限 (rad/s)
+          omega_min: -12.5 # 角速度下限 (rad/s)
+        start_command:
+          vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
+          omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
+        motion_constraints:
+          acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+          a_lat_max: 2.4 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
+        command_weights:
+          r_v: 2.0 # 线速度正则
+          r_omega: 0.2 # 角速度正则
+          r_dv: 0.2 # 线速度指令平滑
+          r_domega: 0.1 # 角速度指令平滑
+        motion_constraint_weights:
+          acc_limit: 12.0 # 速度指令变化率超限惩罚
+          alpha_limit: 12.0 # 角速度指令变化率超限惩罚
+          lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
+        environment_weights:
+          obstacle: 1.0 # 避障惩罚（台阶区域已转为障碍物）
+        terminal_weights:
+          obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
+
+      hold:
+        max_iters: 20 # FDDP 求解器最大迭代次数
+        command_bounds:
+          vel_max: 1.2 # 线速度上限 (m/s)
+          vel_min: -1.2 # 线速度下限 (m/s）
+          omega_max: 1.6 # 角速度上限 (rad/s)
+          omega_min: -1.6 # 角速度下限 (rad/s)
+        start_command:
+          vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
+          omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
+        motion_constraints:
+          acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+          a_lat_max: 2.4 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
+        goal_weights:
+          q_goal_xy: 0.3 # 每步目标点吸引（x/y误差）
+          q_goal_theta: 0.2 # 朝向目标点
+          goal_deadzone: 0.2 # 目标吸引死区半径，进入后不再因目标位置误差来回抽动 (m)
+        command_weights:
+          r_v: 0.01 # 线速度正则
+          r_omega: 0.01 # 角速度正则
+          r_dv: 0.2 # 线速度指令平滑
+          r_domega: 0.1 # 角速度指令平滑
+        motion_constraint_weights:
+          acc_limit: 12.0 # 速度指令变化率超限惩罚
+          alpha_limit: 12.0 # 角速度指令变化率超限惩罚
+          lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
+        environment_weights:
+          obstacle: 1.0 # 全程避障惩罚
+        terminal_weights:
+          q_goal_xy_terminal: 3.0 # 终端目标点吸引
+          obstacle_terminal: 12.0 # 终端避障惩罚

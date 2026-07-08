@@ -141,7 +141,7 @@ class SimConfig:
     TORQUE_NOISE_STD_NM: tuple[float, float, float, float] = (0.04, 0.04, 0.04, 0.04)
 
     # --- 话题名 ---
-    TOPIC_CMD: str = "/path_follower/chassis_cmd"
+    TOPIC_CMD: str = "/nav_executor/chassis_cmd"
     TOPIC_JOINT: str = "/serial_bridge/joint_state"
     TOPIC_ODOM: str = "/small_glim/odometry"
     TOPIC_IMU: str = "/serial_bridge/imu_pose"
