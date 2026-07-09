@@ -10,15 +10,15 @@ StateMachine::StateMachine(const FsmParams& params, rclcpp::Logger logger)
 
 FsmOutput StateMachine::update(const FsmInput& input) {
     switch (active_state_) {
-        case MotionState::IDLE:            return on_idle(input);
-        case MotionState::FIXED:           return on_fixed(input);
-        case MotionState::FOLLOW:          return on_follow(input);
-        case MotionState::STEPPING:        return on_stepping(input);
-        case MotionState::SPIN:            return on_spin(input);
-        case MotionState::STOPPING:        return on_stopping(input);
-        case MotionState::STUCK_REVERSE:   return on_stuck_reverse(input);
+        case MotionState::IDLE: return on_idle(input);
+        case MotionState::FIXED: return on_fixed(input);
+        case MotionState::FOLLOW: return on_follow(input);
+        case MotionState::STEPPING: return on_stepping(input);
+        case MotionState::SPIN: return on_spin(input);
+        case MotionState::STOPPING: return on_stopping(input);
+        case MotionState::STUCK_REVERSE: return on_stuck_reverse(input);
         case MotionState::HAZARD_RECOVERY: return on_hazard_recovery(input);
-        default:                           return { .state = active_state_ };
+        default: return { .state = active_state_ };
     }
 }
 
@@ -78,13 +78,13 @@ FsmOutput StateMachine::exit_reverse(const FsmInput& in, const double displaceme
     if (in.is_hazard) {
         RCLCPP_WARN(
             logger_,
-            "STUCK_REVERSE: displaced %.2f m (mature=%.1f s), current position IS hazard, entering HAZARD_RECOVERY",
+            "STUCK_REVERSE: displaced %.2f m (mature=%.1f s), current position hazard, entering HAZARD_RECOVERY",
             displacement, mature_elapsed
         );
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
 
-    RCLCPP_WARN(
+    RCLCPP_INFO(
         logger_,
         "STUCK_REVERSE: displaced %.2f m (mature=%.1f s), current position safe, skipping HAZARD_RECOVERY",
         displacement, mature_elapsed
@@ -97,68 +97,58 @@ FsmOutput StateMachine::exit_reverse(const FsmInput& in, const double displaceme
 FsmOutput StateMachine::on_idle(const FsmInput& in) {
     if (in.is_hazard) {
         replan_after_recovery_ = false;
-        RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY");
+        RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY (is hazard)");
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
     if (in.has_path) {
-        RCLCPP_INFO(logger_, "FSM -> FOLLOW");
+        RCLCPP_INFO(logger_, "FSM -> FOLLOW (has path)");
         return transition_to(MotionState::FOLLOW);
     }
     if (in.has_hold_goal) {
-        RCLCPP_INFO(logger_, "FSM -> FIXED");
+        RCLCPP_INFO(logger_, "FSM -> FIXED (has hold goal)");
         return transition_to(MotionState::FIXED);
     }
     if (in.spin_requested) {
-        RCLCPP_INFO(logger_, "FSM -> SPIN");
+        RCLCPP_INFO(logger_, "FSM -> SPIN (spin requested)");
         return transition_to(MotionState::SPIN);
     }
     return { .state = MotionState::IDLE };
 }
 
 // ═══════════════════════════ FIXED ══════════════════════════
-// FIXED 只能通过顶层设 hold_goal 进入，不靠 current_goal.fixed 直接推导。
-// FIXED 是持续保持模式，不再上报"再次完成"。
-// 当 hold_goal 消失（任务被清空时）→ 平滑退出到 STOPPING。
-// 注意：executor_replan_event 在此状态下会被顶层吞掉（见 ingest_executor_replan_event），
-// 所以 FIXED 下的 stuck 恢复后不会导致路径重规划——恢复后因 hold_goal 仍在，自然回 FIXED。
 
 FsmOutput StateMachine::on_fixed(const FsmInput& in) {
     if (in.is_stuck) {
         replan_after_recovery_ = true;
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE");
+        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (is stuck)");
         return transition_to(MotionState::STUCK_REVERSE);
     }
     if (in.has_path) {
-        RCLCPP_INFO(logger_, "FSM -> FOLLOW");
+        RCLCPP_INFO(logger_, "FSM -> FOLLOW (has path)");
         return transition_to(MotionState::FOLLOW);
     }
     if (in.spin_requested && in.spin_high_priority) {
         stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING");
+        RCLCPP_INFO(logger_, "FSM -> STOPPING (spin requested)");
         return transition_to(MotionState::STOPPING);
     }
     // hold_goal 消失（任务被清空）→ 平滑退出
     if (!in.has_hold_goal) {
         stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING");
+        RCLCPP_INFO(logger_, "FSM -> STOPPING (no hold goal)");
         return transition_to(MotionState::STOPPING);
     }
     return { .state = MotionState::FIXED };
 }
 
 // ═══════════════════════════ FOLLOW ═════════════════════════
-// 优先级：step_active（不可抢占 STEPPING）> stuck-like > 无 path（顶层已判 invalid）> spin > reach_goal
-// stuck-like（no_progress_detected / is_stuck）统一走 STUCK_REVERSE 脱困链，
-// 不同于旧版直接进入 WAIT_REPLAN。恢复链结束后发出 one-shot executor_replan_event。
-// path 被顶层清空（RouteMonitor 判 invalid 或消费后）→ 平滑停止后回落到对应终态。
-// step_active 最高优先，不被 stuck/no_progress 打断前置处理。
 
 FsmOutput StateMachine::on_follow(const FsmInput& in) {
     // step_active 最高优先：进入不可抢占的 STEPPING，且不被 stuck/no_progress 打断前置处理。
     if (in.step_active) {
-        RCLCPP_INFO(logger_, "FSM -> STEPPING");
+        RCLCPP_INFO(logger_, "FSM -> STEPPING (step active)");
         return transition_to(MotionState::STEPPING);
     }
 
@@ -167,20 +157,20 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
         replan_after_recovery_ = true;
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (stuck-like in FOLLOW)");
+        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (stuck-like)");
         return transition_to(MotionState::STUCK_REVERSE);
     }
 
     // path 被顶层清空（RouteMonitor 判 invalid 或消费）→ 平滑停止后回落。
     if (!in.has_path) {
         stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING");
+        RCLCPP_INFO(logger_, "FSM -> STOPPING (no path)");
         return transition_to(MotionState::STOPPING);
     }
 
     if (in.spin_requested && in.spin_high_priority) {
         stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING");
+        RCLCPP_INFO(logger_, "FSM -> STOPPING (spin requested)");
         return transition_to(MotionState::STOPPING);
     }
 
@@ -196,15 +186,13 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
 }
 
 // ═══════════════════════════ STEPPING ═══════════════════════
-// 约束：no_progress 和 stuck 视为 stuck-like，不走直接 replan，
-// 统一走 STUCK_REVERSE→HAZARD_RECOVERY 恢复链。恢复后 one-shot replan event。
 
 FsmOutput StateMachine::on_stepping(const FsmInput& in) {
     if (in.no_progress_detected || in.is_stuck) {
         replan_after_recovery_ = true;
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (stuck-like in STEPPING)");
+        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (stuck-like)");
         return transition_to(MotionState::STUCK_REVERSE);
     }
 
@@ -212,7 +200,7 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
         return { .state = MotionState::STEPPING };
     }
 
-    RCLCPP_INFO(logger_, "FSM -> FOLLOW");
+    RCLCPP_INFO(logger_, "FSM -> FOLLOW (step completed)");
     return transition_to(MotionState::FOLLOW);
 }
 
@@ -221,16 +209,15 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
 FsmOutput StateMachine::on_spin(const FsmInput& in) {
     if (in.is_hazard) {
         replan_after_recovery_ = false;
-        RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY");
+        RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY (is hazard)");
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
 
-    const bool keep_spinning = in.spin_requested
-        && (in.spin_high_priority || (!in.has_path && !in.has_hold_goal));
+    const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.has_hold_goal));
 
     if (!keep_spinning) {
         stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING");
+        RCLCPP_INFO(logger_, "FSM -> STOPPING (spin completed)");
         return transition_to(MotionState::STOPPING);
     }
 
@@ -244,7 +231,7 @@ FsmOutput StateMachine::on_stopping(const FsmInput& in) {
 
     // 新任务（有 path）→ 立即跟随，无需等待减速。
     if (target == Terminal::FOLLOW) {
-        RCLCPP_INFO(logger_, "FSM -> FOLLOW");
+        RCLCPP_INFO(logger_, "FSM -> FOLLOW (new task)");
         return transition_to(MotionState::FOLLOW);
     }
 
@@ -254,8 +241,8 @@ FsmOutput StateMachine::on_stopping(const FsmInput& in) {
     if (stopping_ready(in, target) || timeout) {
         switch (target) {
             case Terminal::FIXED: RCLCPP_INFO(logger_, "FSM -> FIXED"); return transition_to(MotionState::FIXED);
-            case Terminal::SPIN:  RCLCPP_INFO(logger_, "FSM -> SPIN");  return transition_to(MotionState::SPIN);
-            case Terminal::IDLE:  RCLCPP_INFO(logger_, "FSM -> IDLE");  return transition_to(MotionState::IDLE);
+            case Terminal::SPIN: RCLCPP_INFO(logger_, "FSM -> SPIN");  return transition_to(MotionState::SPIN);
+            case Terminal::IDLE: RCLCPP_INFO(logger_, "FSM -> IDLE");  return transition_to(MotionState::IDLE);
             case Terminal::FOLLOW: return transition_to(MotionState::FOLLOW);
         }
     }
@@ -264,9 +251,6 @@ FsmOutput StateMachine::on_stopping(const FsmInput& in) {
 }
 
 // ═══════════════════════════ STUCK_REVERSE ══════════════════
-// stuck-like 统一走此恢复链。退出后若当前位姿不安全进入 HAZARD_RECOVERY，
-// 若安全则直接 finish_recovery_chain（后者发出 one-shot executor_replan_event）。
-// 不允许在恢复链中途提前发出 executor_replan_event。
 
 FsmOutput StateMachine::on_stuck_reverse(const FsmInput& in) {
     if (!reverse_entry_initialized_) {
@@ -274,18 +258,15 @@ FsmOutput StateMachine::on_stuck_reverse(const FsmInput& in) {
         reverse_mature_accumulated_ = 0.0;
         reverse_last_mature_stamp_ = pending_reverse_start_time_;
         reverse_entry_pos_ = pending_reverse_start_pos_;
-        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE");
     }
 
     if (in.command_blocked) {
-        reverse_mature_accumulated_ +=
-            std::chrono::duration<double>(in.stamp - reverse_last_mature_stamp_).count();
+        reverse_mature_accumulated_ += std::chrono::duration<double>(in.stamp - reverse_last_mature_stamp_).count();
         reverse_last_mature_stamp_ = in.stamp;
         return { .state = MotionState::STUCK_REVERSE };
     }
 
-    const double mature_elapsed = reverse_mature_accumulated_
-        + std::chrono::duration<double>(in.stamp - reverse_last_mature_stamp_).count();
+    const double mature_elapsed = reverse_mature_accumulated_ + std::chrono::duration<double>(in.stamp - reverse_last_mature_stamp_).count();
     const double displacement = (in.chassis_pos_map - reverse_entry_pos_).norm();
 
     if (displacement >= params_.stuck.reverse_displacement) {
@@ -314,7 +295,7 @@ FsmOutput StateMachine::on_hazard_recovery(const FsmInput& in) {
         // 保留 replan_after_recovery_（不重置），恢复链结束后仍需 replan。
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
-        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE");
+        RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (is stuck)");
         return transition_to(MotionState::STUCK_REVERSE);
     }
 

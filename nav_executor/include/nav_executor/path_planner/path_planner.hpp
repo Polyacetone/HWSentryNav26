@@ -61,7 +61,6 @@ struct PlanResult {
     std::vector<Eigen::Vector2d> debug_optimized_path;
 };
 
-// 规划算法只读配置（由 node 加载，const 引用共享给 worker，不每请求复制）。
 struct PlannerConfig {
     // 可行性判定
     int occupied_threshold;
@@ -88,13 +87,7 @@ struct PlannerConfig {
     bool enable_debug;
 };
 
-// 独立线程规划 worker。
-// 控制线程通过 submit()（latest-wins）提交请求，try_take_result() 非阻塞轮询结果。worker 线程被 cv 唤醒，读取快照做规划，产出不可变 AnnotatedPath。
-// 关键约束：
-// - worker 永不访问外部共享状态或 TF。只读配置（TerrainProfiles、StepRoutingMask 等）由节点通过 const * const 在线程间共享。
-// - PlanRequest 只携带每周期变化的快照数据（位姿、地图、goal），静态配置不进入请求体。
-// - worker 永不修改 current_goal_ / active_path_ / hold_goal_。
-// - 所有结果只在控制周期边界被消费，不在 worker 内异步写入 active_path。
+// 独立线程规划 worker：控制线程 submit()（latest-wins）提交请求，worker 被 cv 唤醒后读取快照做规划，产出不可变 AnnotatedPath。
 class PathPlanner {
 public:
     PathPlanner(

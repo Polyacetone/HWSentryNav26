@@ -57,13 +57,6 @@ struct FsmParams {
 
 // ═══════════════════════════ 运动状态 ═══════════════════════
 // 暴露给任务层的 motion_state。可抢占性判定在 PathExecutor::preemptible() 中统一处理。
-// 关键约束：
-// - DEAD 由 PathExecutor 外部拦截，不参与 FSM 流转（根据 leg_mode + comp_stage 提前短路，不进入 update()）。
-// - FIXED 仅在 hold_goal 存在时进入（顶层设 hold_goal 后底层推导产生），不可在等待规划结果时进入。
-// - FIXED 是持续保持模式，不再上报"再次完成"。
-// - 恢复链统一为 STUCK_REVERSE→HAZARD_RECOVERY（若不安全）→finish_recovery_chain。
-//   stuck-like 来源（FOLLOW_NO_PROGRESS / STEPPING_NO_PROGRESS / STUCK）都走此链，
-//   恢复链结束后发出 one-shot executor_replan_event。不允许在恢复链中途提前发出。
 
 enum class MotionState : uint8_t {
     DEAD = 0,             // 底盘失效：由 PathExecutor 外部拦截
@@ -80,10 +73,6 @@ enum class MotionState : uint8_t {
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
 
 struct FsmInput {
-    // ── 顶层每周期暴露的三输入 ──
-    // 有 active_path → 路径跟随相关状态
-    // 无 active_path 且有 hold_goal → FIXED
-    // 两者都无 → 若 spin 则 SPIN，否则 IDLE
     bool has_path = false;       // 当前存在 active_path
     bool has_hold_goal = false;  // 当前存在 hold_goal（应进入 FIXED 保持）
     bool reach_goal = false;     // 路径终点已到达（dist/u 阈值）
@@ -112,16 +101,8 @@ struct FsmInput {
 
 struct FsmOutput {
     MotionState state = MotionState::IDLE;
-
-    // 路径终点到达事实（one-shot，仅路径阶段上报）。
-    // FIXED 是持续保持模式，不再上报"再次完成"。
-    bool goal_reached = false;
-
-    // 恢复链结束后请求顶层丢 path 并 replan（one-shot）。
-    // 不是常驻 bool，顶层消费后立即清除。
-    // 不允许在 STUCK_REVERSE/HAZARD_RECOVERY 中途提前发出。
-    // 当 hold_goal 存在或没有 goal 时，顶层直接吞掉该事件。
-    bool executor_replan_event = false;
+    bool goal_reached = false;           // 路径终点到达事实（one-shot，仅路径阶段上报）
+    bool executor_replan_event = false;   // 恢复链结束后请求顶层丢 path 并 replan（one-shot）
 };
 
 // ═══════════════════════ 运动层状态机 ═══════════════════════

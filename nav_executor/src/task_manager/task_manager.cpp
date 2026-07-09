@@ -41,7 +41,6 @@ TaskCommandView TaskManager::command_view() const {
 void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool preemptible) {
     if (!incoming) return;
 
-    // 等价 goal：直接忽略，不触发规划、不重置冷却、不改执行状态。
     if (current_goal_ && goals_equivalent(*current_goal_, *incoming)) {
         return;
     }
@@ -55,8 +54,6 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
     needs_plan_ = true;       // 标记需要重新规划
     in_cooldown_ = false;     // 新 goal 立即打断旧冷却
 
-    // 保留旧 active_path_ 不清理：可抢占态下旧路径继续执行，新路径成功后替换。
-    // 不可抢占态：仅更新 goal，恢复到可抢占态后由统一调度自动提交。
     RCLCPP_INFO(
         logger_, "New goal #%lu (%.2f, %.2f) fixed=%d [%s]",
         static_cast<unsigned long>(goal.id), goal.position_map.x(), goal.position_map.y(),
@@ -69,7 +66,6 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
 void TaskManager::ingest_executor_replan_event(const bool event) {
     if (!event) return;
 
-    // 无 goal 或存在 hold_goal → 直接吞掉。
     if (!current_goal_ || hold_goal_.has_value()) {
         RCLCPP_DEBUG(logger_, "executor_replan_event swallowed (no goal or holding)");
         return;
@@ -88,13 +84,11 @@ void TaskManager::poll_planner_result(const bool preemptible) {
     auto result = planner_->try_take_result();
     if (!result) return;
 
-    // 接纳条件 1：goal_id 与当前 goal id 一致。
     if (!current_goal_ || result->goal_id != current_goal_->id) {
         RCLCPP_INFO(logger_, "Discard plan result: goal changed (result goal_id mismatch)");
         return;
     }
 
-    // 接纳条件 2：返回时系统处于可抢占态。
     if (!preemptible) {
         RCLCPP_INFO(logger_, "Discard plan result: system became non-preemptible");
         return;
@@ -114,7 +108,6 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             break;
 
         case PlanResult::Kind::COMPLETE_NO_PLAN_NEEDED:
-            // 普通 goal 已足够近：任务完成，清 goal / path / hold。
             active_path_.reset();
             hold_goal_.reset();
             needs_plan_ = false;
@@ -124,7 +117,6 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             break;
 
         case PlanResult::Kind::USE_AS_FIXED_GOAL:
-            // fixed goal 已足够近：直接进入保持，不经过路径阶段。
             active_path_.reset();
             hold_goal_ = result->goal_pos;
             needs_plan_ = false;
@@ -133,7 +125,6 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             break;
 
         case PlanResult::Kind::FAILED:
-            // 保留 goal，清 path / hold，进入冷却重试。
             active_path_.reset();
             hold_goal_.reset();
             needs_plan_ = false;

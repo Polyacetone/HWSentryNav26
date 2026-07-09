@@ -85,17 +85,7 @@ struct ExecutorOutput {
     std::optional<std::vector<std::vector<Eigen::Vector2d>>> mppi_rollouts;
 };
 
-// 运动控制编排。持有运动层 FSM、MPC、台阶运行时、stuck-like 检测与恢复链。
-// 关键约束：
-// - 不拥有 goal / path 生命周期——只消费顶层每周期传入的 active_path / hold_goal。
-// - 顶层设 hold_goal 后底层才进入 FIXED；不在无 hold_goal 时自行决定进 FIXED。
-// - FIXED 不上报 goal_reached（持续保持模式）。
-// - MPC_LETHAL 是 one-shot 事实，由 node 传入下周期 RouteMonitor 统一转为 replan。
-// - executor_replan_event 是 one-shot，不允许作为常驻 flag 输出。
-// - DEAD 由外部根据 leg_mode+comp_stage 提前拦截，不进入 FSM update()。
-// - stuck-like 先执行 STUCK_REVERSE→HAZARD_RECOVERY，恢复后 one-shot replan event。
-// - FOLLOW_NO_PROGRESS / STEPPING_NO_PROGRESS / STUCK 均视为 stuck-like，统一走此恢复链，不走直接 replan。
-// - 底层的 executor_replan_event 与顶层的 hold_goal 互斥：当 hold_goal 存在时 executor_replan_event 被顶层吞掉，底层恢复后自然回 FIXED。
+// 运动控制编排：持有 FSM / MPC / 台阶运行时 / stuck 检测与恢复链，消费顶层每周期传入的 active_path 与 hold_goal。
 class PathExecutor {
 public:
     PathExecutor(

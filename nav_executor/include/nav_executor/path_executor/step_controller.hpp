@@ -22,14 +22,7 @@ struct ProfileBlendParams {
     double a_lat_step;
 };
 
-// 台阶运行时逻辑。
-//
-// 台阶几何标注（build_step_plan）已上移到 planner 的 step_annotator。此处只
-// 消费 AnnotatedPath.step_segments，负责运行时的：
-//   - 台阶段激活/持有跟踪（沿 u 推进）
-//   - 能力档位（profile）时间域融合
-//   - 台阶底盘模式激活判定
-//   - 台阶距离上报
+// 台阶运行时逻辑：消费 AnnotatedPath.step_segments，负责段跟踪、profile 时间域融合、台阶模式激活判定与距离上报。
 class StepController {
 public:
     StepController(
