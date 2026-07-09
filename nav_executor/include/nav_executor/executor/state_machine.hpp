@@ -57,7 +57,7 @@ struct FsmParams {
 
 // ═══════════════════════════ 运动状态 ═══════════════════════
 //
-// 这是暴露给任务层的 motion_state（§9.3）。可抢占集合与不可抢占集合见
+// 暴露给任务层的 motion_state。可抢占集合与不可抢占集合见
 // is_preemptible()。DEAD 由 PathExecutor 外部拦截，不参与 FSM 流转。
 
 enum class MotionState : uint8_t {
@@ -72,7 +72,7 @@ enum class MotionState : uint8_t {
     STEPPING = 8,         // 上下台阶（不可抢占）
 };
 
-// 可抢占集合（§9.4）
+// 可抢占集合
 [[nodiscard]] inline bool is_preemptible(const MotionState s) {
     switch (s) {
         case MotionState::FOLLOW:
@@ -118,10 +118,10 @@ struct FsmInput {
 struct FsmOutput {
     MotionState state = MotionState::IDLE;
 
-    // 路径终点到达事实（one-shot，仅路径阶段上报，§9.6）
+    // 路径终点到达事实（one-shot，仅路径阶段上报）
     bool goal_reached = false;
 
-    // 恢复链结束后请求顶层丢 path 并 replan（one-shot，§9.5）
+    // 恢复链结束后请求顶层丢 path 并 replan（one-shot）
     bool executor_replan_event = false;
 };
 

@@ -568,7 +568,7 @@ public:
         const T speed_grid = ceres::sqrt(speed_sq_grid + T(EPS));
         const T speed_m = T(resolution_) * speed_grid;
         // 单一速度门控: v²/(v²+thresh²)
-        // 低俗时曲率代价病态（小速度除零），该门控平滑抑制之。
+        // 低速时曲率代价病态（小速度除零），该门控平滑抑制之。
         // 当 speed_m = speed_gate_threshold 时代价半衰，物理含义清晰。
         const double safe_threshold = std::max(params_.speed_gate_threshold, 1e-6);
         const T gate = speed_m * speed_m / (speed_m * speed_m + T(safe_threshold * safe_threshold));

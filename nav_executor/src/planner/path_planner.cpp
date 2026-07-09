@@ -235,7 +235,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const Eigen::Vector2d goal_map = req.goal.position_map;
     const bool fixed = req.goal.fixed;
 
-    // ── 近距离短路判断（§6.4）：robot-to-goal ──
+    // ── 近距离短路判断：robot-to-goal ──
     if ((req.current_pos_map - goal_map).norm() < config_.goal_reached_distance) {
         result.kind = fixed ? PlanResult::Kind::USE_AS_FIXED_GOAL : PlanResult::Kind::COMPLETE_NO_PLAN_NEEDED;
         RCLCPP_INFO(
@@ -328,12 +328,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     path->goal_fixed = fixed;
     path->goal_id = req.goal.id;
 
-    // 台阶几何标注：基于 base（未掩码）方向场（§16）。
+    // 台阶几何标注：基于 base（未掩码）方向场。
     path->step_segments = step_annotator::build_step_plan(
         config_.step_detection, path->spline, *req.direction_map, logger_
     );
 
-    // 台阶掩码层：针对本条样条产出（Q3）。
+    // 台阶掩码层：针对本条样条产出。
     const auto layers = step_routing_mask_->compute(path->spline);
     path->step_cost_layer = layers.step_cost_layer;
     path->masked_direction_map = layers.masked_direction_map;

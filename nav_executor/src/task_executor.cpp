@@ -15,12 +15,12 @@ bool TaskExecutor::goals_equivalent(const Goal& a, const Goal& b) const {
         && (a.position_map - b.position_map).norm() < params_.goal_equivalence_distance;
 }
 
-// ═══════════════════ step 2：goal 接入（§5.2 / §5.3）═══════════
+// ═══════════════════ step 2：goal 接入 ═══════════════════════════
 
 void TaskExecutor::ingest_goal(const std::optional<Goal>& incoming, const bool preemptible) {
     if (!incoming) return;
 
-    // 等价 goal：直接忽略，不触发规划、不重置冷却、不改执行状态（§5.2）。
+    // 等价 goal：直接忽略，不触发规划、不重置冷却、不改执行状态。
     if (current_goal_ && goals_equivalent(*current_goal_, *incoming)) {
         return;
     }
@@ -30,11 +30,11 @@ void TaskExecutor::ingest_goal(const std::optional<Goal>& incoming, const bool p
     goal.id = next_goal_id_++;
     current_goal_ = goal;
 
-    hold_goal_.reset();       // §5.3：清空 hold_goal
-    needs_plan_ = true;       // §5.3：设 needs_plan（由统一调度提交）
-    in_cooldown_ = false;     // 新 goal 立即打断旧冷却（§11.2）
+    hold_goal_.reset();       // 新 goal 清空 hold_goal
+    needs_plan_ = true;       // 标记需要重新规划
+    in_cooldown_ = false;     // 新 goal 立即打断旧冷却
 
-    // §5.3：不清空旧 active_path_；可抢占态下旧路径继续执行，新路径成功后替换。
+    // 保留旧 active_path_ 不清理：可抢占态下旧路径继续执行，新路径成功后替换。
     // 不可抢占态：仅更新 goal，恢复到可抢占态后由统一调度自动提交。
     RCLCPP_INFO(
         logger_, "New goal #%lu (%.2f, %.2f) fixed=%d [%s]",
@@ -43,12 +43,12 @@ void TaskExecutor::ingest_goal(const std::optional<Goal>& incoming, const bool p
     );
 }
 
-// ═══════════════════ step 3：executor_replan_event（§9.5 / §15.7）═
+// ═══════════════════ step 3：executor_replan_event ════════════
 
 void TaskExecutor::ingest_executor_replan_event(const bool event) {
     if (!event) return;
 
-    // 无 goal 或存在 hold_goal → 直接吞掉（§9.5 互斥 / §15.7）。
+    // 无 goal 或存在 hold_goal → 直接吞掉。
     if (!current_goal_ || hold_goal_.has_value()) {
         RCLCPP_DEBUG(logger_, "executor_replan_event swallowed (no goal or holding)");
         return;
@@ -61,19 +61,19 @@ void TaskExecutor::ingest_executor_replan_event(const bool event) {
     RCLCPP_INFO(logger_, "executor_replan_event → drop path, replan current goal");
 }
 
-// ═══════════════════ step 4：接纳 planner 结果（§6.5）═══════════
+// ═══════════════════ step 4：接纳 planner 结果 ═════════════════
 
 void TaskExecutor::poll_planner_result(const bool preemptible) {
     auto result = planner_->try_take_result();
     if (!result) return;
 
-    // §6.5 接纳条件 1：goal_id 与 current_goal_.id 一致。
+    // 接纳条件 1：goal_id 与当前 goal id 一致。
     if (!current_goal_ || result->goal_id != current_goal_->id) {
         RCLCPP_INFO(logger_, "Discard plan result: goal changed (result goal_id mismatch)");
-        return; // 不消费、不清 needs_plan（§12 step 4）
+        return;
     }
 
-    // §6.5 接纳条件 2：返回时系统处于可抢占态。
+    // 接纳条件 2：返回时系统处于可抢占态。
     if (!preemptible) {
         RCLCPP_INFO(logger_, "Discard plan result: system became non-preemptible");
         return;
@@ -85,6 +85,10 @@ void TaskExecutor::poll_planner_result(const bool preemptible) {
             hold_goal_.reset();
             needs_plan_ = false;
             in_cooldown_ = false;
+            // 缓存调试路径（即便 enable_debug=false 也是空 vector，无开销）
+            last_debug_rough_path_ = std::move(result->debug_rough_path);
+            last_debug_warmup_path_ = std::move(result->debug_warmup_path);
+            last_debug_optimized_path_ = std::move(result->debug_optimized_path);
             RCLCPP_INFO(logger_, "Accepted new path for goal #%lu", static_cast<unsigned long>(result->goal_id));
             break;
 
@@ -108,7 +112,7 @@ void TaskExecutor::poll_planner_result(const bool preemptible) {
             break;
 
         case PlanResult::Kind::FAILED:
-            // §11：保留 goal，清 path / hold，进入冷却重试。
+            // 保留 goal，清 path / hold，进入冷却重试。
             active_path_.reset();
             hold_goal_.reset();
             needs_plan_ = false;
@@ -119,7 +123,7 @@ void TaskExecutor::poll_planner_result(const bool preemptible) {
     }
 }
 
-// ═══════════════════ step 5：统一规划调度（§5.5）═══════════════
+// ═══════════════════ step 5：统一规划调度 ═════════════════════
 
 bool TaskExecutor::maybe_submit_plan(
     const bool preemptible,
@@ -131,13 +135,13 @@ bool TaskExecutor::maybe_submit_plan(
         in_cooldown_ = false;
     }
 
-    // 提交条件（§5.5，全部满足）：
-    if (!current_goal_) return false;                                   // 1
-    if (!preemptible) return false;                                     // 2
-    const bool trigger = needs_plan_ || (!active_path_ && !hold_goal_); // 3
+    // 提交条件（全部满足）：
+    if (!current_goal_) return false;
+    if (!preemptible) return false;
+    const bool trigger = needs_plan_ || (!active_path_ && !hold_goal_);
     if (!trigger) return false;
-    if (planner_->busy()) return false;                                 // 4
-    if (in_cooldown_) return false;                                     // 5
+    if (planner_->busy()) return false;
+    if (in_cooldown_) return false;
 
     PlanRequest request;
     request.goal = *current_goal_;
@@ -153,7 +157,7 @@ bool TaskExecutor::maybe_submit_plan(
     return true;
 }
 
-// ═══════════════════ step 7：RouteMonitor 判 invalid（§8）═══════
+// ═══════════════════ step 7：RouteMonitor 判 invalid ══════════
 
 void TaskExecutor::on_route_invalid(const ReplanReason reason) {
     active_path_.reset();
@@ -162,23 +166,23 @@ void TaskExecutor::on_route_invalid(const ReplanReason reason) {
     RCLCPP_INFO(logger_, "Path invalid (%s) → drop path, replan", replan_reason_str(reason));
 }
 
-// ═══════════════════ step 9：goal_reached（§9.6 / §12 step 9）═══
+// ═══════════════════ step 9：goal_reached 处理 ════════════════
 
 void TaskExecutor::ingest_goal_reached(const bool goal_reached) {
     if (!goal_reached) return;
 
-    // §12 step 9 守卫：仅当 active_path.goal_id == current_goal.id 时才视为有效。
+    // 仅当 active_path.goal_id == current_goal.id 时才视为有效。
     const bool valid = active_path_ && current_goal_ && active_path_->goal_id == current_goal_->id;
 
     if (!valid) {
-        // 旧路径按旧任务语义自然完结（§5.4）：只清 path，不动 current_goal_。
+        // 旧路径按旧任务语义自然完结：只清 path，不动 current_goal_。
         active_path_.reset();
         RCLCPP_INFO(logger_, "goal_reached on stale path → drop path only, keep current goal");
         return;
     }
 
     if (current_goal_->fixed) {
-        // fixed goal：清 path，设置 hold_goal，进入持续保持（§10.2）。
+        // fixed goal：清 path，设置 hold_goal，进入持续保持。
         hold_goal_ = active_path_->goal_pos;
         active_path_.reset();
         needs_plan_ = false;
@@ -202,6 +206,9 @@ TaskDiagnostics TaskExecutor::diagnostics() const {
     d.planner_state = planner_->busy() ? PlannerState::PLANNING
         : (in_cooldown_ ? PlannerState::COOLDOWN : PlannerState::IDLE);
     d.last_replan_reason = last_replan_reason_;
+    d.debug_rough_path = last_debug_rough_path_;
+    d.debug_warmup_path = last_debug_warmup_path_;
+    d.debug_optimized_path = last_debug_optimized_path_;
     return d;
 }
 

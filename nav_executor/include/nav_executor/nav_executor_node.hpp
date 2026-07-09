@@ -115,7 +115,7 @@ private:
     std::vector<CostMap::ConstPtr> prediction_maps_;  // cost_maps[1..N]
     DirectionMap::ConstPtr global_direction_map_;
 
-    // ROS 回调缓存槽位（只写不做状态转移，§5.1 / §12）
+    // ROS 回调缓存槽位（只写不做状态转移）
     std::optional<Goal> pending_goal_;
 
     ChassisMotionState chassis_state_{};

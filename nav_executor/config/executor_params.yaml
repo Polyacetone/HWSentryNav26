@@ -1,0 +1,92 @@
+/**:
+  ros__parameters:
+    # ═══════════════════════════════════════════════
+    #  TaskExecutor — 任务层
+    # ═══════════════════════════════════════════════
+    task:
+      goal_equivalence_distance: 0.3 # goal-to-goal 去重阈值 (m)：新旧 goal fixed 相同且距离 < 此值则视为等价直接忽略
+      plan_cooldown: 1.0 # 同一 goal 规划失败后的重试冷却时间 (s)
+
+    # ═══════════════════════════════════════════════
+    #  Misc — 运动执行杂项参数
+    # ═══════════════════════════════════════════════
+    misc:
+      stop_threshold_dist: 0.5 # 到达路径终点判定距离 (m)
+      stop_threshold_u: 0.99 # 到达路径终点判定样条参数 u
+      remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]
+
+    # ═══════════════════════════════════════════════
+    #  Step — 台阶几何处理
+    # ═══════════════════════════════════════════════
+    step:
+      step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)
+
+    # ═══════════════════════════════════════════════
+    #  NoProgressGuard — 无进度检测
+    # ═══════════════════════════════════════════════
+    no_progress_guard:
+      follow:
+        landmark_spacing: 1.0 # follow 模式路标点沿弧长间隔 (m)
+        timeout: 6.0 # follow 模式无进度超时 (s)
+      stepping:
+        landmark_spacing: 0.3 # stepping 模式路标点沿弧长间隔 (m)
+        timeout: 6.0 # stepping 模式无进度超时 (s)
+
+    # ═══════════════════════════════════════════════
+    #  StateMachine — FSM 状态切换阈值
+    # ═══════════════════════════════════════════════
+    state_machine:
+      follow_to_spin_vel_max: 0.3 # →SPIN 退出判定：|v_cmd| < 该值 (m/s)
+      spin_to_follow_omega_max: 0.8 # →FOLLOW 退出判定：|omega_cmd| < 该值 (rad/s)
+      to_idle_vel_max: 0.3 # →IDLE/FIXED 退出判定：|v_cmd| < 该值 (m/s)
+      to_idle_omega_max: 0.8 # →IDLE/FIXED 退出判定：|omega_cmd| < 该值 (rad/s)
+      stopping_timeout: 1.0 # STOPPING 超时 (s)，超时后强制切出
+
+    # ═══════════════════════════════════════════════
+    #  Recovery — 危险恢复与脱困
+    # ═══════════════════════════════════════════════
+    recovery:
+      hazard:
+        cost_threshold: 30.0 # 当前位置代价 >= 该值视为危险（需恢复脱困）
+        step_norm_threshold: 0.06 # 当前位置方向场模长 >= 该值视为危险
+      safe:
+        cost_threshold: 5.0 # 候选恢复点代价 < 该值视为安全
+        step_norm_threshold: 0.01 # 候选恢复点方向场模长 < 该值视为安全
+      search:
+        recovery_cost_threshold: 20.0 # 搜索候选点时允许的最大代价值
+        radius_min: 0.5 # 搜索半径下限 (m)
+        radius_max: 1.5 # 搜索半径上限 (m)
+        radius_samples: 5 # 半径方向采样数
+        angle_samples: 36 # 角度方向采样数
+        path_integral_resolution: 0.05 # 路径积分采样分辨率 (m)
+        path_integral_cost_weight: 1.0 # 路径积分中代价项的权重
+        path_integral_step_weight: 1.0 # 路径积分中台阶模长项的权重
+        step_ascent_penalty_weight: 5.0 # 沿台阶上升方向移动的惩罚权重
+        step_ascent_penalty_norm_threshold: 0.3 # 台阶上升惩罚的最小方向场模长
+        step_ascent_penalty_dot_threshold: 0.2 # 台阶上升惩罚的最小方向点积
+        goal_timeout: 4.0 # 恢复目标更新超时 (s)
+      exit:
+        safe_hold_time: 1.0 # 到达安全区域后需持续稳定的时间 (s)
+      stuck:
+        cmd_vel_threshold: 0.4 # 速度指令低于此值不触发卡住检测 (m/s)
+        timeout: 2.0 # 卡住检测超时 (s)
+        max_displacement: 0.2 # 超时时间内允许的最大位移 (m)
+        reverse_speed: 0.8 # 倒退脱困速度 (m/s)
+        reverse_displacement: 1.0 # 倒退目标位移 (m)
+        reverse_timeout: 3.0 # 倒退脱困超时 (s)
+
+    # ═══════════════════════════════════════════════
+    #  RouteMonitor — 路径有效性监控
+    # ═══════════════════════════════════════════════
+    route_monitor:
+      proj_guard:
+        dist_max: 2.0 # 当前位置到样条投影点距离 > 此值则触发投影保护 (m)
+        cost_max: 240.0 # 投影连线最大障碍物代价 > 此值则触发投影保护 (0~255)
+        cost_samples: 20 # 连线代价估计采样数
+      step_block:
+        enable: true # 是否启用"台阶被动态障碍物堵住"检测
+        lookahead_distance: 5.0 # 沿路径向前检查距离 (m)
+        sample_resolution: 0.2 # 非预测地图模式路径采样分辨率 (m)
+        step_norm_threshold: 0.9 # 方向场模长 >= 该值视为路径经过台阶
+        obstacle_cost_threshold: 100.0 # 动态障碍物代价 >= 该值视为被占据
+        predicted_obstacle_ratio_threshold: 0.8 # 预测模式下台阶样本被占据比例超此值则触发

@@ -84,7 +84,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     const bool entered_controllable = chassis_controllable && !last_cycle_chassis_controllable_;
     last_cycle_chassis_controllable_ = chassis_controllable;
 
-    // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM（§9.3 DEAD）。
+    // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM。
     if (chassis_dead) {
         ExecutorOutput out;
         out.velocity = 0.0;

@@ -19,7 +19,7 @@ struct StepDetectionParams {
     double release_distance;
 };
 
-// 台阶几何标注器（§16：build_step_plan 从 StepController 上移到 planner）。
+// 台阶几何标注器（build_step_plan 从 StepController 上移到 planner）。
 //
 // 在规划期基于方向场对样条做一次台阶扫描，产出不可变的 StepPlanSegment 列表，
 // 装入 AnnotatedPath.step_segments。运行时不再重建。

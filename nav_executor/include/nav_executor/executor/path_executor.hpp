@@ -26,7 +26,7 @@ struct PathExecutorParams {
     double step_dist_offset;
 };
 
-// 每周期由 nav_executor_node 组装、传入 PathExecutor（§4.2 三输入 + 传感快照 + 地图）。
+// 每周期由 nav_executor_node 组装、传入 PathExecutor（顶层输入 + 传感快照 + 地图）。
 struct ExecutorInput {
     // 顶层暴露的三输入
     const AnnotatedPath* active_path = nullptr;
@@ -56,7 +56,6 @@ struct ExecutorInput {
     std::chrono::steady_clock::time_point stamp;
 };
 
-// PathExecutor 每周期输出。
 struct ExecutorOutput {
     double velocity = 0.0;
     double omega = 0.0;
@@ -66,11 +65,11 @@ struct ExecutorOutput {
 
     MotionState motion_state = MotionState::IDLE;
 
-    // one-shot 事实/事件（§9.2）
+    // one-shot 事实/事件
     bool goal_reached = false;
     bool executor_replan_event = false;
 
-    // one-shot：follow rollout 命中致命障碍物，path invalid（§7.1 MPC_LETHAL）。
+    // one-shot：follow rollout 命中致命障碍物，path invalid（MPC_LETHAL）。
     // 由 node 传入下一周期 RouteMonitorInput 统一转为 replan。
     bool mpc_lethal = false;
 

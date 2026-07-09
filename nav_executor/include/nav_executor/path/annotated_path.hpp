@@ -28,7 +28,7 @@ struct StepPlanSegment {
     uint8_t terrain_label = 0;
 };
 
-// 不可变路径包（§3.2）。
+// 不可变路径包。
 //
 // 一次规划任务产出一个完整 AnnotatedPath：样条、终点元数据、goal_id、
 // 台阶几何标注、以及针对本条样条产出的台阶掩码层。PathExecutor 不再重建
@@ -46,12 +46,12 @@ struct AnnotatedPath {
     Eigen::Vector2d goal_pos = Eigen::Vector2d::Zero();
     bool goal_fixed = false;
 
-    // 对应 PlanRequest 所携带的 goal id，用于 §6.5 接纳验证和 §12 step 9 守卫。
+    // 对应 PlanRequest 所携带的 goal id，用于接纳验证和 goal_reached 守卫。
     uint64_t goal_id = 0;
 
     std::vector<StepPlanSegment> step_segments;
 
-    // 针对本条样条产出的台阶掩码层（§3.3 说明 / Q3）。
+    // 针对本条样条产出的台阶掩码层。
     CostMap::ConstPtr step_cost_layer;
     DirectionMap::ConstPtr masked_direction_map;
 };

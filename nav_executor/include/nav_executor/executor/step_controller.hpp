@@ -22,7 +22,7 @@ struct ProfileBlendParams {
     double a_lat_step;
 };
 
-// 台阶运行时逻辑（§2.2 executor/step_controller）。
+// 台阶运行时逻辑。
 //
 // 台阶几何标注（build_step_plan）已上移到 planner 的 step_annotator。此处只
 // 消费 AnnotatedPath.step_segments，负责运行时的：
@@ -31,7 +31,7 @@ struct ProfileBlendParams {
 //   - 台阶底盘模式激活判定
 //   - 台阶距离上报
 //
-// 不再持有/锁存 path（§16：路径锁存机制移除；不可抢占态直接禁止规划）。
+// 不再持有/锁存 path（锁存机制已移除；不可抢占态直接禁止规划）。
 class StepController {
 public:
     StepController(

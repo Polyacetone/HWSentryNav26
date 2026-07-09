@@ -25,8 +25,8 @@ struct StepBlockReplanParams {
     double predicted_obstacle_ratio_threshold;
 };
 
-// RouteMonitorReport.reason（§3.5）。RouteMonitor 自身仅产出前三种；
-// EXECUTOR_REPLAN_EVENT 由 node 在 §12 step 3 处理，此处仅用于诊断记录。
+// RouteMonitor 输出的重规划原因。自身仅产出前三种；
+// EXECUTOR_REPLAN_EVENT 由 node 在 step 3 处理，此处仅用于诊断记录。
 enum class ReplanReason : uint8_t {
     NONE = 0,
     PROJECTION_GUARD = 1,
@@ -37,7 +37,7 @@ enum class ReplanReason : uint8_t {
 
 const char* replan_reason_str(ReplanReason reason);
 
-// RouteMonitor 输入（§8.3）。由 nav_executor_node 每周期组装后传入。
+// RouteMonitor 输入，由 nav_executor_node 每周期组装后传入。
 struct RouteMonitorInput {
     const AnnotatedPath* active_path = nullptr;
     double current_u = 0.0;
@@ -63,7 +63,7 @@ struct RouteMonitorReport {
     ReplanReason reason = ReplanReason::NONE;
 };
 
-// 顶层 FOLLOW 阶段 path monitoring（§8）。无状态纯函数。
+// 顶层 FOLLOW 阶段 path monitoring。无状态纯函数。
 // 只回答："当前 active_path 还值不值得继续执行？"
 RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Logger logger);
 

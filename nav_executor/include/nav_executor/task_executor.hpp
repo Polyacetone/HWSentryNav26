@@ -13,17 +13,15 @@
 namespace nav_executor {
 
 struct TaskExecutorParams {
-    double goal_equivalence_distance; // goal-to-goal 去重阈值（§5.2）
+    double goal_equivalence_distance; // goal-to-goal 去重阈值 (m)
     double plan_cooldown;             // 同一 goal 失败重试冷却 (s)
 };
 
-// 顶层每周期向底层暴露的三输入（§4.2）。
+// 顶层每周期向底层暴露的输入。
 struct ExecutorInterface {
     const AnnotatedPath* active_path = nullptr;
     std::optional<Eigen::Vector2d> hold_goal;
 };
-
-// 诊断快照（§13）。
 enum class PlannerState : uint8_t { IDLE, PLANNING, COOLDOWN };
 
 struct TaskDiagnostics {
@@ -32,10 +30,15 @@ struct TaskDiagnostics {
     bool has_hold_goal = false;
     PlannerState planner_state = PlannerState::IDLE;
     ReplanReason last_replan_reason = ReplanReason::NONE;
+
+    // 调试路径（planner 各阶段），仅在 enable_debug 时非空
+    std::vector<Eigen::Vector2d> debug_rough_path;
+    std::vector<Eigen::Vector2d> debug_warmup_path;
+    std::vector<Eigen::Vector2d> debug_optimized_path;
 };
 
 // 任务层：拥有 goal 生命周期、planner 调度、active_path/hold_goal 输出、
-// FOLLOW 阶段 path 失效监视（§2.1）。
+// FOLLOW 阶段 path 失效监视。
 class TaskExecutor {
 public:
     TaskExecutor(
@@ -44,7 +47,7 @@ public:
         rclcpp::Logger logger
     );
 
-    // ── §12 主循环步骤，由 node 顺序调用 ──
+    // ── 主循环步骤，由 node 顺序调用 ──
 
     // step 2：处理新 goal 输入（含等价判定），更新 current_goal / 清 hold_goal / 设 needs_plan。
     void ingest_goal(const std::optional<Goal>& incoming, bool preemptible);
@@ -71,7 +74,7 @@ public:
     // step 7：RouteMonitor 判 path invalid → 清 active_path、设 needs_plan。
     void on_route_invalid(ReplanReason reason);
 
-    // step 9：消费 goal_reached（§9.6 + §12 step 9 守卫）。
+    // step 9：消费 goal_reached。
     void ingest_goal_reached(bool goal_reached);
 
     // ── 顶层暴露给底层的接口 ──
@@ -104,6 +107,11 @@ private:
 
     uint64_t next_goal_id_ = 1;
     ReplanReason last_replan_reason_ = ReplanReason::NONE;
+
+    // 缓存最新一次成功规划的调试路径（供 node 发布用）
+    std::vector<Eigen::Vector2d> last_debug_rough_path_;
+    std::vector<Eigen::Vector2d> last_debug_warmup_path_;
+    std::vector<Eigen::Vector2d> last_debug_optimized_path_;
 };
 
 } // namespace nav_executor

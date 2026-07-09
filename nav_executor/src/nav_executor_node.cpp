@@ -1,15 +1,10 @@
 #include <nav_executor/nav_executor_node.hpp>
-
-#include <chrono>
-#include <cmath>
+#include <nav_executor/planner/step_annotator.hpp>
 
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/core.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-
 #include <common_utils/convert.hpp>
-
-#include <nav_executor/planner/step_annotator.hpp>
 
 namespace nav_executor {
 
@@ -136,7 +131,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
             Goal g;
             g.position_map = Eigen::Vector2d(msg->x, msg->y);
             g.fixed = msg->fixed;
-            pending_goal_ = g; // 只缓存，不做状态转移（§5.1）
+            pending_goal_ = g; // 只缓存，不做状态转移
         }
     );
 
@@ -221,7 +216,7 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
         prediction_maps_.push_back(to_cost_map(msg->maps[i]));
     }
 
-    // planner 用：global + 时域融合动态（迁自旧 planner local_cost_maps_callback）
+    // planner 用：global + 时域融合动态
     CostMap::ConstPtr fused_dynamic;
     if (prediction_horizon_seconds_ <= 0.0 || msg->maps.size() <= 1 || msg->prediction_dt <= 0.0) {
         fused_dynamic = current_cost_map_;
@@ -261,7 +256,7 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
     }
 }
 
-// ═══════════════════════ 主控制循环（§12）══════════════════════
+// ═══════════════════════ 主控制循环 ════════════════════════════
 
 void NavExecutorNode::control_tick() {
     if (!global_cost_map_ || !global_direction_map_ || !step_mask_ready_) return;
@@ -274,7 +269,7 @@ void NavExecutorNode::control_tick() {
     const AnnotatedPath* active_path = task_->active_path();
 
     // ── step 1：合并代价地图 ──
-    // active_path 携带针对自身样条的 step_cost_layer / masked_direction_map（§3.3 / Q3）。
+    // active_path 携带针对自身样条的 step_cost_layer / masked_direction_map。
     const CostMap* step_cost_layer = active_path ? active_path->step_cost_layer.get() : nullptr;
     const DirectionMap* masked_direction_map = active_path && active_path->masked_direction_map
         ? active_path->masked_direction_map.get() : global_direction_map_.get();
@@ -305,9 +300,8 @@ void NavExecutorNode::control_tick() {
     pending_goal_.reset();
 
     // ── step 3：消费 executor_replan_event（上周期底层 one-shot）──
-    // （在 step 4 之前处理，见 §12 顺序）——此处用上一周期缓存的事件。
     // 注：executor 事件与本周期底层输出解耦，故在 step 8 后消费下一轮；
-    // 为遵循 §12 顺序，我们在 tick 末尾把事件传入 task_。见下方 step 8/9。
+    // 我们在 tick 末尾把事件传入 task_（见下方 step 8/9）。
 
     // ── step 4：轮询 planner 结果 ──
     task_->poll_planner_result(preemptible);
@@ -455,6 +449,12 @@ void NavExecutorNode::publish_diagnostics(const TaskDiagnostics& diag, const Mot
     msg.planner_state = static_cast<uint8_t>(diag.planner_state);
     msg.last_replan_reason = static_cast<uint8_t>(diag.last_replan_reason);
     state_pub_->publish(msg);
+
+    if (enable_debug_) {
+        if (!diag.debug_rough_path.empty()) debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
+        if (!diag.debug_warmup_path.empty()) debug_warmup_path_pub_->publish(path_to_nav_msg(diag.debug_warmup_path));
+        if (!diag.debug_optimized_path.empty()) debug_optimized_path_pub_->publish(path_to_nav_msg(diag.debug_optimized_path));
+    }
 }
 
 nav_msgs::msg::Path NavExecutorNode::path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const {

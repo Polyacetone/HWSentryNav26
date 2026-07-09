@@ -19,14 +19,14 @@
 
 namespace nav_executor {
 
-// ── 任务目标值对象（§3.1）──
+// ── 任务目标值对象 ──
 struct Goal {
     uint64_t id = 0;
     Eigen::Vector2d position_map = Eigen::Vector2d::Zero();
     bool fixed = false;
 };
 
-// ── PlanRequest（§3.3）：控制线程提交给规划 worker 的完整任务包 ──
+// ── PlanRequest：控制线程提交给规划 worker 的完整任务包 ──
 struct PlanRequest {
     Goal goal;
 
@@ -41,7 +41,7 @@ struct PlanRequest {
     DirectionMap::ConstPtr direction_map; // 方向场（含地形标签）
 };
 
-// ── PlanResult（§3.3）──
+// ── PlanResult ──
 struct PlanResult {
     enum class Kind : uint8_t {
         PATH = 0,                 // 得到新可执行路径
@@ -88,7 +88,7 @@ struct PlannerConfig {
     bool enable_debug;
 };
 
-// 独立线程规划 worker（§6）。
+// 独立线程规划 worker。
 //
 // 控制线程通过 submit()（latest-wins）提交请求，try_take_result() 非阻塞轮询
 // 结果。worker 线程被 cv 唤醒，读取快照做规划，产出不可变 AnnotatedPath。
@@ -123,7 +123,7 @@ private:
     void worker_loop();
     PlanResult plan(const PlanRequest& request) const;
 
-    // ── 规划期几何工具（迁自旧 PathPlannerNode）──
+    // ── 规划期几何工具 ──
     [[nodiscard]] bool is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& map_pt) const;
     [[nodiscard]] Eigen::Vector2d predict_start_map(const PlanRequest& req) const;
     [[nodiscard]] Eigen::Vector2d adjust_reachable_start_on_segment(const PlanRequest& req, const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const;

@@ -22,7 +22,7 @@ const char* replan_reason_str(const ReplanReason reason) {
 
 namespace {
 
-// ── projection guard（迁自旧 MainController::check_follow_projection_guard）──
+// ── projection guard ──
 bool check_projection_guard(const RouteMonitorInput& in, const SplinePath& path, rclcpp::Logger logger) {
     const Eigen::Vector2d pos_map = in.chassis_pos_map;
     const Eigen::Vector2d proj_map = path.position(in.current_u);
@@ -51,7 +51,7 @@ bool check_projection_guard(const RouteMonitorInput& in, const SplinePath& path,
     return false;
 }
 
-// ── step blocked（迁自旧 StepController::check_block_replan）──
+// ── step blocked ──
 struct BlockSampleStats {
     int sample_count = 0;
     int step_sample_count = 0;

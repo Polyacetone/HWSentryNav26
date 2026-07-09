@@ -1,195 +1,25 @@
 /**:
   ros__parameters:
-    # ══════════════════ 话题 ══════════════════
-    goal_sub_topic: "/decision/nav_goal"                                  # 决策目标点
-    global_direction_map_sub_topic: "/map_server/global_direction_map"    # 全局台阶方向场（8UC3: ch0=方向角, ch1=模长, ch2=地形标签）
-    global_cost_map_sub_topic: "/map_server/global_cost_map"              # 全局代价地图（OccupancyGrid）
-    local_cost_maps_sub_topic: "/map_server/local_cost_maps"              # 局部代价地图序列（maps[0]=当前帧，maps[1..N]=预测帧）
-    chassis_status_sub_topic: "/serial_bridge/chassis_status"             # 底盘状态（速度、腿模式、电容能量等）
-    comp_stage_sub_topic: "/serial_bridge/comp_stage"                     # 比赛阶段
-    spin_cmd_sub_topic: "/decision/spin_cmd"                              # 小陀螺指令
-    chassis_cmd_pub_topic: "/nav_executor/chassis_cmd"                    # 底盘控制指令
-    state_pub_topic: "/nav_executor/state"                                # 执行器诊断状态
+    # ═══════════════════════════════════════════════
+    #  Topic Names
+    # ═══════════════════════════════════════════════
+    goal_sub_topic: "/decision/nav_goal" # 决策目标点话题
+    global_direction_map_sub_topic: "/map_server/global_direction_map" # 全局台阶方向场（8UC3: ch0=方向角, ch1=模长, ch2=地形标签）
+    global_cost_map_sub_topic: "/map_server/global_cost_map" # 全局代价地图（OccupancyGrid）
+    local_cost_maps_sub_topic: "/map_server/local_cost_maps" # 局部代价地图序列（maps[0]=当前帧，maps[1..N]=预测帧）
+    chassis_status_sub_topic: "/serial_bridge/chassis_status" # 底盘状态（速度、腿模式、电容能量等）
+    comp_stage_sub_topic: "/serial_bridge/comp_stage" # 比赛阶段
+    spin_cmd_sub_topic: "/decision/spin_cmd" # 小陀螺指令
+    chassis_cmd_pub_topic: "/nav_executor/chassis_cmd" # 底盘控制指令发布话题
+    state_pub_topic: "/nav_executor/state" # 执行器诊断状态发布话题
 
     debug:
       enable: true
-      predicted_path_pub_topic: "/nav_executor/debug/predicted_path"      # MPC 预测路径
-      optimized_path_pub_topic: "/nav_executor/debug/optimized_path"      # 规划优化后路径
-      rough_path_pub_topic: "/nav_executor/debug/rough_path"              # A* 原始路径
-      warmup_path_pub_topic: "/nav_executor/debug/warmup_path"            # Warmup 后路径
-      mppi_rollouts_pub_topic: "/nav_executor/debug/mppi_rollouts"        # MPPI rollout（MarkerArray）
-      v_pred_pub_topic: "/nav_executor/debug/v_pred"                      # MPC 预测线速度
-      w_pred_pub_topic: "/nav_executor/debug/w_pred"                      # MPC 预测角速度
-      final_cost_map_pub_topic: "/nav_executor/debug/final_cost_map"      # 最终融合代价地图
-
-    # ══════════════════ 杂项 ══════════════════
-    misc:
-      stop_threshold_dist: 0.5              # 到达路径终点判定距离 (m)
-      stop_threshold_u: 0.99               # 到达路径终点判定样条参数 u
-      remaining_energy_filter_alpha: 0.5   # 电容剩余电量一阶惯性滤波系数 (0,1]
-
-    # ══════════════════ 任务层（§5 / §11）══════════════════
-    task:
-      goal_equivalence_distance: 0.3       # goal-to-goal 去重阈值 (m)：新旧 goal fixed 相同且距离 < 此值则视为等价直接忽略（§5.2）
-      plan_cooldown: 1.0                   # 同一 goal 规划失败后的重试冷却 (s)，仅对失败重试生效（§11.2）
-
-    # ══════════════════ 代价地图预测融合（planner 输入）══════════════════
-    prediction:
-      horizon_seconds: 2.0                 # 预测时间窗口 (0=仅使用当前帧)
-      weight_decay: 1.0                    # 线性衰减因子 [0,1]
-
-    # ══════════════════ 台阶掩码（AnnotatedPath 产出）══════════════════
-    step_mask:
-      path_align_dot_threshold: 0.6        # 路径切向与台阶方向点积 >= 该值则认为路径经过台阶
-      full_effect_radius: 0.6              # 掩码满强度半径 (m)
-      cutoff_radius: 1.0                   # 掩码截止半径 (m)
-      length_num_samples: 100              # 路径弧长估计采样数
-
-    # ══════════════════ 顶层 RouteMonitor（§8）══════════════════
-    route_monitor:
-      proj_guard:
-        dist_max: 2.0                      # 当前位置到样条投影点距离 > 此值则 PROJECTION_GUARD (m)
-        cost_max: 240.0                    # 投影连线最大障碍物代价 > 此值则 PROJECTION_GUARD (0~255)
-        cost_samples: 20                   # 连线代价估计采样数
-      step_block:
-        enable: true                       # 是否启用"台阶被动态障碍物堵住" -> STEP_BLOCKED
-        lookahead_distance: 5.0            # 沿路径向前检查距离 (m)
-        sample_resolution: 0.2             # 非预测地图模式路径采样分辨率 (m)
-        step_norm_threshold: 0.9           # 方向场模长 >= 该值视为路径经过台阶
-        obstacle_cost_threshold: 100.0     # 动态障碍物代价 >= 该值视为被占据
-        predicted_obstacle_ratio_threshold: 0.8  # 预测模式下台阶样本被占据比例超此阈值则触发
-
-    # ══════════════════ 无进度检测（stuck-like）══════════════════
-    no_progress_guard:
-      follow:
-        landmark_spacing: 1.0              # 路标点沿弧长间隔 (m)
-        timeout: 6.0                       # 无进度超时 (s)
-      stepping:
-        landmark_spacing: 0.3
-        timeout: 6.0
-
-    # ══════════════════ 运动层 FSM（§9.3 已删除 WAIT_REPLAN）══════════════════
-    state_machine:
-      follow_to_spin_vel_max: 0.3          # →SPIN 退出判定：|v_cmd| < 该值 (m/s)
-      spin_to_follow_omega_max: 0.8        # →FOLLOW 退出判定：|omega_cmd| < 该值 (rad/s)
-      to_idle_vel_max: 0.3                 # →IDLE/FIXED 退出判定：|v_cmd| < 该值 (m/s)
-      to_idle_omega_max: 0.8               # →IDLE/FIXED 退出判定：|omega_cmd| < 该值 (rad/s)
-      stopping_timeout: 1.0                # STOPPING 超时 (s)
-
-    # ══════════════════ 台阶运行时（executor）══════════════════
-    step:
-      step_dist_offset: 0.1                # 补偿代价地图膨胀的台阶距离偏移量 (m)
-      detection:                           # 台阶几何标注参数（规划期 step_annotator 使用）
-        detect_norm_threshold: 0.9         # 方向场模长阈值，用于探测台阶 enter/exit
-        detect_dot_threshold: 0.5          # 路径切向与台阶方向点积阈值；>阈值为上台阶，<-阈值为下台阶
-        path_sample_resolution: 0.05       # 沿路径采样分辨率 (m)
-        prepare_distance: 4.0              # 控制约束渐变起点 (m)
-        active_distance: 2.0               # 控制约束渐变终点 (m)
-        release_distance: 0.3              # 退出 STEPPING 的额外推进距离 (m)
-
-    # ══════════════════ 危险恢复 / 卡住脱困（§9.5）══════════════════
-    recovery:
-      hazard:
-        cost_threshold: 30.0
-        step_norm_threshold: 0.06
-      safe:
-        cost_threshold: 5.0
-        step_norm_threshold: 0.01
-      search:
-        recovery_cost_threshold: 20.0
-        radius_min: 0.5
-        radius_max: 1.5
-        radius_samples: 5
-        angle_samples: 36
-        path_integral_resolution: 0.05
-        path_integral_cost_weight: 1.0
-        path_integral_step_weight: 1.0
-        step_ascent_penalty_weight: 5.0
-        step_ascent_penalty_norm_threshold: 0.3
-        step_ascent_penalty_dot_threshold: 0.2
-        goal_timeout: 4.0
-      exit:
-        safe_hold_time: 1.0
-      stuck:
-        cmd_vel_threshold: 0.4
-        timeout: 2.0
-        max_displacement: 0.2
-        reverse_speed: 0.8
-        reverse_displacement: 1.0
-        reverse_timeout: 3.0
-
-    # ══════════════════ 规划器（worker）══════════════════
-    traversability:
-      occupied_threshold: 50               # 格子代价 > 该值则不可通行 (0~255)
-      on_step_threshold: 0.1               # 方向场模长 > 该值则在台阶上不可达
-      terrain_rules:                       # 每类有方向地形的通行规则
-        slope: {forward: true, backward: true}
-        step_l1: {forward: true, backward: true}
-        step_l2: {forward: true, backward: true}
-        fly_slope: {forward: true, backward: false}
-        step_high: {forward: true, backward: false}
-
-    nudge:
-      max_distance: 1.0                    # merged 上搜 free 格子的最大 BFS 半径 (m)
-
-    start_prediction:
-      enable: true
-      max_accel: 2.0                       # 最大减速度 (m/s²)
-      planning_delay: 0.2                  # A* + 样条期望耗时 (s)
-      min_speed: 0.3                       # 低于该速度不做起点前推 (m/s)
-      collision_check_step: 0.05           # 预测起点直线可达性采样间隔 (m)
-
-    planner:
-      goal_reached_distance: 0.5           # robot-to-goal 近距离短路阈值 (m)：< 此值则 COMPLETE/USE_AS_FIXED（§6.4）
-      skip_distance: 0.5                   # 起终点距离 < 此值时跳过 A* 直接构造样条初值 (m)
-      a_star:
-        step_alignment_weight: 6.0
-        obstacle_weight: 4.0
-        step_proximity_weight: 0.6
-        step_mode_dot_threshold: 0.3
-        downsampled_waypoint_max_interval: 5
-        feasible_threshold: 100
-
-    path_optimizer:
-      step_norm_threshold: 0.01
-      step_norm_transition: 0.05
-      step_detection_samples_per_meter: 10.0
-      warmup:
-        samples_per_meter: 10.0
-        max_iterations: 60
-        max_curvature: 1.2
-        obstacle_weight: 2.0
-        direction_weight: 3.0
-        step_weight: 0.25
-        start_end_weight: 30.0
-        smoothness_weight: 0.005
-        length_penalty_weight: 0.03
-        curvature:
-          base_weight: 0.1
-          base_beta: 4.0
-          limit_weight: 10.0
-          limit_beta: 16.0
-          min_speed_epsilon: 0.05
-          speed_gate_threshold: 0.15
-      main:
-        samples_per_meter: 10.0
-        max_iterations: 60
-        max_refinement_iterations: 1
-        near_max_curvature: 0.2
-        far_max_curvature: 1.2
-        step_extension_distance: 1.0
-        step_transition_distance: 1.0
-        interval_iou_threshold: 0.85
-        obstacle_weight: 2.0
-        direction_weight: 10.0
-        step_weight: 0.25
-        start_end_weight: 30.0
-        smoothness_weight: 0.005
-        length_penalty_weight: 0.03
-        curvature:
-          base_weight: 0.1
-          base_beta: 4.0
-          limit_weight: 15.0
-          limit_beta: 16.0
-          min_speed_epsilon: 0.05
-          speed_gate_threshold: 0.15
+      predicted_path_pub_topic: "/nav_executor/debug/predicted_path" # MPC 预测路径
+      optimized_path_pub_topic: "/nav_executor/debug/optimized_path" # 规划优化后路径
+      rough_path_pub_topic: "/nav_executor/debug/rough_path" # A* 原始路径
+      warmup_path_pub_topic: "/nav_executor/debug/warmup_path" # Warmup 后路径
+      mppi_rollouts_pub_topic: "/nav_executor/debug/mppi_rollouts" # MPPI rollout 可视化（MarkerArray）
+      v_pred_pub_topic: "/nav_executor/debug/v_pred" # MPC 预测线速度
+      w_pred_pub_topic: "/nav_executor/debug/w_pred" # MPC 预测角速度
+      final_cost_map_pub_topic: "/nav_executor/debug/final_cost_map" # 最终融合代价地图
