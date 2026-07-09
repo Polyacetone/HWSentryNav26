@@ -180,6 +180,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     fsm_input.command_blocked = command_blocked;
     fsm_input.spin_requested = input.intent.spin_requested;
     fsm_input.spin_high_priority = input.intent.spin_high_priority;
+    last_spin_high_priority_ = input.intent.spin_high_priority;
     fsm_input.no_progress_detected = no_progress_detected;
 
     const bool hazard_allowed = (prev_state == MotionState::IDLE) || (prev_state == MotionState::SPIN)

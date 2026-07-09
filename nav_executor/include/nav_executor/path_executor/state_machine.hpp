@@ -56,7 +56,7 @@ struct FsmParams {
 };
 
 // ═══════════════════════════ 运动状态 ═══════════════════════
-// 暴露给任务层的 motion_state。可抢占集合与不可抢占集合见 is_preemptible()。
+// 暴露给任务层的 motion_state。可抢占性判定在 PathExecutor::preemptible() 中统一处理。
 // 关键约束：
 // - DEAD 由 PathExecutor 外部拦截，不参与 FSM 流转（根据 leg_mode + comp_stage 提前短路，不进入 update()）。
 // - FIXED 仅在 hold_goal 存在时进入（顶层设 hold_goal 后底层推导产生），不可在等待规划结果时进入。
@@ -76,19 +76,6 @@ enum class MotionState : uint8_t {
     FIXED = 7,            // 固定保持目标点
     STEPPING = 8,         // 上下台阶（不可抢占）
 };
-
-// 可抢占集合
-[[nodiscard]] inline bool is_preemptible(const MotionState s) {
-    switch (s) {
-        case MotionState::FOLLOW:
-        case MotionState::IDLE:
-        case MotionState::STOPPING:
-        case MotionState::FIXED:
-            return true;
-        default:
-            return false;
-    }
-}
 
 // ═══════════════════════════ 输入 / 输出 ═══════════════════
 

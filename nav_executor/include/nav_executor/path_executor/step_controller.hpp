@@ -30,8 +30,6 @@ struct ProfileBlendParams {
 //   - 能力档位（profile）时间域融合
 //   - 台阶底盘模式激活判定
 //   - 台阶距离上报
-//
-// 不再持有/锁存 path（锁存机制已移除；不可抢占态直接禁止规划）。
 class StepController {
 public:
     StepController(

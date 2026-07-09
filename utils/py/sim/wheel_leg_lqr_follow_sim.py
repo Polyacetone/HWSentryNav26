@@ -170,9 +170,9 @@ class SimConfig:
     STEP_RELEASE_NORM_THRESHOLD: float = 0.42  # 离开台阶区域的判定阈值（略小于进入阈值）
 
     # --- 小陀螺漂移 ---
-    SPIN_DRIFT_SPEED_MPS: float = 0.02  # 小陀螺位置漂移速度（m/s）
+    SPIN_DRIFT_SPEED_MPS: float = 0.05  # 小陀螺位置漂移速度（m/s）
     SPIN_DRIFT_DIR_X: float = 1.0
-    SPIN_DRIFT_DIR_Y: float = 0.0
+    SPIN_DRIFT_DIR_Y: float = 1.0
 
     # --- 功率/能量仿真 ---
     RFR_PWR_LIMIT: float = 80.0           # 裁判系统最大取电功率 (W)

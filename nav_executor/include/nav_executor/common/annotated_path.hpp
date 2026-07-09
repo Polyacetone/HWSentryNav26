@@ -12,8 +12,7 @@
 
 namespace nav_executor {
 
-// 台阶段几何标注。由 planner 的 step_annotator 在规划期一次性产出，
-// 之后作为 AnnotatedPath 的不可变部分被 PathExecutor 运行时消费。
+// 台阶段几何标注。由 planner 的 step_annotator 在规划期一次性产出，之后作为 AnnotatedPath 的不可变部分被 PathExecutor 运行时消费。
 struct StepPlanSegment {
     double prepare_u = 0.0;
     double active_u = 0.0;
@@ -28,14 +27,9 @@ struct StepPlanSegment {
     uint8_t terrain_label = 0;
 };
 
-// 不可变路径包。
-//
-// 一次规划任务产出一个完整 AnnotatedPath：样条、终点元数据、goal_id、
-// 台阶几何标注、以及针对本条样条产出的台阶掩码层。PathExecutor 不再重建
-// 台阶几何或 route context。
-//
-// 通过 shared_ptr<const AnnotatedPath> 在控制线程内传递；worker 线程构建
-// 完毕后即冻结，不再修改。
+// 不可变路径包。由 PathPlanner 产出提供给 PathExecutor。
+// 一次规划任务产出一个完整 AnnotatedPath：样条、终点元数据、goal_id、台阶几何标注、以及针对本条样条产出的台阶掩码层。
+// 通过 shared_ptr<const AnnotatedPath> 在控制线程内传递；worker 线程构建完毕后即冻结，不再修改。
 struct AnnotatedPath {
     using ConstPtr = std::shared_ptr<const AnnotatedPath>;
 

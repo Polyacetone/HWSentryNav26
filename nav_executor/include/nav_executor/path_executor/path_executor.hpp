@@ -73,9 +73,6 @@ struct ExecutorOutput {
     // one-shot 事实/事件
     bool goal_reached = false;
     bool executor_replan_event = false;
-
-    // one-shot：follow rollout 命中致命障碍物，path invalid（MPC_LETHAL）。
-    // 由 node 传入下一周期 RouteMonitorInput 统一转为 replan。
     bool mpc_lethal = false;
 
     // 当前投影 u（供顶层 RouteMonitor 复用为下周期 seed 及诊断）
@@ -114,7 +111,21 @@ public:
     ExecutorOutput update(const ExecutorInput& input);
 
     [[nodiscard]] MotionState motion_state() const { return control_fsm_->state(); }
-    [[nodiscard]] bool preemptible() const { return is_preemptible(control_fsm_->state()); }
+
+    [[nodiscard]] bool preemptible() const {
+        const MotionState s = control_fsm_->state();
+        switch (s) {
+            case MotionState::SPIN:
+                return !last_spin_high_priority_;
+            case MotionState::FOLLOW:
+            case MotionState::IDLE:
+            case MotionState::STOPPING:
+            case MotionState::FIXED:
+                return true;
+            default:
+                return false;
+        }
+    }
 
 private:
     ExecutorOutput execute_idle();
@@ -146,6 +157,7 @@ private:
     const AnnotatedPath* bound_path_ = nullptr;
 
     double last_reference_u_ = 0.0;
+    bool last_spin_high_priority_ = false;
     MotionState last_motion_state_ = MotionState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
 
