@@ -23,16 +23,17 @@
 #include <interfaces/msg/comp_stage.hpp>
 #include <interfaces/msg/nav_executor_state.hpp>
 
-#include <nav_executor/task_executor.hpp>
-#include <nav_executor/executor/path_executor.hpp>
-#include <nav_executor/executor/step_controller.hpp>
-#include <nav_executor/path/route_monitor.hpp>
-#include <nav_executor/planner/path_planner.hpp>
-#include <nav_executor/planner/a_star_planner.hpp>
-#include <nav_executor/planner/bspline_optimizer.hpp>
-#include <nav_executor/planner/nav_map.hpp>
-#include <nav_executor/planner/step_routing_mask.hpp>
-#include <nav_executor/solver/mpc_solver.hpp>
+#include <nav_executor/common/world_context.hpp>
+#include <nav_executor/task_manager/task_manager.hpp>
+#include <nav_executor/path_executor/path_executor.hpp>
+#include <nav_executor/path_executor/step_controller.hpp>
+#include <nav_executor/task_manager/route_monitor.hpp>
+#include <nav_executor/path_planner/path_planner.hpp>
+#include <nav_executor/path_planner/a_star_planner.hpp>
+#include <nav_executor/path_planner/bspline_optimizer.hpp>
+#include <nav_executor/path_planner/nav_map.hpp>
+#include <nav_executor/path_planner/step_routing_mask.hpp>
+#include <nav_executor/path_executor/solver/mpc_solver.hpp>
 
 namespace nav_executor {
 
@@ -42,13 +43,13 @@ public:
     ~NavExecutorNode() override;
 
 private:
-    // ─── 参数加载（实现见 nav_executor_params.cpp）───
+    // ─── 初始化 / 参数加载（实现见 nav_executor_init.cpp）───
     void load_terrain_config();
     MPCParams load_mpc_params();
     FsmParams load_fsm_params();
     PathExecutorParams load_executor_params();
     PlannerConfig load_planner_config();
-    TaskExecutorParams load_task_params();
+    TaskManagerParams load_task_params();
     ProfileBlendParams load_blend_params();
     BSplineOptimizer::Params load_optimizer_params();
     CapabilityProfile load_capability_profile(const std::string& prefix);
@@ -100,7 +101,7 @@ private:
     // ─── 核心组件 ───
     std::unique_ptr<PathPlanner> planner_;
     std::unique_ptr<PathExecutor> executor_;
-    std::unique_ptr<TaskExecutor> task_;
+    std::unique_ptr<TaskManager> task_;
 
     // 只读配置（跨线程共享）
     TerrainProfiles terrain_profiles_;
@@ -127,10 +128,7 @@ private:
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;
 
-    // 上一周期底层输出的 one-shot MPC_LETHAL 与投影 u（供本周期 RouteMonitor / seed）
-    bool prev_mpc_lethal_ = false;
-    const AnnotatedPath* prev_lethal_path_ = nullptr; // lethal 针对的 path 身份
-    double prev_route_u_ = 0.0;
+    MotionFeedback previous_motion_feedback_;
 };
 
 } // namespace nav_executor

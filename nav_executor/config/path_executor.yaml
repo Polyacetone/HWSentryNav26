@@ -1,0 +1,65 @@
+/**:
+  ros__parameters:
+    path_executor:
+      # ═══════════════════════════════════════════════
+      #  Misc — 常规配置
+      # ═══════════════════════════════════════════════
+      misc:
+        stop_threshold_dist: 0.5 # 到达目标判定距离 (m)
+        stop_threshold_u: 0.99 # 到达目标判定样条参数 u
+        remaining_energy_filter_alpha: 0.5 # 电容剩余电量一阶惯性滤波系数 (0,1]，越小越平滑
+        step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离
+
+      # ═══════════════════════════════════════════════
+      #  NoProgressGuard — 无进展检测守卫
+      # ═══════════════════════════════════════════════
+      no_progress_guard:
+        follow:
+          landmark_spacing: 1.0 # 路标点沿弧长间隔 (m)
+          timeout: 6.0 # 无进度超时 (s)
+        stepping:
+          landmark_spacing: 0.3 # 路标点沿弧长间隔 (m)
+          timeout: 6.0 # 无进度超时 (s)
+
+      # ═══════════════════════════════════════════════
+      #  StateMachine — 状态机转换阈值
+      # ═══════════════════════════════════════════════
+      state_machine:
+        follow_to_spin_vel_max: 0.3 # →SPIN: |v| 须低于此值 (m/s)
+        spin_to_follow_omega_max: 0.8 # →FOLLOW: |ω| 须低于此值 (rad/s)
+        to_idle_vel_max: 0.3 # →IDLE/FIXED: |v| 须低于此值 (m/s)
+        to_idle_omega_max: 0.8 # →IDLE/FIXED: |ω| 须低于此值 (rad/s)
+        stopping_timeout: 1.0 # STOPPING 状态超时 (s)，超过强制切出
+
+      # ═══════════════════════════════════════════════
+      #  Recovery — 恢复行为
+      # ═══════════════════════════════════════════════
+      recovery:
+        hazard:
+          cost_threshold: 30.0 # 当前位置代价 >= 该值认为在危险区域 (0~255)
+          step_norm_threshold: 0.06 # 当前位置方向场模长 >= 该值认为在危险台阶区域
+        safe:
+          cost_threshold: 5.0 # 当前位置代价 < 该值认为可通行
+          step_norm_threshold: 0.01 # 当前位置方向场模长 < 该值认为可通行
+        search:
+          recovery_cost_threshold: 20.0 # 候选点插值代价上限，超过则不作为恢复目标
+          radius_min: 0.5 # 搜索半径下界 (m)
+          radius_max: 1.5 # 搜索半径上界 (m)
+          radius_samples: 5 # 半径采样数
+          angle_samples: 36 # 角度采样数
+          path_integral_resolution: 0.05 # 路径积分采样精度 (m)
+          path_integral_cost_weight: 1.0 # 路径积分中障碍代价权重
+          path_integral_step_weight: 1.0 # 路径积分中台阶方向场权重
+          step_ascent_penalty_weight: 5.0 # 上台阶轨迹惩罚权重
+          step_ascent_penalty_norm_threshold: 0.3 # 方向场模长低于此值不惩罚
+          step_ascent_penalty_dot_threshold: 0.2 # 路径方向与台阶上升方向点积 > 此值视为上台阶
+          goal_timeout: 4.0 # 目标点超时 (s)，超时后重新搜索
+        exit:
+          safe_hold_time: 1.0 # 安全区域保持时间，超过后才退出恢复 (s)
+        stuck:
+          cmd_vel_threshold: 0.4 # 指令速度超过该值才开始检测 (m/s)
+          timeout: 2.0 # 卡住判定持续时间阈值 (s)
+          max_displacement: 0.2 # 位移小于该值判定卡住 (m)
+          reverse_speed: 0.8 # 倒车速度 (m/s)
+          reverse_displacement: 1.0 # 倒车退出位移阈值 (m)，里程计从 entry 起计
+          reverse_timeout: 3.0 # 倒车安全网超时 (s)，MATURE 累计时间超时则打印 ERROR

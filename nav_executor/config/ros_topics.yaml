@@ -1,0 +1,24 @@
+/**:
+  ros__parameters:
+    ros:
+      topics:
+        goal_sub: "/decision/nav_goal"
+        global_direction_map_sub: "/map_server/global_direction_map"
+        global_cost_map_sub: "/map_server/global_cost_map"
+        local_cost_maps_sub: "/map_server/local_cost_maps"
+        chassis_status_sub: "/serial_bridge/chassis_status"
+        comp_stage_sub: "/serial_bridge/comp_stage"
+        spin_cmd_sub: "/decision/spin_cmd"
+        chassis_cmd_pub: "/nav_executor/chassis_cmd"
+        state_pub: "/nav_executor/state"
+
+      debug:
+        enable: true
+        predicted_path_pub_topic: "/nav_executor/debug/predicted_path"
+        optimized_path_pub_topic: "/nav_executor/debug/optimized_path"
+        rough_path_pub_topic: "/nav_executor/debug/rough_path"
+        warmup_path_pub_topic: "/nav_executor/debug/warmup_path"
+        mppi_rollouts_pub_topic: "/nav_executor/debug/mppi_rollouts"
+        v_pred_pub_topic: "/nav_executor/debug/v_pred"
+        w_pred_pub_topic: "/nav_executor/debug/w_pred"
+        final_cost_map_pub_topic: "/nav_executor/debug/final_cost_map"

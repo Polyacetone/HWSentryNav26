@@ -1,45 +1,54 @@
 /**:
   ros__parameters:
     terrain_profiles:
-      profile_blend: # 能力档位切换时的控制指令和约束渐变步长
+      # ═══════════════════════════════════════════════
+      #  ProfileBlend — 能力档位渐变步长
+      # ═══════════════════════════════════════════════
+      profile_blend:
         v_step: 0.06 # vel_max / vel_min 步长 (m/s) 
         w_step: 0.30 # omega_max / omega_min 步长 (rad/s)
         acc_step: 0.03 # acc_max 步长 (m/s²)
         alpha_step: 0.10 # alpha_max 步长 (rad/s²)
         a_lat_step: 0.10 # a_lat_max 步长 (m/s²)
 
+      # ═══════════════════════════════════════════════
+      #  CapabilityProfiles — 能力档位（低/中/高）
+      # ═══════════════════════════════════════════════
       capability_profiles:
         low: # 低能力档位（适用于高腿长）
           command_bounds:
-            vel_max: 1.5
-            vel_min: -0.8
-            omega_max: 4.0
-            omega_min: -4.0
+            vel_max: 1.5 # 线速度上限 (m/s)
+            vel_min: -0.8 # 线速度下限 (m/s)
+            omega_max: 4.0 # 角速度上限 (rad/s)
+            omega_min: -4.0 # 角速度下限 (rad/s)
           motion_constraints:
-            acc_max: 1.5
-            alpha_max: 7.0
-            a_lat_max: 1.2
+            acc_max: 1.5 # 最大 dv_cmd/dt (m/s²)
+            alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+            a_lat_max: 1.2 # 最大侧向加速度 (m/s²)
         medium: # 中等能力档位（一般等同于正常模式，适用于低腿长）
           command_bounds:
-            vel_max: 2.0
-            vel_min: -1.2
-            omega_max: 6.0
-            omega_min: -6.0
+            vel_max: 2.0 # 线速度上限 (m/s)
+            vel_min: -1.2 # 线速度下限 (m/s)
+            omega_max: 6.0 # 角速度上限 (rad/s)
+            omega_min: -6.0 # 角速度下限 (rad/s)
           motion_constraints:
-            acc_max: 1.8
-            alpha_max: 7.0
-            a_lat_max: 2.0
+            acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+            alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+            a_lat_max: 2.0 # 最大侧向加速度 (m/s²)
         high: # 高能力档位（适用于飞坡）
           command_bounds:
-            vel_max: 2.8
-            vel_min: -1.2
-            omega_max: 6.0
-            omega_min: -6.0
+            vel_max: 2.8 # 线速度上限 (m/s)
+            vel_min: -1.2 # 线速度下限 (m/s)
+            omega_max: 6.0 # 角速度上限 (rad/s)
+            omega_min: -6.0 # 角速度下限 (rad/s)
           motion_constraints:
-            acc_max: 1.8
-            alpha_max: 7.0
-            a_lat_max: 2.0
+            acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
+            alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
+            a_lat_max: 2.0 # 最大侧向加速度 (m/s²)
 
+      # ═══════════════════════════════════════════════
+      #  DirectionalLabels — 有方向地形的档位与速度标签
+      # ═══════════════════════════════════════════════
       directional_labels:
         slope: # 斜坡
           up:   { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 } }
