@@ -44,10 +44,10 @@ struct PlanRequest {
 // ── PlanResult ──
 struct PlanResult {
     enum class Kind : uint8_t {
-        PATH = 0,                 // 得到新可执行路径
-        COMPLETE_NO_PLAN_NEEDED,  // 已足够近且 fixed=false
-        USE_AS_FIXED_GOAL,        // 已足够近且 fixed=true，直接进入保持
-        FAILED,                   // 本次规划失败
+        PATH = 0, // 得到新可执行路径
+        COMPLETE_NO_PLAN_NEEDED = 1, // 已足够近且 fixed=false
+        USE_AS_FIXED_GOAL = 2, // 已足够近且 fixed=true，直接进入保持
+        FAILED = 3, // 本次规划失败
     };
 
     Kind kind = Kind::FAILED;
@@ -55,10 +55,9 @@ struct PlanResult {
     AnnotatedPath::ConstPtr path; // 仅 kind==PATH 有效
     Eigen::Vector2d goal_pos = Eigen::Vector2d::Zero(); // fixed 短路时的保持点
 
-    // 调试路径（grid→map），仅 debug 使用
     std::vector<Eigen::Vector2d> debug_rough_path;
     std::vector<Eigen::Vector2d> debug_warmup_path;
-    std::vector<Eigen::Vector2d> debug_optimized_path;
+    std::vector<Eigen::Vector2d> global_path;
 };
 
 struct PlannerConfig {

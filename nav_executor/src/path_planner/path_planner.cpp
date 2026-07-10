@@ -310,7 +310,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     );
     if (!optimize_result) return fail("Path optimization failed: " + optimize_result.error());
 
-    const auto& [control_points_grid, warmup_path_grid, optimized_path_grid] = *optimize_result;
+    const auto& [control_points_grid, warmup_path_grid, global_path_grid] = *optimize_result;
     if (control_points_grid.size() < 3) return fail("Optimizer returned insufficient control points");
 
     const auto grid_to_map = [&](const std::vector<Eigen::Vector2d>& pts) {
@@ -344,7 +344,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     if (config_.enable_debug) {
         result.debug_rough_path = grid_to_map(rough_path);
         result.debug_warmup_path = grid_to_map(warmup_path_grid);
-        result.debug_optimized_path = grid_to_map(optimized_path_grid);
+        result.global_path = grid_to_map(global_path_grid);
     }
 
     RCLCPP_INFO(

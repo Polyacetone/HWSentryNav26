@@ -9,16 +9,16 @@
         chassis_status_sub: "/serial_bridge/chassis_status"
         comp_stage_sub: "/serial_bridge/comp_stage"
         spin_cmd_sub: "/decision/spin_cmd"
+        global_path_pub: "/nav_executor/global_path"
         chassis_cmd_pub: "/nav_executor/chassis_cmd"
         state_pub: "/nav_executor/state"
 
       debug:
         enable: true
-        predicted_path_pub_topic: "/nav_executor/debug/predicted_path"
-        optimized_path_pub_topic: "/nav_executor/debug/optimized_path"
+        final_cost_map_pub_topic: "/nav_executor/debug/final_cost_map"
         rough_path_pub_topic: "/nav_executor/debug/rough_path"
         warmup_path_pub_topic: "/nav_executor/debug/warmup_path"
         mppi_rollouts_pub_topic: "/nav_executor/debug/mppi_rollouts"
+        mpc_path_pub_topic: "/nav_executor/debug/mpc_path"
         v_pred_pub_topic: "/nav_executor/debug/v_pred"
         w_pred_pub_topic: "/nav_executor/debug/w_pred"
-        final_cost_map_pub_topic: "/nav_executor/debug/final_cost_map"

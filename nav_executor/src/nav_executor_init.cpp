@@ -12,8 +12,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     enable_debug_ = declare_parameter<bool>("ros.debug.enable");
     if (enable_debug_) {
         get_logger().set_level(rclcpp::Logger::Level::Debug);
-        debug_predicted_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.predicted_path_pub_topic"), 1);
-        debug_optimized_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.optimized_path_pub_topic"), 1);
+        debug_mpc_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.mpc_path_pub_topic"), 1);
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.rough_path_pub_topic"), 1);
         debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.warmup_path_pub_topic"), 1);
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("ros.debug.v_pred_pub_topic"), 1);
@@ -137,6 +136,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         [this](const interfaces::msg::SpinCmd::SharedPtr msg) { spin_cmd_callback(msg); }
     );
 
+    global_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.topics.global_path_pub"), 1);
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("ros.topics.chassis_cmd_pub"), 1);
     state_pub_ = create_publisher<interfaces::msg::NavExecutorState>(declare_parameter<std::string>("ros.topics.state_pub"), 1);
 

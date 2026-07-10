@@ -6,7 +6,7 @@ import math
 class ChassisCmdPublisher(Node):
     def __init__(self):
         super().__init__('chassis_cmd_publisher')
-        self.chassis_cmd_publisher_ = self.create_publisher(ChassisCmd, '/path_follower/chassis_cmd', 1)
+        self.chassis_cmd_publisher_ = self.create_publisher(ChassisCmd, '/nav_executor/chassis_cmd', 1)
         self.timer = self.create_timer(0.1, self.timer_callback)
 
     def timer_callback(self):

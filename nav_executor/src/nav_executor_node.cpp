@@ -188,7 +188,7 @@ void NavExecutorNode::control_tick() {
         chassis_cmd_pub_->publish(cmd);
 
         if (enable_debug_) {
-            if (out.predicted_path_map) debug_predicted_path_pub_->publish(path_to_nav_msg(*out.predicted_path_map));
+            if (out.mpc_path_map) debug_mpc_path_pub_->publish(path_to_nav_msg(*out.mpc_path_map));
             if (out.predicted_v && out.predicted_w && !out.predicted_v->empty() && !out.predicted_w->empty()) {
                 std_msgs::msg::Float64 v_msg, w_msg;
                 v_msg.data = (*out.predicted_v)[0];
@@ -248,12 +248,12 @@ void NavExecutorNode::publish_diagnostics(const TaskDiagnostics& diag, const Mot
     msg.has_hold_goal = diag.has_hold_goal;
     msg.planner_state = static_cast<uint8_t>(diag.planner_state);
     msg.last_replan_reason = static_cast<uint8_t>(diag.last_replan_reason);
+    global_path_pub_->publish(path_to_nav_msg(diag.global_path));
     state_pub_->publish(msg);
 
     if (enable_debug_) {
         if (!diag.debug_rough_path.empty()) debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
         if (!diag.debug_warmup_path.empty()) debug_warmup_path_pub_->publish(path_to_nav_msg(diag.debug_warmup_path));
-        if (!diag.debug_optimized_path.empty()) debug_optimized_path_pub_->publish(path_to_nav_msg(diag.debug_optimized_path));
     }
 }
 

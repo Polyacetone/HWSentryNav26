@@ -79,7 +79,7 @@ struct ExecutorOutput {
     double current_u = 0.0;
 
     // 调试
-    std::optional<std::vector<Eigen::Vector2d>> predicted_path_map;
+    std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
     std::optional<std::vector<std::vector<Eigen::Vector2d>>> mppi_rollouts;

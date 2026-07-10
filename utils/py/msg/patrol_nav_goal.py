@@ -35,7 +35,7 @@ class PatrolNavGoal(Node):
         # frames used for TF lookup instead of odometry
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'chassis_link')
-        self.declare_parameter('chassis_cmd_topic', '/path_follower/chassis_cmd')
+        self.declare_parameter('chassis_cmd_topic', '/nav_executor/chassis_cmd')
 
         self.declare_parameter('point_a_x', 3.0)
         self.declare_parameter('point_a_y', 6.0)

@@ -305,7 +305,7 @@ void assign_hold_output(ExecutorOutput& out, const std::tuple<Eigen::Vector2d, M
     out.velocity = std::get<0>(result).x();
     out.omega = std::get<0>(result).y();
     out.mode = chassis_mode::NORMAL;
-    out.predicted_path_map = std::get<1>(result).path_map;
+    out.mpc_path_map = std::get<1>(result).path_map;
     out.predicted_v = std::get<1>(result).v_pred;
     out.predicted_w = std::get<1>(result).w_pred;
     out.valid = true;
@@ -381,7 +381,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
         out.mode = chassis_mode::NORMAL;
     }
 
-    out.predicted_path_map = prediction.path_map;
+    out.mpc_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
     if (!prediction.rollout_paths.empty()) {

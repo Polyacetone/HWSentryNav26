@@ -26,11 +26,9 @@ struct TaskDiagnostics {
     bool has_hold_goal = false;
     PlannerState planner_state = PlannerState::IDLE;
     ReplanReason last_replan_reason = ReplanReason::NONE;
-
-    // 调试路径（planner 各阶段），仅在 enable_debug 时非空
     std::vector<Eigen::Vector2d> debug_rough_path;
     std::vector<Eigen::Vector2d> debug_warmup_path;
-    std::vector<Eigen::Vector2d> debug_optimized_path;
+    std::vector<Eigen::Vector2d> global_path;
 };
 
 struct PlanRequestSnapshot {
@@ -123,7 +121,7 @@ private:
     // 缓存最新一次成功规划的调试路径（供 node 发布用）
     std::vector<Eigen::Vector2d> last_debug_rough_path_;
     std::vector<Eigen::Vector2d> last_debug_warmup_path_;
-    std::vector<Eigen::Vector2d> last_debug_optimized_path_;
+    std::vector<Eigen::Vector2d> last_global_path_;
 };
 
 } // namespace nav_executor

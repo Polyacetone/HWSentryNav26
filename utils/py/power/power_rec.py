@@ -1,6 +1,6 @@
 """Record chassis power data for power model identification.
 
-被动录制脚本：订阅 /path_follower/chassis_cmd 和 /serial_bridge/chassis_status，
+被动录制脚本：订阅 /nav_executor/chassis_cmd 和 /serial_bridge/chassis_status，
 记录速度、角速度、功率、电容电量等完整数据，用于后续功率模型辨识。
 
 该脚本本身不发布任何指令，适合在正常导航运行时录制真实功率数据。

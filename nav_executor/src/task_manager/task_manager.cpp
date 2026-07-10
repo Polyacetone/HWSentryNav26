@@ -11,8 +11,7 @@ TaskManager::TaskManager(
 ) : params_(params), planner_(planner), logger_(logger) {}
 
 bool TaskManager::goals_equivalent(const Goal& a, const Goal& b) const {
-    return a.fixed == b.fixed
-        && (a.position_map - b.position_map).norm() < params_.goal_equivalence_distance;
+    return a.fixed == b.fixed && (a.position_map - b.position_map).norm() < params_.goal_equivalence_distance;
 }
 
 TaskUpdateOutput TaskManager::update(const TaskUpdateInput& input) {
@@ -103,7 +102,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             // 缓存调试路径（即便 enable_debug=false 也是空 vector，无开销）
             last_debug_rough_path_ = std::move(result->debug_rough_path);
             last_debug_warmup_path_ = std::move(result->debug_warmup_path);
-            last_debug_optimized_path_ = std::move(result->debug_optimized_path);
+            last_global_path_ = std::move(result->global_path);
             RCLCPP_INFO(logger_, "Accepted new path for goal #%lu", static_cast<unsigned long>(result->goal_id));
             break;
 
@@ -222,12 +221,11 @@ TaskDiagnostics TaskManager::diagnostics() const {
     d.has_goal = current_goal_.has_value();
     d.has_path = static_cast<bool>(active_path_);
     d.has_hold_goal = hold_goal_.has_value();
-    d.planner_state = planner_->busy() ? PlannerState::PLANNING
-        : (in_cooldown_ ? PlannerState::COOLDOWN : PlannerState::IDLE);
+    d.planner_state = planner_->busy() ? PlannerState::PLANNING : (in_cooldown_ ? PlannerState::COOLDOWN : PlannerState::IDLE);
     d.last_replan_reason = last_replan_reason_;
     d.debug_rough_path = last_debug_rough_path_;
     d.debug_warmup_path = last_debug_warmup_path_;
-    d.debug_optimized_path = last_debug_optimized_path_;
+    d.global_path = last_global_path_;
     return d;
 }
 

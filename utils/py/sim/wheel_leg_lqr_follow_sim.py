@@ -148,7 +148,7 @@ class SimConfig:
     TOPIC_STATUS: str = "/serial_bridge/chassis_status"
     TOPIC_CLOUD: str = "/small_glim/registered_cloud"
 
-    # --- 地图话题（参考 path_follower/path_planner/map_server）---
+    # --- 地图话题（map_server）---
     TOPIC_GLOBAL_COST_MAP: str = "/map_server/global_cost_map"
     TOPIC_LOCAL_COST_MAPS: str = "/map_server/local_cost_maps"
     TOPIC_GLOBAL_DIRECTION_MAP: str = "/map_server/global_direction_map"
@@ -570,7 +570,7 @@ class WheelLegDynamics:
 
 
 # =============================================================================
-# nav map helpers (参考 path_follower/path_planner/nav_map.cpp)
+# nav map helpers (参考 nav_map.cpp)
 # =============================================================================
 
 

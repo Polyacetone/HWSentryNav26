@@ -2,7 +2,7 @@
 
 This script listens to the same topics that the original `identify_pub_and_rec.py`
 published to, but it *does not* send any command.  It simply subscribes to
-`/path_follower/chassis_cmd` and `/serial_bridge/chassis_status` and stores all
+`/nav_executor/chassis_cmd` and `/serial_bridge/chassis_status` and stores all
 messages along with their wall‑clock timestamps.  When the node is shut down
 (e.g. via Ctrl‑C) the collected data is saved in the same `identify_data/`
 directory as the original script.
@@ -108,7 +108,7 @@ def main() -> int:
     class RecordNode(Node):
         def __init__(self, warmup: float):
             super().__init__("wheel_leg_lqr_ident_rec")
-            self.sub_cmd = self.create_subscription(ChassisCmd, "/path_follower/chassis_cmd", self._cmd_cb, 1)
+            self.sub_cmd = self.create_subscription(ChassisCmd, "/nav_executor/chassis_cmd", self._cmd_cb, 1)
             self.sub_status = self.create_subscription(
                 ChassisStatus, "/serial_bridge/chassis_status", self._status_cb, 1
             )
