@@ -45,7 +45,8 @@ public:
         double prediction_dt,
         const DirectionMap& direction_map,
         const CapabilityProfile& blended_profile,
-        std::optional<ActiveStepMode> active_step_mode
+        std::optional<ActiveStepMode> active_step_mode,
+        bool check_lethal_status
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(

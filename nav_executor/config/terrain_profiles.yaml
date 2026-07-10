@@ -27,7 +27,7 @@
             a_lat_max: 1.2 # 最大侧向加速度 (m/s²)
         medium: # 中等能力档位（一般等同于正常模式，适用于低腿长）
           command_bounds:
-            vel_max: 2.0 # 线速度上限 (m/s)
+            vel_max: 2.2 # 线速度上限 (m/s)
             vel_min: -1.2 # 线速度下限 (m/s)
             omega_max: 6.0 # 角速度上限 (rad/s)
             omega_min: -6.0 # 角速度下限 (rad/s)
@@ -61,7 +61,7 @@
           down: { chassis_mode: 9, capability: medium, speed: { min: 1.6, max: 2.0 } }
         fly_slope: # 飞坡
           up:   { chassis_mode: 10, capability: high, speed: { min: 2.8, max: 3.2 } }
-          down: { chassis_mode: 11, capability: medium, speed: { min: 1.8, max: 2.0 } }
+          down: { chassis_mode: 11, capability: medium, speed: { min: 2.2, max: 2.6 } }
         step_high: # 高地台阶
-          up:   { chassis_mode: 6, capability: medium, speed: { min: 1.8, max: 2.0 } }
+          up:   { chassis_mode: 6, capability: medium, speed: { min: 2.2, max: 2.6 } }
           down: { chassis_mode: 9, capability: medium, speed: { min: 1.8, max: 2.0 } }

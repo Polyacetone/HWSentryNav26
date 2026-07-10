@@ -119,7 +119,7 @@ public:
 
 private:
     ExecutorOutput execute_idle();
-    ExecutorOutput execute_follow(const ExecutorInput& input);
+    ExecutorOutput execute_follow(const ExecutorInput& input, bool check_lethal_status);
     ExecutorOutput execute_spin(const ExecutorInput& input);
     ExecutorOutput execute_stop(const ExecutorInput& input);
     ExecutorOutput execute_recovery(const ExecutorInput& input);
@@ -155,6 +155,7 @@ private:
     bool has_last_command_output_ = false;
 
     bool mpc_lethal_pending_ = false;
+    ChassisControlState last_cycle_chassis_control_state_ = ChassisControlState::STOPPED;
     bool last_cycle_chassis_controllable_ = false;
 };
 

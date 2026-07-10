@@ -218,7 +218,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     double prediction_dt,
     const DirectionMap& direction_map,
     const CapabilityProfile& blended_profile,
-    std::optional<ActiveStepMode> active_step_mode
+    std::optional<ActiveStepMode> active_step_mode,
+    bool check_lethal_status
 ) {
     const bool path_changed = !(prev_ref_control_points_ && *prev_ref_control_points_ == global_path);
     const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
@@ -330,7 +331,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
     prediction.rollout_paths = std::move(mppi_result.rollout_paths);
 
-    {
+    if (check_lethal_status) {
         const auto& safety = params_.follow.rollout_safety;
         const auto lethal = detect_rollout_lethal_obstacle(
             problem, solved_rollout.xs, solved_rollout.valid_steps + 1

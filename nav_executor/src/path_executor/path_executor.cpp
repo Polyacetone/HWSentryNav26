@@ -81,7 +81,9 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     const bool chassis_dead = chassis_control_state == ChassisControlState::STOPPED;
     const bool command_blocked = chassis_control_state == ChassisControlState::BLOCKED;
     const bool chassis_controllable = chassis_control_state == ChassisControlState::NORMAL;
+    const bool resumed_from_stopped = chassis_controllable && last_cycle_chassis_control_state_ == ChassisControlState::STOPPED;
     const bool entered_controllable = chassis_controllable && !last_cycle_chassis_controllable_;
+    last_cycle_chassis_control_state_ = chassis_control_state;
     last_cycle_chassis_controllable_ = chassis_controllable;
 
     // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM。
@@ -177,20 +179,19 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     fsm_input.has_hold_goal = input.intent.hold_goal.has_value();
     fsm_input.reach_goal = dist_reached || u_reached;
     fsm_input.step_active = has_path && step_controller_.is_step_active(current_u);
+    fsm_input.resumed_from_stopped = resumed_from_stopped;
     fsm_input.command_blocked = command_blocked;
     fsm_input.spin_requested = input.intent.spin_requested;
     fsm_input.spin_high_priority = input.intent.spin_high_priority;
     last_spin_high_priority_ = input.intent.spin_high_priority;
     fsm_input.no_progress_detected = no_progress_detected;
 
-    const bool hazard_allowed = (prev_state == MotionState::IDLE) || (prev_state == MotionState::SPIN)
-        || (prev_state == MotionState::HAZARD_RECOVERY) || (prev_state == MotionState::STUCK_REVERSE);
-    fsm_input.is_hazard = !command_blocked
-        && (no_progress_detected || hazard_allowed)
+    const bool is_hazard_now = !command_blocked
         && input.environment.masked_global_cost_map && input.environment.masked_direction_map
         && safety_monitor_.compute_is_hazard(
             *input.environment.masked_global_cost_map, *input.environment.masked_direction_map, input.observation.chassis_pose_map.head<2>()
         );
+    fsm_input.is_hazard_now = is_hazard_now;
     fsm_input.is_stuck = !command_blocked && safety_monitor_.check_stuck(
         input.observation.chassis_pose_map.head<2>(), last_cmd_.x(), input.observation.stamp
     );
@@ -215,13 +216,13 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     } else {
         switch (state) {
             case MotionState::IDLE: output = execute_idle(); break;
-            case MotionState::FOLLOW: output = execute_follow(input); break;
+            case MotionState::FOLLOW: output = execute_follow(input, true); break;
             case MotionState::SPIN: output = execute_spin(input); break;
             case MotionState::STOPPING: output = execute_stop(input); break;
             case MotionState::HAZARD_RECOVERY: output = execute_recovery(input); break;
             case MotionState::STUCK_REVERSE: output = execute_stuck_reverse(); break;
             case MotionState::FIXED: output = execute_fixed(input); break;
-            case MotionState::STEPPING: output = execute_follow(input); break;
+            case MotionState::STEPPING: output = execute_follow(input, false); break;
             case MotionState::DEAD: output = execute_idle(); break;
         }
     }
@@ -326,7 +327,7 @@ ExecutorOutput PathExecutor::execute_idle() {
 
 // ═══════════════════ FOLLOW ══════════════════════════════════
 
-ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
+ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool check_lethal_status) {
     ExecutorOutput out;
     if (!input.intent.active_path || !input.environment.final_cost_map || !input.environment.masked_global_cost_map || !input.environment.masked_direction_map) {
         return out;
@@ -342,7 +343,8 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         *input.environment.masked_direction_map,
         step_controller_.current_blended_profile(),
-        step_controller_.current_active_step_mode(u0)
+        step_controller_.current_active_step_mode(u0),
+        check_lethal_status
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());

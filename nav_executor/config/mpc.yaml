@@ -30,7 +30,7 @@
           include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免MPPI退化时丢掉已有好解
           fallback_to_best_sample: true # 最终优先采用历史最佳可行样本，增强跳出局部最优的稳定性
         rollout_safety:
-          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解连续命中 N 帧则退化为 solve_stop
+          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
           fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
         command_bounds:
@@ -105,7 +105,7 @@
         environment_weights:
           obstacle: 1.0 # 避障惩罚（台阶区域已转为障碍物）
         terminal_weights:
-          obstacle_terminal: 10.0 # 终端避障惩罚（防止停在障碍上）
+          obstacle_terminal: 1.0 # 终端避障惩罚（防止停在障碍上）
 
       # ═══════════════════════════════════════════════
       #  Hold — 保持求解器
@@ -141,4 +141,4 @@
           obstacle: 1.0 # 全程避障惩罚
         terminal_weights:
           q_goal_xy_terminal: 3.0 # 终端目标点吸引
-          obstacle_terminal: 12.0 # 终端避障惩罚
+          obstacle_terminal: 1.0 # 终端避障惩罚

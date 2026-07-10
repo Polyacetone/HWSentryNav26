@@ -77,6 +77,7 @@ struct FsmInput {
     bool has_hold_goal = false;  // 当前存在 hold_goal（应进入 FIXED 保持）
     bool reach_goal = false;     // 路径终点已到达（dist/u 阈值）
     bool step_active = false;
+    bool resumed_from_stopped = false;
 
     // 外部请求
     bool spin_requested = false;
@@ -87,7 +88,7 @@ struct FsmInput {
     bool is_stuck = false;
 
     // 危险 / 恢复安全
-    bool is_hazard = false;
+    bool is_hazard_now = false;
     bool is_recovery_safe = false;
 
     // 底盘不可控（FLIGHT/JUMP/STEP 物理过程），不响应速度指令
@@ -128,6 +129,7 @@ private:
     FsmOutput route_to_terminal(const FsmInput& in);
     FsmOutput exit_reverse(const FsmInput& in, double displacement, double mature_elapsed);
     FsmOutput finish_recovery_chain(const FsmInput& in);
+    [[nodiscard]] bool should_start_resume_hazard_recovery(const FsmInput& in) const;
 
     // 目标终态类型（仅用于选择 STOPPING 退出速度门槛）
     enum class Terminal : uint8_t { IDLE, FIXED, SPIN, FOLLOW };

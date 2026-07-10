@@ -64,7 +64,7 @@ sudo make install
 
 ### Python相关库
 `utils/py`下有一些Python脚本，可能需要以下Python库。
-推荐使用uv安装：`uv pip install numpy matplotlib scipy open3d scikit-learn pillow opencv-python`。
+推荐使用uv安装：`uv pip install numpy matplotlib scipy open3d scikit-learn pillow opencv-python msgpack`。
 
 ### absl（可选）
 `utils/cpp/offline_mapping_optimizer`使用了absl库。如果不想安装absl也可以在CMake里禁用该功能。

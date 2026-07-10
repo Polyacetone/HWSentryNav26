@@ -25,7 +25,7 @@
           slope: {forward: true, backward: true}
           step_l1: {forward: true, backward: true}
           step_l2: {forward: true, backward: true}
-          fly_slope: {forward: true, backward: false}
+          fly_slope: {forward: true, backward: true}
           step_high: {forward: true, backward: false}
 
       # ═══════════════════════════════════════════════
@@ -89,7 +89,7 @@
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
           smoothness_weight: 0.005 # 样条光滑性正则权重
-          length_penalty_weight: 0.03 # 路径长度惩罚权重
+          length_penalty_weight: 0.02 # 路径长度惩罚权重
           curvature:
             base_weight: 0.1 # 曲率基础惩罚权重
             base_beta: 4.0 # 曲率基础惩罚 softplus beta
@@ -103,16 +103,16 @@
           max_iterations: 60 # main 每次迭代的最大优化步数
           max_refinement_iterations: 1 # main 阶段细化迭代次数（台阶区间收敛后停止）
           near_max_curvature: 0.2 # 台阶附近区域曲率上限
-          far_max_curvature: 1.2 # 远离台阶区域曲率上限
-          step_extension_distance: 1.0 # 台阶区间前后扩展距离 (m)
-          step_transition_distance: 1.0 # 近/远曲率之间平滑过渡距离 (m)
+          far_max_curvature: 1.6 # 远离台阶区域曲率上限
+          step_extension_distance: 0.3 # 台阶区间前后扩展距离 (m)
+          step_transition_distance: 0.3 # 近/远曲率之间平滑过渡距离 (m)
           interval_iou_threshold: 0.85 # 台阶区间 IoU 阈值，收敛后提前退出细化
           obstacle_weight: 2.0 # 障碍物代价权重
           direction_weight: 10.0 # 方向对齐代价权重
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
-          smoothness_weight: 0.005 # 样条光滑度正则权重
-          length_penalty_weight: 0.03 # 路径长度惩罚权重
+          smoothness_weight: 0.003 # 样条光滑度正则权重
+          length_penalty_weight: 0.02 # 路径长度惩罚权重
           curvature:
             base_weight: 0.1 # 曲率基础惩罚权重
             base_beta: 4.0 # 曲率基础惩罚 softplus beta

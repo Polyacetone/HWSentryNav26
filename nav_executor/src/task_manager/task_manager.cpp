@@ -36,7 +36,6 @@ TaskCommandView TaskManager::command_view() const {
 }
 
 // New semantic goals replace the committed task, but the old path may continue until a new route is ready.
-
 void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool preemptible) {
     if (!incoming) return;
 
@@ -60,25 +59,24 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
     );
 }
 
-// Recovery replan events are ignored after the task has already reached hold mode.
-
+// Recovery replan events keep the semantic goal but may change the execution form.
 void TaskManager::ingest_executor_replan_event(const bool event) {
     if (!event) return;
 
-    if (!current_goal_ || hold_goal_.has_value()) {
-        RCLCPP_DEBUG(logger_, "executor_replan_event swallowed (no goal or holding)");
+    if (!current_goal_) {
+        RCLCPP_DEBUG(logger_, "executor_replan_event swallowed (no goal)");
         return;
     }
 
-    // 当前旧 path 已不可信 → 清 path 并重新规划。
+    // 当前执行形式已不可信 → 清掉 path/hold，回到 planner 重新决定 FOLLOW 还是 FIXED。
     active_path_.reset();
+    hold_goal_.reset();
     needs_plan_ = true;
     last_replan_reason_ = ReplanReason::EXECUTOR_REPLAN_EVENT;
-    RCLCPP_INFO(logger_, "executor_replan_event → drop path, replan current goal");
+    RCLCPP_INFO(logger_, "executor_replan_event → drop path/hold, replan current goal");
 }
 
 // Planner results are accepted only when they still match the committed goal and current motion phase.
-
 void TaskManager::poll_planner_result(const bool preemptible) {
     auto result = planner_->try_take_result();
     if (!result) return;
@@ -135,7 +133,6 @@ void TaskManager::poll_planner_result(const bool preemptible) {
 }
 
 // Planning is dispatched from one gate so event handlers only mark intent.
-
 bool TaskManager::maybe_submit_plan(
     const bool preemptible,
     const PlanRequestSnapshot& snapshot,
@@ -185,7 +182,6 @@ void TaskManager::on_route_invalid(const ReplanReason reason) {
 }
 
 // A stale path may finish after a newer goal has already been committed; only the path is cleared.
-
 void TaskManager::ingest_goal_reached(const bool goal_reached) {
     if (!goal_reached) return;
 
