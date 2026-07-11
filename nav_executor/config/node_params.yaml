@@ -1,6 +1,10 @@
 /**:
   ros__parameters:
-    ros:
+    node:
+      remaining_energy_filter_alpha: 0.5 # 对 remaining_energy_supercap 和 remaining_energy_supercap 进行低通滤波的指数衰减系数 [0,1]
+      prediction_horizon_seconds: 2.0 # 代价地图时域融合的预测时间窗口 (0=仅用当前帧)，用于 planner
+      prediction_weight_decay: 1.0 # 代价地图时域融合中时域帧权重的线性衰减因子 [0,1]，用于 planner
+
       topics:
         goal_sub: "/decision/nav_goal"
         global_direction_map_sub: "/map_server/global_direction_map"

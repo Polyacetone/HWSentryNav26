@@ -38,6 +38,8 @@ struct PlanRequestSnapshot {
     CostMap::ConstPtr global_cost_map;
     CostMap::ConstPtr merged_cost_map;
     DirectionMap::ConstPtr direction_map;
+    TerrainTraversalConstraints terrain_constraints;
+    PerformanceState performance;
 };
 
 struct MotionFeedback {

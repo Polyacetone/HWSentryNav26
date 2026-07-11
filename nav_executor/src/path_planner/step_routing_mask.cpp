@@ -100,9 +100,7 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<SplinePath>
         base_direction_map_->origin_x,
         base_direction_map_->origin_y,
         std::move(masked_dir_data),
-        base_direction_map_->terrain,
-        base_direction_map_->profiles(),
-        base_direction_map_->rules()
+        base_direction_map_->terrain
     );
 
     return {std::move(step_cost_layer), std::move(masked_direction_map)};

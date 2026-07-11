@@ -118,14 +118,14 @@ void PathPlanner::worker_loop() {
 
 // ═══════════════════════ 规划期几何工具 ═══════════════════════
 
-bool PathPlanner::is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& map_pt) const {
+bool PathPlanner::is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const TerrainTraversalConstraints& terrain_constraints, const Eigen::Vector2d& map_pt) const {
     const Eigen::Vector2d cost_grid = cost_map.map_coord_to_grid(map_pt);
     const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(map_pt);
     if (!cost_map.is_valid_coord(cost_grid) || !direction_map.is_valid_coord(dir_grid)) return false;
 
     return cost_map.interpolate(cost_grid) < config_.occupied_threshold
         && direction_map.interpolate(dir_grid).norm() < config_.on_step_threshold
-        && !direction_map.has_blocked_corner(dir_grid);
+        && !terrain_constraints.has_blocked_corner(direction_map, dir_grid);
 }
 
 Eigen::Vector2d PathPlanner::adjust_reachable_start_on_segment(const PlanRequest& req, const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const {
@@ -141,7 +141,7 @@ Eigen::Vector2d PathPlanner::adjust_reachable_start_on_segment(const PlanRequest
     for (int i = 0; i <= n; ++i) {
         const double d = length * (static_cast<double>(i) / static_cast<double>(n));
         const Eigen::Vector2d pt = from_map + dir * d;
-        if (!is_map_point_feasible(*req.merged_cost_map, *req.direction_map, pt)) break;
+        if (!is_map_point_feasible(*req.merged_cost_map, *req.direction_map, req.terrain_constraints, pt)) break;
         last_feasible = pt;
     }
     return last_feasible;
@@ -158,7 +158,7 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(const PlanReques
         return static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
     };
 
-    if (merged.is_valid_coord(grid_pt) && is_map_point_feasible(merged, dir, map_pt)) {
+    if (merged.is_valid_coord(grid_pt) && is_map_point_feasible(merged, dir, req.terrain_constraints, map_pt)) {
         return map_pt;
     }
 
@@ -182,7 +182,7 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(const PlanReques
         if (dist > max_nudge_distance) continue;
 
         const Eigen::Vector2d candidate_map = merged.grid_coord_to_map(current.cast<double>());
-        if (is_map_point_feasible(merged, dir, candidate_map)) {
+        if (is_map_point_feasible(merged, dir, req.terrain_constraints, candidate_map)) {
             return candidate_map;
         }
 
@@ -226,7 +226,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     result.goal_id = req.goal.id;
     result.goal_pos = req.goal.position_map;
 
-    if (!req.global_cost_map || !req.merged_cost_map || !req.direction_map) {
+    if (!req.global_cost_map || !req.merged_cost_map || !req.direction_map || !req.terrain_constraints.blocked_cost_layer) {
         RCLCPP_WARN(logger_, "Plan aborted: map snapshot incomplete");
         result.kind = PlanResult::Kind::FAILED;
         return result;
@@ -258,7 +258,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     {
         const Eigen::Vector2d sg = req.global_cost_map->map_coord_to_grid(start_map);
         if (!req.global_cost_map->is_valid_coord(sg)) return fail("Start is out of bound");
-        if (!is_map_point_feasible(*req.global_cost_map, *req.direction_map, start_map)) return fail("Start is not feasible on global map");
+        if (!is_map_point_feasible(*req.global_cost_map, *req.direction_map, req.terrain_constraints, start_map)) return fail("Start is not feasible on global map");
     }
 
     // ── 起点 nudge（merged 上最近 free）──
@@ -272,19 +272,19 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     {
         const Eigen::Vector2d gg = req.global_cost_map->map_coord_to_grid(goal_map);
         if (!req.global_cost_map->is_valid_coord(gg)) return fail("Goal is out of bound");
-        if (!is_map_point_feasible(*req.global_cost_map, *req.direction_map, goal_map)) return fail("Goal is not feasible on global map");
+        if (!is_map_point_feasible(*req.global_cost_map, *req.direction_map, req.terrain_constraints, goal_map)) return fail("Goal is not feasible on global map");
     }
 
     // ── 终点 merged 检查 / nudge（取决于 fixed）──
     if (fixed) {
-        if (!is_map_point_feasible(*req.merged_cost_map, *req.direction_map, goal_map)) return fail("Fixed goal is occupied by a dynamic obstacle");
+        if (!is_map_point_feasible(*req.merged_cost_map, *req.direction_map, req.terrain_constraints, goal_map)) return fail("Fixed goal is occupied by a dynamic obstacle");
     } else {
         const auto nudged = nudge_point_to_free(req, goal_map, config_.nudge_max_distance);
         if (!nudged) return fail("Cannot nudge goal to a free cell");
         goal_plan = *nudged;
     }
 
-    const CostMap& planning_cost_map = *req.merged_cost_map;
+    const CostMap planning_cost_map = req.merged_cost_map->merge(*req.terrain_constraints.blocked_cost_layer);
     const Eigen::Vector2d start_grid = planning_cost_map.map_coord_to_grid(start_map);
     const Eigen::Vector2d goal_grid = planning_cost_map.map_coord_to_grid(goal_plan);
     const double dist = (goal_plan - start_map).norm();
@@ -297,7 +297,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         rough_path = make_direct_init_path(start_grid, goal_grid, planning_cost_map.width, planning_cost_map.height);
     } else {
         const auto plan_search = a_star_->search_path(
-            planning_cost_map, *req.direction_map, start_grid.cast<int>(), goal_grid.cast<int>()
+            planning_cost_map, *req.direction_map, req.terrain_constraints, start_grid.cast<int>(), goal_grid.cast<int>()
         );
         if (!plan_search) return fail("A* search failed: " + plan_search.error());
         rough_path.reserve(plan_search->size());
@@ -306,7 +306,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     // ── 样条优化 ──
     const auto optimize_result = optimizer_->optimize(
-        planning_cost_map, *req.direction_map, rough_path, start_grid, goal_grid
+        planning_cost_map, *req.direction_map, req.terrain_constraints, rough_path, start_grid, goal_grid
     );
     if (!optimize_result) return fail("Path optimization failed: " + optimize_result.error());
 
@@ -327,10 +327,11 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     path->goal_pos = goal_map;
     path->goal_fixed = fixed;
     path->goal_id = req.goal.id;
+    path->planning_performance = req.performance;
 
     // 台阶几何标注：基于 base（未掩码）方向场。
     path->step_segments = step_annotator::build_step_plan(
-        config_.step_detection, path->spline, *req.direction_map, logger_
+        config_.step_detection, path->spline, *req.direction_map, req.terrain_constraints, logger_
     );
 
     // 台阶掩码层：针对本条样条产出。

@@ -25,6 +25,7 @@ struct StepPlanSegment {
     StepDirection direction = StepDirection::UP;
     ActiveStepMode command;
     uint8_t terrain_label = 0;
+    bool requires_high_performance = false;
 };
 
 // 一次规划产出的不可变路径包。
@@ -40,6 +41,7 @@ struct AnnotatedPath {
 
     // 对应 PlanRequest 所携带的 goal id，用于接纳验证和 goal_reached 守卫。
     uint64_t goal_id = 0;
+    PerformanceState planning_performance;
 
     std::vector<StepPlanSegment> step_segments;
 

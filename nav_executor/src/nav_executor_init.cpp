@@ -3,22 +3,24 @@
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/core.hpp>
 
+#include <unordered_map>
+
 namespace nav_executor {
 
 NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav_executor", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
 
-    enable_debug_ = declare_parameter<bool>("ros.debug.enable");
+    enable_debug_ = declare_parameter<bool>("node.debug.enable");
     if (enable_debug_) {
         get_logger().set_level(rclcpp::Logger::Level::Debug);
-        debug_mpc_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.mpc_path_pub_topic"), 1);
-        debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.rough_path_pub_topic"), 1);
-        debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.debug.warmup_path_pub_topic"), 1);
-        debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("ros.debug.v_pred_pub_topic"), 1);
-        debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("ros.debug.w_pred_pub_topic"), 1);
-        debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("ros.debug.final_cost_map_pub_topic"), 1);
-        debug_mppi_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("ros.debug.mppi_rollouts_pub_topic"), 1);
+        debug_mpc_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.mpc_path_pub_topic"), 1);
+        debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.rough_path_pub_topic"), 1);
+        debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.warmup_path_pub_topic"), 1);
+        debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.v_pred_pub_topic"), 1);
+        debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.w_pred_pub_topic"), 1);
+        debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("node.debug.final_cost_map_pub_topic"), 1);
+        debug_mppi_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("node.debug.mppi_rollouts_pub_topic"), 1);
     }
 
     load_terrain_config();
@@ -68,13 +70,16 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         .obstacle_cost_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.obstacle_cost_threshold"),
         .predicted_obstacle_ratio_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.predicted_obstacle_ratio_threshold")
     };
+    performance_replan_params_ = {
+        .lookahead_distance = declare_parameter<double>("task_manager.route_monitor.performance.lookahead_distance")
+    };
 
-    prediction_horizon_seconds_ = declare_parameter<double>("path_planner.prediction.horizon_seconds");
-    prediction_weight_decay_ = declare_parameter<double>("path_planner.prediction.weight_decay");
-    remaining_energy_filter_alpha_ = declare_parameter<double>("path_executor.misc.remaining_energy_filter_alpha");
+    remaining_energy_filter_alpha_ = declare_parameter<double>("node.remaining_energy_filter_alpha");
+    prediction_horizon_seconds_ = declare_parameter<double>("node.prediction_horizon_seconds");
+    prediction_weight_decay_ = declare_parameter<double>("node.prediction_weight_decay");
 
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
-        declare_parameter<std::string>("ros.topics.global_cost_map_sub"), 1,
+        declare_parameter<std::string>("node.topics.global_cost_map_sub"), 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
             global_cost_map_ = std::make_shared<CostMap>(*msg);
             RCLCPP_INFO(get_logger(), "Received global cost map: (%d,%d) res=%.2f",
@@ -85,7 +90,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     );
 
     global_direction_map_sub_ = create_subscription<sensor_msgs::msg::Image>(
-        declare_parameter<std::string>("ros.topics.global_direction_map_sub"), 1,
+        declare_parameter<std::string>("node.topics.global_direction_map_sub"), 1,
         [this](const sensor_msgs::msg::Image::SharedPtr msg) {
             if (!global_cost_map_) {
                 RCLCPP_WARN(get_logger(), "Received direction map before cost map; ignoring");
@@ -93,8 +98,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
             }
             const cv::Mat img = cv_bridge::toCvShare(msg, "8UC3")->image;
             global_direction_map_ = std::make_shared<DirectionMap>(
-                img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y,
-                terrain_profiles_, terrain_rules_
+                img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y
             );
             if (global_direction_map_->width != global_cost_map_->width || global_direction_map_->height != global_cost_map_->height) {
                 RCLCPP_FATAL(get_logger(), "Direction map size mismatch with cost map!");
@@ -107,12 +111,12 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     );
 
     local_cost_maps_sub_ = create_subscription<interfaces::msg::CostMaps>(
-        declare_parameter<std::string>("ros.topics.local_cost_maps_sub"), 1,
+        declare_parameter<std::string>("node.topics.local_cost_maps_sub"), 1,
         [this](const interfaces::msg::CostMaps::SharedPtr msg) { local_cost_maps_callback(msg); }
     );
 
     goal_sub_ = create_subscription<interfaces::msg::NavGoal>(
-        declare_parameter<std::string>("ros.topics.goal_sub"), 1,
+        declare_parameter<std::string>("node.topics.goal_sub"), 1,
         [this](const interfaces::msg::NavGoal::SharedPtr msg) {
             Goal g;
             g.position_map = Eigen::Vector2d(msg->x, msg->y);
@@ -122,23 +126,23 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     );
 
     chassis_status_sub_ = create_subscription<interfaces::msg::ChassisStatus>(
-        declare_parameter<std::string>("ros.topics.chassis_status_sub"), 1,
+        declare_parameter<std::string>("node.topics.chassis_status_sub"), 1,
         [this](const interfaces::msg::ChassisStatus::SharedPtr msg) { chassis_status_callback(msg); }
     );
 
     comp_stage_sub_ = create_subscription<interfaces::msg::CompStage>(
-        declare_parameter<std::string>("ros.topics.comp_stage_sub"), 1,
+        declare_parameter<std::string>("node.topics.comp_stage_sub"), 1,
         [this](const interfaces::msg::CompStage::SharedPtr msg) { comp_stage_ = msg->game_progress; }
     );
 
     spin_cmd_sub_ = create_subscription<interfaces::msg::SpinCmd>(
-        declare_parameter<std::string>("ros.topics.spin_cmd_sub"), 1,
+        declare_parameter<std::string>("node.topics.spin_cmd_sub"), 1,
         [this](const interfaces::msg::SpinCmd::SharedPtr msg) { spin_cmd_callback(msg); }
     );
 
-    global_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("ros.topics.global_path_pub"), 1);
-    chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("ros.topics.chassis_cmd_pub"), 1);
-    state_pub_ = create_publisher<interfaces::msg::NavExecutorState>(declare_parameter<std::string>("ros.topics.state_pub"), 1);
+    global_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.topics.global_path_pub"), 1);
+    chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("node.topics.chassis_cmd_pub"), 1);
+    state_pub_ = create_publisher<interfaces::msg::NavExecutorState>(declare_parameter<std::string>("node.topics.state_pub"), 1);
 
     control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_DT), [this]() { control_tick(); });
 }
@@ -182,37 +186,45 @@ void NavExecutorNode::load_terrain_config() {
     terrain_profiles_.capability_profiles[static_cast<size_t>(MEDIUM)] = load_capability_profile("terrain_profiles.capability_profiles.medium");
     terrain_profiles_.capability_profiles[static_cast<size_t>(HIGH)] = load_capability_profile("terrain_profiles.capability_profiles.high");
 
+    terrain_profiles_.high_performance_buffercap_threshold = declare_parameter<double>("terrain_profiles.high_performance.buffercap_threshold");
+    terrain_profiles_.high_performance_supercap_threshold = declare_parameter<double>("terrain_profiles.high_performance.supercap_threshold");
+    terrain_profiles_.high_performance_rfr_pwr_limit_threshold = declare_parameter<double>("terrain_profiles.high_performance.rfr_pwr_limit_threshold");
+
     // directional_labels — 有方向语义的标签 (SLOPE..STEP_HIGH)
     struct DirEntry { const char* name; uint8_t label; };
     const DirEntry dir_entries[] = {
         {"slope", 2}, {"step_l1", 3}, {"step_l2", 4}, {"fly_slope", 5}, {"step_high", 6},
     };
-    for (const auto& [name, label] : dir_entries) {
+    for (const auto& [entry_name, label] : dir_entries) {
+        const size_t idx = label - 2;
+        auto& dir_modes = terrain_profiles_.directional_labels[idx];
+
+        // modes 段在 YAML 中是 entry 级别的共享字典，同一个 mode_name 只 declare 一次
+        std::unordered_map<std::string, TerrainStepRule> mode_map;
+
         for (const auto& dir : {"up", "down"}) {
-            const auto prefix = std::string("terrain_profiles.directional_labels.") + name + "." + dir;
-            const size_t idx = label - 2;
-            auto& rule = (dir == std::string("up"))
-                ? terrain_profiles_.directional_labels[idx].up
-                : terrain_profiles_.directional_labels[idx].down;
-            rule.chassis_mode = static_cast<uint8_t>(declare_parameter<int>(prefix + ".chassis_mode"));
-            rule.capability = capability_level_from_string(declare_parameter<std::string>(prefix + ".capability"));
-            rule.speed.min = declare_parameter<double>(prefix + ".speed.min");
-            rule.speed.max = declare_parameter<double>(prefix + ".speed.max");
+            const auto prefix = std::string("terrain_profiles.directional_labels.") + entry_name + "." + dir;
+            const auto names = declare_parameter<std::vector<std::string>>(prefix);
+
+            auto& target = (dir == std::string("up")) ? dir_modes.up : dir_modes.down;
+            target.reserve(names.size());
+
+            for (const std::string& mode_name : names) {
+                // mode 参数只 declare 一次，缓存到 mode_map 后复用
+                if (mode_map.find(mode_name) == mode_map.end()) {
+                    const std::string mode_prefix = std::string("terrain_profiles.directional_labels.") + entry_name + ".modes." + mode_name;
+                    mode_map[mode_name] = TerrainStepRule{
+                        .name = mode_name,
+                        .chassis_mode = static_cast<uint8_t>(declare_parameter<int>(mode_prefix + ".chassis_mode")),
+                        .capability = capability_level_from_string(declare_parameter<std::string>(mode_prefix + ".capability")),
+                        .speed = {.min = declare_parameter<double>(mode_prefix + ".speed.min"), .max = declare_parameter<double>(mode_prefix + ".speed.max")},
+                        .requires_high_performance = declare_parameter<bool>(mode_prefix + ".requires_high_perf"),
+                    };
+                }
+                target.push_back(mode_map[mode_name]);
+            }
         }
     }
-
-    // 通行性规则（planner 可行性判定）
-    const auto load_rule = [&](const std::string& prefix, uint8_t label) {
-        terrain_rules_[label] = {
-            declare_parameter<bool>(prefix + ".forward"),
-            declare_parameter<bool>(prefix + ".backward")
-        };
-    };
-    load_rule("path_planner.traversability.terrain_rules.slope", static_cast<uint8_t>(TerrainType::SLOPE));
-    load_rule("path_planner.traversability.terrain_rules.step_l1", static_cast<uint8_t>(TerrainType::STEP_L1));
-    load_rule("path_planner.traversability.terrain_rules.step_l2", static_cast<uint8_t>(TerrainType::STEP_L2));
-    load_rule("path_planner.traversability.terrain_rules.fly_slope", static_cast<uint8_t>(TerrainType::FLY_SLOPE));
-    load_rule("path_planner.traversability.terrain_rules.step_high", static_cast<uint8_t>(TerrainType::STEP_HIGH));
 }
 
 ProfileBlendParams NavExecutorNode::load_blend_params() {

@@ -65,6 +65,7 @@ public:
     std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> optimize(
         const CostMap& cost_map,
         const DirectionMap& direction_map,
+        const TerrainTraversalConstraints& terrain_constraints,
         const std::vector<Eigen::Vector2d>& init_path,
         const Eigen::Vector2d& start_grid,
         const Eigen::Vector2d& goal_grid

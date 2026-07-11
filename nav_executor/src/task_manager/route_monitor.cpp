@@ -16,6 +16,8 @@ const char* replan_reason_str(const ReplanReason reason) {
         case ReplanReason::STEP_BLOCKED: return "STEP_BLOCKED";
         case ReplanReason::MPC_LETHAL: return "MPC_LETHAL";
         case ReplanReason::EXECUTOR_REPLAN_EVENT: return "EXECUTOR_REPLAN_EVENT";
+        case ReplanReason::PERFORMANCE_DEGRADED: return "PERFORMANCE_DEGRADED";
+        case ReplanReason::PERFORMANCE_RECOVERED: return "PERFORMANCE_RECOVERED";
     }
     return "NONE";
 }
@@ -151,6 +153,38 @@ bool check_step_blocked(const RouteMonitorInput& in, const SplinePath& path, rcl
     return false;
 }
 
+double advance_path_u_by_distance(const SplinePath& path, double start_u, const double distance) {
+    constexpr double resolution = 0.05;
+    double u = std::clamp(start_u, 0.0, 1.0);
+    double travelled = 0.0;
+    while (u < 1.0 && travelled < distance) {
+        const double speed = path.tangent(u).norm();
+        if (speed < 1e-12) break;
+        const double next_u = std::min(1.0, u + resolution / speed);
+        travelled += (path.position(next_u) - path.position(u)).norm();
+        u = next_u;
+    }
+    return u;
+}
+
+std::optional<ReplanReason> check_performance(const RouteMonitorInput& in, rclcpp::Logger logger) {
+    const AnnotatedPath& path = *in.active_path;
+    if (!path.planning_performance.high_performance && in.current_performance.high_performance) {
+        RCLCPP_INFO(logger, "RouteMonitor: performance recovered; upgrading low-performance route");
+        return ReplanReason::PERFORMANCE_RECOVERED;
+    }
+    if (!path.planning_performance.high_performance || in.current_performance.high_performance) return std::nullopt;
+
+    const double lookahead_u = advance_path_u_by_distance(path.spline, in.current_u, in.performance.lookahead_distance);
+    for (const StepPlanSegment& segment : path.step_segments) {
+        if (!segment.requires_high_performance) continue;
+        if (segment.prepare_u <= in.current_u || segment.prepare_u > lookahead_u) continue;
+        RCLCPP_WARN(logger, "RouteMonitor: high-performance crossing ahead is no longer available");
+        return ReplanReason::PERFORMANCE_DEGRADED;
+    }
+    return std::nullopt;
+}
+
 } // anonymous namespace
 
 RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Logger logger) {
@@ -176,6 +210,12 @@ RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Log
     if (check_step_blocked(input, path, logger)) {
         report.needs_replan = true;
         report.reason = ReplanReason::STEP_BLOCKED;
+        return report;
+    }
+
+    if (const auto performance_reason = check_performance(input, logger)) {
+        report.needs_replan = true;
+        report.reason = *performance_reason;
         return report;
     }
 

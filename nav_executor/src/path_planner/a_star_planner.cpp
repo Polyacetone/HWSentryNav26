@@ -43,6 +43,7 @@ bool AStarPlanner::is_valid(const CostMap& costmap, const Eigen::Vector2i& coord
 std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_path(
     const CostMap& costmap,
     const DirectionMap& direction_map,
+    const TerrainTraversalConstraints& terrain_constraints,
     const Eigen::Vector2i& start_grid,
     const Eigen::Vector2i& goal_grid
 ) const {
@@ -117,7 +118,7 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
                 if (!is_valid(costmap, next) || closed_fwd[n_key] != 0) continue;
 
                 const Eigen::Vector2d move_dir = dir.cast<double>().normalized();
-                if (direction_map.is_direction_prohibited(next, move_dir, step_mode_dot_threshold_)) continue;
+                if (terrain_constraints.is_direction_prohibited(direction_map, next, move_dir, step_mode_dot_threshold_)) continue;
 
                 const double obstacle_cost = costmap.at(next) * obstacle_weight_;
                 const auto [step_alignment, step_proximity] = step_costs(next, move_dir);
@@ -151,7 +152,7 @@ std::expected<std::vector<Eigen::Vector2i>, std::string> AStarPlanner::search_pa
 
                 // 反向搜索: 路径真实方向为 next → current
                 const Eigen::Vector2d travel_dir = -dir.cast<double>().normalized();
-                if (direction_map.is_direction_prohibited(current->coord, travel_dir, step_mode_dot_threshold_)) continue;
+                if (terrain_constraints.is_direction_prohibited(direction_map, current->coord, travel_dir, step_mode_dot_threshold_)) continue;
                 // 注: step_costs 内部使用 |dot|, travel_dir 与 -travel_dir 结果相同;
                 // 进入当前栅格的方向为 travel_dir (next→current), 与正向搜索语义一致
                 const double obstacle_cost = costmap.at(next) * obstacle_weight_;

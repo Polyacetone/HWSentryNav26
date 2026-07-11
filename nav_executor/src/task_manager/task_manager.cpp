@@ -159,6 +159,8 @@ bool TaskManager::maybe_submit_plan(
     request.global_cost_map = snapshot.global_cost_map;
     request.merged_cost_map = snapshot.merged_cost_map;
     request.direction_map = snapshot.direction_map;
+    request.terrain_constraints = snapshot.terrain_constraints;
+    request.performance = snapshot.performance;
 
     planner_->submit(request);
     RCLCPP_DEBUG(logger_, "Submitted plan request for goal #%lu", static_cast<unsigned long>(current_goal_->id));

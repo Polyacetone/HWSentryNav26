@@ -21,12 +21,6 @@
       traversability:
         occupied_threshold: 50 # 格子代价 > 该值则不可通行 (0~255)
         on_step_threshold: 0.1 # 方向场模长 > 该值则视为在台阶上不可规划起点
-        terrain_rules: # 每类有方向地形的通行规则
-          slope: {forward: true, backward: true}
-          step_l1: {forward: true, backward: true}
-          step_l2: {forward: true, backward: true}
-          fly_slope: {forward: true, backward: true}
-          step_high: {forward: true, backward: false}
 
       # ═══════════════════════════════════════════════
       #  Nudge — 起点/终点 nudging
@@ -54,13 +48,6 @@
         length_num_samples: 100 # 路径弧长估计采样数
 
       # ═══════════════════════════════════════════════
-      #  Prediction — 代价地图时域融合（planner 输入）
-      # ═══════════════════════════════════════════════
-      prediction:
-        horizon_seconds: 2.0 # 预测时间窗口 (0=仅用当前帧)
-        weight_decay: 1.0 # 时域帧权重的线性衰减因子 [0,1]
-
-      # ═══════════════════════════════════════════════
       #  Step — 台阶检测（规划期 step_annotator 使用）
       # ═══════════════════════════════════════════════
       step:
@@ -85,7 +72,7 @@
           max_iterations: 60 # warmup 最大优化迭代次数
           max_curvature: 1.2 # warmup 阶段全局曲率上限
           obstacle_weight: 2.0 # 障碍物代价权重
-          direction_weight: 3.0 # 方向对齐代价权重
+          direction_weight: 20.0 # 方向对齐代价权重
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
           smoothness_weight: 0.005 # 样条光滑性正则权重
@@ -108,7 +95,7 @@
           step_transition_distance: 0.3 # 近/远曲率之间平滑过渡距离 (m)
           interval_iou_threshold: 0.85 # 台阶区间 IoU 阈值，收敛后提前退出细化
           obstacle_weight: 2.0 # 障碍物代价权重
-          direction_weight: 10.0 # 方向对齐代价权重
+          direction_weight: 60.0 # 方向对齐代价权重
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
           smoothness_weight: 0.003 # 样条光滑度正则权重

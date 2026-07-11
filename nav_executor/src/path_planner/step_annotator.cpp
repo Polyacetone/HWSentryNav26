@@ -63,21 +63,22 @@ std::optional<ActiveStepMode> build_step_command(
     const StepDirection direction,
     const Eigen::Vector2d& step_enter_pos_map,
     const double step_enter_u,
-    const DirectionMap& direction_map
+    const DirectionMap& direction_map,
+    const TerrainTraversalConstraints& terrain_constraints
 ) {
     const Eigen::Vector2d g = direction_map.map_coord_to_grid(step_enter_pos_map);
     const uint8_t label = direction_map.terrain_at(g);
-    const auto& rule = direction_map.rule_for_label(label, direction == StepDirection::UP);
+    const TerrainStepRule* rule = terrain_constraints.selected_mode(label, direction == StepDirection::UP);
 
-    if (rule.chassis_mode == 0) {
+    if (!rule || rule->chassis_mode == 0) {
         return std::nullopt;
     }
 
     return ActiveStepMode {
-        .mode = rule.chassis_mode,
-        .capability = rule.capability,
-        .speed_min = rule.speed.min,
-        .speed_max = rule.speed.max,
+        .mode = rule->chassis_mode,
+        .capability = rule->capability,
+        .speed_min = rule->speed.min,
+        .speed_max = rule->speed.max,
         .step_entry_u = step_enter_u,
     };
 }
@@ -97,6 +98,7 @@ std::vector<StepPlanSegment> build_step_plan(
     const StepDetectionParams& p,
     const SplinePath& path,
     const DirectionMap& direction_map,
+    const TerrainTraversalConstraints& terrain_constraints,
     rclcpp::Logger logger
 ) {
     const double resolution = std::max(1e-3, p.path_sample_resolution);
@@ -133,7 +135,7 @@ std::vector<StepPlanSegment> build_step_plan(
         const double step_enter_u = static_cast<double>(active->start_index) * u_step;
 
         auto command = build_step_command(
-            active->direction, active->step_enter_pos_map, step_enter_u, direction_map
+            active->direction, active->step_enter_pos_map, step_enter_u, direction_map, terrain_constraints
         );
         if (command) {
             StepPlanSegment seg;
@@ -145,6 +147,7 @@ std::vector<StepPlanSegment> build_step_plan(
             seg.direction = active->direction;
             seg.command = *command;
             seg.terrain_label = active->label;
+            seg.requires_high_performance = terrain_constraints.selected_mode(active->label, active->direction == StepDirection::UP)->requires_high_performance;
             plan.push_back(std::move(seg));
         }
         active.reset();

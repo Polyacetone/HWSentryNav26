@@ -97,6 +97,7 @@ private:
     double prediction_weight_decay_ = 1.0;
     FollowProjectionGuardParams proj_guard_params_{};
     StepBlockReplanParams step_block_params_{};
+    PerformanceReplanParams performance_replan_params_{};
 
     // ─── 核心组件 ───
     std::unique_ptr<PathPlanner> planner_;
@@ -105,7 +106,6 @@ private:
 
     // 只读配置（跨线程共享）
     TerrainProfiles terrain_profiles_;
-    TerrainRuleTable terrain_rules_{};
     std::shared_ptr<StepRoutingMask> step_routing_mask_;
     bool step_mask_ready_ = false;
 
@@ -123,7 +123,8 @@ private:
     uint8_t chassis_leg_mode_ = 4;
     uint8_t comp_stage_ = 4;
     double rfr_pwr_limit_ = 90.0;
-    double remaining_energy_filtered_ = 1400.0;
+    double remaining_energy_supercap_filtered_ = 1400.0;
+    double remaining_energy_buffercap_filtered_ = 0.0;
 
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;

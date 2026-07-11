@@ -11,6 +11,9 @@
 
 namespace nav_executor {
 
+class CostMap;
+class DirectionMap;
+
 // ════════════════════════════════════════════════════════════════
 //  地形标签
 // ════════════════════════════════════════════════════════════════
@@ -27,7 +30,7 @@ enum class TerrainType : uint8_t {
 constexpr size_t TERRAIN_LABEL_COUNT = 7;
 
 // ════════════════════════════════════════════════════════════════
-//  通行性规则（供 planner 起终点可行性 / 方向禁行判定）
+//  地形跨越模式与规划期约束
 // ════════════════════════════════════════════════════════════════
 
 struct TerrainRule {
@@ -77,20 +80,45 @@ struct TerrainSpeedRange {
 };
 
 struct TerrainStepRule {
+    std::string name;
     uint8_t chassis_mode = 0;
     CapabilityLevel capability = CapabilityLevel::LOW;
     TerrainSpeedRange speed;
+    bool requires_high_performance = false;
 };
 
 struct TerrainLabelRule {
-    TerrainStepRule up;
-    TerrainStepRule down;
+    std::vector<TerrainStepRule> up;
+    std::vector<TerrainStepRule> down;
 };
 
 struct TerrainProfiles {
     std::array<CapabilityProfile, 3> capability_profiles;
     std::array<TerrainLabelRule, 5> directional_labels;
+    double high_performance_buffercap_threshold = 0.0;
+    double high_performance_supercap_threshold = 0.0;
+    double high_performance_rfr_pwr_limit_threshold = 0.0;
 };
+
+struct PerformanceState {
+    bool high_performance = false;
+};
+
+struct TerrainTraversalConstraints {
+    TerrainRuleTable rules{};
+    std::array<TerrainLabelRule, 5> selected_modes{};
+    std::shared_ptr<const CostMap> blocked_cost_layer;
+
+    [[nodiscard]] bool has_blocked_corner(const DirectionMap& direction_map, const Eigen::Vector2d& grid_coord) const;
+    [[nodiscard]] bool is_direction_prohibited(const DirectionMap& direction_map, const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
+    [[nodiscard]] const TerrainStepRule* selected_mode(uint8_t label, bool is_up) const;
+};
+
+[[nodiscard]] TerrainTraversalConstraints build_terrain_traversal_constraints(
+    const DirectionMap& direction_map,
+    const TerrainProfiles& profiles,
+    PerformanceState performance
+);
 
 // ════════════════════════════════════════════════════════════════
 //  代价地图
@@ -136,21 +164,18 @@ public:
     };
 
     explicit DirectionMap(
-        const cv::Mat& direction_map, double resolution, double origin_x, double origin_y,
-        const TerrainProfiles& profiles, const TerrainRuleTable& rules
+        const cv::Mat& direction_map, double resolution, double origin_x, double origin_y
     );
 
     explicit DirectionMap(
         int width, int height, double resolution, double origin_x, double origin_y,
-        std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data,
-        const TerrainProfiles& profiles, const TerrainRuleTable& rules
+        std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data
     );
 
 private:
     explicit DirectionMap(
         int width, int height, double resolution, double origin_x, double origin_y,
-        std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded,
-        const TerrainProfiles& profiles, const TerrainRuleTable& rules
+        std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded
     );
 
     static std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>>
@@ -170,25 +195,11 @@ public:
     uint8_t terrain_at(const Eigen::Vector2i& grid_coord) const;
     uint8_t terrain_at(const Eigen::Vector2d& grid_coord) const;
 
-    // ── 通行性判定（planner 使用）──
-    bool has_blocked_corner(const Eigen::Vector2d& grid_coord) const;
-    double prohibited_direction_score(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
-    double prohibited_direction_score(const Eigen::Vector2d& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
-    bool is_direction_prohibited(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
-
-    // ── 台阶模式规则（executor 使用）──
-    const TerrainStepRule& rule_for_label(uint8_t label, bool is_up) const;
-    const TerrainProfiles& profiles() const { return profiles_; }
-    const TerrainRuleTable& rules() const { return rules_; }
-
     const int width, height;
     const double resolution, origin_x, origin_y;
     const std::vector<Eigen::Vector2d> data;
     const std::vector<uint8_t> terrain;
 
-private:
-    TerrainProfiles profiles_;
-    TerrainRuleTable rules_;
 };
 
 } // namespace nav_executor

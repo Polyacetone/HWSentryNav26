@@ -373,31 +373,32 @@ public:
 
         const double dir_norm = dir.norm();
         const double gate = step_gate(dir_norm, step_norm_threshold_, step_norm_transition_);
-        const double cross = (vel.x() * dir.y() - vel.y() * dir.x()) * cost_map_.resolution;
-        const double abs_cross = std::abs(cross);
-        residuals[0] = weight_ * gate * abs_cross;
+        constexpr double epsilon = 1e-12;
+        const double speed = std::sqrt(vel.squaredNorm() + epsilon);
+        const double safe_dir_norm = std::max(dir_norm, epsilon);
+        const double cross = vel.x() * dir.y() - vel.y() * dir.x();
+        const double alignment = cross / (speed * safe_dir_norm);
+        residuals[0] = weight_ * gate * alignment;
 
         if (jacobians) {
-            const double sign = cross >= 0.0 ? 1.0 : -1.0;
-            const double res = cost_map_.resolution;
-            const double eps = 1e-12;
-
             // d(gate)/d(norm) — smoothstep 导数（门控过渡区外为 0）
             const double dgate_dnorm = step_gate_derivative(dir_norm, step_norm_threshold_, step_norm_transition_);
 
             // d(norm)/d(dir) = dir / norm（零向量时为零）
             Eigen::Vector2d dnorm_ddir = Eigen::Vector2d::Zero();
-            if (dir_norm > eps) dnorm_ddir = dir / dir_norm;
+            if (dir_norm > epsilon) dnorm_ddir = dir / dir_norm;
 
             // d(gate)/d(pos) = dgate_dnorm * (dir/norm)ᵀ * dir_grad
             const Eigen::Vector2d dgate_dpos = dgate_dnorm * dir_grad.transpose() * dnorm_ddir;
+            const Eigen::Vector2d ddir_norm_dpos = dir_grad.transpose() * dnorm_ddir;
 
-            // d(cross)/d(pos) = res * (vel.x * ∂dir.y/∂pos - vel.y * ∂dir.x/∂pos)
-            // dir_grad.row(0) = ∂dir.x/∂pos, dir_grad.row(1) = ∂dir.y/∂pos
-            const Eigen::Vector2d dcross_dpos = res * (vel.x() * dir_grad.row(1) - vel.y() * dir_grad.row(0));
-
-            // d(cross)/d(vel) = res * (dir.y, -dir.x)
-            const Eigen::Vector2d dcross_dvel = res * Eigen::Vector2d(dir.y(), -dir.x());
+            const Eigen::Vector2d dcross_dpos = vel.x() * dir_grad.row(1) - vel.y() * dir_grad.row(0);
+            const Eigen::Vector2d dcross_dvel(dir.y(), -dir.x());
+            const Eigen::Vector2d dspeed_dvel = vel / speed;
+            const Eigen::Vector2d dalignment_dpos = dcross_dpos / (speed * safe_dir_norm)
+                - cross * ddir_norm_dpos / (speed * safe_dir_norm * safe_dir_norm);
+            const Eigen::Vector2d dalignment_dvel = dcross_dvel / (speed * safe_dir_norm)
+                - cross * dspeed_dvel / (speed * speed * safe_dir_norm);
 
             const size_t n = pos_evaluator_.ControlPointsSupport;
             for (size_t i = 0; i < n; ++i) {
@@ -406,16 +407,13 @@ public:
                 const double bp = pos_evaluator_.basisVals_[i];
                 const double bv = vel_evaluator_.basisVals_[i];
 
-                // ∂pos/∂cp_i = bp * I, ∂vel/∂cp_i = bv * I
-                // ∂residual/∂cp_i = w * [(∂gate/∂pos * |c| + gate*sign*∂cross/∂pos)·∂pos/∂cp_i
-                //                       + gate*sign*∂cross/∂vel·∂vel/∂cp_i]
                 jacobians[i][0] = weight_ * (
-                    bp * (dgate_dpos.x() * abs_cross + gate * sign * dcross_dpos.x())
-                  + bv * (gate * sign * dcross_dvel.x())
+                    bp * (dgate_dpos.x() * alignment + gate * dalignment_dpos.x())
+                  + bv * gate * dalignment_dvel.x()
                 );
                 jacobians[i][1] = weight_ * (
-                    bp * (dgate_dpos.y() * abs_cross + gate * sign * dcross_dpos.y())
-                  + bv * (gate * sign * dcross_dvel.y())
+                    bp * (dgate_dpos.y() * alignment + gate * dalignment_dpos.y())
+                  + bv * gate * dalignment_dvel.y()
                 );
             }
         }
@@ -729,10 +727,12 @@ BSplineOptimizer::BSplineOptimizer(BSplineOptimizer::Params params): params_(std
 std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector2d>>, std::string> BSplineOptimizer::optimize(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
+    const TerrainTraversalConstraints& terrain_constraints,
     const std::vector<Eigen::Vector2d>& init_path,
     const Eigen::Vector2d& start_grid,
     const Eigen::Vector2d& goal_grid
 ) const {
+    static_cast<void>(terrain_constraints);
     if (init_path.size() <= 2) {
         return std::unexpected("Initial path too short for optimization");
     }

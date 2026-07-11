@@ -19,3 +19,5 @@
           step_norm_threshold: 0.9 # 方向场模长 >= 该值视为路径经过台阶区域
           obstacle_cost_threshold: 100.0 # 动态障碍物代价值 >= 该值视为被障碍物占据
           predicted_obstacle_ratio_threshold: 0.8 # 预测地图模式下，台阶样本中被占据比例超过该阈值则触发重规划
+        performance:
+          lookahead_distance: 6.0 # 性能下降时检查尚未进入 prepare 阶段的跨越段

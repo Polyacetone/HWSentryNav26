@@ -51,17 +51,38 @@
       # ═══════════════════════════════════════════════
       directional_labels:
         slope: # 斜坡
-          up:   { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 } }
-          down: { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 } }
+          up: [mid_leg]
+          down: [mid_leg]
+          modes:
+            mid_leg: { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 }, requires_high_perf: false }
         step_l1: # 一级台阶
-          up:   { chassis_mode: 4, capability: low, speed: { min: 1.2, max: 1.5 } }
-          down: { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 } }
+          up: [high_leg_l1, jump_up_l1]
+          down: [mid_leg]
+          modes:
+            high_leg_l1: { chassis_mode: 3, capability: low, speed: { min: 1.2, max: 1.5 }, requires_high_perf: false }
+            jump_up_l1: { chassis_mode: 5, capability: medium, speed: { min: 1.6, max: 2.0 }, requires_high_perf: true }
+            mid_leg: { chassis_mode: 7, capability: medium, speed: { min: 1.6, max: 2.0 }, requires_high_perf: false }
         step_l2: # 二级台阶
-          up:   { chassis_mode: 4, capability: low, speed: { min: 1.2, max: 1.5 } }
-          down: { chassis_mode: 9, capability: medium, speed: { min: 1.6, max: 2.0 } }
+          up: [high_leg_l2]
+          down: [jump_down, high_leg_down]
+          modes:
+            high_leg_l2: { chassis_mode: 4, capability: low, speed: { min: 1.2, max: 1.5 }, requires_high_perf: false }
+            jump_down: { chassis_mode: 9, capability: medium, speed: { min: 1.2, max: 1.6 }, requires_high_perf: true }
+            high_leg_down: { chassis_mode: 8, capability: low, speed: { min: 1.2, max: 1.6 }, requires_high_perf: false }
         fly_slope: # 飞坡
-          up:   { chassis_mode: 10, capability: high, speed: { min: 2.8, max: 3.2 } }
-          down: { chassis_mode: 11, capability: medium, speed: { min: 2.2, max: 2.6 } }
+          up: [fly_slope]
+          down: [fly_slope_rev]
+          modes:
+            fly_slope: { chassis_mode: 10, capability: high, speed: { min: 2.8, max: 3.2 }, requires_high_perf: true }
+            fly_slope_rev: { chassis_mode: 11, capability: medium, speed: { min: 2.2, max: 2.6 }, requires_high_perf: true }
         step_high: # 高地台阶
-          up:   { chassis_mode: 6, capability: medium, speed: { min: 2.2, max: 2.6 } }
-          down: { chassis_mode: 9, capability: medium, speed: { min: 1.8, max: 2.0 } }
+          up: [jump_up_high]
+          down: [jump_down]
+          modes:
+            jump_up_high: { chassis_mode: 6, capability: medium, speed: { min: 2.2, max: 2.6 }, requires_high_perf: true }
+            jump_down: { chassis_mode: 9, capability: medium, speed: { min: 1.2, max: 1.6 }, requires_high_perf: true }
+
+      high_performance:
+        buffercap_threshold: 1000.0 # 缓冲电容能量高于该阈值时，允许使用高性能模式
+        supercap_threshold: 1000.0 # 超级电容能量高于该阈值时，允许使用高性能模式
+        rfr_pwr_limit_threshold: 40.0 # 底盘取电功率高于该阈值时，允许使用高性能模式

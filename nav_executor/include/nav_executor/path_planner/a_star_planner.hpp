@@ -22,6 +22,7 @@ public:
     std::expected<std::vector<Eigen::Vector2i>, std::string> search_path(
         const CostMap& cost_map,
         const DirectionMap& direction_map,
+        const TerrainTraversalConstraints& terrain_constraints,
         const Eigen::Vector2i& start_grid,
         const Eigen::Vector2i& goal_grid
     ) const;

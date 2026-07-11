@@ -27,6 +27,7 @@ std::vector<StepPlanSegment> build_step_plan(
     const StepDetectionParams& params,
     const SplinePath& path,
     const DirectionMap& direction_map,
+    const TerrainTraversalConstraints& terrain_constraints,
     rclcpp::Logger logger
 );
 

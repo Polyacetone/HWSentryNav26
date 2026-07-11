@@ -12,8 +12,10 @@ void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStat
     chassis_state_.leg_psi = msg->leg_psi;
     chassis_leg_mode_ = msg->leg_mode;
     rfr_pwr_limit_ = static_cast<double>(msg->rfr_pwr_limit);
-    remaining_energy_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_supercap)
-        + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_filtered_;
+    remaining_energy_supercap_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_supercap)
+        + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_supercap_filtered_;
+    remaining_energy_buffercap_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_buffercap)
+        + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_buffercap_filtered_;
 }
 
 void NavExecutorNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -108,6 +110,14 @@ void NavExecutorNode::control_tick() {
         .prediction_dynamic = prediction_maps_,
     };
     const DirectionLayers direction_layers { .global = global_direction_map_ };
+    const PerformanceState performance {
+        .high_performance = remaining_energy_buffercap_filtered_ >= terrain_profiles_.high_performance_buffercap_threshold
+            && remaining_energy_supercap_filtered_ >= terrain_profiles_.high_performance_supercap_threshold
+            && rfr_pwr_limit_ >= terrain_profiles_.high_performance_rfr_pwr_limit_threshold
+    };
+    const TerrainTraversalConstraints terrain_constraints = build_terrain_traversal_constraints(
+        *global_direction_map_, terrain_profiles_, performance
+    );
 
     RouteContext route_context = build_route_context(cost_layers, direction_layers, task_->active_path());
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
@@ -125,6 +135,8 @@ void NavExecutorNode::control_tick() {
         task_input.plan_snapshot.global_cost_map = global_cost_map_;
         task_input.plan_snapshot.merged_cost_map = merged_prediction_cost_map_;
         task_input.plan_snapshot.direction_map = global_direction_map_;
+        task_input.plan_snapshot.terrain_constraints = terrain_constraints;
+        task_input.plan_snapshot.performance = performance;
     }
 
     if (task_->active_path() && previous_motion_feedback_.motion_state == MotionState::FOLLOW) {
@@ -138,6 +150,8 @@ void NavExecutorNode::control_tick() {
         rm.masked_direction_map = route_context.masked_direction.get();
         rm.proj_guard = proj_guard_params_;
         rm.step_block = step_block_params_;
+        rm.performance = performance_replan_params_;
+        rm.current_performance = performance;
         rm.mpc_lethal = previous_motion_feedback_.mpc_lethal
             && previous_motion_feedback_.lethal_path == task_->active_path();
         task_input.route_monitor = std::move(rm);
@@ -156,7 +170,7 @@ void NavExecutorNode::control_tick() {
     ein.intent.spin_fast = (spin_state_ == SpinState::SPIN_FAST);
     ein.observation.chassis_pose_map = chassis_pose_map;
     ein.observation.chassis_state = chassis_state_;
-    ein.observation.remaining_energy = remaining_energy_filtered_;
+    ein.observation.remaining_energy = remaining_energy_supercap_filtered_;
     ein.observation.rfr_pwr_limit = rfr_pwr_limit_;
     ein.observation.chassis_leg_mode = chassis_leg_mode_;
     ein.observation.comp_stage = comp_stage_;

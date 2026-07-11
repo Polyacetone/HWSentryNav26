@@ -1,6 +1,4 @@
 #include <nav_executor/path_planner/nav_map.hpp>
-#include <nav_executor/common/chassis_defs.hpp>
-
 #include <algorithm>
 #include <numbers>
 #include <stdexcept>
@@ -141,35 +139,30 @@ DirectionMap::decode_mat(const cv::Mat& mat) {
 }
 
 DirectionMap::DirectionMap(
-    const cv::Mat& direction_map, double resolution, double origin_x, double origin_y,
-    const TerrainProfiles& profiles, const TerrainRuleTable& rules):
+    const cv::Mat& direction_map, double resolution, double origin_x, double origin_y):
     DirectionMap(
         direction_map.cols, direction_map.rows, resolution, origin_x, origin_y,
-        decode_mat(direction_map), profiles, rules
+        decode_mat(direction_map)
     ) {}
 
 DirectionMap::DirectionMap(
     int width, int height, double resolution, double origin_x, double origin_y,
-    std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded,
-    const TerrainProfiles& profiles, const TerrainRuleTable& rules):
+    std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded):
     DirectionMap(
         width, height, resolution, origin_x, origin_y,
-        std::move(decoded.first), std::move(decoded.second), profiles, rules
+        std::move(decoded.first), std::move(decoded.second)
     ) {}
 
 DirectionMap::DirectionMap(
     int width, int height, double resolution, double origin_x, double origin_y,
-    std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data,
-    const TerrainProfiles& profiles, const TerrainRuleTable& rules):
+    std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data):
     width(width),
     height(height),
     resolution(resolution),
     origin_x(origin_x),
     origin_y(origin_y),
     data(std::move(dir_data)),
-    terrain(terrain_data.empty() ? std::vector<uint8_t>(static_cast<size_t>(width) * static_cast<size_t>(height), static_cast<uint8_t>(TerrainType::FLAT)) : std::move(terrain_data)),
-    profiles_(profiles),
-    rules_(rules) {
+    terrain(terrain_data.empty() ? std::vector<uint8_t>(static_cast<size_t>(width) * static_cast<size_t>(height), static_cast<uint8_t>(TerrainType::FLAT)) : std::move(terrain_data)) {
     if (static_cast<int>(this->data.size()) != width * height) {
         throw std::runtime_error("DirectionMap data size does not match width*height");
     }
@@ -247,70 +240,56 @@ uint8_t DirectionMap::terrain_at(const Eigen::Vector2d& grid_coord) const {
     return terrain_at(Eigen::Vector2i(floored.x(), floored.y()));
 }
 
-bool DirectionMap::has_blocked_corner(const Eigen::Vector2d& grid_coord) const {
-    if (!is_valid_coord(grid_coord)) return false;
+const TerrainStepRule* TerrainTraversalConstraints::selected_mode(const uint8_t label, const bool is_up) const {
+    if (label < static_cast<uint8_t>(TerrainType::SLOPE) || label >= TERRAIN_LABEL_COUNT) return nullptr;
+    const auto& modes = is_up ? selected_modes[label - 2].up : selected_modes[label - 2].down;
+    return modes.empty() ? nullptr : &modes.front();
+}
 
+bool TerrainTraversalConstraints::has_blocked_corner(const DirectionMap& direction_map, const Eigen::Vector2d& grid_coord) const {
+    if (!direction_map.is_valid_coord(grid_coord)) return false;
     const int x0 = static_cast<int>(grid_coord.x());
     const int y0 = static_cast<int>(grid_coord.y());
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
-
-    for (const Eigen::Vector2i& sample : {Eigen::Vector2i{x0, y0}, Eigen::Vector2i{x1, y0}, Eigen::Vector2i{x0, y1}, Eigen::Vector2i{x1, y1}}) {
-        const Eigen::Vector2d dir = at(sample);
-        if (dir.squaredNorm() <= 1e-12) continue;
-        const TerrainRule& rule = rules_[terrain_at(sample)];
-        if (!rule.forward_allowed && !rule.backward_allowed) {
-            return true;
-        }
+    for (const Eigen::Vector2i& sample : {Eigen::Vector2i{x0, y0}, {x0 + 1, y0}, {x0, y0 + 1}, {x0 + 1, y0 + 1}}) {
+        const TerrainRule& rule = rules[direction_map.terrain_at(sample)];
+        if (!rule.forward_allowed && !rule.backward_allowed) return true;
     }
-
     return false;
 }
 
-double DirectionMap::prohibited_direction_score(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
-    return prohibited_direction_score_impl(at(grid_coord), rules_[terrain_at(grid_coord)], move_dir, dot_threshold);
+bool TerrainTraversalConstraints::is_direction_prohibited(const DirectionMap& direction_map, const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, const double dot_threshold) const {
+    return prohibited_direction_score_impl(direction_map.at(grid_coord), rules[direction_map.terrain_at(grid_coord)], move_dir, dot_threshold) > 0.0;
 }
 
-double DirectionMap::prohibited_direction_score(const Eigen::Vector2d& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
-    if (!is_valid_coord(grid_coord) || move_dir.squaredNorm() <= 1e-12) return 0.0;
-
-    const int x0 = static_cast<int>(grid_coord.x());
-    const int y0 = static_cast<int>(grid_coord.y());
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
-    const double dx = grid_coord.x() - x0;
-    const double dy = grid_coord.y() - y0;
-
-    const double w00 = (1 - dx) * (1 - dy);
-    const double w10 = dx * (1 - dy);
-    const double w01 = (1 - dx) * dy;
-    const double w11 = dx * dy;
-
-    const double total = w00 + w10 + w01 + w11;
-    if (total <= 0.0) return 0.0;
-
-    const double score = w00 * prohibited_direction_score(Eigen::Vector2i(x0, y0), move_dir, dot_threshold)
-        + w10 * prohibited_direction_score(Eigen::Vector2i(x1, y0), move_dir, dot_threshold)
-        + w01 * prohibited_direction_score(Eigen::Vector2i(x0, y1), move_dir, dot_threshold)
-        + w11 * prohibited_direction_score(Eigen::Vector2i(x1, y1), move_dir, dot_threshold);
-    return std::clamp(score / total, 0.0, 1.0);
-}
-
-bool DirectionMap::is_direction_prohibited(const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const {
-    return prohibited_direction_score_impl(at(grid_coord), rules_[terrain_at(grid_coord)], move_dir, dot_threshold) > 0.0;
-}
-
-const TerrainStepRule& DirectionMap::rule_for_label(const uint8_t label, const bool is_up) const {
-    if (label <= static_cast<uint8_t>(TerrainType::OBSTACLE)) {
-        static const TerrainStepRule kFlatRule = {
-            .chassis_mode = chassis_mode::NORMAL,
-            .capability = CapabilityLevel::LOW,
-            .speed = {0.0, 0.0},
+TerrainTraversalConstraints build_terrain_traversal_constraints(
+    const DirectionMap& direction_map, const TerrainProfiles& profiles, const PerformanceState performance
+) {
+    TerrainTraversalConstraints constraints;
+    std::vector<uint8_t> blocked(direction_map.data.size(), 0);
+    for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE); label < TERRAIN_LABEL_COUNT; ++label) {
+        const auto select = [&](const std::vector<TerrainStepRule>& modes) {
+            std::vector<TerrainStepRule> selected;
+            for (const TerrainStepRule& mode : modes) {
+                if (!mode.requires_high_performance || performance.high_performance) {
+                    selected.push_back(mode);
+                    break;
+                }
+            }
+            return selected;
         };
-        return kFlatRule;
+        auto& selected = constraints.selected_modes[label - 2];
+        selected.up = select(profiles.directional_labels[label - 2].up);
+        selected.down = select(profiles.directional_labels[label - 2].down);
+        constraints.rules[label] = {.forward_allowed = !selected.up.empty(), .backward_allowed = !selected.down.empty()};
     }
-    const auto& lr = profiles_.directional_labels[label - 2];
-    return is_up ? lr.up : lr.down;
+    for (size_t i = 0; i < blocked.size(); ++i) {
+        const TerrainRule& rule = constraints.rules[direction_map.terrain[i]];
+        blocked[i] = (!rule.forward_allowed && !rule.backward_allowed) ? 255 : 0;
+    }
+    constraints.blocked_cost_layer = std::make_shared<CostMap>(
+        direction_map.width, direction_map.height, direction_map.resolution, direction_map.origin_x, direction_map.origin_y, blocked
+    );
+    return constraints;
 }
 
 } // namespace nav_executor

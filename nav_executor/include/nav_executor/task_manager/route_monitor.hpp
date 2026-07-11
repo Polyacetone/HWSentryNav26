@@ -25,6 +25,8 @@ struct StepBlockReplanParams {
     double predicted_obstacle_ratio_threshold;
 };
 
+struct PerformanceReplanParams { double lookahead_distance; };
+
 // RouteMonitor 输出的重规划原因。前三种由本模块产出，EXECUTOR_REPLAN_EVENT 由 TaskManager 消费，此处仅用于诊断记录。
 enum class ReplanReason : uint8_t {
     NONE = 0,
@@ -32,6 +34,8 @@ enum class ReplanReason : uint8_t {
     STEP_BLOCKED = 2,
     MPC_LETHAL = 3,
     EXECUTOR_REPLAN_EVENT = 4,
+    PERFORMANCE_DEGRADED = 5,
+    PERFORMANCE_RECOVERED = 6,
 };
 
 const char* replan_reason_str(ReplanReason reason);
@@ -51,6 +55,8 @@ struct RouteMonitorInput {
 
     FollowProjectionGuardParams proj_guard{};
     StepBlockReplanParams step_block{};
+    PerformanceReplanParams performance{};
+    PerformanceState current_performance{};
 
     // 上一周期 PathExecutor 输出的 one-shot MPC_LETHAL 事实。
     bool mpc_lethal = false;

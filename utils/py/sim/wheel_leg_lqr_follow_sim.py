@@ -1424,7 +1424,7 @@ class WheelLegLqrFollowSimNode(Node):
         )
         msg.leg_mode = 4
         msg.remaining_energy_supercap = int(np.clip(self._energy, -32768, 32767))
-        msg.remaining_energy_buffercap = 0
+        msg.remaining_energy_buffercap = 1100
         msg.curr_chassis_pwr = int(np.clip(self._current_power, -32768, 32767))
         msg.rfr_pwr_limit = int(np.clip(self.cfg.RFR_PWR_LIMIT, -32768, 32767))
         self.status_pub.publish(msg)
