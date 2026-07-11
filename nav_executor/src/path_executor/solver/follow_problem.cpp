@@ -2,7 +2,6 @@
 #include <nav_executor/path_executor/solver/mpc_utils.hpp>
 #include <nav_executor/path_executor/solver/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/solver/lpv_model.hpp>
-#include <nav_executor/path_executor/solver/mppi_sampler.hpp>
 
 namespace nav_executor {
 

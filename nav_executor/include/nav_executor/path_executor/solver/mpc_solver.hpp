@@ -5,6 +5,7 @@
 #include <nav_executor/path_executor/solver/follow_problem.hpp>
 #include <nav_executor/path_executor/solver/stop_problem.hpp>
 #include <nav_executor/path_executor/solver/hold_problem.hpp>
+#include <nav_executor/path_executor/solver/search/follow_search.hpp>
 
 namespace nav_executor {
 
@@ -72,11 +73,14 @@ private:
     double last_u_ = 0.0;
 
     fddp::Solver<FollowProblem> follow_solver_;
+    fddp::Solver<FollowProblem> search_solver_; // 从 MHA* 种子出发的候选（Q5 双解比较）
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
     bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
+
+    search::FollowSearchSeeder search_seeder_;
 
     std::optional<SplinePath> prev_ref_control_points_;
 

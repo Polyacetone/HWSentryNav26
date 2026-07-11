@@ -20,7 +20,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.w_pred_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("node.debug.final_cost_map_pub_topic"), 1);
-        debug_mppi_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("node.debug.mppi_rollouts_pub_topic"), 1);
+        debug_search_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.search_path_pub_topic"), 1);
     }
 
     load_terrain_config();
@@ -448,23 +448,28 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .proj_search_window = declare_parameter<double>("mpc.follow.projection.search_window"),
                 .local_search_lazy_distance = declare_parameter<double>("mpc.follow.projection.local_search_lazy_distance")
             },
-            .mppi = {
-                .enable = declare_parameter<bool>("mpc.follow.mppi.enable"),
-                .num_threads = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.num_threads")),
-                .batch_size = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.batch_size")),
-                .iteration_count = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.iteration_count")),
-                .temperature = declare_parameter<double>("mpc.follow.mppi.temperature"),
-                .gamma = declare_parameter<double>("mpc.follow.mppi.gamma"),
-                .sampling_std = {
-                    .velocity = declare_parameter<double>("mpc.follow.mppi.sampling_std.velocity"),
-                    .omega = declare_parameter<double>("mpc.follow.mppi.sampling_std.omega")
-                },
-                .noise_smoothing = {
-                    .window = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.noise_smoothing.window")),
-                    .passes = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.noise_smoothing.passes"))
-                },
-                .include_nominal_trajectory = declare_parameter<bool>("mpc.follow.mppi.include_nominal_trajectory"),
-                .fallback_to_best_sample = declare_parameter<bool>("mpc.follow.mppi.fallback_to_best_sample")
+            .search = {
+                .enable = declare_parameter<bool>("mpc.follow.search.enable"),
+                .dt = declare_parameter<double>("mpc.follow.search.dt"),
+                .horizon_steps = static_cast<int>(declare_parameter<int>("mpc.follow.search.horizon_steps")),
+                .theta_bins = static_cast<int>(declare_parameter<int>("mpc.follow.search.theta_bins")),
+                .v_bin_size = declare_parameter<double>("mpc.follow.search.v_bin_size"),
+                .v_primitive_fracs = declare_parameter<std::vector<double>>("mpc.follow.search.v_primitive_fracs"),
+                .omega_primitive_fracs = declare_parameter<std::vector<double>>("mpc.follow.search.omega_primitive_fracs"),
+                .tau_v = declare_parameter<double>("mpc.follow.search.tau_v"),
+                .budget_ms = declare_parameter<double>("mpc.follow.search.budget_ms"),
+                .max_expansions = static_cast<int>(declare_parameter<int>("mpc.follow.search.max_expansions")),
+                .collision_threshold = declare_parameter<double>("mpc.follow.search.collision_threshold"),
+                .goal_tolerance = declare_parameter<double>("mpc.follow.search.goal_tolerance"),
+                .lookahead_distance = declare_parameter<double>("mpc.follow.search.lookahead_distance"),
+                .w_anchor = declare_parameter<double>("mpc.follow.search.w_anchor"),
+                .w_inadmissible = declare_parameter<double>("mpc.follow.search.w_inadmissible"),
+                .spline_bias = declare_parameter<double>("mpc.follow.search.spline_bias"),
+                .w_time = declare_parameter<double>("mpc.follow.search.w_time"),
+                .w_obstacle = declare_parameter<double>("mpc.follow.search.w_obstacle"),
+                .w_lateral = declare_parameter<double>("mpc.follow.search.w_lateral"),
+                .w_step_align = declare_parameter<double>("mpc.follow.search.w_step_align"),
+                .w_step_reach = declare_parameter<double>("mpc.follow.search.w_step_reach")
             },
             .rollout_safety = {
                 .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),

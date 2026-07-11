@@ -14,23 +14,32 @@
       # ═══════════════════════════════════════════════
       follow:
         max_iters: 40 # FDDP 求解器最大迭代次数
-        mppi:
-          enable: false # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
-          num_threads: 2 # MPPI并行线程数
-          batch_size: 256 # 每次迭代采样轨迹数
-          iteration_count: 2 # MPPI迭代次数
-          temperature: 0.3 # 软最优权重温度，越小越偏向最优样本
-          gamma: 0.015 # 控制噪声正则权重，抑制大幅偏离名义控制
-          sampling_std:
-            velocity: 0.4 # 线速度采样标准差 (m/s)
-            omega: 1.0 # 角速度采样标准差 (rad/s)
-          noise_smoothing:
-            window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
-            passes: 2 # 平滑迭代次数
-          include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免MPPI退化时丢掉已有好解
-          fallback_to_best_sample: true # 最终优先采用历史最佳可行样本，增强跳出局部最优的稳定性
+        search:
+          # Anytime MHA* 局部搜索播种器：在 FDDP 前做全局较优粗搜，跳出非凸局部最优。
+          # 与 warm-shift 各跑一次 FDDP，取最终 cost 低者（Q5 双解比较）。
+          enable: true # 是否启用搜索播种
+          dt: 0.2 # 搜索步长 (s)，粗于 MPC_DT=0.05
+          horizon_steps: 15 # 搜索时域步数（dt×steps=3.0s 覆盖 MPC 时域）
+          theta_bins: 16 # 航向离散档数（22.5°/档）
+          v_bin_size: 0.3 # 速度离散分辨率 (m/s)
+          v_primitive_fracs: [1.0, 0.5, 0.0, -0.5] # 速度基元（>=0 乘 vel_max，<0 乘 |vel_min|），含后退
+          omega_primitive_fracs: [-1.0, -0.5, 0.0, 0.5, 1.0] # 角速度基元（乘对应 omega bound）
+          tau_v: 0.0 # 速度一阶滞后时间常数 (s)；<=0 时启动期由 LPV 模型自动推导
+          budget_ms: 15.0 # anytime 时间预算 (ms)
+          max_expansions: 4000 # 最大节点展开数
+          collision_threshold: 200.0 # 代价 >= 该值视为不可通行
+          goal_tolerance: 0.15 # 到达前瞻目标的距离阈值 (m)
+          lookahead_distance: 3.0 # 沿样条设定前瞻目标点的弧长 (m)
+          w_anchor: 2.0 # w1：不可采纳启发式膨胀系数
+          w_inadmissible: 2.0 # w2：anchor 有界次优系数
+          spline_bias: 0.5 # H1：偏向贴近全局样条的强度
+          w_time: 0.2 # 每步时间/进度基代价
+          w_obstacle: 1.0 # 避障（↔ environment_weights.obstacle）
+          w_lateral: 0.3 # Frenet 横向误差（↔ tracking_weights.q_y）
+          w_step_align: 1.0 # 台阶方向对齐（↔ terrain_weights.direction）
+          w_step_reach: 0.8 # 台阶入口可达速度（↔ terrain_weights.step_reachability_*）
         rollout_safety:
-          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
+          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
           fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
         command_bounds:

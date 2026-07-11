@@ -145,27 +145,41 @@ struct MPCFollowProjection {
     double local_search_lazy_distance;
 };
 
-struct MPPISamplingStd {
-    double velocity;
-    double omega;
-};
-
-struct MPPINoiseSmoothing {
-    int window;
-    int passes;
-};
-
-struct MPCFollowMPPIParams {
+// Anytime MHA* 局部搜索播种器参数（在 FDDP 前做全局较优粗搜，跳出非凸局部最优）
+struct FollowSearchParams {
     bool enable;
-    int num_threads;
-    int batch_size;
-    int iteration_count;
-    double temperature;
-    double gamma;
-    MPPISamplingStd sampling_std;
-    MPPINoiseSmoothing noise_smoothing;
-    bool include_nominal_trajectory;
-    bool fallback_to_best_sample;
+
+    // ── 离散化 ──
+    double dt;                  // 搜索步长 (s)，粗于 MPC_DT
+    int horizon_steps;          // 搜索时域步数上限（dt × steps 覆盖 MPC 时域）
+    int theta_bins;             // 航向离散档数
+    double v_bin_size;          // 速度离散分辨率 (m/s)
+
+    // ── 运动基元（相对 command_bounds 的比例，v 含负值支持后退）──
+    std::vector<double> v_primitive_fracs;
+    std::vector<double> omega_primitive_fracs;
+    double tau_v;               // 速度一阶滞后时间常数 (s)；<=0 时启动期由 LPV 模型自动推导
+
+    // ── Anytime 预算 ──
+    double budget_ms;
+    int max_expansions;
+
+    // ── 可行性 ──
+    double collision_threshold; // 代价 >= 该值视为不可通行
+    double goal_tolerance;      // 到达前瞻目标的距离阈值 (m)
+    double lookahead_distance;  // 沿样条设定前瞻目标点的弧长 (m)
+
+    // ── MHA* 权重 ──
+    double w_anchor;            // w1：不可采纳启发式膨胀系数
+    double w_inadmissible;      // w2：anchor 有界次优系数
+    double spline_bias;         // H1：偏向贴近全局样条的强度
+
+    // ── 边代价权重（与 FDDP running cost 主项同构）──
+    double w_time;              // 每步时间/进度基代价
+    double w_obstacle;          // 避障（↔ environment_weights.obstacle）
+    double w_lateral;           // Frenet 横向误差（↔ tracking_weights.q_y）
+    double w_step_align;        // 台阶方向对齐（↔ terrain_weights.direction）
+    double w_step_reach;        // 台阶入口可达速度（↔ terrain_weights.step_reachability_*）
 };
 
 struct MPCFollowRolloutSafetyParams {
@@ -186,7 +200,7 @@ struct MPCFollowParams {
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowTerminalWeights terminal_weights;
     MPCFollowProjection projection;
-    MPCFollowMPPIParams mppi;
+    FollowSearchParams search;
     MPCFollowRolloutSafetyParams rollout_safety;
     int max_iters;
 };
@@ -282,7 +296,8 @@ struct MPCPrediction {
     std::vector<double> v_pred;
     std::vector<double> w_pred;
 
-    std::vector<std::vector<Eigen::Vector2d>> rollout_paths;
+    // 调试：本周期 MHA* 搜索得到的粗路径（map 坐标）
+    std::vector<Eigen::Vector2d> search_path;
 };
 
 struct MPCParams {

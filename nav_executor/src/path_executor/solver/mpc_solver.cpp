@@ -2,7 +2,6 @@
 #include <nav_executor/path_executor/solver/mpc_utils.hpp>
 #include <nav_executor/path_executor/solver/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/solver/lpv_model.hpp>
-#include <nav_executor/path_executor/solver/mppi_sampler.hpp>
 
 namespace nav_executor {
 
@@ -63,14 +62,19 @@ void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
 }
 
 template<typename SolverT>
-std::array<ControlVec, SolverT::N> copy_solver_controls(const SolverT& solver) {
-    return solver.us;
+void seed_solver_from_fddp_seed(SolverT& solver, const search::FddpSeed& seed) {
+    solver.xs = seed.xs;
+    solver.us = seed.us;
 }
 
-template<typename SolverT>
-void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample) {
-    solver.xs = sample.xs;
-    solver.us = sample.us;
+template<typename ProblemT, typename SolverT>
+double solver_trajectory_cost(const ProblemT& prob, const SolverT& solver) {
+    double c = 0.0;
+    for (size_t k = 0; k < SolverT::N; ++k) {
+        c += prob.running_cost(static_cast<int>(k), solver.xs[k], solver.us[k]);
+    }
+    c += prob.terminal_cost(solver.xs[SolverT::N]);
+    return c;
 }
 
 template<typename ProblemT, typename StateContainerT>
@@ -129,7 +133,8 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 // ── MPCSolver 方法 ──
 
-MPCSolver::MPCSolver(const MPCParams& params): params_(params) {}
+MPCSolver::MPCSolver(const MPCParams& params)
+    : params_(params), search_seeder_(params.follow.search) {}
 
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
     last_cmd_ = cmd;
@@ -284,31 +289,48 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     opts.tol_grad = SOLVER_TOL_GRAD;
     opts.tol_cost = SOLVER_TOL_COST;
 
+    // ── 候选 1：warm-shift（时间相干，指令平滑）──
     if (follow_warm_) {
         shift_warm_start(follow_solver_);
     } else {
         fill_solver_controls(follow_solver_, ControlVec::Zero());
     }
     scale_solver_controls(follow_solver_, problem);
+    rollout_solver_states(follow_solver_, problem, x0);
+    follow_solver_.solve(problem, opts);
+    follow_warm_ = true;
+    const double warm_cost = solver_trajectory_cost(problem, follow_solver_);
 
-    MPPIFollowSamplingResult mppi_result;
-    bool seeded_by_mppi = false;
-    if (params_.follow.mppi.enable) {
-        MPPIFollowSampler sampler(params_.follow.mppi);
-        mppi_result = sampler.optimize(problem, x0, copy_solver_controls(follow_solver_));
-        if (mppi_result.valid) {
-            seed_solver_from_sampling_result(follow_solver_, mppi_result);
-            seeded_by_mppi = true;
+    // ── 候选 2：MHA* 搜索种子（跳出非凸局部最优）──
+    std::vector<Eigen::Vector2d> search_path;
+    bool use_search = false;
+    if (search_seeder_.enabled()) {
+        search_seeder_.ensure_tau_v(build_lpv_discrete_model(params_.kinematic_model, schedule_rho));
+        auto seeding = search_seeder_.run(
+            x0, global_path, u0, CostMapGridView(cost_map), ci, dg, di,
+            blended_profile, active_step_mode,
+            params_.follow.terrain_limits.step_reachability_guide_acc
+        );
+        if (seeding.seed.valid) {
+            search_path = std::move(seeding.search_path);
+            seed_solver_from_fddp_seed(search_solver_, seeding.seed);
+            scale_solver_controls(search_solver_, problem);
+            search_solver_.solve(problem, opts);
+            const double search_cost = solver_trajectory_cost(problem, search_solver_);
+            if (search_cost < warm_cost) {
+                use_search = true;
+            }
         }
     }
 
-    if (!seeded_by_mppi) {
-        rollout_solver_states(follow_solver_, problem, x0);
+    // 取胜出候选作为本周期解（搜索胜出时同步 warm-shift 缓冲，保证下周期相干）。
+    fddp::Solver<FollowProblem>& winner = use_search ? search_solver_ : follow_solver_;
+    if (use_search) {
+        follow_solver_.xs = search_solver_.xs;
+        follow_solver_.us = search_solver_.us;
     }
-    follow_solver_.solve(problem, opts);
-    follow_warm_ = true;
 
-    const auto solved_rollout = rollout_states(problem, follow_solver_, x0);
+    const auto solved_rollout = rollout_states(problem, winner, x0);
     MPCPrediction prediction;
     {
         const size_t sz = solved_rollout.valid_steps + 1;
@@ -324,7 +346,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             prediction.w_pred.push_back(x(ix::W));
         }
     }
-    prediction.rollout_paths = std::move(mppi_result.rollout_paths);
+    prediction.search_path = std::move(search_path);
 
     if (check_lethal_status) {
         const auto& safety = params_.follow.rollout_safety;
