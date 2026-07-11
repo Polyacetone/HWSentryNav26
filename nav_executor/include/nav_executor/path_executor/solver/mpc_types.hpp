@@ -173,19 +173,18 @@ struct FollowSearchParams {
     double w_anchor;            // w1：不可采纳启发式膨胀系数
     double w_inadmissible;      // w2：anchor 有界次优系数
     double spline_bias;         // H1：偏向贴近全局样条的强度
+    double w_step_reach_heur;   // H2：台阶可达引导启发式强度（inadmissible 事前引导）
 
-    // ── 边代价权重（与 FDDP running cost 主项同构）──
-    double w_time;              // 每步时间/进度基代价
+    // ── 双解采纳判据 ──
+    double accept_margin;       // search 需低于 warm_cost*(1-margin) 才采纳，避免 basin 边界抖动
+
+    // ── 边代价权重（与 FDDP running cost 主项同构，二次化对齐 basin 形状）──
+    double w_time;              // 每步时间/进度基代价（线性，A* g-cost 基线）
     double w_obstacle;          // 避障（↔ environment_weights.obstacle）
     double w_lateral;           // Frenet 横向误差（↔ tracking_weights.q_y）
+    double w_heading;           // Frenet 航向误差（↔ tracking_weights.q_theta）
     double w_step_align;        // 台阶方向对齐（↔ terrain_weights.direction）
     double w_step_reach;        // 台阶入口可达速度（↔ terrain_weights.step_reachability_*）
-};
-
-struct MPCFollowRolloutSafetyParams {
-    bool enable_lethal_obstacle_check;
-    double lethal_obstacle_threshold;
-    int fddp_lethal_consecutive_threshold;
 };
 
 struct MPCFollowParams {
@@ -201,7 +200,6 @@ struct MPCFollowParams {
     MPCFollowTerminalWeights terminal_weights;
     MPCFollowProjection projection;
     FollowSearchParams search;
-    MPCFollowRolloutSafetyParams rollout_safety;
     int max_iters;
 };
 
@@ -282,12 +280,6 @@ struct ActiveStepMode {
     double release_u = 1.0;
 
     bool operator==(const ActiveStepMode&) const = default;
-};
-
-struct RolloutLethalObstacleInfo {
-    int state_index = -1;
-    Eigen::Vector2d position_map = Eigen::Vector2d::Zero();
-    double sampled_cost = 0.0;
 };
 
 struct MPCPrediction {

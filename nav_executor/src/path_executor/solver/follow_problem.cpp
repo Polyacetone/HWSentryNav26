@@ -5,7 +5,6 @@
 
 namespace nav_executor {
 
-constexpr double COST_EPS = 1e-9;
 constexpr double REACHABILITY_EPS = 1e-6;
 
 // ─── 前向声明 ───
@@ -437,7 +436,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     const MPCParams& params,
     const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
-    const CostMapGridView& masked_global_grid,
     double prediction_dt,
     double schedule_rho,
     const DirectionMapGridView& dir_grid,
@@ -452,7 +450,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     p_(params),
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
-    masked_global_grid_(masked_global_grid),
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     dir_grid_(dir_grid),
@@ -502,59 +499,10 @@ const MPCParams& FollowProblemT<Horizon>::params() const {
 }
 
 template<int Horizon>
-FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const SplinePath& spline) const {
-    return FollowProblemT<Horizon>(
-        spline,
-        p_,
-        step_cost_grids_,
-        cost_info_,
-        masked_global_grid_,
-        prediction_dt_,
-        model_.rho,
-        dir_grid_,
-        dir_info_,
-        remaining_energy_,
-        rfr_pwr_limit_,
-        blended_profile_,
-        active_step_mode_,
-        current_path_u_
-    );
-}
-
-template<int Horizon>
 const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(int k) const {
     if (step_cost_grids_.size() <= 1) return step_cost_grids_[0];
     int idx = static_cast<int>(static_cast<double>(k) * MPC_DT / prediction_dt_);
     return step_cost_grids_[static_cast<size_t>(std::min(idx, static_cast<int>(step_cost_grids_.size()) - 1))];
-}
-
-template<int Horizon>
-std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value) const {
-    const auto& safety = p_.follow.rollout_safety;
-    if (!safety.enable_lethal_obstacle_check) {
-        return std::nullopt;
-    }
-
-    const auto sample = eval_cost_bilinear(
-        masked_global_grid_,
-        cost_info_,
-        x(ix::X),
-        x(ix::Y)
-    );
-
-    if (out_cost_value) {
-        *out_cost_value = sample.value;
-    }
-
-    if (sample.value + COST_EPS < safety.lethal_obstacle_threshold) {
-        return std::nullopt;
-    }
-
-    return RolloutLethalObstacleInfo {
-        .state_index = state_index,
-        .position_map = Eigen::Vector2d(x(ix::X), x(ix::Y)),
-        .sampled_cost = sample.value,
-    };
 }
 
 template<int Horizon>

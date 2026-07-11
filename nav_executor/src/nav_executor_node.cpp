@@ -153,8 +153,6 @@ void NavExecutorNode::control_tick() {
         rm.step_block = step_block_params_;
         rm.performance = performance_replan_params_;
         rm.current_performance = performance;
-        rm.mpc_lethal = previous_motion_feedback_.mpc_lethal
-            && previous_motion_feedback_.lethal_path == active_path_before_update;
         task_input.route_monitor = std::move(rm);
     }
 
@@ -189,8 +187,6 @@ void NavExecutorNode::control_tick() {
 
     previous_motion_feedback_.goal_reached = out.goal_reached;
     previous_motion_feedback_.executor_replan_event = out.executor_replan_event;
-    previous_motion_feedback_.mpc_lethal = out.mpc_lethal;
-    previous_motion_feedback_.lethal_path = out.mpc_lethal ? task_output.command.active_path : nullptr;
     previous_motion_feedback_.route_u = out.current_u;
     previous_motion_feedback_.motion_state = out.motion_state;
 

@@ -465,16 +465,14 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .w_anchor = declare_parameter<double>("mpc.follow.search.w_anchor"),
                 .w_inadmissible = declare_parameter<double>("mpc.follow.search.w_inadmissible"),
                 .spline_bias = declare_parameter<double>("mpc.follow.search.spline_bias"),
-                .w_time = declare_parameter<double>("mpc.follow.search.w_time"),
-                .w_obstacle = declare_parameter<double>("mpc.follow.search.w_obstacle"),
-                .w_lateral = declare_parameter<double>("mpc.follow.search.w_lateral"),
-                .w_step_align = declare_parameter<double>("mpc.follow.search.w_step_align"),
-                .w_step_reach = declare_parameter<double>("mpc.follow.search.w_step_reach")
-            },
-            .rollout_safety = {
-                .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),
-                .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold"),
-                .fddp_lethal_consecutive_threshold = static_cast<int>(declare_parameter<int>("mpc.follow.rollout_safety.fddp_lethal_consecutive_threshold"))
+                .w_step_reach_heur = declare_parameter<double>("mpc.follow.search.w_step_reach_heur"),
+                .accept_margin = declare_parameter<double>("mpc.follow.search.accept_margin"),
+                .w_time = declare_parameter<double>("mpc.follow.search.weights.w_time"),
+                .w_obstacle = declare_parameter<double>("mpc.follow.search.weights.w_obstacle"),
+                .w_lateral = declare_parameter<double>("mpc.follow.search.weights.w_lateral"),
+                .w_heading = declare_parameter<double>("mpc.follow.search.weights.w_heading"),
+                .w_step_align = declare_parameter<double>("mpc.follow.search.weights.w_step_align"),
+                .w_step_reach = declare_parameter<double>("mpc.follow.search.weights.w_step_reach")
             },
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },

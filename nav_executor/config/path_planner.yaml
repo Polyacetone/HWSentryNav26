@@ -75,7 +75,7 @@
           direction_weight: 20.0 # 方向对齐代价权重
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
-          smoothness_weight: 0.005 # 样条光滑性正则权重
+          smoothness_weight: 0.004 # 样条光滑性正则权重
           length_penalty_weight: 0.02 # 路径长度惩罚权重
           curvature:
             base_weight: 0.1 # 曲率基础惩罚权重
@@ -95,10 +95,10 @@
           step_transition_distance: 0.3 # 近/远曲率之间平滑过渡距离 (m)
           interval_iou_threshold: 0.85 # 台阶区间 IoU 阈值，收敛后提前退出细化
           obstacle_weight: 2.0 # 障碍物代价权重
-          direction_weight: 60.0 # 方向对齐代价权重
+          direction_weight: 80.0 # 方向对齐代价权重
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
-          smoothness_weight: 0.003 # 样条光滑度正则权重
+          smoothness_weight: 0.002 # 样条光滑度正则权重
           length_penalty_weight: 0.02 # 路径长度惩罚权重
           curvature:
             base_weight: 0.1 # 曲率基础惩罚权重

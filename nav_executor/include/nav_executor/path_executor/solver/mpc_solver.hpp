@@ -11,16 +11,9 @@ namespace nav_executor {
 
 class MPCSolver {
 public:
-    enum class FollowSolveStatus : uint8_t {
-        FOLLOW = 0,
-        STOP_AND_WAIT_REPLAN = 1,
-    };
-
     struct FollowSolveResult {
         Eigen::Vector2d command = Eigen::Vector2d::Zero();
         MPCPrediction prediction;
-        FollowSolveStatus status = FollowSolveStatus::FOLLOW;
-        std::optional<RolloutLethalObstacleInfo> lethal_obstacle;
     };
 
     explicit MPCSolver(const MPCParams& params);
@@ -41,13 +34,11 @@ public:
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
         const CostMap& cost_map,
-        const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
         const DirectionMap& direction_map,
         const CapabilityProfile& blended_profile,
-        std::optional<ActiveStepMode> active_step_mode,
-        bool check_lethal_status
+        std::optional<ActiveStepMode> active_step_mode
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(
@@ -92,8 +83,6 @@ private:
 
     double remaining_energy_ = 200.0;
     double rfr_pwr_limit_ = 90.0;
-
-    int fddp_lethal_consecutive_count_ = 0;
 
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,

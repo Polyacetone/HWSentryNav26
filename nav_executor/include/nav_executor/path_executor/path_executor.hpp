@@ -73,7 +73,6 @@ struct ExecutorOutput {
     // one-shot 事实/事件
     bool goal_reached = false;
     bool executor_replan_event = false;
-    bool mpc_lethal = false;
 
     // 当前投影 u（供顶层 RouteMonitor 复用为下周期 seed 及诊断）
     double current_u = 0.0;
@@ -119,7 +118,7 @@ public:
 
 private:
     ExecutorOutput execute_idle();
-    ExecutorOutput execute_follow(const ExecutorInput& input, bool check_lethal_status);
+    ExecutorOutput execute_follow(const ExecutorInput& input);
     ExecutorOutput execute_spin(const ExecutorInput& input);
     ExecutorOutput execute_stop(const ExecutorInput& input);
     ExecutorOutput execute_recovery(const ExecutorInput& input);
@@ -154,7 +153,6 @@ private:
     ExecutorOutput last_command_output_;
     bool has_last_command_output_ = false;
 
-    bool mpc_lethal_pending_ = false;
     ChassisControlState last_cycle_chassis_control_state_ = ChassisControlState::STOPPED;
     bool last_cycle_chassis_controllable_ = false;
 };

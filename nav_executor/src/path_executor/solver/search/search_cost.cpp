@@ -49,13 +49,18 @@ bool SearchEnvironment::is_goal(const SearchState& s) const {
 }
 
 double SearchEnvironment::edge_cost(const SearchState& next) const {
-    double cost = params.w_time; // 基础步代价
+    // 各避障/跟踪/台阶项二次化，与 FDDP running cost（0.5·(w·residual)²）同构，
+    // 使搜索 basin 与 FDDP basin 形状一致，令双解 cost 比较更公平。
+    // w_time 保持线性——它是 A* 的 g-cost 基线，也是 H0 admissible 下界的折算依据。
+    // 二次项均 ≥ 0，故 g 单调非减，A* 完备性/有界次优不受影响。
+    double cost = params.w_time; // 基础步代价（线性）
 
-    // ── 避障（↔ environment_weights.obstacle * cost/255）──
+    // ── 避障（↔ 0.5·(environment_weights.obstacle·cost/255)²）──
     const double obs = eval_cost_bilinear(cost_grid, cost_info, next.x, next.y).value;
-    cost += params.w_obstacle * obs / 255.0;
+    const double r_obs = params.w_obstacle * obs / 255.0;
+    cost += 0.5 * r_obs * r_obs;
 
-    // ── Frenet 横向误差（↔ tracking_weights.q_y * ey）──
+    // ── Frenet 横向误差（↔ 0.5·(q_y·ey)²）──
     const double u = spline.project_extrapolated(
         Eigen::Vector2d(next.x, next.y), start_u, PROJ_SAMPLES, PROJ_WINDOW, PROJ_LAZY
     );
@@ -63,17 +68,24 @@ double SearchEnvironment::edge_cost(const SearchState& next) const {
     const double ex = next.x - se.p.x();
     const double ey_w = next.y - se.p.y();
     const double ey = -ex * se.sin_r + ey_w * se.cos_r;
-    cost += params.w_lateral * std::abs(ey);
+    const double r_lat = params.w_lateral * ey;
+    cost += 0.5 * r_lat * r_lat;
 
-    // ── 台阶方向对齐（↔ terrain_weights.direction * |heading × dir|）──
+    // ── Frenet 航向误差（↔ 0.5·(q_theta·etheta)²）──
+    const double etheta = wrap_pi(next.theta - se.thetar);
+    const double r_head = params.w_heading * etheta;
+    cost += 0.5 * r_head * r_head;
+
+    // ── 台阶方向对齐（↔ 0.5·(terrain_weights.direction·|heading × dir|)²）──
     const Eigen::Vector2d dir = eval_dir_bilinear_value_only(dir_grid, dir_info, next.x, next.y);
     if (dir.squaredNorm() > 1e-8) {
         const Eigen::Vector2d heading(std::cos(next.theta), std::sin(next.theta));
         const double cross = heading.x() * dir.y() - heading.y() * dir.x();
-        cost += params.w_step_align * std::abs(cross);
+        const double r_align = params.w_step_align * cross;
+        cost += 0.5 * r_align * r_align;
     }
 
-    // ── 台阶入口可达速度（↔ terrain_weights.step_reachability_*）──
+    // ── 台阶入口可达速度（↔ 0.5·(sqrt(step_reachability_*)·relu)² = 0.5·w·relu²）──
     if (active_step_mode.has_value() && active_step_mode->step_entry_u.has_value()) {
         const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
         const double cur_u = std::clamp(u, 0.0, 1.0);
@@ -83,8 +95,10 @@ double SearchEnvironment::edge_cost(const SearchState& next) const {
             const double v = next.v;
             const double r_lo = std::sqrt(std::max(0.0, std::max(0.0, v) * std::max(0.0, v) + 2.0 * a_guide * d));
             const double r_hi = std::sqrt(std::max(0.0, v * v - 2.0 * a_guide * d));
-            cost += params.w_step_reach * positive_part(active_step_mode->speed_min - r_lo);
-            cost += params.w_step_reach * positive_part(r_hi - active_step_mode->speed_max);
+            const double relu_lo = positive_part(active_step_mode->speed_min - r_lo);
+            const double relu_hi = positive_part(r_hi - active_step_mode->speed_max);
+            cost += 0.5 * params.w_step_reach * relu_lo * relu_lo;
+            cost += 0.5 * params.w_step_reach * relu_hi * relu_hi;
         }
     }
 

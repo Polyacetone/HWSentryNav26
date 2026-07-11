@@ -16,7 +16,6 @@ public:
         const MPCParams& params,
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
-        const CostMapGridView& masked_global_grid,
         double prediction_dt,
         double schedule_rho,
         const DirectionMapGridView& dir_grid,
@@ -50,9 +49,7 @@ public:
     ControlVec u_lower() const;
     ControlVec u_upper() const;
 
-    [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
     [[nodiscard]] const MPCParams& params() const;
-    [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const SplinePath& spline) const;
 
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
@@ -62,7 +59,6 @@ private:
     const MPCParams& p_;
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
-    const CostMapGridView& masked_global_grid_;
     double prediction_dt_;
     LPVDiscreteModel model_ {};
     const DirectionMapGridView& dir_grid_;

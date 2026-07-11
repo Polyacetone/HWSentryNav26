@@ -35,7 +35,16 @@ public:
     [[nodiscard]] bool admissible() const override { return false; }
 };
 
-/// 构建原型-1 的启发式集合：[0]=anchor(H0)，其后为 inadmissible(H1...)。
+/// H2：inadmissible —— anchor + 台阶入口可达性欠缺量（复用 FDDP r_lo/r_hi 速度势函数）。
+///     事前引导搜索优先扩展"能达成可行台阶入口速度"的节点（含提前调速/后退腾挪），
+///     提速并增强"先退后进"策略的可靠性。
+class StepReachabilityHeuristic final : public Heuristic {
+public:
+    [[nodiscard]] double h(const SearchState& state, const SearchEnvironment& env) const override;
+    [[nodiscard]] bool admissible() const override { return false; }
+};
+
+/// 构建启发式集合：[0]=anchor(H0)，其后为 inadmissible([1]=H1 样条，[2]=H2 台阶可达)。
 [[nodiscard]] std::vector<std::unique_ptr<Heuristic>> build_default_heuristics();
 
 } // namespace nav_executor::search
