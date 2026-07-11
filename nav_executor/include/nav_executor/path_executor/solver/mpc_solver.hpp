@@ -78,8 +78,6 @@ private:
     bool stop_warm_ = false;
     bool hold_warm_ = false;
 
-    std::vector<CostMapGridView> step_cost_grids_cache_;
-
     std::optional<SplinePath> prev_ref_control_points_;
 
     double x_h_hat_ = 0.0;

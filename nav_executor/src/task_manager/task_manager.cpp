@@ -168,7 +168,7 @@ bool TaskManager::maybe_submit_plan(
 }
 
 void TaskManager::monitor_route(const std::optional<RouteMonitorInput>& input) {
-    if (!input || !input->active_path) return;
+    if (!input || !input->active_path || input->active_path != active_path_) return;
 
     const RouteMonitorReport report = run_route_monitor(*input, logger_);
     if (report.needs_replan) {

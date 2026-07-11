@@ -22,27 +22,27 @@ StepController::StepController(
     target_profile_(normal_profile) {}
 
 void StepController::clear() {
-    step_plan_ = nullptr;
+    path_.reset();
     held_step_segment_index_ = std::nullopt;
     current_profile_ = normal_profile_;
     target_profile_ = normal_profile_;
 }
 
-void StepController::set_path(const AnnotatedPath* const path) {
+void StepController::set_path(AnnotatedPath::ConstPtr path) {
     held_step_segment_index_ = std::nullopt;
     target_profile_ = normal_profile_;
-    step_plan_ = path ? &path->step_segments : nullptr;
-    if (step_plan_ && !step_plan_->empty()) {
-        RCLCPP_DEBUG(logger_, "StepController bound path with %zu step segments", step_plan_->size());
+    path_ = std::move(path);
+    if (path_ && !path_->step_segments.empty()) {
+        RCLCPP_DEBUG(logger_, "StepController bound path with %zu step segments", path_->step_segments.size());
     }
 }
 
 // ═══════════════════════ 台阶段查询 ═══════════════════════
 
 std::optional<size_t> StepController::find_active_segment_index(const double current_u) const {
-    if (!step_plan_) return std::nullopt;
-    for (size_t i = 0; i < step_plan_->size(); ++i) {
-        const StepPlanSegment& segment = (*step_plan_)[i];
+    if (!path_) return std::nullopt;
+    for (size_t i = 0; i < path_->step_segments.size(); ++i) {
+        const StepPlanSegment& segment = path_->step_segments[i];
         if (current_u + U_EPSILON < segment.prepare_u) {
             break;
         }
@@ -54,16 +54,16 @@ std::optional<size_t> StepController::find_active_segment_index(const double cur
 }
 
 const StepPlanSegment* StepController::active_segment(const double current_u) const {
-    if (!step_plan_) return nullptr;
+    if (!path_) return nullptr;
     if (held_step_segment_index_.has_value()) {
-        const auto& segment = (*step_plan_)[*held_step_segment_index_];
+        const auto& segment = path_->step_segments[*held_step_segment_index_];
         if (current_u < segment.release_u) {
             return &segment;
         }
     }
     const auto index = find_active_segment_index(current_u);
     if (!index) return nullptr;
-    return &(*step_plan_)[*index];
+    return &path_->step_segments[*index];
 }
 
 const StepPlanSegment* StepController::current_command_segment(const double current_u) const {
@@ -76,14 +76,14 @@ const StepPlanSegment* StepController::current_command_segment(const double curr
 // ═══════════════════════ 台阶段激活跟踪 ═══════════════════════
 
 void StepController::update_active_segment(const double current_u) {
-    if (!step_plan_) {
+    if (!path_) {
         held_step_segment_index_ = std::nullopt;
         target_profile_ = normal_profile_;
         return;
     }
 
     if (held_step_segment_index_.has_value()) {
-        const auto& segment = (*step_plan_)[*held_step_segment_index_];
+        const auto& segment = path_->step_segments[*held_step_segment_index_];
         if (current_u >= segment.release_u) {
             RCLCPP_DEBUG(
                 logger_,
@@ -104,7 +104,7 @@ void StepController::update_active_segment(const double current_u) {
     }
 
     held_step_segment_index_ = next_index;
-    const auto& segment = (*step_plan_)[*held_step_segment_index_];
+    const auto& segment = path_->step_segments[*held_step_segment_index_];
     target_profile_ = capability_profiles_[static_cast<size_t>(segment.command.capability)];
 
     RCLCPP_DEBUG(

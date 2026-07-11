@@ -116,7 +116,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     const MotionState prev_state = last_motion_state_;
     sync_mpc_context(input, chassis_controllable);
 
-    const bool has_path = input.intent.active_path != nullptr;
+    const bool has_path = static_cast<bool>(input.intent.active_path);
 
     // ── path 绑定切换（新的不可变包 → 重置台阶/进度状态）──
     if (input.intent.active_path != bound_path_) {
@@ -132,6 +132,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
             progress_monitor_.clear();
         }
         last_reference_u_ = 0.0;
+        mpc_controller_->reset_warm_start();
     }
 
     if (prev_state == MotionState::HAZARD_RECOVERY

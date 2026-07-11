@@ -27,7 +27,7 @@ struct PathExecutorParams {
 };
 
 struct MotionIntent {
-    const AnnotatedPath* active_path = nullptr;
+    AnnotatedPath::ConstPtr active_path;
     std::optional<Eigen::Vector2d> hold_goal;
     bool spin_requested = false;
     bool spin_high_priority = false;
@@ -144,7 +144,7 @@ private:
     FsmParams fsm_params_;
 
     // 当前绑定的 path（身份用于检测切换）
-    const AnnotatedPath* bound_path_ = nullptr;
+    AnnotatedPath::ConstPtr bound_path_;
 
     double last_reference_u_ = 0.0;
     bool last_spin_high_priority_ = false;

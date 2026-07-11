@@ -119,7 +119,8 @@ void NavExecutorNode::control_tick() {
         *global_direction_map_, terrain_profiles_, performance
     );
 
-    RouteContext route_context = build_route_context(cost_layers, direction_layers, task_->active_path());
+    const AnnotatedPath::ConstPtr active_path_before_update = task_->active_path();
+    RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
 
     TaskUpdateInput task_input;
@@ -139,9 +140,9 @@ void NavExecutorNode::control_tick() {
         task_input.plan_snapshot.performance = performance;
     }
 
-    if (task_->active_path() && previous_motion_feedback_.motion_state == MotionState::FOLLOW) {
+    if (active_path_before_update && previous_motion_feedback_.motion_state == MotionState::FOLLOW) {
         RouteMonitorInput rm;
-        rm.active_path = task_->active_path();
+        rm.active_path = active_path_before_update;
         rm.current_u = previous_motion_feedback_.route_u;
         rm.chassis_pos_map = chassis_pose_map.head<2>();
         rm.masked_global_cost_map = route_context.masked_global.get();
@@ -153,7 +154,7 @@ void NavExecutorNode::control_tick() {
         rm.performance = performance_replan_params_;
         rm.current_performance = performance;
         rm.mpc_lethal = previous_motion_feedback_.mpc_lethal
-            && previous_motion_feedback_.lethal_path == task_->active_path();
+            && previous_motion_feedback_.lethal_path == active_path_before_update;
         task_input.route_monitor = std::move(rm);
     }
 

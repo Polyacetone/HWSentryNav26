@@ -46,7 +46,7 @@ struct MotionFeedback {
     bool goal_reached = false;
     bool executor_replan_event = false;
     bool mpc_lethal = false;
-    const AnnotatedPath* lethal_path = nullptr;
+    AnnotatedPath::ConstPtr lethal_path;
     double route_u = 0.0;
     MotionState motion_state = MotionState::IDLE;
     bool preemptible = true;
@@ -61,7 +61,7 @@ struct TaskUpdateInput {
 };
 
 struct TaskCommandView {
-    const AnnotatedPath* active_path = nullptr;
+    AnnotatedPath::ConstPtr active_path;
     std::optional<Eigen::Vector2d> hold_goal;
 };
 
@@ -81,9 +81,7 @@ public:
 
     TaskUpdateOutput update(const TaskUpdateInput& input);
 
-    [[nodiscard]] const AnnotatedPath* active_path() const {
-        return active_path_ ? active_path_.get() : nullptr;
-    }
+    [[nodiscard]] AnnotatedPath::ConstPtr active_path() const { return active_path_; }
     [[nodiscard]] const std::optional<Eigen::Vector2d>& hold_goal() const { return hold_goal_; }
     [[nodiscard]] std::optional<uint64_t> current_goal_id() const {
         return current_goal_ ? std::optional<uint64_t>(current_goal_->id) : std::nullopt;

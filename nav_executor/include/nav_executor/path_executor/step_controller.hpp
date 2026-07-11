@@ -34,7 +34,7 @@ public:
     );
 
     // 路径切换时重置段跟踪状态并绑定新的 step_segments。
-    void set_path(const AnnotatedPath* path);
+    void set_path(AnnotatedPath::ConstPtr path);
     // 无 path 时清空运行时状态。
     void clear();
 
@@ -63,7 +63,7 @@ private:
     CapabilityProfile current_profile_;
     CapabilityProfile target_profile_;
 
-    const std::vector<StepPlanSegment>* step_plan_ = nullptr;
+    AnnotatedPath::ConstPtr path_;
     std::optional<size_t> held_step_segment_index_;
 };
 

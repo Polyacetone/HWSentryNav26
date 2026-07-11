@@ -32,7 +32,7 @@ struct RouteContext {
 [[nodiscard]] RouteContext build_route_context(
     const CostLayers& cost_layers,
     const DirectionLayers& direction_layers,
-    const AnnotatedPath* active_path
+    const AnnotatedPath::ConstPtr& active_path
 );
 
 } // namespace nav_executor

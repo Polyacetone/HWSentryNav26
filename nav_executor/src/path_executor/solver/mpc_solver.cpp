@@ -129,9 +129,7 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 // ── MPCSolver 方法 ──
 
-MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
-    step_cost_grids_cache_.reserve(MPC_HORIZON + 1);
-}
+MPCSolver::MPCSolver(const MPCParams& params): params_(params) {}
 
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
     last_cmd_ = cmd;
@@ -230,9 +228,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         params_.follow.projection.proj_search_window,
         params_.follow.projection.local_search_lazy_distance
     );
-    if (path_changed) {
-        follow_warm_ = false;
-    }
     last_u_ = u0;
 
     const Eigen::Vector2d cmd0(
@@ -258,17 +253,17 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     prev_ref_control_points_ = global_path;
 
-    step_cost_grids_cache_.clear();
+    std::vector<CostMapGridView> step_cost_grids;
     if (per_step_cost_maps.empty()) {
-        step_cost_grids_cache_.reserve(1);
+        step_cost_grids.reserve(1);
     } else {
-        step_cost_grids_cache_.reserve(std::max(step_cost_grids_cache_.capacity(), per_step_cost_maps.size()));
+        step_cost_grids.reserve(per_step_cost_maps.size());
     }
     if (per_step_cost_maps.empty()) {
-        step_cost_grids_cache_.emplace_back(cost_map);
+        step_cost_grids.emplace_back(cost_map);
     } else {
         for (const auto* cm : per_step_cost_maps) {
-            step_cost_grids_cache_.emplace_back(*cm);
+            step_cost_grids.emplace_back(*cm);
         }
     }
     const double pred_dt = per_step_cost_maps.empty() ? MPC_DT : prediction_dt;
@@ -280,7 +275,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     const FollowProblem problem(
-        global_path, params_, step_cost_grids_cache_, ci, masked_global_grid, pred_dt, schedule_rho,
+        global_path, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
         dg, di, remaining_energy_, rfr_pwr_limit_, blended_profile, active_step_mode, u0
     );
 
@@ -292,7 +287,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     if (follow_warm_) {
         shift_warm_start(follow_solver_);
     } else {
-        fill_solver_controls(follow_solver_, cmd0);
+        fill_solver_controls(follow_solver_, ControlVec::Zero());
     }
     scale_solver_controls(follow_solver_, problem);
 
@@ -400,7 +395,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     if (stop_warm_) {
         shift_warm_start(stop_solver_);
     } else {
-        fill_solver_controls(stop_solver_, cmd0);
+        fill_solver_controls(stop_solver_, ControlVec::Zero());
     }
     scale_solver_controls(stop_solver_, prob);
     rollout_solver_states(stop_solver_, prob, x0);
@@ -449,7 +444,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     if (hold_warm_) {
         shift_warm_start(hold_solver_);
     } else {
-        fill_solver_controls(hold_solver_, cmd0);
+        fill_solver_controls(hold_solver_, ControlVec::Zero());
     }
     scale_solver_controls(hold_solver_, prob);
     rollout_solver_states(hold_solver_, prob, x0);

@@ -5,7 +5,7 @@ namespace nav_executor {
 RouteContext build_route_context(
     const CostLayers& cost_layers,
     const DirectionLayers& direction_layers,
-    const AnnotatedPath* active_path
+    const AnnotatedPath::ConstPtr& active_path
 ) {
     RouteContext context;
 

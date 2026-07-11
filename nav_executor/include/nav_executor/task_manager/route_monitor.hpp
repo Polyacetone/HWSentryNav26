@@ -42,7 +42,7 @@ const char* replan_reason_str(ReplanReason reason);
 
 // RouteMonitor 输入，由 nav_executor_node 每周期组装后传入。
 struct RouteMonitorInput {
-    const AnnotatedPath* active_path = nullptr;
+    AnnotatedPath::ConstPtr active_path;
     double current_u = 0.0;
 
     Eigen::Vector2d chassis_pos_map = Eigen::Vector2d::Zero();
