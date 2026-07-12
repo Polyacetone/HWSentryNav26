@@ -45,6 +45,8 @@ struct PlanRequestSnapshot {
 struct MotionFeedback {
     bool goal_reached = false;
     bool executor_replan_event = false;
+    bool mpc_lethal = false;
+    AnnotatedPath::ConstPtr lethal_path;
     double route_u = 0.0;
     MotionState motion_state = MotionState::IDLE;
     bool preemptible = true;

@@ -2,8 +2,7 @@
 #include <nav_executor/path_executor/solver/mpc_utils.hpp>
 #include <nav_executor/path_executor/solver/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/solver/lpv_model.hpp>
-
-#include <thread>
+#include <nav_executor/path_executor/solver/mppi_sampler.hpp>
 
 namespace nav_executor {
 
@@ -64,19 +63,28 @@ void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
 }
 
 template<typename SolverT>
-void seed_solver_from_fddp_seed(SolverT& solver, const search::FddpSeed& seed) {
-    solver.xs = seed.xs;
-    solver.us = seed.us;
+std::array<ControlVec, SolverT::N> copy_solver_controls(const SolverT& solver) {
+    return solver.us;
 }
 
-template<typename ProblemT, typename SolverT>
-double solver_trajectory_cost(const ProblemT& prob, const SolverT& solver) {
-    double c = 0.0;
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        c += prob.running_cost(static_cast<int>(k), solver.xs[k], solver.us[k]);
+template<typename SolverT>
+void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample) {
+    solver.xs = sample.xs;
+    solver.us = sample.us;
+}
+
+template<typename ProblemT, typename StateContainerT>
+std::optional<RolloutLethalObstacleInfo> detect_rollout_lethal_obstacle(
+    const ProblemT& prob,
+    const StateContainerT& xs,
+    size_t state_count
+) {
+    for (size_t i = 0; i < state_count; ++i) {
+        if (const auto lethal = prob.detect_lethal_obstacle(static_cast<int>(i), xs[i])) {
+            return lethal;
+        }
     }
-    c += prob.terminal_cost(solver.xs[SolverT::N]);
-    return c;
+    return std::nullopt;
 }
 
 template<typename SolverT>
@@ -121,8 +129,7 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 // ── MPCSolver 方法 ──
 
-MPCSolver::MPCSolver(const MPCParams& params)
-    : params_(params), search_seeder_(params.follow.search) {}
+MPCSolver::MPCSolver(const MPCParams& params): params_(params) {}
 
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
     last_cmd_ = cmd;
@@ -133,6 +140,7 @@ void MPCSolver::reset_warm_start() {
     stop_warm_ = false;
     hold_warm_ = false;
     last_u_ = 0.0;
+    fddp_lethal_consecutive_count_ = 0;
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
         stop_solver_.us[k].setZero();
@@ -203,13 +211,13 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
     const CostMap& cost_map,
+    const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
     const DirectionMap& direction_map,
-    const DirectionMap* base_direction_map,
-    const TerrainTraversalConstraints* terrain_constraints,
     const CapabilityProfile& blended_profile,
-    std::optional<ActiveStepMode> active_step_mode
+    std::optional<ActiveStepMode> active_step_mode,
+    bool check_lethal_status
 ) {
     const bool path_changed = !(prev_ref_control_points_ && *prev_ref_control_points_ == global_path);
     const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
@@ -261,12 +269,13 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const double pred_dt = per_step_cost_maps.empty() ? MPC_DT : prediction_dt;
 
     const GridInfo ci = make_grid_info(cost_map);
+    const CostMapGridView masked_global_grid(masked_global_map);
     const DirectionMapGridView dg(direction_map);
     const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     const FollowProblem problem(
-        global_path, params_, step_cost_grids, ci, pred_dt, schedule_rho,
+        global_path, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
         dg, di, remaining_energy_, rfr_pwr_limit_, blended_profile, active_step_mode, u0
     );
 
@@ -275,62 +284,29 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     opts.tol_grad = SOLVER_TOL_GRAD;
     opts.tol_cost = SOLVER_TOL_COST;
 
-    // fork 前：一次性初始化（tau_v 必须在并行前完成，否则 seeder.run 无法用）。
-    if (search_seeder_.enabled()) {
-        search_seeder_.ensure_tau_v(build_lpv_discrete_model(params_.kinematic_model, schedule_rho));
+    if (follow_warm_) {
+        shift_warm_start(follow_solver_);
+    } else {
+        fill_solver_controls(follow_solver_, ControlVec::Zero());
+    }
+    scale_solver_controls(follow_solver_, problem);
+
+    MPPIFollowSamplingResult mppi_result;
+    bool seeded_by_mppi = false;
+    if (params_.follow.mppi.enable) {
+        MPPIFollowSampler sampler(params_.follow.mppi);
+        mppi_result = sampler.optimize(problem, x0, copy_solver_controls(follow_solver_));
+        if (mppi_result.valid) {
+            seed_solver_from_sampling_result(follow_solver_, mppi_result);
+            seeded_by_mppi = true;
+        }
     }
 
-    // ── 候选 1：warm-shift（时间相干，指令平滑）——独立线程执行，藏于搜索耗时之下 ──
-    // 只写 follow_solver_ 与本地 warm_cost；problem/x0 为只读共享，无跨线程可变状态。
-    const bool follow_was_warm = follow_warm_;
-    double warm_cost = 0.0;
-    std::jthread warm_worker([&] {
-        if (follow_was_warm) {
-            shift_warm_start(follow_solver_);
-        } else {
-            fill_solver_controls(follow_solver_, ControlVec::Zero());
-        }
-        scale_solver_controls(follow_solver_, problem);
+    if (!seeded_by_mppi) {
         rollout_solver_states(follow_solver_, problem, x0);
-        follow_solver_.solve(problem, opts);
-        warm_cost = solver_trajectory_cost(problem, follow_solver_);
-    });
-
-    // ── 候选 2：MHA* 搜索种子（跳出非凸局部最优）——主线程与 warm 并行，只写 search_solver_ ──
-    std::vector<Eigen::Vector2d> search_path;
-    bool search_valid = false;
-    double search_cost = 0.0;
-    if (search_seeder_.enabled()) {
-        auto seeding = search_seeder_.run(
-            x0, global_path, u0, CostMapGridView(cost_map), ci, dg, di,
-            blended_profile, active_step_mode,
-            params_.follow.terrain_limits.step_reachability_guide_acc,
-            params_.follow.terminal_weights.a_brake,
-            params_.follow.terminal_weights.slow_down_target_vel,
-            base_direction_map, terrain_constraints
-        );
-        if (seeding.seed.valid) {
-            search_path = std::move(seeding.search_path);
-            seed_solver_from_fddp_seed(search_solver_, seeding.seed);
-            scale_solver_controls(search_solver_, problem);
-            search_solver_.solve(problem, opts);
-            search_cost = solver_trajectory_cost(problem, search_solver_);
-            search_valid = true;
-        }
     }
-
-    warm_worker.join();
+    follow_solver_.solve(problem, opts);
     follow_warm_ = true;
-
-    // ── 采纳判据：search 需低于 warm_cost*(1-margin) 才采纳，避免两 basin 边界逐周期翻转 ──
-    const bool use_search = search_valid
-        && search_cost < warm_cost * (1.0 - params_.follow.search.accept_margin);
-
-    // 搜索胜出时同步进 warm-shift 缓冲，保证下周期时间相干；胜出解统一由 follow_solver_ 承载。
-    if (use_search) {
-        follow_solver_.xs = search_solver_.xs;
-        follow_solver_.us = search_solver_.us;
-    }
 
     const auto solved_rollout = rollout_states(problem, follow_solver_, x0);
     MPCPrediction prediction;
@@ -348,7 +324,35 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             prediction.w_pred.push_back(x(ix::W));
         }
     }
-    prediction.search_path = std::move(search_path);
+    prediction.rollout_paths = std::move(mppi_result.rollout_paths);
+
+    if (check_lethal_status) {
+        const auto& safety = params_.follow.rollout_safety;
+        const auto lethal = detect_rollout_lethal_obstacle(
+            problem, solved_rollout.xs, solved_rollout.valid_steps + 1
+        );
+
+        if (lethal.has_value()) {
+            ++fddp_lethal_consecutive_count_;
+        } else {
+            fddp_lethal_consecutive_count_ = 0;
+        }
+
+        const int threshold = safety.fddp_lethal_consecutive_threshold;
+        if (lethal.has_value() && fddp_lethal_consecutive_count_ >= threshold) {
+            auto stop_result = solve_stop(chassis_pose_map, chassis_state, cost_map);
+            if (!stop_result) {
+                return std::unexpected(stop_result.error());
+            }
+
+            FollowSolveResult out;
+            out.command = std::get<0>(*stop_result);
+            out.prediction = std::get<1>(*stop_result);
+            out.status = FollowSolveStatus::STOP_AND_WAIT_REPLAN;
+            out.lethal_obstacle = lethal;
+            return out;
+        }
+    }
 
     const Eigen::Vector2d cmd(follow_solver_.us[0](0), follow_solver_.us[0](1));
     last_cmd_ = cmd;
@@ -356,6 +360,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     FollowSolveResult out;
     out.command = cmd;
     out.prediction = std::move(prediction);
+    out.status = FollowSolveStatus::FOLLOW;
     return out;
 }
 

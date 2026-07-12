@@ -14,6 +14,7 @@ const char* replan_reason_str(const ReplanReason reason) {
         case ReplanReason::NONE: return "NONE";
         case ReplanReason::PROJECTION_GUARD: return "PROJECTION_GUARD";
         case ReplanReason::STEP_BLOCKED: return "STEP_BLOCKED";
+        case ReplanReason::MPC_LETHAL: return "MPC_LETHAL";
         case ReplanReason::EXECUTOR_REPLAN_EVENT: return "EXECUTOR_REPLAN_EVENT";
         case ReplanReason::PERFORMANCE_DEGRADED: return "PERFORMANCE_DEGRADED";
         case ReplanReason::PERFORMANCE_RECOVERED: return "PERFORMANCE_RECOVERED";
@@ -192,6 +193,13 @@ RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Log
 
     if (!input.active_path) return report;
     const SplinePath& path = input.active_path->spline;
+
+    // MPC_LETHAL 优先（path invalid，已在运动层减速）
+    if (input.mpc_lethal) {
+        report.needs_replan = true;
+        report.reason = ReplanReason::MPC_LETHAL;
+        return report;
+    }
 
     if (check_projection_guard(input, path, logger)) {
         report.needs_replan = true;

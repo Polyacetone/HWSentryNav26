@@ -32,9 +32,10 @@ enum class ReplanReason : uint8_t {
     NONE = 0,
     PROJECTION_GUARD = 1,
     STEP_BLOCKED = 2,
-    EXECUTOR_REPLAN_EVENT = 3,
-    PERFORMANCE_DEGRADED = 4,
-    PERFORMANCE_RECOVERED = 5,
+    MPC_LETHAL = 3,
+    EXECUTOR_REPLAN_EVENT = 4,
+    PERFORMANCE_DEGRADED = 5,
+    PERFORMANCE_RECOVERED = 6,
 };
 
 const char* replan_reason_str(ReplanReason reason);
@@ -56,6 +57,9 @@ struct RouteMonitorInput {
     StepBlockReplanParams step_block{};
     PerformanceReplanParams performance{};
     PerformanceState current_performance{};
+
+    // 上一周期 PathExecutor 输出的 one-shot MPC_LETHAL 事实。
+    bool mpc_lethal = false;
 };
 
 struct RouteMonitorReport {

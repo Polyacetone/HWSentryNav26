@@ -49,7 +49,6 @@ struct MotionEnvironment {
     const CostMap* masked_global_cost_map = nullptr;  // global + step_cost_layer
     const DirectionMap* masked_direction_map = nullptr;
     const DirectionMap* base_direction_map = nullptr;
-    const TerrainTraversalConstraints* terrain_constraints = nullptr; // 台阶方向硬约束规则表
     const CostMap* current_dynamic_cost_map = nullptr;
     std::vector<const CostMap*> per_step_cost_maps;
     std::vector<const CostMap*> per_step_dynamic_cost_maps;
@@ -74,6 +73,7 @@ struct ExecutorOutput {
     // one-shot 事实/事件
     bool goal_reached = false;
     bool executor_replan_event = false;
+    bool mpc_lethal = false;
 
     // 当前投影 u（供顶层 RouteMonitor 复用为下周期 seed 及诊断）
     double current_u = 0.0;
@@ -82,7 +82,7 @@ struct ExecutorOutput {
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
-    std::optional<std::vector<Eigen::Vector2d>> search_path;
+    std::optional<std::vector<std::vector<Eigen::Vector2d>>> mppi_rollouts;
 };
 
 // 运动控制编排：持有 FSM / MPC / 台阶运行时 / stuck 检测与恢复链，消费顶层每周期传入的 active_path 与 hold_goal。
@@ -119,7 +119,7 @@ public:
 
 private:
     ExecutorOutput execute_idle();
-    ExecutorOutput execute_follow(const ExecutorInput& input);
+    ExecutorOutput execute_follow(const ExecutorInput& input, bool check_lethal_status);
     ExecutorOutput execute_spin(const ExecutorInput& input);
     ExecutorOutput execute_stop(const ExecutorInput& input);
     ExecutorOutput execute_recovery(const ExecutorInput& input);
@@ -154,6 +154,7 @@ private:
     ExecutorOutput last_command_output_;
     bool has_last_command_output_ = false;
 
+    bool mpc_lethal_pending_ = false;
     ChassisControlState last_cycle_chassis_control_state_ = ChassisControlState::STOPPED;
     bool last_cycle_chassis_controllable_ = false;
 };

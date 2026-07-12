@@ -22,7 +22,7 @@
         final_cost_map_pub_topic: "/nav_executor/debug/final_cost_map"
         rough_path_pub_topic: "/nav_executor/debug/rough_path"
         warmup_path_pub_topic: "/nav_executor/debug/warmup_path"
-        search_path_pub_topic: "/nav_executor/debug/search_path"
+        mppi_rollouts_pub_topic: "/nav_executor/debug/mppi_rollouts"
         mpc_path_pub_topic: "/nav_executor/debug/mpc_path"
         v_pred_pub_topic: "/nav_executor/debug/v_pred"
         w_pred_pub_topic: "/nav_executor/debug/w_pred"

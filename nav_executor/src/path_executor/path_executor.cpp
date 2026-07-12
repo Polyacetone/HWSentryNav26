@@ -217,13 +217,13 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     } else {
         switch (state) {
             case MotionState::IDLE: output = execute_idle(); break;
-            case MotionState::FOLLOW: output = execute_follow(input); break;
+            case MotionState::FOLLOW: output = execute_follow(input, true); break;
             case MotionState::SPIN: output = execute_spin(input); break;
             case MotionState::STOPPING: output = execute_stop(input); break;
             case MotionState::HAZARD_RECOVERY: output = execute_recovery(input); break;
             case MotionState::STUCK_REVERSE: output = execute_stuck_reverse(); break;
             case MotionState::FIXED: output = execute_fixed(input); break;
-            case MotionState::STEPPING: output = execute_follow(input); break;
+            case MotionState::STEPPING: output = execute_follow(input, false); break;
             case MotionState::DEAD: output = execute_idle(); break;
         }
     }
@@ -232,6 +232,8 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     output.current_u = current_u;
     output.goal_reached = fsm_output.goal_reached;
     output.executor_replan_event = fsm_output.executor_replan_event;
+    output.mpc_lethal = mpc_lethal_pending_;
+    mpc_lethal_pending_ = false;
 
     if (output.valid) {
         last_cmd_ = Eigen::Vector2d(output.velocity, output.omega);
@@ -262,6 +264,7 @@ void PathExecutor::on_state_transition(const MotionState prev, const MotionState
     if (prev_follow_like && !next_follow_like) {
         last_reference_u_ = 0.0;
         progress_monitor_.reset();
+        mpc_lethal_pending_ = false;
         if (allow_warm_start_reset) {
             mpc_controller_->reset_warm_start();
         }
@@ -325,9 +328,9 @@ ExecutorOutput PathExecutor::execute_idle() {
 
 // ═══════════════════ FOLLOW ══════════════════════════════════
 
-ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
+ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool check_lethal_status) {
     ExecutorOutput out;
-    if (!input.intent.active_path || !input.environment.final_cost_map || !input.environment.masked_direction_map) {
+    if (!input.intent.active_path || !input.environment.final_cost_map || !input.environment.masked_global_cost_map || !input.environment.masked_direction_map) {
         return out;
     }
 
@@ -338,11 +341,11 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_follow(
         path, input.observation.chassis_pose_map, input.observation.chassis_state,
-        *input.environment.final_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
+        *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         *input.environment.masked_direction_map,
-        input.environment.base_direction_map, input.environment.terrain_constraints,
         step_controller_.current_blended_profile(),
-        step_controller_.current_active_step_mode(u0)
+        step_controller_.current_active_step_mode(u0),
+        check_lethal_status
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
@@ -354,11 +357,28 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
     const auto& cmd = follow_result.command;
     const auto& prediction = follow_result.prediction;
 
+    if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
+        // path invalid（MPC_LETHAL）：本周期输出减速指令，标记 one-shot 供顶层 replan。
+        mpc_lethal_pending_ = true;
+        if (follow_result.lethal_obstacle) {
+            const auto& lethal = *follow_result.lethal_obstacle;
+            RCLCPP_WARN(
+                logger_,
+                "Follow rollout entered lethal obstacle at step %d (x=%.2f, y=%.2f, cost=%.1f); flagging MPC_LETHAL",
+                lethal.state_index, lethal.position_map.x(), lethal.position_map.y(), lethal.sampled_cost
+            );
+        } else {
+            RCLCPP_WARN(logger_, "Follow rollout entered lethal obstacle; flagging MPC_LETHAL");
+        }
+    }
+
     out.velocity = cmd.x();
     out.omega = cmd.y();
 
-    if (const auto active_step_mode = step_controller_.current_active_step_mode(u0);
-        active_step_mode && step_controller_.should_activate_step_mode(u0)) {
+    if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
+        out.mode = chassis_mode::NORMAL;
+    } else if (const auto active_step_mode = step_controller_.current_active_step_mode(u0);
+               active_step_mode && step_controller_.should_activate_step_mode(u0)) {
         out.mode = active_step_mode->mode;
     } else {
         out.mode = chassis_mode::NORMAL;
@@ -367,8 +387,8 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
     out.mpc_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
-    if (!prediction.search_path.empty()) {
-        out.search_path = std::move(const_cast<MPCPrediction&>(prediction).search_path);
+    if (!prediction.rollout_paths.empty()) {
+        out.mppi_rollouts = std::move(const_cast<MPCPrediction&>(prediction).rollout_paths);
     }
     out.step_dist_cm = step_controller_.compute_step_distance_cm(path, u0);
     out.valid = true;

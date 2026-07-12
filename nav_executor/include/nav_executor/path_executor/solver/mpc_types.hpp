@@ -145,48 +145,33 @@ struct MPCFollowProjection {
     double local_search_lazy_distance;
 };
 
-// Anytime MHA* 局部搜索播种器参数（在 FDDP 前做全局较优粗搜，跳出非凸局部最优）
-struct FollowSearchParams {
+struct MPPISamplingStd {
+    double velocity;
+    double omega;
+};
+
+struct MPPINoiseSmoothing {
+    int window;
+    int passes;
+};
+
+struct MPCFollowMPPIParams {
     bool enable;
+    int num_threads;
+    int batch_size;
+    int iteration_count;
+    double temperature;
+    double gamma;
+    MPPISamplingStd sampling_std;
+    MPPINoiseSmoothing noise_smoothing;
+    bool include_nominal_trajectory;
+    bool fallback_to_best_sample;
+};
 
-    // ── 离散化 ──
-    double dt;                  // 搜索步长 (s)，粗于 MPC_DT
-    int horizon_steps;          // 搜索时域步数上限（dt × steps 覆盖 MPC 时域）
-    int theta_bins;             // 航向离散档数
-    double v_bin_size;          // 速度离散分辨率 (m/s)
-
-    // ── 运动基元（相对 command_bounds 的比例，v 含负值支持后退）──
-    std::vector<double> v_primitive_fracs;
-    std::vector<double> omega_primitive_fracs;
-    double tau_v;               // 速度一阶滞后时间常数 (s)；<=0 时启动期由 LPV 模型自动推导
-
-    // ── Anytime 预算 ──
-    double budget_ms;
-    int max_expansions;
-
-    // ── 可行性（硬约束）──
-    double collision_threshold;   // 代价 >= 该值视为不可通行
-    double step_dir_dot_threshold; // 台阶方向禁行判据：move_dir·step_dir 的对齐阈值（↔ a_star.step_mode_dot_threshold）
-
-    // ── MHA* 权重 ──
-    double w_anchor;            // w1：不可采纳启发式膨胀系数
-    double w_inadmissible;      // w2：anchor 有界次优系数
-    double spline_bias;         // H1：偏向贴近全局样条的强度
-    double w_step_reach_heur;   // H2：台阶可达引导启发式强度（进度解耦，事前浮现"先退后进"分支）
-
-    // ── 双解采纳判据 ──
-    double accept_margin;       // search 需低于 warm_cost*(1-margin) 才采纳，避免 basin 边界抖动
-
-    // ── 边代价权重（与 FDDP running cost 主项同构，二次化对齐 basin 形状）──
-    double w_time;              // 每步时间基代价（线性，A* g-cost 基线 / anchor admissible 下界）
-    double w_progress;          // 沿样条进度（每步剩余弧长惩罚，↔ tracking_weights.q_u，取代前瞻目标点）
-    double w_brake;             // 终端减速（↔ terminal_weights.q_v_final，令超越终点自然被抑制）
-    double w_obstacle;          // 避障（↔ environment_weights.obstacle）
-    double w_lateral;           // Frenet 横向误差（↔ tracking_weights.q_y）
-    double w_heading;           // Frenet 航向误差（↔ tracking_weights.q_theta）
-    double w_step_align;        // 台阶方向对齐（↔ terrain_weights.direction）
-    double w_step_reach;        // 台阶入口可达速度（↔ terrain_weights.step_reachability_*）
-    double w_step_vel;          // 台阶内部速度区间（↔ terrain_weights.step_vel_weight）
+struct MPCFollowRolloutSafetyParams {
+    bool enable_lethal_obstacle_check;
+    double lethal_obstacle_threshold;
+    int fddp_lethal_consecutive_threshold;
 };
 
 struct MPCFollowParams {
@@ -201,7 +186,8 @@ struct MPCFollowParams {
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowTerminalWeights terminal_weights;
     MPCFollowProjection projection;
-    FollowSearchParams search;
+    MPCFollowMPPIParams mppi;
+    MPCFollowRolloutSafetyParams rollout_safety;
     int max_iters;
 };
 
@@ -284,14 +270,19 @@ struct ActiveStepMode {
     bool operator==(const ActiveStepMode&) const = default;
 };
 
+struct RolloutLethalObstacleInfo {
+    int state_index = -1;
+    Eigen::Vector2d position_map = Eigen::Vector2d::Zero();
+    double sampled_cost = 0.0;
+};
+
 struct MPCPrediction {
     std::vector<Eigen::Vector2d> path_map;
     std::vector<double> headings;
     std::vector<double> v_pred;
     std::vector<double> w_pred;
 
-    // 调试：本周期 MHA* 搜索得到的粗路径（map 坐标）
-    std::vector<Eigen::Vector2d> search_path;
+    std::vector<std::vector<Eigen::Vector2d>> rollout_paths;
 };
 
 struct MPCParams {

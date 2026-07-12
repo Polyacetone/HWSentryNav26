@@ -5,15 +5,21 @@
 #include <nav_executor/path_executor/solver/follow_problem.hpp>
 #include <nav_executor/path_executor/solver/stop_problem.hpp>
 #include <nav_executor/path_executor/solver/hold_problem.hpp>
-#include <nav_executor/path_executor/solver/search/follow_search.hpp>
 
 namespace nav_executor {
 
 class MPCSolver {
 public:
+    enum class FollowSolveStatus : uint8_t {
+        FOLLOW = 0,
+        STOP_AND_WAIT_REPLAN = 1,
+    };
+
     struct FollowSolveResult {
         Eigen::Vector2d command = Eigen::Vector2d::Zero();
         MPCPrediction prediction;
+        FollowSolveStatus status = FollowSolveStatus::FOLLOW;
+        std::optional<RolloutLethalObstacleInfo> lethal_obstacle;
     };
 
     explicit MPCSolver(const MPCParams& params);
@@ -34,13 +40,13 @@ public:
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
         const CostMap& cost_map,
+        const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
         const DirectionMap& direction_map,
-        const DirectionMap* base_direction_map,
-        const TerrainTraversalConstraints* terrain_constraints,
         const CapabilityProfile& blended_profile,
-        std::optional<ActiveStepMode> active_step_mode
+        std::optional<ActiveStepMode> active_step_mode,
+        bool check_lethal_status
     );
 
     std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(
@@ -66,14 +72,11 @@ private:
     double last_u_ = 0.0;
 
     fddp::Solver<FollowProblem> follow_solver_;
-    fddp::Solver<FollowProblem> search_solver_; // 从 MHA* 种子出发的候选（Q5 双解比较）
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
     bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
-
-    search::FollowSearchSeeder search_seeder_;
 
     std::optional<SplinePath> prev_ref_control_points_;
 
@@ -85,6 +88,8 @@ private:
 
     double remaining_energy_ = 200.0;
     double rfr_pwr_limit_ = 90.0;
+
+    int fddp_lethal_consecutive_count_ = 0;
 
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,
