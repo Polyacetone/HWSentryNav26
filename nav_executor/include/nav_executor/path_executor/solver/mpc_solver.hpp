@@ -7,6 +7,7 @@
 #include <nav_executor/path_executor/solver/hold_problem.hpp>
 #include <nav_executor/path_executor/solver/global_search_worker.hpp>
 #include <nav_executor/path_executor/solver/longitudinal_planner.hpp>
+#include <rclcpp/logging.hpp>
 
 namespace nav_executor {
 
@@ -24,7 +25,7 @@ public:
         std::optional<RolloutLethalObstacleInfo> lethal_obstacle;
     };
 
-    explicit MPCSolver(const MPCParams& params);
+    MPCSolver(const MPCParams& params, rclcpp::Logger logger);
     ~MPCSolver();
 
     void set_last_cmd(const Eigen::Vector2d& cmd);
@@ -71,6 +72,7 @@ public:
 
 private:
     MPCParams params_;
+    rclcpp::Logger logger_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     double last_u_ = 0.0;
 

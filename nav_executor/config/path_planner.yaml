@@ -89,7 +89,7 @@
           samples_per_meter: 10.0 # main 阶段采样密度
           max_iterations: 60 # main 每次迭代的最大优化步数
           max_refinement_iterations: 1 # main 阶段细化迭代次数（台阶区间收敛后停止）
-          near_max_curvature: 0.2 # 台阶附近区域曲率上限
+          near_max_curvature: 0.3 # 台阶附近区域曲率上限
           far_max_curvature: 1.6 # 远离台阶区域曲率上限
           step_extension_distance: 0.3 # 台阶区间前后扩展距离 (m)
           step_transition_distance: 0.3 # 近/远曲率之间平滑过渡距离 (m)

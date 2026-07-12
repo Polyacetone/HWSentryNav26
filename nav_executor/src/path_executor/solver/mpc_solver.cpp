@@ -118,7 +118,7 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 // ── MPCSolver 方法 ──
 
-MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
+MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger) : params_(params), logger_(std::move(logger)) {
     const auto& search = params_.follow.global_search;
     GlobalSearchWorkerParams worker_params;
     worker_params.enable = search.enable;
@@ -130,7 +130,9 @@ MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
         .hysteresis_count = search.hysteresis_count,
         .refinement_iterations = search.refinement_iterations,
     };
-    global_search_worker_ = std::make_unique<GlobalSearchWorker>(params_, worker_params);
+    global_search_worker_ = std::make_unique<GlobalSearchWorker>(
+        params_, worker_params, logger_.get_child("global_search")
+    );
 }
 
 MPCSolver::~MPCSolver() = default;

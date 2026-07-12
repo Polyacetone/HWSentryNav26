@@ -26,7 +26,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     load_terrain_config();
 
     const MPCParams mpc_params = load_mpc_params();
-    auto mpc_solver = std::make_shared<MPCSolver>(mpc_params);
+    auto mpc_solver = std::make_shared<MPCSolver>(mpc_params, get_logger().get_child("mpc"));
 
     executor_ = std::make_unique<PathExecutor>(
         load_executor_params(), load_fsm_params(), mpc_solver,

@@ -4,8 +4,9 @@
 
 namespace nav_executor {
 
-GlobalSearchWorker::GlobalSearchWorker(const MPCParams& mpc_params, GlobalSearchWorkerParams params)
-    : mpc_params_(mpc_params), params_(params), search_(mpc_params.follow.global_search), selector_(params.selector) {
+GlobalSearchWorker::GlobalSearchWorker(const MPCParams& mpc_params, GlobalSearchWorkerParams params, rclcpp::Logger logger)
+    : mpc_params_(mpc_params), params_(params), search_(mpc_params.follow.global_search), selector_(params.selector),
+      logger_(std::move(logger)) {
     if (params_.enable) thread_ = std::jthread([this](std::stop_token token) { run(token); });
 }
 
@@ -85,9 +86,17 @@ std::optional<GlobalSearchOutput> GlobalSearchWorker::process(GlobalSearchInput 
         input.remaining_energy, input.rfr_pwr_limit, input.blended_profile, input.active_step_mode,
         input.current_path_u
     );
+    const auto solve_start = std::chrono::steady_clock::now();
     auto search_result = search_.search(
         problem, input.x0, input.warm_seed, input.longitudinal_seed, params_.candidate_count
     );
+    const double solve_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - solve_start
+    ).count();
+    const double threshold_ms = 0.6 * static_cast<double>(std::max(params_.min_period_ms, 0));
+    if (threshold_ms > 0.0 && solve_ms > threshold_ms) {
+        RCLCPP_WARN(logger_, "GlobalSearch solve time %.2f ms > %.2f ms (0.6 * min_period_ms=%d)", solve_ms, threshold_ms, params_.min_period_ms);
+    }
     auto selected = selector_.select(problem, input.x0, input.warm_seed, search_result.candidates);
     if (input.generation != generation_.load(std::memory_order_acquire)) return std::nullopt;
     if (selected) selected->origin_seq = input.sequence;

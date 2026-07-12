@@ -6,6 +6,7 @@
 #include <optional>
 #include <stop_token>
 #include <thread>
+#include <rclcpp/logging.hpp>
 
 #include <nav_executor/path_executor/solver/global_search.hpp>
 #include <nav_executor/path_executor/solver/seed_selector.hpp>
@@ -49,7 +50,7 @@ struct GlobalSearchOutput {
 
 class GlobalSearchWorker {
 public:
-    GlobalSearchWorker(const MPCParams& mpc_params, GlobalSearchWorkerParams params);
+    GlobalSearchWorker(const MPCParams& mpc_params, GlobalSearchWorkerParams params, rclcpp::Logger logger);
     ~GlobalSearchWorker();
 
     GlobalSearchWorker(const GlobalSearchWorker&) = delete;
@@ -67,6 +68,7 @@ private:
     GlobalSearchWorkerParams params_;
     GlobalSearch search_;
     SeedSelector selector_;
+    rclcpp::Logger logger_;
     std::mutex input_mutex_;
     std::condition_variable_any input_ready_;
     std::optional<GlobalSearchInput> input_;
