@@ -35,9 +35,12 @@ struct MPCMotionConstraintWeights {
 };
 
 struct MPCFollowTrackingWeights {
-    double q_y;
-    double q_theta;
-    double q_u;
+    double q_y;            // 横向误差管廊外权重（tube 外二次惩罚）
+    double q_theta;        // 航向误差权重
+    double q_u;            // 逐步进度势权重（基于投影弧长的 cost-to-go 梯度）
+    double y_tube;         // 横向误差管廊半宽 (m)：|ey| < y_tube 内不惩罚，允许横向腾挪
+    double q_term_prog;    // 终端进度势权重：terminal_cost += q_term_prog * s_remaining(u*)
+    double q_term_lateral; // 终端横向势权重：terminal_cost += q_term_lateral * |ey|，补偿投影势的 cross-track 平坦性
 };
 
 struct MPCFollowCommandWeights {

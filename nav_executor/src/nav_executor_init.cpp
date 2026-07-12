@@ -413,7 +413,10 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .tracking_weights = {
                 .q_y = declare_parameter<double>("mpc.follow.tracking_weights.q_y"),
                 .q_theta = declare_parameter<double>("mpc.follow.tracking_weights.q_theta"),
-                .q_u = declare_parameter<double>("mpc.follow.tracking_weights.q_u")
+                .q_u = declare_parameter<double>("mpc.follow.tracking_weights.q_u"),
+                .y_tube = declare_parameter<double>("mpc.follow.tracking_weights.y_tube"),
+                .q_term_prog = declare_parameter<double>("mpc.follow.tracking_weights.q_term_prog"),
+                .q_term_lateral = declare_parameter<double>("mpc.follow.tracking_weights.q_term_lateral")
             },
             .command_weights = {
                 .r_v = declare_parameter<double>("mpc.follow.command_weights.r_v"),

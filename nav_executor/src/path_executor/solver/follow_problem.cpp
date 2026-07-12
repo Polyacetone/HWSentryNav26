@@ -108,10 +108,14 @@ FollowResidualLinearization follow_residual_linearized_impl(
 
     const double a_lat = std::abs(v_cmd * w_cmd);
 
-    out.r(0) = tracking_w.q_y * ey;
-    out.jx(0, ix::X) = tracking_w.q_y * dey_dpx;
-    out.jx(0, ix::Y) = tracking_w.q_y * dey_dpy;
-    out.jx(0, ix::PATH_U) = tracking_w.q_y * dey_dpathu;
+    // 横向误差管廊：|ey| < y_tube 内不惩罚（允许横向腾挪对齐/助跑台阶），
+    // 管廊外按 q_y 二次拉回。残差 = q_y * sign(ey)*max(0,|ey|-W)，管廊外导数为 1。
+    const double ey_tube = positive_part(std::abs(ey) - tracking_w.y_tube) * sign_or_zero(ey);
+    const double dtube_dey = (std::abs(ey) > tracking_w.y_tube) ? 1.0 : 0.0;
+    out.r(0) = tracking_w.q_y * ey_tube;
+    out.jx(0, ix::X) = tracking_w.q_y * dtube_dey * dey_dpx;
+    out.jx(0, ix::Y) = tracking_w.q_y * dtube_dey * dey_dpy;
+    out.jx(0, ix::PATH_U) = tracking_w.q_y * dtube_dey * dey_dpathu;
 
     out.r(1) = tracking_w.q_theta * etheta;
     out.jx(1, ix::THETA) = tracking_w.q_theta;
@@ -296,7 +300,8 @@ double follow_running_cost_value_only_impl(
 
     double cost = 0.0;
 
-    cost += 0.5 * (tracking_w.q_y * ey) * (tracking_w.q_y * ey);
+    const double ey_tube = positive_part(std::abs(ey) - tracking_w.y_tube) * sign_or_zero(ey);
+    cost += 0.5 * (tracking_w.q_y * ey_tube) * (tracking_w.q_y * ey_tube);
     cost += 0.5 * (tracking_w.q_theta * etheta) * (tracking_w.q_theta * etheta);
     cost += 0.5 * (command_w.r_v * v_cmd) * (command_w.r_v * v_cmd);
     cost += 0.5 * (command_w.r_omega * w_cmd) * (command_w.r_omega * w_cmd);
@@ -615,16 +620,81 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 }
 
 template<int Horizon>
+typename FollowProblemT<Horizon>::TerminalEval
+FollowProblemT<Horizon>::evaluate_terminal(const StateVec& x) const {
+    // 终端 cost-to-go：把路径当作一维值场，但补上横向分量，重建
+    // "沿轨剩余弧长 + 横向跨回代价" 的曼哈顿近似，使其不再对横向偏移平坦、
+    // 也不再乐观低估远离路径点的到达代价。
+    //   V_term = w_prog * s_remaining(u*) + w_lat * |ey|
+    // 梯度 = w_prog * (-切向) + w_lat * sign(ey) * (法向)
+    // 当投影饱和到路径末端 (u*≈1) 时，进度项退化为到 goal 点的直线距离，
+    // 避免 "末端归零 → 失去锚定 → rollout 乱飘"。
+    const auto& tw = p_.follow.tracking_weights;
+    const double w_prog = tw.q_term_prog;
+    const double w_lat = tw.q_term_lateral;
+
+    TerminalEval out;
+    if (w_prog <= 0.0 && w_lat <= 0.0) return out;
+
+    const auto& proj = p_.follow.projection;
+    const Eigen::Vector2d p_xy(x(ix::X), x(ix::Y));
+    const double hint = std::clamp(x(ix::PATH_U), 0.0, 1.0);
+    const double u_star = spline_.project(
+        p_xy, hint, proj.proj_num_samples, proj.proj_search_window, proj.local_search_lazy_distance
+    );
+    const double uc = std::clamp(u_star, 0.0, 1.0);
+    const auto se = spline_.eval(uc);
+
+    constexpr double DIR_EPS = 1e-9;
+    constexpr double END_U = 1.0 - 1e-6;
+
+    if (uc >= END_U) {
+        // 末端饱和：进度项接管为到 goal 的直线距离，梯度指向 goal。
+        const Eigen::Vector2d to_goal = p_xy - goal_xy_;
+        const double d = to_goal.norm();
+        out.value += w_prog * d;
+        if (d > DIR_EPS) {
+            out.grad_xy += w_prog * (to_goal / d);
+        }
+        // 末端不再叠加横向项（goal 距离已同时含横向信息）。
+        return out;
+    }
+
+    // ── 进度项：s_remaining，梯度 = -单位切向（包络定理）──
+    out.value += w_prog * spline_.arc_length(uc, 1.0, 8);
+    const double tnorm = se.d1.norm();
+    if (w_prog > 0.0 && tnorm > DIR_EPS) {
+        const Eigen::Vector2d t = se.d1 / tnorm;
+        out.grad_xy += -w_prog * t;
+    }
+
+    // ── 横向项：w_lat * |ey|，梯度 = sign(ey) * 单位法向 ──
+    // ey = -ex*sin_r + ey_w*cos_r，其 ∇_xy = (-sin_r, cos_r) = 左法向。
+    if (w_lat > 0.0) {
+        const double ex = p_xy.x() - se.p.x();
+        const double ey_w = p_xy.y() - se.p.y();
+        const double ey = -ex * se.sin_r + ey_w * se.cos_r;
+        const Eigen::Vector2d n(-se.sin_r, se.cos_r);
+        out.value += w_lat * std::abs(ey);
+        out.grad_xy += w_lat * sign_or_zero(ey) * n;
+    }
+
+    return out;
+}
+
+template<int Horizon>
 double FollowProblemT<Horizon>::terminal_cost(const StateVec& x) const {
-    (void)x;
-    return 0.0;
+    return evaluate_terminal(x).value;
 }
 
 template<int Horizon>
 void FollowProblemT<Horizon>::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const {
-    (void)x;
     lfx.setZero();
     lfxx.setZero();
+    const auto eval = evaluate_terminal(x);
+    lfx(ix::X) = eval.grad_xy.x();
+    lfx(ix::Y) = eval.grad_xy.y();
+    // 线性/绝对值势无二阶项；backward pass 的 mu 正则负责曲率，lfxx 保持零。
 }
 
 template class FollowProblemT<MPC_HORIZON>;

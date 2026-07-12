@@ -58,6 +58,13 @@ public:
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
 
+    // 终端 cost-to-go 势的值与其对 (x,y) 的梯度（已含权重）。
+    struct TerminalEval {
+        double value = 0.0;
+        Eigen::Vector2d grad_xy = Eigen::Vector2d::Zero();
+    };
+    TerminalEval evaluate_terminal(const StateVec& x) const;
+
     Eigen::Vector2d goal_xy_;
     SplinePath spline_;
     const MPCParams& p_;
