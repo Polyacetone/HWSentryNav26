@@ -340,6 +340,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input) {
         path, input.observation.chassis_pose_map, input.observation.chassis_state,
         *input.environment.final_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         *input.environment.masked_direction_map,
+        input.environment.base_direction_map, input.environment.terrain_constraints,
         step_controller_.current_blended_profile(),
         step_controller_.current_active_step_mode(u0)
     );

@@ -24,7 +24,11 @@ SeedingResult FollowSearchSeeder::run(
     const GridInfo& dir_info,
     const CapabilityProfile& profile,
     std::optional<ActiveStepMode> active_step_mode,
-    double step_guide_acc
+    double step_guide_acc,
+    double brake_decel,
+    double brake_v_target,
+    const DirectionMap* base_dir,
+    const TerrainTraversalConstraints* terrain
 ) {
     SeedingResult out;
     if (!tau_v_ready_) return out;
@@ -33,21 +37,8 @@ SeedingResult FollowSearchSeeder::run(
         params_.dt, tau_v_, profile, params_.v_primitive_fracs, params_.omega_primitive_fracs
     );
 
-    // 前瞻目标：沿样条从 start_u 推进 lookahead_distance 弧长处的点。
-    const double total_len = spline.arc_length(0.0, 1.0, 32);
-    const double target_len = std::min(
-        spline.arc_length(0.0, start_u, 32) + params_.lookahead_distance, total_len
-    );
-    // 二分求 target_len 对应的 u。
-    double lo = start_u, hi = 1.0;
-    for (int i = 0; i < 24; ++i) {
-        const double mid = 0.5 * (lo + hi);
-        if (spline.arc_length(0.0, mid, 32) < target_len) lo = mid;
-        else hi = mid;
-    }
-    const double goal_u = 0.5 * (lo + hi);
-    const Eigen::Vector2d goal_xy = spline.position(goal_u);
-
+    // 目标为定时域最小代价（展开满 horizon_steps 步）；无外部前瞻目标点，
+    // 沿样条推进由 edge_cost 的进度项自发牵引，超越终点由制动项抑制。
     SearchEnvironment env {
         .cost_grid = cost_grid,
         .cost_info = cost_info,
@@ -57,10 +48,12 @@ SeedingResult FollowSearchSeeder::run(
         .params = params_,
         .active_step_mode = active_step_mode,
         .step_guide_acc = step_guide_acc,
+        .brake_decel = brake_decel,
+        .brake_v_target = brake_v_target,
         .max_step_advance = std::max(model.v_max() * params_.dt, 1e-3),
+        .base_dir = base_dir,
+        .terrain = terrain,
         .start_u = start_u,
-        .goal_xy = goal_xy,
-        .goal_u = goal_u,
         .max_depth = params_.horizon_steps,
     };
 

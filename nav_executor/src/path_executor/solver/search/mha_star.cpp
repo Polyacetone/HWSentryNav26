@@ -12,10 +12,16 @@ namespace {
 
 constexpr double INF = std::numeric_limits<double>::infinity();
 
+// 搜索期样条投影参数：粗搜不需要 FDDP 那么密的采样。
+constexpr int PROJ_SAMPLES = 20;
+constexpr double PROJ_WINDOW = 0.2;
+constexpr double PROJ_LAZY = 0.1;
+
 /// 搜索节点：闭表/开表共享的持久记录。
 struct Node {
     SearchState state;
     double g = INF;
+    double u = 0.0;             // 在样条上的缓存投影（供 edge_cost / 启发式复用，避免重复投影）
     int parent = -1;            // 父节点在 nodes_ 池中的索引
     int depth = 0;              // 从起点起的搜索步数
     MotionPrimitive incoming {}; // 到达本节点所用基元
@@ -64,11 +70,12 @@ SearchResult MHAStar::search(
 
     const auto key_for = [&](const Node& n, size_t heuristic_idx) {
         const double w = (heuristic_idx == 0) ? w_anchor_ : (w_anchor_ * w_inadmissible_);
-        return n.g + w * heuristics_[heuristic_idx]->h(n.state, env);
+        const int remaining = env.max_depth - n.depth;
+        return n.g + w * heuristics_[heuristic_idx]->h(n.state, env, n.u, remaining);
     };
 
     // ── 插入起点 ──
-    nodes.push_back(Node {.state = start, .g = 0.0, .parent = -1});
+    nodes.push_back(Node {.state = start, .g = 0.0, .u = env.start_u, .parent = -1});
     visited[env.make_key(start)] = 0;
     anchor_open.push({key_for(nodes[0], 0), 0, 0.0});
     for (size_t i = 0; i < num_inadmissible; ++i) {
@@ -78,6 +85,7 @@ SearchResult MHAStar::search(
     const auto t_start = std::chrono::steady_clock::now();
     const auto budget = std::chrono::duration<double, std::milli>(budget_ms);
 
+    // incumbent：已找到的最优完整轨迹（展开满 max_depth 的节点）。
     int best_goal = -1;
     double best_goal_g = INF;
     int expansions = 0;
@@ -99,31 +107,38 @@ SearchResult MHAStar::search(
         nodes[static_cast<size_t>(node_idx)].closed_anchor = true;
         ++expansions;
 
-        const SearchState parent = nodes[static_cast<size_t>(node_idx)].state;
-        const double parent_g = nodes[static_cast<size_t>(node_idx)].g;
-        const int parent_depth = nodes[static_cast<size_t>(node_idx)].depth;
-        if (parent_depth >= env.max_depth) return; // 达到时域上限，不再扩展
+        const Node parent = nodes[static_cast<size_t>(node_idx)];
+        if (parent.depth >= env.max_depth) return; // 已是完整轨迹末端，不再扩展
+        const int child_depth = parent.depth + 1;
 
         for (const auto& prim : model.primitives()) {
-            const SearchState next = model.step(parent, prim);
+            const SearchState next = model.step(parent.state, prim);
             if (!env.is_feasible(next)) continue;
+            if (!env.is_move_allowed(parent.state, next)) continue; // 台阶方向硬约束
 
-            const double new_g = parent_g + env.edge_cost(next);
+            const double u_next = env.spline.project_extrapolated(
+                Eigen::Vector2d(next.x, next.y), parent.u, PROJ_SAMPLES, PROJ_WINDOW, PROJ_LAZY
+            );
+            const double new_g = parent.g + env.edge_cost(next, u_next);
             const StateKey nk = env.make_key(next);
 
             auto it = visited.find(nk);
             int next_idx;
             if (it == visited.end()) {
                 next_idx = static_cast<int>(nodes.size());
-                nodes.push_back(Node {.state = next, .g = new_g, .parent = node_idx, .depth = parent_depth + 1, .incoming = prim});
+                nodes.push_back(Node {
+                    .state = next, .g = new_g, .u = u_next,
+                    .parent = node_idx, .depth = child_depth, .incoming = prim
+                });
                 visited.emplace(nk, next_idx);
             } else {
                 next_idx = it->second;
                 Node& existing = nodes[static_cast<size_t>(next_idx)];
                 if (new_g + 1e-9 >= existing.g || existing.closed_anchor) continue;
                 existing.g = new_g;
+                existing.u = u_next;
                 existing.parent = node_idx;
-                existing.depth = parent_depth + 1;
+                existing.depth = child_depth;
                 existing.incoming = prim;
             }
 
@@ -133,69 +148,65 @@ SearchResult MHAStar::search(
                 inadmissible_open[i].push({key_for(nn, i + 1), next_idx, new_g});
             }
 
-            if (env.is_goal(next) && new_g < best_goal_g) {
+            // 完整轨迹（展开满时域）即目标候选，更新 incumbent。
+            if (child_depth >= env.max_depth && new_g < best_goal_g) {
                 best_goal_g = new_g;
                 best_goal = next_idx;
             }
         }
     };
 
-    // ── SMHA* 主循环：轮询 inadmissible 队列，anchor 提供有界次优保证 ──
-    while (true) {
-        if (best_goal >= 0) break; // 首个到达目标的解即返回（anytime + 有界次优）
-        if (expansions >= max_expansions) break;
-        if (std::chrono::steady_clock::now() - t_start > budget) break;
-
-        // anchor 队列最小 key，作为 inadmissible 展开的准入界。
-        int anchor_top = -1;
-        while (!anchor_open.empty()) {
-            const OpenEntry e = anchor_open.top();
+    // 取某开表的当前有效最小 key（惰性清理队顶过期/闭合项）。返回 INF 表示队列空。
+    const auto clean_min_key = [&](OpenQueue& q) -> double {
+        while (!q.empty()) {
+            const OpenEntry e = q.top();
             const Node& n = nodes[static_cast<size_t>(e.node_index)];
             if (e.g_at_insert > n.g + 1e-9 || n.closed_anchor) {
-                anchor_open.pop();
+                q.pop();
                 continue;
             }
-            anchor_top = e.node_index;
-            break;
+            return e.key;
         }
-        if (anchor_top < 0) break; // 全部队列耗尽
+        return INF;
+    };
 
-        const double anchor_min_key = key_for(nodes[static_cast<size_t>(anchor_top)], 0);
+    // ── SMHA* 主循环 + 分支定界早停 ──
+    // anchor 提供 admissible 下界；当 incumbent 代价 <= 某队列最小 key 时，该队列无法再改进解，
+    // anchor 满足该条件即证得（有界次优内）最优，提前返回，无需耗尽预算。
+    while (true) {
+        if (expansions >= max_expansions) break;                              // anytime 兜底
+        if (std::chrono::steady_clock::now() - t_start > budget) break;       // anytime 兜底
 
-        bool expanded_inadmissible = false;
+        const double anchor_min_key = clean_min_key(anchor_open);
+        if (anchor_min_key == INF) break;                 // 全部队列耗尽
+        if (best_goal_g <= anchor_min_key) break;         // incumbent 已达最优下界，早停
+
+        bool expanded = false;
         for (size_t i = 0; i < num_inadmissible; ++i) {
-            if (inadmissible_open[i].empty()) continue;
-            // 惰性清理队顶
-            const OpenEntry top = inadmissible_open[i].top();
-            const Node& tn = nodes[static_cast<size_t>(top.node_index)];
-            if (top.g_at_insert > tn.g + 1e-9 || tn.closed_anchor) {
-                inadmissible_open[i].pop();
-                expanded_inadmissible = true; // 本轮做了工作，继续
+            const double min_key_i = clean_min_key(inadmissible_open[i]);
+            if (min_key_i == INF) continue;
+            if (min_key_i > w_inadmissible_ * anchor_min_key) continue; // 未满足 inadmissible 准入
+            if (best_goal_g <= min_key_i) continue;                     // 该队列无法改进 incumbent
+
+            const int idx = pop_valid(inadmissible_open[i]);
+            if (idx >= 0) {
+                expand(idx);
+                expanded = true;
                 break;
             }
-            // 准入判据：inadmissible 队顶 key <= w2 * anchor 最小 key
-            if (top.key <= w_inadmissible_ * anchor_min_key) {
-                const int idx = pop_valid(inadmissible_open[i]);
-                if (idx >= 0) {
-                    expand(idx);
-                    expanded_inadmissible = true;
-                    break;
-                }
-            }
         }
 
-        if (!expanded_inadmissible) {
-            // 无 inadmissible 队列满足准入，展开 anchor 队列（保证进展与完备性）。
+        if (!expanded) {
+            // 无 inadmissible 队列可推进，展开 anchor（保证进展与完备性）。
             const int idx = pop_valid(anchor_open);
             if (idx < 0) break;
             expand(idx);
         }
     }
 
-    // ── 回溯最优解（若无目标解，取 anchor 队列中离目标启发值最小的已展开节点作 best-effort）──
+    // ── 回溯最优解（若无完整解，取 anchor key 最小的已展开节点作 best-effort 种子）──
     int trace = best_goal;
     if (trace < 0) {
-        // best-effort：选 g + anchor_h 最小的已扩展节点，给 FDDP 一个尽量靠前的种子。
         double best_key = INF;
         for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
             if (!nodes[static_cast<size_t>(i)].closed_anchor) continue;

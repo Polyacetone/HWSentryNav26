@@ -206,6 +206,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
     const DirectionMap& direction_map,
+    const DirectionMap* base_direction_map,
+    const TerrainTraversalConstraints* terrain_constraints,
     const CapabilityProfile& blended_profile,
     std::optional<ActiveStepMode> active_step_mode
 ) {
@@ -302,7 +304,10 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         auto seeding = search_seeder_.run(
             x0, global_path, u0, CostMapGridView(cost_map), ci, dg, di,
             blended_profile, active_step_mode,
-            params_.follow.terrain_limits.step_reachability_guide_acc
+            params_.follow.terrain_limits.step_reachability_guide_acc,
+            params_.follow.terminal_weights.a_brake,
+            params_.follow.terminal_weights.slow_down_target_vel,
+            base_direction_map, terrain_constraints
         );
         if (seeding.seed.valid) {
             search_path = std::move(seeding.search_path);

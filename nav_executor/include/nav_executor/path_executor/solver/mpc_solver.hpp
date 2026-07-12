@@ -37,6 +37,8 @@ public:
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
         const DirectionMap& direction_map,
+        const DirectionMap* base_direction_map,
+        const TerrainTraversalConstraints* terrain_constraints,
         const CapabilityProfile& blended_profile,
         std::optional<ActiveStepMode> active_step_mode
     );

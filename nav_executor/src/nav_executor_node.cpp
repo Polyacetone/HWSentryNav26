@@ -178,6 +178,7 @@ void NavExecutorNode::control_tick() {
     ein.environment.masked_global_cost_map = route_context.masked_global.get();
     ein.environment.masked_direction_map = route_context.masked_direction.get();
     ein.environment.base_direction_map = global_direction_map_.get();
+    ein.environment.terrain_constraints = &terrain_constraints;
     ein.environment.current_dynamic_cost_map = current_cost_map_.get();
     ein.environment.per_step_cost_maps = std::move(route_context.prediction_with_step_mask_ptrs);
     ein.environment.per_step_dynamic_cost_maps = std::move(route_context.prediction_dynamic_ptrs);

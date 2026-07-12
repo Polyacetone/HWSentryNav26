@@ -164,27 +164,29 @@ struct FollowSearchParams {
     double budget_ms;
     int max_expansions;
 
-    // ── 可行性 ──
-    double collision_threshold; // 代价 >= 该值视为不可通行
-    double goal_tolerance;      // 到达前瞻目标的距离阈值 (m)
-    double lookahead_distance;  // 沿样条设定前瞻目标点的弧长 (m)
+    // ── 可行性（硬约束）──
+    double collision_threshold;   // 代价 >= 该值视为不可通行
+    double step_dir_dot_threshold; // 台阶方向禁行判据：move_dir·step_dir 的对齐阈值（↔ a_star.step_mode_dot_threshold）
 
     // ── MHA* 权重 ──
     double w_anchor;            // w1：不可采纳启发式膨胀系数
     double w_inadmissible;      // w2：anchor 有界次优系数
     double spline_bias;         // H1：偏向贴近全局样条的强度
-    double w_step_reach_heur;   // H2：台阶可达引导启发式强度（inadmissible 事前引导）
+    double w_step_reach_heur;   // H2：台阶可达引导启发式强度（进度解耦，事前浮现"先退后进"分支）
 
     // ── 双解采纳判据 ──
     double accept_margin;       // search 需低于 warm_cost*(1-margin) 才采纳，避免 basin 边界抖动
 
     // ── 边代价权重（与 FDDP running cost 主项同构，二次化对齐 basin 形状）──
-    double w_time;              // 每步时间/进度基代价（线性，A* g-cost 基线）
+    double w_time;              // 每步时间基代价（线性，A* g-cost 基线 / anchor admissible 下界）
+    double w_progress;          // 沿样条进度（每步剩余弧长惩罚，↔ tracking_weights.q_u，取代前瞻目标点）
+    double w_brake;             // 终端减速（↔ terminal_weights.q_v_final，令超越终点自然被抑制）
     double w_obstacle;          // 避障（↔ environment_weights.obstacle）
     double w_lateral;           // Frenet 横向误差（↔ tracking_weights.q_y）
     double w_heading;           // Frenet 航向误差（↔ tracking_weights.q_theta）
     double w_step_align;        // 台阶方向对齐（↔ terrain_weights.direction）
     double w_step_reach;        // 台阶入口可达速度（↔ terrain_weights.step_reachability_*）
+    double w_step_vel;          // 台阶内部速度区间（↔ terrain_weights.step_vel_weight）
 };
 
 struct MPCFollowParams {

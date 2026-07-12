@@ -23,24 +23,26 @@
           v_bin_size: 0.3 # 速度离散分辨率 (m/s)
           v_primitive_fracs: [1.0, 0.5, 0.0, -0.5] # 速度基元（>=0 乘 vel_max，<0 乘 |vel_min|），含后退
           omega_primitive_fracs: [-1.0, -0.5, 0.0, 0.5, 1.0] # 角速度基元（乘对应 omega bound）
-          tau_v: 0.0 # 速度一阶滞后时间常数 (s)；<=0 时启动期由 LPV 模型自动推导
+          tau_v: -1.0 # 速度一阶滞后时间常数 (s)；<=0 时启动期由 LPV 模型自动推导
           budget_ms: 15.0 # anytime 时间预算 (ms)
           max_expansions: 4000 # 最大节点展开数
-          collision_threshold: 200.0 # 代价 >= 该值视为不可通行
-          goal_tolerance: 0.15 # 到达前瞻目标的距离阈值 (m)
-          lookahead_distance: 3.0 # 沿样条设定前瞻目标点的弧长 (m)
+          collision_threshold: 200.0 # 代价 >= 该值视为不可通行（硬约束）
+          step_dir_dot_threshold: 0.5 # 台阶方向禁行判据：move_dir·step_dir 对齐阈值（硬约束，↔ a_star.step_mode_dot_threshold）
           w_anchor: 2.0 # w1：不可采纳启发式膨胀系数
           w_inadmissible: 2.0 # w2：anchor 有界次优系数
           spline_bias: 0.5 # H1：偏向贴近全局样条的强度
-          w_step_reach_heur: 0.8 # H2：台阶可达引导启发式强度（inadmissible 事前引导搜索优先扩展可达入口速度的节点）
+          w_step_reach_heur: 0.8 # H2：台阶可达引导启发式强度（进度解耦，事前浮现"先退后进"分支，避免其被进度锚队列饿死）
           accept_margin: 0.05 # 双解采纳裕度：search_cost < warm_cost*(1-margin) 才采纳，避免 basin 边界抖动
           weights:
-            w_time: 0.2 # 每步时间/进度基代价（线性）
+            w_time: 0.2 # 每步时间基代价（线性，anchor admissible 下界基线）
+            w_progress: 0.5 # 沿样条进度（每步剩余弧长惩罚，↔ tracking_weights.q_u，取代前瞻目标点牵引沿路径推进）
+            w_brake: 0.2 # 终端减速（↔ terminal_weights.q_v_final，令超越终点的高速方案被抑制，自然停在终点）
             w_obstacle: 1.0 # 避障（↔ environment_weights.obstacle）
             w_lateral: 0.3 # Frenet 横向误差（↔ tracking_weights.q_y）
             w_heading: 0.05 # Frenet 航向误差（↔ tracking_weights.q_theta）
             w_step_align: 1.0 # 台阶方向对齐（↔ terrain_weights.direction）
-            w_step_reach: 0.8 # 台阶入口可达速度（↔ terrain_weights.step_reachability_*）
+            w_step_reach: 8.0 # 台阶入口可达速度（高权重软约束，欠速时牵引先退后进腾挪加速；待实车/仿真验证）
+            w_step_vel: 8.0 # 台阶内部速度区间（高权重软约束，↔ terrain_weights.step_vel_weight；待实车/仿真验证）
         command_bounds:
           vel_max: 2.0 # 线速度上限 (m/s)
           vel_min: -1.2 # 线速度下限 (m/s)

@@ -31,6 +31,8 @@ public:
     [[nodiscard]] bool enabled() const { return params_.enable; }
 
     /// 跑一次搜索并构建 FDDP 种子。失败（不可行/超预算无解）时 seed.valid=false。
+    /// base_dir / terrain 供台阶方向硬约束（可为 nullptr，此时跳过该约束）；
+    /// 使用未掩码的 base 方向场，避免走廊掩码擦除方向矢量导致约束失效。
     [[nodiscard]] SeedingResult run(
         const StateVec& x0,
         const SplinePath& spline,
@@ -41,7 +43,11 @@ public:
         const GridInfo& dir_info,
         const CapabilityProfile& profile,
         std::optional<ActiveStepMode> active_step_mode,
-        double step_guide_acc
+        double step_guide_acc,
+        double brake_decel,
+        double brake_v_target,
+        const DirectionMap* base_dir,
+        const TerrainTraversalConstraints* terrain
     );
 
 private:

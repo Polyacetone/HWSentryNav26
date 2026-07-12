@@ -49,6 +49,7 @@ struct MotionEnvironment {
     const CostMap* masked_global_cost_map = nullptr;  // global + step_cost_layer
     const DirectionMap* masked_direction_map = nullptr;
     const DirectionMap* base_direction_map = nullptr;
+    const TerrainTraversalConstraints* terrain_constraints = nullptr; // 台阶方向硬约束规则表
     const CostMap* current_dynamic_cost_map = nullptr;
     std::vector<const CostMap*> per_step_cost_maps;
     std::vector<const CostMap*> per_step_dynamic_cost_maps;
