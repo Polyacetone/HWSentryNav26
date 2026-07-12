@@ -82,7 +82,7 @@ struct ExecutorOutput {
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
-    std::optional<std::vector<std::vector<Eigen::Vector2d>>> mppi_rollouts;
+    std::optional<std::vector<std::vector<Eigen::Vector2d>>> global_search_rollouts;
 };
 
 // 运动控制编排：持有 FSM / MPC / 台阶运行时 / stuck 检测与恢复链，消费顶层每周期传入的 active_path 与 hold_goal。

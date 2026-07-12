@@ -7,27 +7,26 @@
 
 namespace nav_executor {
 
-struct MPPIFollowSamplingResult {
+struct CEMOptimizationResult {
     std::array<StateVec, MPC_HORIZON + 1> xs {};
     std::array<ControlVec, MPC_HORIZON> us {};
     double cost = 0.0;
     bool valid = false;
 
-    std::vector<std::vector<Eigen::Vector2d>> rollout_paths;
 };
 
-class MPPIFollowSampler {
+class CEMOptimizer {
 public:
-    explicit MPPIFollowSampler(MPCFollowMPPIParams params): params_(params) {}
+    explicit CEMOptimizer(GlobalSearchParams params): params_(params) {}
 
-    [[nodiscard]] MPPIFollowSamplingResult optimize(
+    [[nodiscard]] CEMOptimizationResult optimize(
         const FollowProblem& problem,
         const StateVec& x0,
         const std::array<ControlVec, MPC_HORIZON>& nominal_controls
     ) const;
 
 private:
-    MPCFollowMPPIParams params_;
+    GlobalSearchParams params_;
 };
 
 } // namespace nav_executor

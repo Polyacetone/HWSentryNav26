@@ -2,7 +2,7 @@
 #include <nav_executor/path_executor/solver/mpc_utils.hpp>
 #include <nav_executor/path_executor/solver/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/solver/lpv_model.hpp>
-#include <nav_executor/path_executor/solver/mppi_sampler.hpp>
+#include <nav_executor/path_executor/solver/trajectory_seed.hpp>
 
 namespace nav_executor {
 
@@ -62,17 +62,6 @@ void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
     }
 }
 
-template<typename SolverT>
-std::array<ControlVec, SolverT::N> copy_solver_controls(const SolverT& solver) {
-    return solver.us;
-}
-
-template<typename SolverT>
-void seed_solver_from_sampling_result(SolverT& solver, const MPPIFollowSamplingResult& sample) {
-    solver.xs = sample.xs;
-    solver.us = sample.us;
-}
-
 template<typename ProblemT, typename StateContainerT>
 std::optional<RolloutLethalObstacleInfo> detect_rollout_lethal_obstacle(
     const ProblemT& prob,
@@ -129,7 +118,22 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 // ── MPCSolver 方法 ──
 
-MPCSolver::MPCSolver(const MPCParams& params): params_(params) {}
+MPCSolver::MPCSolver(const MPCParams& params): params_(params) {
+    const auto& search = params_.follow.global_search;
+    GlobalSearchWorkerParams worker_params;
+    worker_params.enable = search.enable;
+    worker_params.candidate_count = search.candidate_count;
+    worker_params.min_period_ms = search.min_period_ms;
+    worker_params.max_seed_age_ticks = search.max_seed_age_ticks;
+    worker_params.selector = {
+        .improvement_margin = search.improvement_margin,
+        .hysteresis_count = search.hysteresis_count,
+        .refinement_iterations = search.refinement_iterations,
+    };
+    global_search_worker_ = std::make_unique<GlobalSearchWorker>(params_, worker_params);
+}
+
+MPCSolver::~MPCSolver() = default;
 
 void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
     last_cmd_ = cmd;
@@ -141,6 +145,7 @@ void MPCSolver::reset_warm_start() {
     hold_warm_ = false;
     last_u_ = 0.0;
     fddp_lethal_consecutive_count_ = 0;
+    if (global_search_worker_) global_search_worker_->clear();
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
         stop_solver_.us[k].setZero();
@@ -284,6 +289,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     opts.tol_grad = SOLVER_TOL_GRAD;
     opts.tol_cost = SOLVER_TOL_COST;
 
+    ++follow_sequence_;
     if (follow_warm_) {
         shift_warm_start(follow_solver_);
     } else {
@@ -291,20 +297,20 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
     scale_solver_controls(follow_solver_, problem);
 
-    MPPIFollowSamplingResult mppi_result;
-    bool seeded_by_mppi = false;
-    if (params_.follow.mppi.enable) {
-        MPPIFollowSampler sampler(params_.follow.mppi);
-        mppi_result = sampler.optimize(problem, x0, copy_solver_controls(follow_solver_));
-        if (mppi_result.valid) {
-            seed_solver_from_sampling_result(follow_solver_, mppi_result);
-            seeded_by_mppi = true;
+    const TrajectorySeed longitudinal_seed = longitudinal_planner_.plan(
+        problem, global_path, x0, active_step_mode, follow_sequence_
+    );
+    std::vector<std::vector<Eigen::Vector2d>> global_search_paths;
+    if (global_search_worker_) {
+        if (auto injected = global_search_worker_->take_latest(follow_sequence_)) {
+            if (injected->injected_seed) {
+                follow_solver_.us = injected->injected_seed->controls;
+                scale_solver_controls(follow_solver_, problem);
+            }
+            global_search_paths = std::move(injected->debug_paths);
         }
     }
-
-    if (!seeded_by_mppi) {
-        rollout_solver_states(follow_solver_, problem, x0);
-    }
+    rollout_solver_states(follow_solver_, problem, x0);
     follow_solver_.solve(problem, opts);
     follow_warm_ = true;
 
@@ -324,7 +330,36 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             prediction.w_pred.push_back(x(ix::W));
         }
     }
-    prediction.rollout_paths = std::move(mppi_result.rollout_paths);
+    prediction.rollout_paths = std::move(global_search_paths);
+
+    if (global_search_worker_) {
+        std::vector<CostMap> step_maps;
+        step_maps.reserve(per_step_cost_maps.size());
+        for (const CostMap* map : per_step_cost_maps) step_maps.push_back(*map);
+        TrajectorySeed incumbent {
+            .controls = follow_solver_.us,
+            .source = SeedSource::WARM_START,
+            .origin_seq = follow_sequence_,
+        };
+        global_search_worker_->submit(GlobalSearchInput {
+            .path = global_path,
+            .cost_map = cost_map,
+            .masked_global_map = masked_global_map,
+            .per_step_cost_maps = std::move(step_maps),
+            .direction_map = direction_map,
+            .x0 = x0,
+            .warm_seed = std::move(incumbent),
+            .longitudinal_seed = longitudinal_seed,
+            .blended_profile = blended_profile,
+            .active_step_mode = active_step_mode,
+            .prediction_dt = pred_dt,
+            .schedule_rho = schedule_rho,
+            .remaining_energy = remaining_energy_,
+            .rfr_pwr_limit = rfr_pwr_limit_,
+            .current_path_u = u0,
+            .sequence = follow_sequence_,
+        });
+    }
 
     if (check_lethal_status) {
         const auto& safety = params_.follow.rollout_safety;

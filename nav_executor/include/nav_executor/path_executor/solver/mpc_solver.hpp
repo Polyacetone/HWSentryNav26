@@ -5,6 +5,8 @@
 #include <nav_executor/path_executor/solver/follow_problem.hpp>
 #include <nav_executor/path_executor/solver/stop_problem.hpp>
 #include <nav_executor/path_executor/solver/hold_problem.hpp>
+#include <nav_executor/path_executor/solver/global_search_worker.hpp>
+#include <nav_executor/path_executor/solver/longitudinal_planner.hpp>
 
 namespace nav_executor {
 
@@ -23,6 +25,7 @@ public:
     };
 
     explicit MPCSolver(const MPCParams& params);
+    ~MPCSolver();
 
     void set_last_cmd(const Eigen::Vector2d& cmd);
     void reset_warm_start();
@@ -90,6 +93,9 @@ private:
     double rfr_pwr_limit_ = 90.0;
 
     int fddp_lethal_consecutive_count_ = 0;
+    uint64_t follow_sequence_ = 0;
+    LongitudinalPlanner longitudinal_planner_;
+    std::unique_ptr<GlobalSearchWorker> global_search_worker_;
 
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,

@@ -1,0 +1,102 @@
+#include <nav_executor/path_executor/solver/global_search_worker.hpp>
+
+#include <chrono>
+
+namespace nav_executor {
+
+GlobalSearchWorker::GlobalSearchWorker(const MPCParams& mpc_params, GlobalSearchWorkerParams params)
+    : mpc_params_(mpc_params), params_(params), search_(mpc_params.follow.global_search), selector_(params.selector) {
+    if (params_.enable) thread_ = std::jthread([this](std::stop_token token) { run(token); });
+}
+
+GlobalSearchWorker::~GlobalSearchWorker() {
+    if (thread_.joinable()) {
+        thread_.request_stop();
+        input_ready_.notify_all();
+    }
+}
+
+void GlobalSearchWorker::submit(GlobalSearchInput input) {
+    if (!params_.enable) return;
+    input.generation = generation_.load(std::memory_order_acquire);
+    {
+        std::scoped_lock lock(input_mutex_);
+        input_.reset();
+        input_.emplace(std::move(input));
+    }
+    input_ready_.notify_one();
+}
+
+std::optional<GlobalSearchOutput> GlobalSearchWorker::take_latest(const uint64_t current_sequence) {
+    std::scoped_lock lock(output_mutex_);
+    if (!output_) return std::nullopt;
+    auto result = std::move(output_);
+    output_.reset();
+    if (result->generation != generation_.load(std::memory_order_acquire)) return std::nullopt;
+    if (current_sequence < result->origin_seq
+        || current_sequence - result->origin_seq > static_cast<uint64_t>(std::max(params_.max_seed_age_ticks, 0))) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+void GlobalSearchWorker::clear() {
+    generation_.fetch_add(1, std::memory_order_acq_rel);
+    std::scoped_lock input_lock(input_mutex_);
+    std::scoped_lock output_lock(output_mutex_);
+    input_.reset();
+    output_.reset();
+}
+
+void GlobalSearchWorker::run(const std::stop_token stop_token) {
+    while (!stop_token.stop_requested()) {
+        std::optional<GlobalSearchInput> input;
+        {
+            std::unique_lock lock(input_mutex_);
+            input_ready_.wait(lock, stop_token, [this] { return input_.has_value(); });
+            if (stop_token.stop_requested()) return;
+            input.emplace(std::move(*input_));
+            input_.reset();
+        }
+        const auto started = std::chrono::steady_clock::now();
+        auto result = process(std::move(*input));
+        if (result) {
+            std::scoped_lock lock(output_mutex_);
+            output_ = std::move(result);
+        }
+        const auto period = std::chrono::milliseconds(std::max(params_.min_period_ms, 0));
+        std::this_thread::sleep_until(started + period);
+    }
+}
+
+std::optional<GlobalSearchOutput> GlobalSearchWorker::process(GlobalSearchInput input) {
+    std::vector<CostMapGridView> step_grids;
+    if (input.per_step_cost_maps.empty()) {
+        step_grids.emplace_back(input.cost_map);
+    } else {
+        step_grids.reserve(input.per_step_cost_maps.size());
+        for (const auto& map : input.per_step_cost_maps) step_grids.emplace_back(map);
+    }
+    const CostMapGridView masked_grid(input.masked_global_map);
+    const DirectionMapGridView direction_grid(input.direction_map);
+    const FollowProblem problem(
+        input.path, mpc_params_, step_grids, make_grid_info(input.cost_map), masked_grid,
+        input.prediction_dt, input.schedule_rho, direction_grid, make_grid_info(input.direction_map),
+        input.remaining_energy, input.rfr_pwr_limit, input.blended_profile, input.active_step_mode,
+        input.current_path_u
+    );
+    auto search_result = search_.search(
+        problem, input.x0, input.warm_seed, input.longitudinal_seed, params_.candidate_count
+    );
+    auto selected = selector_.select(problem, input.x0, input.warm_seed, search_result.candidates);
+    if (input.generation != generation_.load(std::memory_order_acquire)) return std::nullopt;
+    if (selected) selected->origin_seq = input.sequence;
+    return GlobalSearchOutput {
+        .injected_seed = std::move(selected),
+        .debug_paths = std::move(search_result.debug_paths),
+        .origin_seq = input.sequence,
+        .generation = input.generation,
+    };
+}
+
+} // namespace nav_executor

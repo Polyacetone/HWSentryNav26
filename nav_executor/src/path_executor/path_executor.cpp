@@ -388,7 +388,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
     if (!prediction.rollout_paths.empty()) {
-        out.mppi_rollouts = std::move(const_cast<MPCPrediction&>(prediction).rollout_paths);
+        out.global_search_rollouts = std::move(const_cast<MPCPrediction&>(prediction).rollout_paths);
     }
     out.step_dist_cm = step_controller_.compute_step_distance_cm(path, u0);
     out.valid = true;

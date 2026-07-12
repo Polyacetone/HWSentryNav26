@@ -211,7 +211,7 @@ void NavExecutorNode::control_tick() {
                 debug_v_pred_pub_->publish(v_msg);
                 debug_w_pred_pub_->publish(w_msg);
             }
-            if (out.mppi_rollouts) publish_mppi_rollouts(*out.mppi_rollouts);
+            if (out.global_search_rollouts) publish_global_search_rollouts(*out.global_search_rollouts);
         }
     }
 
@@ -287,8 +287,8 @@ nav_msgs::msg::Path NavExecutorNode::path_to_nav_msg(const std::vector<Eigen::Ve
     return msg;
 }
 
-void NavExecutorNode::publish_mppi_rollouts(const std::vector<std::vector<Eigen::Vector2d>>& rollouts) {
-    if (!debug_mppi_rollouts_pub_) return;
+void NavExecutorNode::publish_global_search_rollouts(const std::vector<std::vector<Eigen::Vector2d>>& rollouts) {
+    if (!debug_global_search_rollouts_pub_) return;
 
     visualization_msgs::msg::MarkerArray markers;
     const auto stamp = now();
@@ -314,7 +314,7 @@ void NavExecutorNode::publish_mppi_rollouts(const std::vector<std::vector<Eigen:
         visualization_msgs::msg::Marker marker;
         marker.header.stamp = stamp;
         marker.header.frame_id = "map";
-        marker.ns = "mppi_rollouts";
+        marker.ns = "global_search_rollouts";
         marker.id = static_cast<int>(i);
         marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
         marker.action = visualization_msgs::msg::Marker::ADD;
@@ -333,7 +333,7 @@ void NavExecutorNode::publish_mppi_rollouts(const std::vector<std::vector<Eigen:
         }
         markers.markers.push_back(std::move(marker));
     }
-    debug_mppi_rollouts_pub_->publish(markers);
+    debug_global_search_rollouts_pub_->publish(markers);
 }
 
 } // namespace nav_executor

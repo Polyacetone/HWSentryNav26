@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-file(GLOB_RECURSE sources "src/*.cpp")
+file(GLOB_RECURSE sources CONFIGURE_DEPENDS "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 
 rclcpp_components_register_node(${PROJECT_NAME}

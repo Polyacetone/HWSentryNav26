@@ -20,7 +20,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.w_pred_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("node.debug.final_cost_map_pub_topic"), 1);
-        debug_mppi_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("node.debug.mppi_rollouts_pub_topic"), 1);
+        debug_global_search_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("node.debug.global_search_rollouts_pub_topic"), 1);
     }
 
     load_terrain_config();
@@ -448,23 +448,27 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .proj_search_window = declare_parameter<double>("mpc.follow.projection.search_window"),
                 .local_search_lazy_distance = declare_parameter<double>("mpc.follow.projection.local_search_lazy_distance")
             },
-            .mppi = {
-                .enable = declare_parameter<bool>("mpc.follow.mppi.enable"),
-                .num_threads = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.num_threads")),
-                .batch_size = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.batch_size")),
-                .iteration_count = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.iteration_count")),
-                .temperature = declare_parameter<double>("mpc.follow.mppi.temperature"),
-                .gamma = declare_parameter<double>("mpc.follow.mppi.gamma"),
+            .global_search = {
+                .enable = declare_parameter<bool>("mpc.follow.global_search.enable"),
+                .num_threads = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.num_threads")),
+                .batch_size = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.batch_size")),
+                .iteration_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.iteration_count")),
+                .elite_fraction = declare_parameter<double>("mpc.follow.global_search.elite_fraction"),
                 .sampling_std = {
-                    .velocity = declare_parameter<double>("mpc.follow.mppi.sampling_std.velocity"),
-                    .omega = declare_parameter<double>("mpc.follow.mppi.sampling_std.omega")
+                    .velocity = declare_parameter<double>("mpc.follow.global_search.sampling_std.velocity"),
+                    .omega = declare_parameter<double>("mpc.follow.global_search.sampling_std.omega")
                 },
                 .noise_smoothing = {
-                    .window = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.noise_smoothing.window")),
-                    .passes = static_cast<int>(declare_parameter<int>("mpc.follow.mppi.noise_smoothing.passes"))
+                    .window = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.noise_smoothing.window")),
+                    .passes = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.noise_smoothing.passes"))
                 },
-                .include_nominal_trajectory = declare_parameter<bool>("mpc.follow.mppi.include_nominal_trajectory"),
-                .fallback_to_best_sample = declare_parameter<bool>("mpc.follow.mppi.fallback_to_best_sample")
+                .include_nominal_trajectory = declare_parameter<bool>("mpc.follow.global_search.include_nominal_trajectory"),
+                .candidate_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.candidate_count")),
+                .min_period_ms = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.min_period_ms")),
+                .max_seed_age_ticks = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.max_seed_age_ticks")),
+                .improvement_margin = declare_parameter<double>("mpc.follow.global_search.improvement_margin"),
+                .hysteresis_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.hysteresis_count")),
+                .refinement_iterations = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.refinement_iterations"))
             },
             .rollout_safety = {
                 .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),

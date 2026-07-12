@@ -145,27 +145,31 @@ struct MPCFollowProjection {
     double local_search_lazy_distance;
 };
 
-struct MPPISamplingStd {
+struct GlobalSearchSamplingStd {
     double velocity;
     double omega;
 };
 
-struct MPPINoiseSmoothing {
+struct GlobalSearchNoiseSmoothing {
     int window;
     int passes;
 };
 
-struct MPCFollowMPPIParams {
+struct GlobalSearchParams {
     bool enable;
     int num_threads;
     int batch_size;
     int iteration_count;
-    double temperature;
-    double gamma;
-    MPPISamplingStd sampling_std;
-    MPPINoiseSmoothing noise_smoothing;
+    double elite_fraction;
+    GlobalSearchSamplingStd sampling_std;
+    GlobalSearchNoiseSmoothing noise_smoothing;
     bool include_nominal_trajectory;
-    bool fallback_to_best_sample;
+    int candidate_count = 2;
+    int min_period_ms = 200;
+    int max_seed_age_ticks = 8;
+    double improvement_margin = 0.05;
+    int hysteresis_count = 2;
+    int refinement_iterations = 8;
 };
 
 struct MPCFollowRolloutSafetyParams {
@@ -186,7 +190,7 @@ struct MPCFollowParams {
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowTerminalWeights terminal_weights;
     MPCFollowProjection projection;
-    MPCFollowMPPIParams mppi;
+    GlobalSearchParams global_search;
     MPCFollowRolloutSafetyParams rollout_safety;
     int max_iters;
 };

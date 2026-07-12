@@ -1,4 +1,4 @@
-#include <nav_executor/path_executor/solver/mppi_sampler.hpp>
+#include <nav_executor/path_executor/solver/cem_optimizer.hpp>
 
 #include <algorithm>
 #include <array>
@@ -13,12 +13,9 @@ namespace nav_executor {
 namespace {
 
 constexpr double SIGMA_EPS = 1e-6;
-constexpr double WEIGHT_EPS = 1e-12;
-
 struct SampledSequence {
     std::array<StateVec, MPC_HORIZON + 1> xs {};
     std::array<ControlVec, MPC_HORIZON> us {};
-    std::array<ControlVec, MPC_HORIZON> effective_noise {};
     double cost = std::numeric_limits<double>::infinity();
     bool valid = false;
 };
@@ -32,18 +29,18 @@ struct FIRKernel {
     }
 };
 
-ControlVec sigma_vector(const MPCFollowMPPIParams& params) {
+ControlVec sigma_vector(const GlobalSearchParams& params) {
     return ControlVec(
         std::max(params.sampling_std.velocity, SIGMA_EPS),
         std::max(params.sampling_std.omega, SIGMA_EPS)
     );
 }
 
-int effective_smoothing_window(const MPPINoiseSmoothing& smoothing) {
+int effective_smoothing_window(const GlobalSearchNoiseSmoothing& smoothing) {
     return 2 * std::max(0, smoothing.window / 2) + 1;
 }
 
-FIRKernel build_fir_kernel(const MPPINoiseSmoothing& smoothing) {
+FIRKernel build_fir_kernel(const GlobalSearchNoiseSmoothing& smoothing) {
     const int window = effective_smoothing_window(smoothing);
     const int passes = std::max(0, smoothing.passes);
     if (window <= 1 || passes == 0) {
@@ -117,7 +114,6 @@ void rollout_sequence_v2(
     for (int k = 0; k < MPC_HORIZON; ++k) {
         const size_t idx = static_cast<size_t>(k);
         sample.us[idx] = (nominal_controls[idx] + noise_getter(k)).cwiseMax(u_lo).cwiseMin(u_hi);
-        sample.effective_noise[idx] = sample.us[idx] - nominal_controls[idx];
 
         // Use cached cost value from last step's lethal detection (at same state)
         cost += problem.running_cost_value_only(k, sample.xs[idx], sample.us[idx], &cached_cost_value);
@@ -164,8 +160,8 @@ void rollout_nominal_sequence_v2(
     );
 }
 
-MPPIFollowSamplingResult to_result(const SampledSequence& sample) {
-    MPPIFollowSamplingResult result;
+CEMOptimizationResult to_result(const SampledSequence& sample) {
+    CEMOptimizationResult result;
     result.xs = sample.xs;
     result.us = sample.us;
     result.cost = sample.cost;
@@ -187,13 +183,14 @@ std::mt19937_64& thread_local_rng(uint64_t base_seed) {
 
 }
 
-MPPIFollowSamplingResult MPPIFollowSampler::optimize(
+CEMOptimizationResult CEMOptimizer::optimize(
     const FollowProblem& problem,
     const StateVec& x0,
     const std::array<ControlVec, MPC_HORIZON>& nominal_controls
 ) const {
-    MPPIFollowSamplingResult invalid_result;
-    if (!params_.enable || params_.batch_size <= 0 || params_.iteration_count <= 0 || params_.temperature <= 0.0) {
+    CEMOptimizationResult invalid_result;
+    if (!params_.enable || params_.batch_size <= 0 || params_.iteration_count <= 0
+        || params_.elite_fraction <= 0.0 || params_.elite_fraction > 1.0) {
         return invalid_result;
     }
 
@@ -218,9 +215,6 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
     std::vector<SampledSequence> samples(static_cast<size_t>(params_.batch_size));
     std::random_device rd;
     const uint64_t base_seed = (static_cast<uint64_t>(rd()) << 32U) ^ static_cast<uint64_t>(rd());
-
-    std::vector<std::vector<Eigen::Vector2d>> iteration_best_paths;
-    iteration_best_paths.reserve(static_cast<size_t>(params_.iteration_count));
 
     for (int iter = 0; iter < params_.iteration_count; ++iter) {
         const double early_cutoff = best_sequence.valid
@@ -299,36 +293,24 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
             best_sequence = best_batch_sample;
         }
 
-        iteration_best_paths.emplace_back();
-        auto& best_path = iteration_best_paths.back();
-        best_path.resize(MPC_HORIZON + 1);
-        for (int k = 0; k <= MPC_HORIZON; ++k) {
-            const auto& s = best_batch_sample.xs[static_cast<size_t>(k)];
-            best_path[static_cast<size_t>(k)] = Eigen::Vector2d(s(ix::X), s(ix::Y));
-        }
-
-        double weight_sum = 0.0;
-        std::array<ControlVec, MPC_HORIZON> weighted_noise {};
-        for (auto& u : weighted_noise) {
-            u.setZero();
-        }
-
+        std::vector<const SampledSequence*> elites;
+        elites.reserve(samples.size());
         for (int sample_index = 0; sample_index < params_.batch_size; ++sample_index) {
             const auto& sample = samples[static_cast<size_t>(sample_index)];
-            if (!sample.valid) continue;
-            const double weight = std::exp(-(sample.cost - min_cost) / params_.temperature);
-            weight_sum += weight;
-            for (int k = 0; k < MPC_HORIZON; ++k) {
-                weighted_noise[static_cast<size_t>(k)] += weight * sample.effective_noise[static_cast<size_t>(k)];
-            }
+            if (sample.valid) elites.push_back(&sample);
         }
-
-        if (weight_sum <= WEIGHT_EPS) {
-            break;
-        }
-
+        std::sort(elites.begin(), elites.end(), [](const auto* lhs, const auto* rhs) {
+            return lhs->cost < rhs->cost;
+        });
+        const size_t elite_count = std::max<size_t>(
+            1, static_cast<size_t>(std::ceil(params_.elite_fraction * static_cast<double>(elites.size())))
+        );
         for (int k = 0; k < MPC_HORIZON; ++k) {
-            nominal[static_cast<size_t>(k)] += weighted_noise[static_cast<size_t>(k)] / weight_sum;
+            nominal[static_cast<size_t>(k)].setZero();
+            for (size_t elite_index = 0; elite_index < elite_count; ++elite_index) {
+                nominal[static_cast<size_t>(k)] += elites[elite_index]->us[static_cast<size_t>(k)];
+            }
+            nominal[static_cast<size_t>(k)] /= static_cast<double>(elite_count);
             nominal[static_cast<size_t>(k)] = nominal[static_cast<size_t>(k)].cwiseMax(u_lo).cwiseMin(u_hi);
         }
     }
@@ -337,23 +319,15 @@ MPPIFollowSamplingResult MPPIFollowSampler::optimize(
         return invalid_result;
     }
 
-    MPPIFollowSamplingResult result;
-    if (!params_.fallback_to_best_sample) {
-        SampledSequence final_nominal;
-        rollout_nominal_sequence_v2(
-            problem, x0, nominal, u_lo, u_hi, final_nominal,
-            std::numeric_limits<double>::infinity()
-        );
-        if (final_nominal.valid) {
-            result = to_result(final_nominal);
-        } else {
-            result = to_result(best_sequence);
-        }
-    } else {
-        result = to_result(best_sequence);
+    SampledSequence final_nominal;
+    rollout_nominal_sequence_v2(
+        problem, x0, nominal, u_lo, u_hi, final_nominal,
+        std::numeric_limits<double>::infinity()
+    );
+    if (final_nominal.valid && final_nominal.cost < best_sequence.cost) {
+        best_sequence = std::move(final_nominal);
     }
-
-    result.rollout_paths = std::move(iteration_best_paths);
+    CEMOptimizationResult result = to_result(best_sequence);
     return result;
 }
 

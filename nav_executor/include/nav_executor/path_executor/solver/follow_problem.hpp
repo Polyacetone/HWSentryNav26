@@ -52,6 +52,7 @@ public:
 
     [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
     [[nodiscard]] const MPCParams& params() const;
+    [[nodiscard]] const CapabilityProfile& capability_profile() const { return blended_profile_; }
     [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const SplinePath& spline) const;
 
 private:

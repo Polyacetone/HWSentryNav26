@@ -14,23 +14,27 @@
       # ═══════════════════════════════════════════════
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
-        mppi:
-          enable: true # 在第一层FDDP前启用MPPI局部采样，帮助跳出动态障碍物导致的同伦局部最优
-          num_threads: 2 # MPPI并行线程数
-          batch_size: 256 # 每次迭代采样轨迹数
-          iteration_count: 2 # MPPI迭代次数
-          temperature: 0.3 # 软最优权重温度，越小越偏向最优样本
-          gamma: 0.015 # 控制噪声正则权重，抑制大幅偏离名义控制
+        global_search:
+          enable: true # 启用异步多模态全局种子搜索
+          num_threads: 2 # 采样 rollout 并行线程数
+          batch_size: 1024 # 每次迭代采样轨迹数
+          iteration_count: 2 # 每个独立模态的采样更新次数
+          elite_fraction: 0.1 # CEM 每轮用于更新模态均值的最优样本比例
           sampling_std:
-            velocity: 0.4 # 线速度采样标准差 (m/s)
-            omega: 1.0 # 角速度采样标准差 (rad/s)
+            velocity: 0.8 # 线速度采样标准差 (m/s)
+            omega: 2.0 # 角速度采样标准差 (rad/s)
           noise_smoothing:
             window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
             passes: 2 # 平滑迭代次数
-          include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免MPPI退化时丢掉已有好解
-          fallback_to_best_sample: true # 最终优先采用历史最佳可行样本，增强跳出局部最优的稳定性
+          include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免随机搜索退化时丢掉已有好解
+          candidate_count: 2 # 异步全局搜索保留的独立模态候选数
+          min_period_ms: 100 # 全局搜索线程最短周期
+          max_seed_age_ticks: 8 # 注入种子的最大控制周期年龄
+          improvement_margin: 0.05 # 挑战者相对 incumbent 的最小后验代价改善比例
+          hysteresis_count: 2 # 连续改善达到该次数后才允许切换模态
+          refinement_iterations: 8 # worker 对每个候选执行的 FDDP 精修次数
         rollout_safety:
-          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；MPPI 采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
+          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
           fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
         command_bounds:
@@ -59,11 +63,11 @@
           alpha_limit: 12.0 # 角速度指令变化率超限惩罚
           lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
         terrain_limits:
-          step_reachability_guide_acc: 1.2 # 台阶入口可达势函数的引导加速度 (m/s^2)
+          step_reachability_guide_acc: 1.8 # 台阶入口可达势函数的引导加速度 (m/s^2)
         terrain_weights:
           step_vel_weight: 2.4 # 台阶内部仍保留原始速度范围惩罚，但权重降低
-          step_reachability_lo: 0.8 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
-          step_reachability_hi: 0.8 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
+          step_reachability_lo: 0.4 # 入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
+          step_reachability_hi: 0.4 # 入口前最大可达速度势函数权重，避免以过高速度进入台阶
           direction: 1.0 # 台阶方向对齐权重（鼓励与方向场同向）
         environment_weights:
           obstacle: 1.0 # 避障权重（全局+局部融合代价）
