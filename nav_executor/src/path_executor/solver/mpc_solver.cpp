@@ -222,9 +222,15 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
     const CapabilityProfile& blended_profile,
-    std::optional<ActiveStepMode> active_step_mode,
+    std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
     bool check_lethal_status
 ) {
+    if (!step_constraint_schedule) {
+        step_constraint_schedule = std::make_shared<const StepConstraintSchedule>(
+            std::vector<StepTraversalConstraint> {}
+        );
+    }
+
     const bool path_changed = !(prev_ref_control_points_ && *prev_ref_control_points_ == global_path);
     const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
     const double u0 = global_path.project_extrapolated(
@@ -280,7 +286,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const FollowProblem problem(
         global_path, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
-        remaining_energy_, rfr_pwr_limit_, blended_profile, active_step_mode, u0
+        remaining_energy_, rfr_pwr_limit_, blended_profile, step_constraint_schedule, u0
     );
 
     fddp::SolverOptions opts;
@@ -297,7 +303,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     scale_solver_controls(follow_solver_, problem);
 
     const TrajectorySeed longitudinal_seed = longitudinal_planner_.plan(
-        problem, global_path, x0, active_step_mode, follow_sequence_
+        problem, global_path, x0, *step_constraint_schedule, follow_sequence_
     );
     std::vector<std::vector<Eigen::Vector2d>> global_search_paths;
     if (global_search_worker_) {
@@ -349,7 +355,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             .warm_seed = std::move(incumbent),
             .longitudinal_seed = longitudinal_seed,
             .blended_profile = blended_profile,
-            .active_step_mode = active_step_mode,
+            .step_constraint_schedule = std::move(step_constraint_schedule),
             .prediction_dt = pred_dt,
             .schedule_rho = schedule_rho,
             .remaining_energy = remaining_energy_,

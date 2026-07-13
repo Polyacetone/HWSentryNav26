@@ -48,7 +48,7 @@ public:
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
         const CapabilityProfile& blended_profile,
-        std::optional<ActiveStepMode> active_step_mode,
+        std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
         bool check_lethal_status
     );
 

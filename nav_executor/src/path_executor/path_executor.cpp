@@ -179,7 +179,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     fsm_input.has_path = has_path;
     fsm_input.has_hold_goal = input.intent.hold_goal.has_value();
     fsm_input.reach_goal = dist_reached || u_reached;
-    fsm_input.step_active = has_path && step_controller_.is_step_active(current_u);
+    fsm_input.step_nonpreemptible = has_path && step_controller_.is_step_nonpreemptible(current_u);
     fsm_input.resumed_from_stopped = resumed_from_stopped;
     fsm_input.command_blocked = command_blocked;
     fsm_input.spin_requested = input.intent.spin_requested;
@@ -343,7 +343,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
         path, input.observation.chassis_pose_map, input.observation.chassis_state,
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         step_controller_.current_blended_profile(),
-        step_controller_.current_active_step_mode(u0),
+        input.intent.active_path->step_constraint_schedule,
         check_lethal_status
     );
     if (!result) {
@@ -376,9 +376,9 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
 
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
         out.mode = chassis_mode::NORMAL;
-    } else if (const auto active_step_mode = step_controller_.current_active_step_mode(u0);
-               active_step_mode && step_controller_.should_activate_step_mode(u0)) {
-        out.mode = active_step_mode->mode;
+    } else if (const StepChassisCommand* const chassis_command = step_controller_.current_chassis_command(u0);
+               chassis_command && step_controller_.should_activate_chassis_mode(u0)) {
+        out.mode = chassis_command->mode;
     } else {
         out.mode = chassis_mode::NORMAL;
     }

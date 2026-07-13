@@ -55,10 +55,13 @@
           detect_norm_threshold: 0.9 # 方向场模长阈值，用于检测台阶 enter/exit
           detect_dot_threshold: 0.5 # 路径切向与台阶方向点积阈值；>阈值为上台阶，<-阈值为下台阶
           path_sample_resolution: 0.05 # 沿路径采样分辨率 (m)
-          prepare_distance: 2.0 # 能力档 blend 起点 → commit 点距离 (m)
-          active_distance: 1.0 # 底盘台阶模式激活起点 → commit 点距离 (m)
-          release_distance: 0.3 # 退出 STEPPING 后额外推进距离 (m)
-          gate_transition_distance: 0.3 # 约束窗软门控两侧过渡带宽度 (m)
+        execution:
+          profile_prepare_distance: 2.0 # capability profile 渐变起点 → commit 点距离 (m)
+          chassis_activation_distance: 1.0 # 底盘台阶模式与 FSM 不可抢占起点 → commit 点距离 (m)
+          fsm_release_distance: 0.3 # STEPPING 退出点相对物理台阶出口的额外推进距离 (m)
+        mpc_constraints:
+          approach_distance: 2.0 # 入口速度可达性约束起点 → commit 点距离 (m)
+          gate_transition_distance: 0.3 # 台阶内部 MPC 约束窗两侧软门控过渡带宽度 (m)
 
       # ═══════════════════════════════════════════════
       #  BSplineOptimizer — 样条路径优化

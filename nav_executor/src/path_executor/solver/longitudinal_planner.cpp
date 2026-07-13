@@ -24,7 +24,7 @@ TrajectorySeed LongitudinalPlanner::plan(
     const FollowProblem& problem,
     const SplinePath& path,
     const StateVec& x0,
-    const std::optional<ActiveStepMode> step_mode,
+    const StepConstraintSchedule& step_constraint_schedule,
     const uint64_t sequence
 ) const {
     TrajectorySeed seed;
@@ -51,8 +51,9 @@ TrajectorySeed LongitudinalPlanner::plan(
     const int initial_v = nearest_cell(x0(ix::V), v_min, v_step, v_count);
     layers[0][static_cast<size_t>(initial_s * v_count + initial_v)].cost = 0.0;
 
-    const double entry_s = step_mode
-        ? path.arc_length(0.0, std::clamp(step_mode->commit_u, 0.0, 1.0), 40)
+    const StepTraversalConstraint* const approach_step = step_constraint_schedule.approach_constraint_at(current_path_u);
+    const double entry_s = approach_step
+        ? path.arc_length(0.0, std::clamp(approach_step->commit_u, 0.0, 1.0), 40)
         : std::numeric_limits<double>::infinity();
     const double acc_max = std::max(profile.motion_constraints.acc_max, 1e-3);
 
@@ -75,9 +76,9 @@ TrajectorySeed LongitudinalPlanner::plan(
                     const double next_v = v_min + static_cast<double>(next_vi) * v_step;
                     double transition_cost = -params_.progress_weight * (next_s - s);
                     transition_cost += params_.control_change_weight * acceleration * acceleration * MPC_DT;
-                    if (step_mode && s < entry_s && next_s >= entry_s) {
-                        const double violation = std::max(0.0, step_mode->speed_min - next_v)
-                            + std::max(0.0, next_v - step_mode->speed_max);
+                    if (approach_step && s < entry_s && next_s >= entry_s) {
+                        const double violation = std::max(0.0, approach_step->speed_min - next_v)
+                            + std::max(0.0, next_v - approach_step->speed_max);
                         transition_cost += params_.step_speed_violation_weight * violation * violation;
                     }
                     auto& next = layers[static_cast<size_t>(k + 1)][static_cast<size_t>(next_index)];

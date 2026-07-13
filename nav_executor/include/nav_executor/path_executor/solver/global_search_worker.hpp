@@ -30,7 +30,7 @@ struct GlobalSearchInput {
     TrajectorySeed warm_seed;
     TrajectorySeed longitudinal_seed;
     CapabilityProfile blended_profile;
-    std::optional<ActiveStepMode> active_step_mode;
+    std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule;
     double prediction_dt = MPC_DT;
     double schedule_rho = 0.0;
     double remaining_energy = 0.0;

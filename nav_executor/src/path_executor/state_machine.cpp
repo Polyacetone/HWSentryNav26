@@ -173,9 +173,9 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
 
-    // step_active 最高优先：进入不可抢占的 STEPPING，且不被 stuck/no_progress 打断前置处理。
-    if (in.step_active) {
-        RCLCPP_INFO(logger_, "FSM -> STEPPING (step active)");
+    // 台阶不可抢占区最高优先，且不被 stuck/no_progress 打断前置处理。
+    if (in.step_nonpreemptible) {
+        RCLCPP_INFO(logger_, "FSM -> STEPPING (step nonpreemptible)");
         return transition_to(MotionState::STEPPING);
     }
 
@@ -229,7 +229,7 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
         return transition_to(MotionState::STUCK_REVERSE);
     }
 
-    if (in.step_active) {
+    if (in.step_nonpreemptible) {
         return { .state = MotionState::STEPPING };
     }
 

@@ -69,7 +69,7 @@ const StepPlanSegment* StepController::active_segment(const double current_u) co
 const StepPlanSegment* StepController::current_command_segment(const double current_u) const {
     const StepPlanSegment* const segment = active_segment(current_u);
     if (!segment) return nullptr;
-    if (!is_step_mode(segment->command.mode)) return nullptr;
+    if (!is_step_mode(segment->chassis_command.mode)) return nullptr;
     return segment;
 }
 
@@ -105,7 +105,7 @@ void StepController::update_active_segment(const double current_u) {
 
     held_step_segment_index_ = next_index;
     const auto& segment = path_->step_segments[*held_step_segment_index_];
-    target_profile_ = capability_profiles_[static_cast<size_t>(segment.command.capability)];
+    target_profile_ = capability_profiles_[static_cast<size_t>(segment.chassis_command.capability)];
 
     RCLCPP_DEBUG(
         logger_,
@@ -116,7 +116,7 @@ void StepController::update_active_segment(const double current_u) {
         segment.direction == StepDirection::UP ? "UP" : "DOWN",
         segment.prepare_u, segment.active_u,
         segment.step_enter_u, segment.step_exit_u, segment.release_u,
-        segment.command.mode
+        segment.chassis_command.mode
     );
 }
 
@@ -157,20 +157,18 @@ void StepController::tick_profile_blend() {
 
 // ═══════════════════════ 台阶模式查询 ═══════════════════════
 
-std::optional<ActiveStepMode> StepController::current_active_step_mode(const double current_u) const {
+const StepChassisCommand* StepController::current_chassis_command(const double current_u) const {
     const StepPlanSegment* const segment = current_command_segment(current_u);
-    if (!segment) return std::nullopt;
-    return segment->command;
+    return segment ? &segment->chassis_command : nullptr;
 }
 
-bool StepController::is_step_active(const double current_u) const {
-    return active_segment(current_u) != nullptr;
+bool StepController::is_step_nonpreemptible(const double current_u) const {
+    const StepPlanSegment* const segment = current_command_segment(current_u);
+    return segment && current_u + U_EPSILON >= segment->active_u;
 }
 
-bool StepController::should_activate_step_mode(const double current_u) const {
-    const StepPlanSegment* const segment = current_command_segment(current_u);
-    if (!segment) return false;
-    return current_u + U_EPSILON >= segment->active_u;
+bool StepController::should_activate_chassis_mode(const double current_u) const {
+    return is_step_nonpreemptible(current_u);
 }
 
 uint8_t StepController::compute_step_distance_cm(const SplinePath& path, const double current_u) const {

@@ -22,7 +22,7 @@ public:
         const FollowProblem& problem,
         const SplinePath& path,
         const StateVec& x0,
-        std::optional<ActiveStepMode> step_mode,
+        const StepConstraintSchedule& step_constraint_schedule,
         uint64_t sequence
     ) const;
 

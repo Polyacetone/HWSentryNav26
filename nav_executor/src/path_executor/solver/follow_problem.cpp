@@ -23,7 +23,7 @@ advance_u_progress_extrapolated_with_jacobian(double u_cur, const StateVec& x, c
 
 // ─── 残差实现 ───
 
-constexpr int FOLLOW_RESIDUAL_DIM = 15;
+constexpr int FOLLOW_RESIDUAL_DIM = 18;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct FollowResidualLinearization {
@@ -41,7 +41,7 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const GridInfo& ci,
     double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
-    std::optional<ActiveStepMode> active_step_mode
+    const std::shared_ptr<const StepConstraintSchedule>& step_constraint_schedule
 ) {
     const auto& follow = p.follow;
     const auto& tracking_w = follow.tracking_weights;
@@ -139,20 +139,24 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(9, ix::X) = env_w.obstacle * cs.dx / 255.0;
     out.jx(9, ix::Y) = env_w.obstacle * cs.dy / 255.0;
 
-    // ── 台阶约束（残差 10/11/12/13）──
-    // 全部锚在 commit_u（上位机视角的台阶起点），随预测 path_u 由 step_window_gate 调度。
+    // ── 台阶约束（残差 10/11/12/13/15/16/17）──
+    // 每个预测点按自身 PATH_U 查询不可变约束表，不依赖当前机器人所在段或 FSM 状态。
+    // 台阶内部约束随预测 path_u 由 step_window_gate 调度。
     // 门控对 path_u 的梯度冻结：约束跟随轨迹前移，但不诱导优化器移动 path_u 逃逸。
     //   - 10 方向对齐：航向 theta 与规划期常量穿越方向 dir_map 对齐，仅 theta 雅可比。
     //   - 11 速度窗：v_act 保持在 [speed_min, speed_max]，仅 V 雅可比。
     //   两者作用区间 [commit_u, exit_u]（含两侧软过渡）。
     //   - 12/13 可达包络：commit 前整形速度剖面使其在 commit 处可行进窗，仅 V/PATH_U 雅可比。
-    if (is_active_follow_step_mode(active_step_mode)) {
-        const double speed_min = active_step_mode->speed_min;
-        const double speed_max = active_step_mode->speed_max;
-        const double gate = step_window_gate(uc, *active_step_mode);
+    const StepTraversalConstraint* const internal_step = step_constraint_schedule
+        ? step_constraint_schedule->constraint_at(uc)
+        : nullptr;
+    if (internal_step) {
+        const double speed_min = internal_step->speed_min;
+        const double speed_max = internal_step->speed_max;
+        const double gate = step_window_gate(uc, *internal_step);
 
         if (gate > 0.0) {
-            const Eigen::Vector2d& dir = active_step_mode->dir_map; // 归一化常量
+            const Eigen::Vector2d& dir = internal_step->dir_map; // 归一化常量
             const double cos_t = std::cos(theta);
             const double sin_t = std::sin(theta);
             const double cross = cos_t * dir.y() - sin_t * dir.x();
@@ -167,9 +171,28 @@ FollowResidualLinearization follow_residual_linearized_impl(
             out.r(11) = terrain_w.step_vel_weight * gate * relu_vstep;
             out.jx(11, ix::V) = terrain_w.step_vel_weight * gate
                 * ((v_act < speed_min) ? -1.0 : (v_act > speed_max) ? 1.0 : 0.0);
+
+            out.r(15) = terrain_w.step_omega * gate * w_cmd;
+            out.ju(15, 1) = terrain_w.step_omega * gate;
+
+            out.r(16) = terrain_w.step_dv * gate * dv_cmd;
+            out.ju(16, 0) = terrain_w.step_dv * gate;
+            out.jx(16, ix::DV) = -terrain_w.step_dv * gate;
+
+            out.r(17) = terrain_w.step_domega * gate * dw_cmd;
+            out.ju(17, 1) = terrain_w.step_domega * gate;
+            out.jx(17, ix::DW) = -terrain_w.step_domega * gate;
         }
 
-        const double commit_u = std::clamp(active_step_mode->commit_u, 0.0, 1.0);
+    }
+
+    const StepTraversalConstraint* const approach_step = step_constraint_schedule
+        ? step_constraint_schedule->approach_constraint_at(uc)
+        : nullptr;
+    if (approach_step) {
+        const double speed_min = approach_step->speed_min;
+        const double speed_max = approach_step->speed_max;
+        const double commit_u = std::clamp(approach_step->commit_u, 0.0, 1.0);
         const double path_u = std::clamp(uc, 0.0, 1.0);
         if (path_u < commit_u) {
             const double d = spline.arc_length(path_u, commit_u, 8);
@@ -233,7 +256,7 @@ double follow_running_cost_value_only_impl(
     const GridInfo& ci,
     double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
-    std::optional<ActiveStepMode> active_step_mode,
+    const std::shared_ptr<const StepConstraintSchedule>& step_constraint_schedule,
     double* cached_cost_value
 ) {
     const auto& follow = p.follow;
@@ -290,13 +313,16 @@ double follow_running_cost_value_only_impl(
     cost += 0.5 * (env_w.obstacle * cost_value / 255.0) * (env_w.obstacle * cost_value / 255.0);
 
     // ── 台阶约束（与 follow_residual_linearized_impl 逐项对应）──
-    if (is_active_follow_step_mode(active_step_mode)) {
-        const double speed_min = active_step_mode->speed_min;
-        const double speed_max = active_step_mode->speed_max;
-        const double gate = step_window_gate(uc, *active_step_mode);
+    const StepTraversalConstraint* const internal_step = step_constraint_schedule
+        ? step_constraint_schedule->constraint_at(uc)
+        : nullptr;
+    if (internal_step) {
+        const double speed_min = internal_step->speed_min;
+        const double speed_max = internal_step->speed_max;
+        const double gate = step_window_gate(uc, *internal_step);
 
         if (gate > 0.0) {
-            const Eigen::Vector2d& dir = active_step_mode->dir_map;
+            const Eigen::Vector2d& dir = internal_step->dir_map;
             const double cross = std::cos(theta) * dir.y() - std::sin(theta) * dir.x();
             cost += 0.5 * (terrain_w.direction * gate * std::abs(cross)) * (terrain_w.direction * gate * std::abs(cross));
 
@@ -304,9 +330,20 @@ double follow_running_cost_value_only_impl(
                 ? (speed_min - v_act)
                 : (v_act > speed_max ? (v_act - speed_max) : 0.0);
             cost += 0.5 * (terrain_w.step_vel_weight * gate * relu_vstep) * (terrain_w.step_vel_weight * gate * relu_vstep);
+            cost += 0.5 * (terrain_w.step_omega * gate * w_cmd) * (terrain_w.step_omega * gate * w_cmd);
+            cost += 0.5 * (terrain_w.step_dv * gate * dv_cmd) * (terrain_w.step_dv * gate * dv_cmd);
+            cost += 0.5 * (terrain_w.step_domega * gate * dw_cmd) * (terrain_w.step_domega * gate * dw_cmd);
         }
 
-        const double commit_u = std::clamp(active_step_mode->commit_u, 0.0, 1.0);
+    }
+
+    const StepTraversalConstraint* const approach_step = step_constraint_schedule
+        ? step_constraint_schedule->approach_constraint_at(uc)
+        : nullptr;
+    if (approach_step) {
+        const double speed_min = approach_step->speed_min;
+        const double speed_max = approach_step->speed_max;
+        const double commit_u = std::clamp(approach_step->commit_u, 0.0, 1.0);
         const double path_u = std::clamp(uc, 0.0, 1.0);
         if (path_u < commit_u) {
             const double d = spline.arc_length(path_u, commit_u, 8);
@@ -427,7 +464,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     double remaining_energy,
     double rfr_pwr_limit,
     const CapabilityProfile& blended_profile,
-    std::optional<ActiveStepMode> active_step_mode,
+    std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
     double current_path_u
 ):
     spline_(spline),
@@ -440,7 +477,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
     blended_profile_(blended_profile),
-    active_step_mode_(active_step_mode),
+    step_constraint_schedule_(std::move(step_constraint_schedule)),
     current_path_u_(current_path_u) {
     goal_xy_ = spline_.eval(1.0).p;
 }
@@ -494,7 +531,7 @@ FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const Splin
         remaining_energy_,
         rfr_pwr_limit_,
         blended_profile_,
-        active_step_mode_,
+        step_constraint_schedule_,
         current_path_u_
     );
 }
@@ -546,7 +583,7 @@ double FollowProblemT<Horizon>::running_cost_value_only(int k, const StateVec& x
         x, u, spline_, p_,
         cost_grid_for_step(k), cost_info_,
         rfr_pwr_limit_, blended_profile_.motion_constraints,
-        active_step_mode_, cached_cost_value
+        step_constraint_schedule_, cached_cost_value
     );
 }
 
@@ -565,7 +602,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     const auto lin = follow_residual_linearized_impl(
         x, u, spline_, p_, cg, cost_info_,
         rfr_pwr_limit_, blended_profile_.motion_constraints,
-        active_step_mode_
+        step_constraint_schedule_
     );
 
     lx = lin.jx.transpose() * lin.r;

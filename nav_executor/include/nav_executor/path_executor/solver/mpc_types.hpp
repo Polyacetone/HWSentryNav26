@@ -2,8 +2,10 @@
 
 #include <array>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 #include <Eigen/Dense>
 #include <nav_executor/common/chassis_defs.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
@@ -59,6 +61,9 @@ struct MPCFollowTerrainWeights {
     double step_reachability_lo;
     double step_reachability_hi;
     double direction;
+    double step_omega;
+    double step_dv;
+    double step_domega;
 };
 
 struct MPCFollowEnvironmentWeights {
@@ -264,27 +269,52 @@ struct EnergyParams {
     double weight;
 };
 
-// 运行时台阶约束参数。所有 u 锚点语义（prepare ≤ active ≤ commit ≤ 物理边缘 ≤ exit ≤ release）
-// 在规划期由 step_annotator 计算并冻结。
-//
-// commit_u 是「上位机视角的台阶起点」：引入助跑提前量后，速度可达包络、速度窗、方向对齐
-// 全部提前到 commit_u 施加，而非物理台阶边缘。物理边缘（真实起跳点，上报底盘用）由
-// StepPlanSegment.step_enter_u 单独持有，二者不混用。
-struct ActiveStepMode {
-    uint8_t mode = chassis_mode::NORMAL;
-    CapabilityLevel capability = CapabilityLevel::LOW;
+// 路径台阶约束。仅供 MPC 按每个预测状态的 PATH_U 查询，不携带底盘模式或 FSM 语义。
+struct StepTraversalConstraint {
     double speed_min = 0.0;
     double speed_max = 0.0;
-    double prepare_u = 0.0;    // 能力档 profile blend 起点
-    double active_u = 0.0;     // 底盘台阶模式激活（抬腿指令）起点
-    double commit_u = 0.0;     // 约束锚点：可达包络靶点 + 约束窗内边界起点
-    double exit_u = 1.0;       // 约束窗内边界终点（物理台阶出口 u）
-    double gate_start_u = 0.0; // 约束窗软起点（commit_u 上游 transition 处，门控 0→1）
-    double gate_end_u = 1.0;   // 约束窗软终点（exit_u 下游 transition 处，门控 1→0）
-    Eigen::Vector2d dir_map = Eigen::Vector2d::Zero(); // 归一化台阶穿越方向（航向对齐目标）
-    double release_u = 1.0;
+    double approach_start_u = 0.0;
+    double commit_u = 0.0;
+    double exit_u = 1.0;
+    double gate_start_u = 0.0;
+    double gate_end_u = 1.0;
+    Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
 
-    bool operator==(const ActiveStepMode&) const = default;
+    bool operator==(const StepTraversalConstraint&) const = default;
+};
+
+// 按路径 u 查询的不可变台阶约束表。规划期负责保证 gate 区间不重叠。
+class StepConstraintSchedule {
+public:
+    explicit StepConstraintSchedule(std::vector<StepTraversalConstraint> constraints)
+        : constraints_(std::move(constraints)) {}
+
+    [[nodiscard]] const StepTraversalConstraint* constraint_at(const double path_u) const {
+        for (const auto& constraint : constraints_) {
+            if (path_u < constraint.gate_start_u) break;
+            if (path_u <= constraint.gate_end_u) return &constraint;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const StepTraversalConstraint* approach_constraint_at(const double path_u) const {
+        for (const auto& constraint : constraints_) {
+            if (path_u < constraint.approach_start_u) break;
+            if (path_u < constraint.commit_u) return &constraint;
+        }
+        return nullptr;
+    }
+
+private:
+    std::vector<StepTraversalConstraint> constraints_;
+};
+
+// 底盘台阶命令。仅供执行器决定底盘模式与能力档，不参与 MPC 台阶代价。
+struct StepChassisCommand {
+    uint8_t mode = chassis_mode::NORMAL;
+    CapabilityLevel capability = CapabilityLevel::LOW;
+
+    bool operator==(const StepChassisCommand&) const = default;
 };
 
 struct RolloutLethalObstacleInfo {

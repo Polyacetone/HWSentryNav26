@@ -14,9 +14,10 @@ struct StepDetectionParams {
     double detect_norm_threshold;
     double detect_dot_threshold;
     double path_sample_resolution;
-    double prepare_distance;
-    double active_distance;
-    double release_distance;
+    double profile_prepare_distance;
+    double chassis_activation_distance;
+    double fsm_release_distance;
+    double approach_distance;
     double gate_transition_distance; // 约束窗软门控两侧过渡带宽度 (m)
 };
 

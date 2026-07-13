@@ -22,7 +22,7 @@ public:
         double remaining_energy,
         double rfr_pwr_limit,
         const CapabilityProfile& blended_profile,
-        std::optional<ActiveStepMode> active_step_mode,
+        std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
         double current_path_u
     );
 
@@ -74,7 +74,7 @@ private:
     double remaining_energy_;
     double rfr_pwr_limit_;
     CapabilityProfile blended_profile_;
-    std::optional<ActiveStepMode> active_step_mode_;
+    std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule_;
     double current_path_u_;
 };
 

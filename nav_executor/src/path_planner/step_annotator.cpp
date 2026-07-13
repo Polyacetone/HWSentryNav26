@@ -138,15 +138,15 @@ std::vector<StepPlanSegment> build_step_plan(
             seg.step_exit_pos_map = step_exit_pos;
             seg.dir_map = active->dir_map;
             seg.direction = active->direction;
-            seg.command = ActiveStepMode {
+            seg.chassis_command = StepChassisCommand {
                 .mode = rule->chassis_mode,
                 .capability = rule->capability,
-                .speed_min = rule->speed.min,
-                .speed_max = rule->speed.max,
-                .commit_u = commit_u,
-                .exit_u = step_exit_u,
-                .dir_map = active->dir_map.normalized(),
             };
+            seg.traversal_constraint.speed_min = rule->speed.min;
+            seg.traversal_constraint.speed_max = rule->speed.max;
+            seg.traversal_constraint.commit_u = commit_u;
+            seg.traversal_constraint.exit_u = step_exit_u;
+            seg.traversal_constraint.dir_map = active->dir_map.normalized();
             seg.terrain_label = active->label;
             seg.requires_high_performance = rule->requires_high_performance;
             plan.push_back(std::move(seg));
@@ -204,9 +204,9 @@ std::vector<StepPlanSegment> build_step_plan(
     // 能力档 blend 与抬腿指令都以它为基准，从而保证 prepare ≤ active ≤ commit 的余量恒定，
     // 与助跑提前量 run_up 解耦。
     for (StepPlanSegment& segment : plan) {
-        segment.prepare_u = retreat_path_u_by_distance(p, path, segment.commit_u, p.prepare_distance);
-        segment.active_u = retreat_path_u_by_distance(p, path, segment.commit_u, p.active_distance);
-        segment.release_u = advance_path_u_by_distance(p, path, segment.step_exit_u, p.release_distance);
+        segment.prepare_u = retreat_path_u_by_distance(p, path, segment.commit_u, p.profile_prepare_distance);
+        segment.active_u = retreat_path_u_by_distance(p, path, segment.commit_u, p.chassis_activation_distance);
+        segment.release_u = advance_path_u_by_distance(p, path, segment.step_exit_u, p.fsm_release_distance);
     }
 
     // ── 段间重叠仲裁 ──
@@ -239,7 +239,7 @@ std::vector<StepPlanSegment> build_step_plan(
         }
     }
 
-    // ── 终值 clamp + 门控软边界 + 回填 command ──
+    // ── 终值 clamp + MPC 约束软边界 ──
     // 不变式：prepare ≤ active ≤ commit ≤ step_enter ≤ step_exit ≤ release。
     // 约束窗软门控：在 commit 上游 gate_transition_distance 处 0→1，在 exit 下游同宽 1→0，
     // 使 MPC 首控点跨过 commit 那一帧的速度/航向惩罚连续变化。
@@ -259,13 +259,14 @@ std::vector<StepPlanSegment> build_step_plan(
             advance_path_u_by_distance(p, path, segment.step_exit_u, p.gate_transition_distance)
         );
 
-        segment.command.prepare_u = segment.prepare_u;
-        segment.command.active_u = segment.active_u;
-        segment.command.commit_u = segment.commit_u;
-        segment.command.exit_u = segment.step_exit_u;
-        segment.command.gate_start_u = gate_start_u;
-        segment.command.gate_end_u = gate_end_u;
-        segment.command.release_u = segment.release_u;
+        auto& constraint = segment.traversal_constraint;
+        constraint.approach_start_u = retreat_path_u_by_distance(
+            p, path, segment.commit_u, p.approach_distance
+        );
+        constraint.commit_u = segment.commit_u;
+        constraint.exit_u = segment.step_exit_u;
+        constraint.gate_start_u = gate_start_u;
+        constraint.gate_end_u = gate_end_u;
     }
 
     return plan;

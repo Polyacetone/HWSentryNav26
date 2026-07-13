@@ -333,6 +333,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     path->step_segments = step_annotator::build_step_plan(
         config_.step_detection, path->spline, *req.direction_map, req.terrain_constraints, logger_
     );
+    std::vector<StepTraversalConstraint> step_constraints;
+    step_constraints.reserve(path->step_segments.size());
+    for (const auto& segment : path->step_segments) {
+        step_constraints.push_back(segment.traversal_constraint);
+    }
+    path->step_constraint_schedule = std::make_shared<const StepConstraintSchedule>(std::move(step_constraints));
 
     // 台阶掩码层：针对本条样条产出。
     const auto layers = step_routing_mask_->compute(path->spline);

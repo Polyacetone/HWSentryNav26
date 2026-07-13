@@ -24,7 +24,8 @@ struct StepPlanSegment {
     Eigen::Vector2d step_exit_pos_map = Eigen::Vector2d::Zero();
     Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
     StepDirection direction = StepDirection::UP;
-    ActiveStepMode command;
+    StepChassisCommand chassis_command;
+    StepTraversalConstraint traversal_constraint;
     uint8_t terrain_label = 0;
     bool requires_high_performance = false;
 };
@@ -45,6 +46,7 @@ struct AnnotatedPath {
     PerformanceState planning_performance;
 
     std::vector<StepPlanSegment> step_segments;
+    std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule;
 
     // 针对本条样条产出的台阶掩码层。
     CostMap::ConstPtr step_cost_layer;

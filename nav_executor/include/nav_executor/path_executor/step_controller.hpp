@@ -45,9 +45,9 @@ public:
     [[nodiscard]] const StepPlanSegment* active_segment(double current_u) const;
     [[nodiscard]] const StepPlanSegment* current_command_segment(double current_u) const;
 
-    [[nodiscard]] std::optional<ActiveStepMode> current_active_step_mode(double current_u) const;
-    [[nodiscard]] bool is_step_active(double current_u) const;
-    [[nodiscard]] bool should_activate_step_mode(double current_u) const;
+    [[nodiscard]] const StepChassisCommand* current_chassis_command(double current_u) const;
+    [[nodiscard]] bool is_step_nonpreemptible(double current_u) const;
+    [[nodiscard]] bool should_activate_chassis_mode(double current_u) const;
     [[nodiscard]] uint8_t compute_step_distance_cm(const SplinePath& path, double current_u) const;
 
     void tick_profile_blend();

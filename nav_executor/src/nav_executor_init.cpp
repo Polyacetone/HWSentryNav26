@@ -315,10 +315,11 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .detect_norm_threshold = declare_parameter<double>("path_planner.step.detection.detect_norm_threshold"),
         .detect_dot_threshold = declare_parameter<double>("path_planner.step.detection.detect_dot_threshold"),
         .path_sample_resolution = declare_parameter<double>("path_planner.step.detection.path_sample_resolution"),
-        .prepare_distance = declare_parameter<double>("path_planner.step.detection.prepare_distance"),
-        .active_distance = declare_parameter<double>("path_planner.step.detection.active_distance"),
-        .release_distance = declare_parameter<double>("path_planner.step.detection.release_distance"),
-        .gate_transition_distance = declare_parameter<double>("path_planner.step.detection.gate_transition_distance"),
+        .profile_prepare_distance = declare_parameter<double>("path_planner.step.execution.profile_prepare_distance"),
+        .chassis_activation_distance = declare_parameter<double>("path_planner.step.execution.chassis_activation_distance"),
+        .fsm_release_distance = declare_parameter<double>("path_planner.step.execution.fsm_release_distance"),
+        .approach_distance = declare_parameter<double>("path_planner.step.mpc_constraints.approach_distance"),
+        .gate_transition_distance = declare_parameter<double>("path_planner.step.mpc_constraints.gate_transition_distance"),
     };
     c.enable_debug = enable_debug_;
     return c;
@@ -435,10 +436,13 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .step_reachability_guide_acc = declare_parameter<double>("mpc.follow.terrain_limits.step_reachability_guide_acc")
             },
             .terrain_weights = {
-                .step_vel_weight = declare_parameter<double>("mpc.follow.terrain_weights.step_vel_weight"),
-                .step_reachability_lo = declare_parameter<double>("mpc.follow.terrain_weights.step_reachability_lo"),
-                .step_reachability_hi = declare_parameter<double>("mpc.follow.terrain_weights.step_reachability_hi"),
-                .direction = declare_parameter<double>("mpc.follow.terrain_weights.direction")
+                .step_vel_weight = declare_parameter<double>("mpc.follow.terrain_weights.internal.velocity_window"),
+                .step_reachability_lo = declare_parameter<double>("mpc.follow.terrain_weights.approach.reachability_lo"),
+                .step_reachability_hi = declare_parameter<double>("mpc.follow.terrain_weights.approach.reachability_hi"),
+                .direction = declare_parameter<double>("mpc.follow.terrain_weights.internal.direction"),
+                .step_omega = declare_parameter<double>("mpc.follow.terrain_weights.internal.omega"),
+                .step_dv = declare_parameter<double>("mpc.follow.terrain_weights.internal.velocity_smooth"),
+                .step_domega = declare_parameter<double>("mpc.follow.terrain_weights.internal.omega_smooth"),
             },
             .environment_weights = {
                 .obstacle = declare_parameter<double>("mpc.follow.environment_weights.obstacle")
