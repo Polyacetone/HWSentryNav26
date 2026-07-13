@@ -25,9 +25,10 @@ struct TerrainMapData {
 };
 
 struct MapInflationParams {
-    int robot_radius_px;
-    int cutoff_radius_px;
+    double robot_radius_m;
+    double cutoff_radius_m;
     double decay_alpha;
+    double resolution = 0.0; // map resolution (m/px), must be set before calling inflation functions
 };
 
 constexpr bool is_directional_label(uint8_t label) {

@@ -6,10 +6,10 @@
       accumulated_cloud_pub_topic: "/map_server/debug/accumulated_local_cloud" # 累积局部点云发布话题名称
       dynamic_points_pub_topic: "/map_server/debug/dynamic_obstacle_points" # 动态障碍物点云发布话题名称
 
-    map_inflation: # 全局与局部统一的代价地图/方向场膨胀参数
-      robot_radius_px: 1 # 膨胀保持半径（像素），该距离内代价/模长保持为源值
-      cutoff_radius_px: 3 # 膨胀截断半径（像素），超过该距离不再膨胀
-      decay_alpha: 1.5 # 指数衰减系数，越大衰减越快
+    map_inflation: # 全局与局部统一的代价地图/方向场膨胀参数（单位：米，自动根据地图分辨率换算为像素）
+      robot_radius_m: 0.1 # 膨胀保持半径（米），该距离内代价/模长保持为源值
+      cutoff_radius_m: 0.3 # 膨胀截断半径（米），超过该距离不再膨胀
+      decay_alpha: 1.2 # 指数衰减系数，越大衰减越快
 
     global_map:
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图

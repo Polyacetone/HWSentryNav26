@@ -101,8 +101,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     robot_color_wait_timeout_ = declare_parameter<double>("global_map.robot_color_wait_timeout");
     map_inflation_params_ = {
-        .robot_radius_px = static_cast<int>(declare_parameter<int>("map_inflation.robot_radius_px")),
-        .cutoff_radius_px = static_cast<int>(declare_parameter<int>("map_inflation.cutoff_radius_px")),
+        .robot_radius_m = declare_parameter<double>("map_inflation.robot_radius_m"),
+        .cutoff_radius_m = declare_parameter<double>("map_inflation.cutoff_radius_m"),
         .decay_alpha = declare_parameter<double>("map_inflation.decay_alpha")
     };
 
@@ -612,6 +612,7 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
 void MapServerNode::load_nav_map(const std::string& filename) {
     auto terrain_data = map_utils::load_terrain_msgpack(filename);
     map_resolution_ = terrain_data.resolution;
+    map_inflation_params_.resolution = map_resolution_;
     map_size_x_ = terrain_data.width;
     map_size_y_ = terrain_data.height;
 

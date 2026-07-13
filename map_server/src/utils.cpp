@@ -60,8 +60,13 @@ cv::Mat inflate_cost_map(
     const MapInflationParams& params
 ) {
     CV_Assert(source.type() == CV_8UC1);
+    CV_Assert(params.resolution > 0.0);
     const int h = source.rows;
     const int w = source.cols;
+
+    // 将米转换为像素
+    const int robot_radius_px = static_cast<int>(std::round(params.robot_radius_m / params.resolution));
+    const int cutoff_radius_px = static_cast<int>(std::round(params.cutoff_radius_m / params.resolution));
 
     // 二值化: 非零值视为障碍物源
     cv::Mat bin_mask;
@@ -72,8 +77,8 @@ cv::Mat inflate_cost_map(
     cv::distanceTransform(1 - bin_mask, dist_px, cv::DIST_L2, 3);
 
     cv::Mat out = source.clone();
-    const float robot_r = static_cast<float>(params.robot_radius_px);
-    const float cutoff_r = static_cast<float>(params.cutoff_radius_px);
+    const float robot_r = static_cast<float>(robot_radius_px);
+    const float cutoff_r = static_cast<float>(cutoff_radius_px);
 
     for (int y = 0; y < h; y++) {
         const float* dist_row = dist_px.ptr<float>(y);
@@ -100,9 +105,14 @@ void inflate_direction_field(
     cv::Mat& out_angle,
     cv::Mat& out_magnitude
 ) {
+    CV_Assert(params.resolution > 0.0);
     const int h = data.height;
     const int w = data.width;
     const size_t N = static_cast<size_t>(h) * static_cast<size_t>(w);
+
+    // 将米转换为像素
+    const int radius = static_cast<int>(std::round(params.cutoff_radius_m / params.resolution));
+    const int robot_r = static_cast<int>(std::round(params.robot_radius_m / params.resolution));
 
     out_angle = cv::Mat::zeros(h, w, CV_8UC1);
     out_magnitude = cv::Mat::zeros(h, w, CV_8UC1);
@@ -110,9 +120,6 @@ void inflate_direction_field(
     std::vector<float> sum_vx(N, 0.0f);
     std::vector<float> sum_vy(N, 0.0f);
     std::vector<float> max_mag(N, 0.0f);
-
-    const int radius = params.cutoff_radius_px;
-    const int robot_r = params.robot_radius_px;
 
     for (int sy = 0; sy < h; sy++) {
         for (int sx = 0; sx < w; sx++) {

@@ -94,7 +94,7 @@ std::optional<GlobalSearchOutput> GlobalSearchWorker::process(GlobalSearchInput 
     ).count();
     const double threshold_ms = 0.6 * static_cast<double>(std::max(params_.min_period_ms, 0));
     if (threshold_ms > 0.0 && solve_ms > threshold_ms) {
-        RCLCPP_WARN(logger_, "GlobalSearch solve time %.2f ms > %.2f ms (0.6 * min_period_ms=%d)", solve_ms, threshold_ms, params_.min_period_ms);
+        RCLCPP_WARN(logger_, "GlobalSearch solve time %.2f ms > %.2f ms", solve_ms, threshold_ms);
     }
     auto selected = selector_.select(problem, input.x0, input.warm_seed, search_result.candidates);
     if (input.generation != generation_.load(std::memory_order_acquire)) return std::nullopt;
