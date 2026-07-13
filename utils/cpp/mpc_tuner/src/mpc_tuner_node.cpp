@@ -9,6 +9,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -16,38 +17,38 @@
 namespace {
 
 struct Arguments {
-    std::filesystem::path scene_directory;
+    std::filesystem::path scenes_directory;
     std::filesystem::path output = "mpc_tuning_results";
     std::filesystem::path tuner_config;
     std::filesystem::path nav_config_directory;
     bool smoke = false;
 };
 
-Arguments parse_arguments(const int argc, char** argv) {
+Arguments parse_arguments(const std::vector<std::string>& arguments) {
     Arguments out;
+    out.scenes_directory = std::filesystem::path(
+        ament_index_cpp::get_package_share_directory("mpc_tuner")) / "scenes";
     out.tuner_config = std::filesystem::path(
         ament_index_cpp::get_package_share_directory("mpc_tuner")) / "config/tuner.yaml";
     out.nav_config_directory = std::filesystem::path(
         ament_index_cpp::get_package_share_directory("nav_executor")) / "config";
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
+    for (size_t i = 1; i < arguments.size(); ++i) {
+        const std::string& arg = arguments[i];
         const auto take_value = [&](std::filesystem::path& destination) {
-            if (i + 1 >= argc) throw std::runtime_error("Missing value after " + arg);
-            destination = argv[++i];
+            if (i + 1 >= arguments.size()) throw std::runtime_error("Missing value after " + arg);
+            destination = arguments[++i];
         };
-        if (arg == "--scene-dir") take_value(out.scene_directory);
-        else if (arg == "--output") take_value(out.output);
+        if (arg == "--output") take_value(out.output);
         else if (arg == "--tuner-config") take_value(out.tuner_config);
         else if (arg == "--nav-config-dir") take_value(out.nav_config_directory);
         else if (arg == "--smoke") out.smoke = true;
         else if (arg == "--help") {
-            std::cout << "Usage: mpc_tuner_node --scene-dir DIR [--output DIR] [--smoke]\n";
+            std::cout << "Usage: mpc_tuner_node [--output DIR] [--smoke]\n";
             std::exit(0);
         } else {
             throw std::runtime_error("Unknown argument: " + arg);
         }
     }
-    if (out.scene_directory.empty()) throw std::runtime_error("--scene-dir is required");
     return out;
 }
 
@@ -87,21 +88,21 @@ void write_validation(
 } // namespace
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv);
+    const auto non_ros_arguments = rclcpp::init_and_remove_ros_arguments(argc, argv);
     const auto logger = rclcpp::get_logger("mpc_tuner");
     try {
-        const Arguments args = parse_arguments(argc, argv);
+        const Arguments args = parse_arguments(non_ros_arguments);
         const auto tuner_config = mpc_tuner::load_tuner_config(args.tuner_config);
         const auto runtime = mpc_tuner::load_runtime_config(args.nav_config_directory);
-        const auto scenarios = mpc_tuner::load_scene_directory(args.scene_directory);
+        const auto scenarios = mpc_tuner::load_scene_splits(args.scenes_directory);
         const auto train_count = std::ranges::count_if(scenarios, [](const auto& scenario) {
             return scenario.spec.split == "train";
         });
         const auto validation_count = scenarios.size() - static_cast<size_t>(train_count);
-        if (train_count == 0) throw std::runtime_error("Scene directory contains no training routes");
         RCLCPP_INFO(
-            logger, "Loaded %zu training and %zu validation routes from %s",
-            static_cast<size_t>(train_count), validation_count, args.scene_directory.c_str()
+            logger, "Loaded %zu training and %zu validation routes from %s/train and %s/validation",
+            static_cast<size_t>(train_count), validation_count,
+            args.scenes_directory.c_str(), args.scenes_directory.c_str()
         );
         const auto baseline = mpc_tuner::baseline_candidate(runtime.mpc, tuner_config);
 
@@ -122,7 +123,16 @@ int main(int argc, char** argv) {
                 fitness.severe_step_violations, fitness.soft_quality_cost
             );
         } else {
-            best = mpc_tuner::run_cem(runtime.mpc, tuner_config, evaluate, args.output);
+            const auto report_progress = [&](const mpc_tuner::OptimizationProgress& progress) {
+                RCLCPP_INFO(
+                    logger,
+                    "Generation %d/%d: evaluated %d/%d candidates, %d workers active, elapsed %.0f s",
+                    progress.generation, progress.total_generations,
+                    progress.completed_candidates, progress.population_size,
+                    progress.active_workers, progress.elapsed_seconds
+                );
+            };
+            best = mpc_tuner::run_cem(runtime.mpc, tuner_config, evaluate, args.output, report_progress);
         }
 
         const auto validation = evaluate_set(scenarios, "validation", runtime, tuner_config, best, logger);

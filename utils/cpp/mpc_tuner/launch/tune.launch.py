@@ -9,8 +9,6 @@ from launch_ros.actions import Node
 
 def launch_tuner(context):
     arguments = [
-        "--scene-dir",
-        LaunchConfiguration("scene_dir").perform(context),
         "--output",
         LaunchConfiguration("output_dir").perform(context),
         "--tuner-config",
@@ -36,11 +34,6 @@ def generate_launch_description():
     nav_share = get_package_share_directory("nav_executor")
     return LaunchDescription(
         [
-            DeclareLaunchArgument(
-                "scene_dir",
-                default_value=os.path.join(package_share, "scenes"),
-                description="Directory recursively containing scene bundle files",
-            ),
             DeclareLaunchArgument("output_dir", default_value="mpc_tuning_results"),
             DeclareLaunchArgument(
                 "tuner_config",

@@ -12,6 +12,7 @@ ament_auto_find_build_dependencies()
 
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(Threads REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(msgpack-cxx REQUIRED)
 
@@ -28,7 +29,7 @@ set(core_sources
 )
 ament_auto_add_library(mpc_tuner_core SHARED ${core_sources})
 target_include_directories(mpc_tuner_core PUBLIC include ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(mpc_tuner_core Eigen3::Eigen yaml-cpp msgpack-cxx ${OpenCV_LIBS})
+target_link_libraries(mpc_tuner_core Eigen3::Eigen Threads::Threads yaml-cpp msgpack-cxx ${OpenCV_LIBS})
 
 ament_auto_add_executable(mpc_tuner_node src/mpc_tuner_node.cpp)
 target_link_libraries(mpc_tuner_node mpc_tuner_core)

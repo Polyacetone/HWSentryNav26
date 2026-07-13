@@ -330,29 +330,55 @@ std::vector<CompiledScenario> materialize_scene_bundle(const SceneBundle& bundle
     return scenarios;
 }
 
-std::vector<CompiledScenario> load_scene_directory(const std::filesystem::path& directory) {
-    if (!std::filesystem::is_directory(directory)) {
-        throw std::runtime_error("Scene directory does not exist: " + directory.string());
-    }
-    std::vector<std::filesystem::path> paths;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".msgpack") {
-            paths.push_back(entry.path());
+std::vector<CompiledScenario> load_scene_splits(const std::filesystem::path& scenes_directory) {
+    const auto load_split = [](const std::filesystem::path& directory, const std::string_view split) {
+        if (!std::filesystem::is_directory(directory)) {
+            throw std::runtime_error(
+                "Required " + std::string(split) + " scene directory does not exist: " + directory.string()
+            );
         }
-    }
-    std::ranges::sort(paths);
-    if (paths.empty()) throw std::runtime_error("No .msgpack scene bundles found in " + directory.string());
 
-    std::vector<CompiledScenario> scenarios;
-    for (const auto& path : paths) {
-        auto loaded = materialize_scene_bundle(load_scene_bundle(path));
-        scenarios.insert(
-            scenarios.end(),
-            std::make_move_iterator(loaded.begin()),
-            std::make_move_iterator(loaded.end())
-        );
-    }
-    return scenarios;
+        std::vector<std::filesystem::path> paths;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".msgpack") {
+                paths.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(paths);
+        if (paths.empty()) {
+            throw std::runtime_error(
+                "No .msgpack scene bundles found in required " + std::string(split)
+                + " scene directory: " + directory.string()
+            );
+        }
+
+        std::vector<CompiledScenario> scenarios;
+        for (const auto& path : paths) {
+            const SceneBundle bundle = load_scene_bundle(path);
+            if (bundle.split != split) {
+                throw std::runtime_error(
+                    "Scene bundle '" + path.string() + "' has split '" + bundle.split
+                    + "' but is stored in the " + std::string(split) + " directory"
+                );
+            }
+            auto loaded = materialize_scene_bundle(bundle);
+            scenarios.insert(
+                scenarios.end(),
+                std::make_move_iterator(loaded.begin()),
+                std::make_move_iterator(loaded.end())
+            );
+        }
+        return scenarios;
+    };
+
+    auto train = load_split(scenes_directory / "train", "train");
+    auto validation = load_split(scenes_directory / "validation", "validation");
+    train.insert(
+        train.end(),
+        std::make_move_iterator(validation.begin()),
+        std::make_move_iterator(validation.end())
+    );
+    return train;
 }
 
 } // namespace mpc_tuner

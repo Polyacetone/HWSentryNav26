@@ -11,6 +11,6 @@ void write_scene_bundle(const SceneBundle& bundle, const std::filesystem::path& 
 SceneBundle load_scene_bundle(const std::filesystem::path& path);
 
 [[nodiscard]] std::vector<CompiledScenario> materialize_scene_bundle(const SceneBundle& bundle);
-[[nodiscard]] std::vector<CompiledScenario> load_scene_directory(const std::filesystem::path& directory);
+[[nodiscard]] std::vector<CompiledScenario> load_scene_splits(const std::filesystem::path& scenes_directory);
 
 } // namespace mpc_tuner

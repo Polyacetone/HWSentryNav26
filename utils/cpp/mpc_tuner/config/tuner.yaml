@@ -1,30 +1,30 @@
 tuner:
   study:
-    seed: 2026
-    population_size: 32
-    elite_fraction: 0.20
-    generations: 20
-    initial_std: 0.45
-    min_std: 0.03
+    seed: 2026 # 随机数种子，用于复现实验结果
+    population_size: 32 # 每代评估的候选参数组数量
+    elite_fraction: 0.20 # 用于更新采样分布的最优候选比例
+    generations: 3 # CEM 优化迭代代数
+    initial_std: 0.45 # 归一化参数空间的初始采样标准差
+    min_std: 0.03 # 归一化参数空间的最小采样标准差
+    parallel_workers: 16 # 并行评估候选参数的工作线程数，0 表示使用全部逻辑核心
+    progress_interval_seconds: 10.0 # 优化过程中打印进度日志的时间间隔，单位秒
   episode:
-    default_timeout: 20.0
-    goal_radius: 0.5
-    target_arrival_speed: 0.1
-    acceptable_arrival_speed: 0.3
-    high_cost_threshold: 30.0
-    lethal_cost_threshold: 250.0
-    severe_step_heading_error_deg: 30.0
-    severe_step_speed_margin: 0.2
+    default_timeout: 20.0 # 未单独指定时单条场景的仿真超时时间，单位秒
+    goal_radius: 0.5 # 判定到达目标的距离阈值，单位米
+    target_arrival_speed: 0.1 # 适应度中期望的到达线速度，单位米每秒
+    acceptable_arrival_speed: 0.3 # 超过此到达线速度即记为快速到达，单位米每秒
+    high_cost_threshold: 30.0 # 统计高代价区域停留时间的代价阈值
+    lethal_cost_threshold: 250.0 # 判定严重环境违规的致命代价阈值
+    severe_step_heading_error_deg: 30.0 # 判定严重台阶方向偏差的阈值，单位度
+    severe_step_speed_margin: 0.2 # 超出台阶速度范围即判严重违规的裕量，单位米每秒
   search_space:
-    # Positive weights are searched logarithmically. Ranges are YAML values,
-    # not the squared effective coefficients used by residual costs.
-    q_y: [0.08, 1.20]
-    q_theta: [0.04, 0.80]
-    q_u: [0.25, 4.00]
-    y_tube: [0.10, 0.50]
-    q_term_prog: [0.05, 1.50]
-    q_term_lateral: [0.05, 1.50]
-    r_v: [0.002, 0.10]
-    r_omega: [0.002, 0.10]
-    r_dv: [0.03, 1.00]
-    r_domega: [0.02, 0.80]
+    q_y: [0.08, 1.20] # 横向跟踪误差权重搜索范围，对数采样
+    q_theta: [0.04, 0.80] # 航向跟踪误差权重搜索范围，对数采样
+    q_u: [0.25, 4.00] # 路径进度跟踪权重搜索范围，对数采样
+    y_tube: [0.10, 0.50] # 横向误差管束宽度搜索范围，线性采样，单位米
+    q_term_prog: [0.05, 1.50] # 终端路径进度权重搜索范围，对数采样
+    q_term_lateral: [0.05, 1.50] # 终端横向误差权重搜索范围，对数采样
+    r_v: [0.002, 0.10] # 线速度指令幅值惩罚权重搜索范围，对数采样
+    r_omega: [0.002, 0.10] # 角速度指令幅值惩罚权重搜索范围，对数采样
+    r_dv: [0.03, 1.00] # 线速度指令变化惩罚权重搜索范围，对数采样
+    r_domega: [0.02, 0.80] # 角速度指令变化惩罚权重搜索范围，对数采样

@@ -68,6 +68,8 @@ struct StudyConfig {
     int generations = 20;
     double initial_std = 0.45;
     double min_std = 0.03;
+    int parallel_workers = 0;
+    double progress_interval_seconds = 10.0;
 };
 
 struct EpisodeConfig {

@@ -1,11 +1,17 @@
 #include <mpc_tuner/optimizer.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
+#include <exception>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <random>
 #include <stdexcept>
+#include <thread>
 
 namespace mpc_tuner {
 namespace {
@@ -65,7 +71,8 @@ ParameterCandidate run_cem(
     const nav_executor::MPCParams& base_params,
     const TunerConfig& config,
     const EvaluateFunction& evaluate,
-    const std::filesystem::path& output_directory
+    const std::filesystem::path& output_directory,
+    const ProgressFunction& report_progress
 ) {
     std::filesystem::create_directories(output_directory);
     std::ofstream trial_stream(output_directory / "trials.csv");
@@ -87,10 +94,14 @@ ParameterCandidate run_cem(
     const int elite_count = std::clamp(
         static_cast<int>(std::ceil(config.study.elite_fraction * population_size)), 1, population_size
     );
+    const unsigned int hardware_workers = std::max(std::thread::hardware_concurrency(), 1U);
+    const int requested_workers = config.study.parallel_workers == 0
+        ? static_cast<int>(hardware_workers) : config.study.parallel_workers;
+    const int worker_count = std::clamp(requested_workers, 1, population_size);
+    const auto progress_interval = std::chrono::duration<double>(config.study.progress_interval_seconds);
 
     for (int generation = 0; generation < config.study.generations; ++generation) {
-        std::vector<EvaluatedCandidate> population;
-        population.reserve(static_cast<size_t>(population_size));
+        std::vector<EvaluatedCandidate> population(static_cast<size_t>(population_size));
         for (int index = 0; index < population_size; ++index) {
             std::array<double, PARAMETER_COUNT> normalized;
             if (generation == 0 && index == 0) {
@@ -100,11 +111,66 @@ ParameterCandidate run_cem(
                     normalized[dim] = std::clamp(mean[dim] + stddev[dim] * normal(rng), 0.0, 1.0);
                 }
             }
-            EvaluatedCandidate item;
-            item.candidate = decode_candidate(normalized, config);
-            std::tie(item.fitness, item.episodes) = evaluate(item.candidate);
-            population.push_back(std::move(item));
+            population[static_cast<size_t>(index)].candidate = decode_candidate(normalized, config);
         }
+
+        std::atomic<int> next_index = 0;
+        std::atomic<int> completed_candidates = 0;
+        std::atomic<int> active_workers = 0;
+        std::atomic<bool> stop = false;
+        std::exception_ptr evaluation_error;
+        std::mutex progress_mutex;
+        std::condition_variable progress_cv;
+        const auto started_at = std::chrono::steady_clock::now();
+
+        const auto make_progress = [&] {
+            return OptimizationProgress {
+                .generation = generation + 1,
+                .total_generations = config.study.generations,
+                .completed_candidates = completed_candidates.load(),
+                .population_size = population_size,
+                .active_workers = active_workers.load(),
+                .elapsed_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_at).count(),
+            };
+        };
+        report_progress(make_progress());
+
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(worker_count));
+        for (int worker = 0; worker < worker_count; ++worker) {
+            workers.emplace_back([&] {
+                while (!stop.load()) {
+                    const int index = next_index.fetch_add(1);
+                    if (index >= population_size) break;
+                    active_workers.fetch_add(1);
+                    try {
+                        auto& item = population[static_cast<size_t>(index)];
+                        std::tie(item.fitness, item.episodes) = evaluate(item.candidate);
+                        completed_candidates.fetch_add(1);
+                    } catch (...) {
+                        std::lock_guard lock(progress_mutex);
+                        if (!evaluation_error) evaluation_error = std::current_exception();
+                        stop.store(true);
+                    }
+                    active_workers.fetch_sub(1);
+                    progress_cv.notify_one();
+                }
+            });
+        }
+
+        {
+            std::unique_lock lock(progress_mutex);
+            while (completed_candidates.load() < population_size && !stop.load()) {
+                progress_cv.wait_for(lock, progress_interval, [&] {
+                    return completed_candidates.load() == population_size || stop.load();
+                });
+                if (completed_candidates.load() < population_size && !stop.load()) report_progress(make_progress());
+            }
+        }
+        for (auto& worker : workers) worker.join();
+        if (evaluation_error) std::rethrow_exception(evaluation_error);
+        report_progress(make_progress());
+
         std::ranges::sort(population, [](const EvaluatedCandidate& lhs, const EvaluatedCandidate& rhs) {
             return lhs.fitness < rhs.fitness;
         });

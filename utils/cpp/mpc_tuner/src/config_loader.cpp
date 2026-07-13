@@ -178,7 +178,15 @@ TunerConfig load_tuner_config(const std::filesystem::path& path) {
         .generations = study["generations"].as<int>(),
         .initial_std = study["initial_std"].as<double>(),
         .min_std = study["min_std"].as<double>(),
+        .parallel_workers = study["parallel_workers"].as<int>(),
+        .progress_interval_seconds = study["progress_interval_seconds"].as<double>(),
     };
+    if (out.study.population_size < 2) throw std::runtime_error("study.population_size must be at least 2");
+    if (out.study.generations < 1) throw std::runtime_error("study.generations must be positive");
+    if (out.study.parallel_workers < 0) throw std::runtime_error("study.parallel_workers must not be negative");
+    if (!(out.study.progress_interval_seconds > 0.0)) {
+        throw std::runtime_error("study.progress_interval_seconds must be positive");
+    }
     const YAML::Node episode = root["episode"];
     out.episode = {
         .default_timeout = episode["default_timeout"].as<double>(),
