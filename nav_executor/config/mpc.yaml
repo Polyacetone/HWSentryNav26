@@ -27,7 +27,7 @@
             window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
             passes: 2 # 平滑迭代次数
           include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免随机搜索退化时丢掉已有好解
-          candidate_count: 3 # 异步全局搜索保留的独立模态候选数
+          candidate_count: 2 # 异步全局搜索保留的独立模态候选数
           min_period_ms: 100 # 全局搜索线程最短周期
           max_seed_age_ticks: 8 # 注入种子的最大控制周期年龄
           improvement_margin: 0.01 # 挑战者相对 incumbent 的最小后验代价改善比例

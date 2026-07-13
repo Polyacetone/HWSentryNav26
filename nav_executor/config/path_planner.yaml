@@ -80,7 +80,7 @@
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
           smoothness_weight: 0.005 # 样条光滑性正则权重
-          length_penalty_weight: 0.02 # 路径长度惩罚权重
+          length_penalty_weight: 0.01 # 路径长度惩罚权重
           curvature:
             base_weight: 0.1 # 曲率基础惩罚权重
             base_beta: 4.0 # 曲率基础惩罚 softplus beta
@@ -103,7 +103,7 @@
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
           smoothness_weight: 0.003 # 样条光滑度正则权重
-          length_penalty_weight: 0.02 # 路径长度惩罚权重
+          length_penalty_weight: 0.01 # 路径长度惩罚权重
           curvature:
             base_weight: 0.1 # 曲率基础惩罚权重
             base_beta: 4.0 # 曲率基础惩罚 softplus beta
