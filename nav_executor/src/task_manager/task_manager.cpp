@@ -20,7 +20,7 @@ TaskUpdateOutput TaskManager::update(const TaskUpdateInput& input) {
     poll_planner_result(input.feedback.preemptible);
     maybe_submit_plan(input.feedback.preemptible, input.plan_snapshot, input.stamp);
     monitor_route(input.route_monitor);
-    ingest_goal_reached(input.feedback.goal_reached);
+    ingest_goal_reached(input.feedback.goal_reached, input.feedback.goal_reached_path);
 
     return {
         .command = command_view(),
@@ -183,12 +183,17 @@ void TaskManager::on_route_invalid(const ReplanReason reason) {
     RCLCPP_INFO(logger_, "Path invalid (%s) → drop path, replan", replan_reason_str(reason));
 }
 
-// A stale path may finish after a newer goal has already been committed; only the path is cleared.
-void TaskManager::ingest_goal_reached(const bool goal_reached) {
+// A completion event is valid only while its exact immutable path package remains active.
+void TaskManager::ingest_goal_reached(const bool goal_reached, const AnnotatedPath::ConstPtr& reached_path) {
     if (!goal_reached) return;
 
-    // 仅当 active_path.goal_id == current_goal.id 时才视为有效。
-    const bool valid = active_path_ && current_goal_ && active_path_->goal_id == current_goal_->id;
+    if (!reached_path || reached_path != active_path_) {
+        RCLCPP_INFO(logger_, "goal_reached on superseded path → ignore event");
+        return;
+    }
+
+    // 当前 active path 已被新语义目标取代，但尚未获得新 path：只清掉这条旧 path。
+    const bool valid = current_goal_ && reached_path->goal_id == current_goal_->id;
 
     if (!valid) {
         // 旧路径按旧任务语义自然完结：只清 path，不动 current_goal_。
@@ -199,7 +204,7 @@ void TaskManager::ingest_goal_reached(const bool goal_reached) {
 
     if (current_goal_->fixed) {
         // fixed goal：清 path，设置 hold_goal，进入持续保持。
-        hold_goal_ = active_path_->goal_pos;
+        hold_goal_ = reached_path->goal_pos;
         active_path_.reset();
         needs_plan_ = false;
         RCLCPP_INFO(logger_, "fixed goal reached → enter FIXED hold");

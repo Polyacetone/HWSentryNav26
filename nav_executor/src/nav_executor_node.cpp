@@ -188,6 +188,7 @@ void NavExecutorNode::control_tick() {
     const ExecutorOutput out = executor_->update(ein);
 
     previous_motion_feedback_.goal_reached = out.goal_reached;
+    previous_motion_feedback_.goal_reached_path = out.goal_reached ? task_output.command.active_path : nullptr;
     previous_motion_feedback_.executor_replan_event = out.executor_replan_event;
     previous_motion_feedback_.mpc_lethal = out.mpc_lethal;
     previous_motion_feedback_.lethal_path = out.mpc_lethal ? task_output.command.active_path : nullptr;

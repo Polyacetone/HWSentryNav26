@@ -44,6 +44,8 @@ struct PlanRequestSnapshot {
 
 struct MotionFeedback {
     bool goal_reached = false;
+    // goal_reached 对应的不可变路径包；用于拒绝晚到的旧路径完成事件。
+    AnnotatedPath::ConstPtr goal_reached_path;
     bool executor_replan_event = false;
     bool mpc_lethal = false;
     AnnotatedPath::ConstPtr lethal_path;
@@ -95,7 +97,7 @@ private:
 
     void ingest_goal(const std::optional<Goal>& incoming, bool preemptible);
     void ingest_executor_replan_event(bool event);
-    void ingest_goal_reached(bool goal_reached);
+    void ingest_goal_reached(bool goal_reached, const AnnotatedPath::ConstPtr& reached_path);
     void poll_planner_result(bool preemptible);
     bool maybe_submit_plan(bool preemptible, const PlanRequestSnapshot& snapshot, std::chrono::steady_clock::time_point stamp);
     void monitor_route(const std::optional<RouteMonitorInput>& input);
