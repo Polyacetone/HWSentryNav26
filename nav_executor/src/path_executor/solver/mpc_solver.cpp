@@ -221,7 +221,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
-    const DirectionMap& direction_map,
     const CapabilityProfile& blended_profile,
     std::optional<ActiveStepMode> active_step_mode,
     bool check_lethal_status
@@ -277,13 +276,11 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const GridInfo ci = make_grid_info(cost_map);
     const CostMapGridView masked_global_grid(masked_global_map);
-    const DirectionMapGridView dg(direction_map);
-    const GridInfo di = make_grid_info(direction_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     const FollowProblem problem(
         global_path, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
-        dg, di, remaining_energy_, rfr_pwr_limit_, blended_profile, active_step_mode, u0
+        remaining_energy_, rfr_pwr_limit_, blended_profile, active_step_mode, u0
     );
 
     fddp::SolverOptions opts;
@@ -348,7 +345,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             .cost_map = cost_map,
             .masked_global_map = masked_global_map,
             .per_step_cost_maps = std::move(step_maps),
-            .direction_map = direction_map,
             .x0 = x0,
             .warm_seed = std::move(incumbent),
             .longitudinal_seed = longitudinal_seed,

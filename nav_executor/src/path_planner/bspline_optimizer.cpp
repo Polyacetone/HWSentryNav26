@@ -37,13 +37,19 @@ T smooth_relu(const T& x, double beta) {
     return (ceres::sqrt(bx * bx + T(1.0)) + bx) / T(2.0 * safe_beta);
 }
 
-Eigen::Vector2d interpolate_direction_from_path_grid(
+struct PathGridTerrainSample {
+    Eigen::Vector2d dir; // 方向场向量（map 帧）
+    uint8_t label;       // 地形标签
+};
+
+PathGridTerrainSample sample_direction_terrain_from_path_grid(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const Eigen::Vector2d& path_grid
 ) {
     const Eigen::Vector2d map_coord = cost_map.grid_coord_to_map(path_grid);
-    return direction_map.interpolate(direction_map.map_coord_to_grid(map_coord));
+    const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(map_coord);
+    return {direction_map.interpolate(dir_grid), direction_map.terrain_at(dir_grid)};
 }
 
 double step_gate(double direction_norm, double threshold, double transition) {
@@ -75,6 +81,9 @@ struct SplineSample {
     double arc_length_m;
     Eigen::Vector2d pos_grid;
     double step_norm;
+    Eigen::Vector2d dir;   // 方向场向量（map 帧），用于判定穿越方向
+    Eigen::Vector2d vel_grid; // 样条一阶导（grid 帧切向），用于判定穿越方向
+    uint8_t terrain_label; // 地形标签，用于查询 run_up
 };
 
 struct SampledSpline {
@@ -126,11 +135,15 @@ SampledSpline sample_spline(
             arc_length_m += (pos_grid - prev).norm() * cost_map.resolution;
         }
 
+        const PathGridTerrainSample dt = sample_direction_terrain_from_path_grid(cost_map, direction_map, pos_grid);
         sampled.samples.push_back({
             .u = u,
             .arc_length_m = arc_length_m,
             .pos_grid = pos_grid,
-            .step_norm = interpolate_direction_from_path_grid(cost_map, direction_map, pos_grid).norm(),
+            .step_norm = dt.dir.norm(),
+            .dir = dt.dir,
+            .vel_grid = spline.derivative(u, 1),
+            .terrain_label = dt.label,
         });
         prev = pos_grid;
     }
@@ -163,8 +176,22 @@ std::vector<StepInterval> merge_intervals(std::vector<StepInterval> intervals) {
     return merged;
 }
 
+// 查询某台阶段入口处的助跑提前量 run_up：由地形标签 + 穿越方向（切向·方向场符号）选出运行模式。
+double lookup_run_up(
+    const nav_executor::TerrainTraversalConstraints& terrain_constraints,
+    const SplineSample& entry_sample
+) {
+    const bool is_up = entry_sample.vel_grid.dot(entry_sample.dir) > 0.0;
+    const nav_executor::TerrainStepRule* rule = terrain_constraints.selected_mode(entry_sample.terrain_label, is_up);
+    return rule ? std::max(rule->run_up, 0.0) : 0.0;
+}
+
+// 检测台阶区间并按运动学需求扩展。
+// 入口（上游 / 低弧长侧）额外扩展 run_up：把「上位机视角的台阶起点」纳入近曲率区，
+// 使助跑段被压直、垂直进入。出口侧仅按 step_extension_distance 对称扩展。
 std::vector<StepInterval> detect_step_intervals(
     const SampledSpline& sampled_spline,
+    const nav_executor::TerrainTraversalConstraints& terrain_constraints,
     double step_norm_threshold,
     double extension_distance_m
 ) {
@@ -189,10 +216,13 @@ std::vector<StepInterval> detect_step_intervals(
         }
 
         const size_t end_idx = on_step && i + 1 == samples.size() ? i : i - 1;
-        const double raw_start_m = samples[static_cast<size_t>(start_idx)].arc_length_m;
+        const SplineSample& entry_sample = samples[static_cast<size_t>(start_idx)];
+        const double run_up = lookup_run_up(terrain_constraints, entry_sample);
+        const double upstream_extension = std::max(extension, run_up);
+        const double raw_start_m = entry_sample.arc_length_m;
         const double raw_end_m = samples[end_idx].arc_length_m;
         intervals.push_back({
-            .start_m = std::max(0.0, raw_start_m - extension),
+            .start_m = std::max(0.0, raw_start_m - upstream_extension),
             .end_m = std::min(total_length_m, raw_end_m + extension),
         });
         start_idx = -1;
@@ -732,7 +762,6 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
     const Eigen::Vector2d& start_grid,
     const Eigen::Vector2d& goal_grid
 ) const {
-    static_cast<void>(terrain_constraints);
     if (init_path.size() <= 2) {
         return std::unexpected("Initial path too short for optimization");
     }
@@ -825,6 +854,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         );
         const std::vector<StepInterval> step_intervals_before = detect_step_intervals(
             detection_before,
+            terrain_constraints,
             params_.step_norm_threshold,
             params_.main.step_extension_distance
         );
@@ -868,6 +898,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         );
         const std::vector<StepInterval> step_intervals_after = detect_step_intervals(
             detection_after,
+            terrain_constraints,
             params_.step_norm_threshold,
             params_.main.step_extension_distance
         );

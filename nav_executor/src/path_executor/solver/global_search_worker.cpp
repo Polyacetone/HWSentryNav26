@@ -79,10 +79,9 @@ std::optional<GlobalSearchOutput> GlobalSearchWorker::process(GlobalSearchInput 
         for (const auto& map : input.per_step_cost_maps) step_grids.emplace_back(map);
     }
     const CostMapGridView masked_grid(input.masked_global_map);
-    const DirectionMapGridView direction_grid(input.direction_map);
     const FollowProblem problem(
         input.path, mpc_params_, step_grids, make_grid_info(input.cost_map), masked_grid,
-        input.prediction_dt, input.schedule_rho, direction_grid, make_grid_info(input.direction_map),
+        input.prediction_dt, input.schedule_rho,
         input.remaining_energy, input.rfr_pwr_limit, input.blended_profile, input.active_step_mode,
         input.current_path_u
     );

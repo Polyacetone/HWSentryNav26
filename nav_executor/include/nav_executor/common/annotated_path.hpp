@@ -16,7 +16,8 @@ namespace nav_executor {
 struct StepPlanSegment {
     double prepare_u = 0.0;
     double active_u = 0.0;
-    double step_enter_u = 0.0;
+    double commit_u = 0.0;   // 上位机视角的台阶起点（物理边缘上游回退 run_up）
+    double step_enter_u = 0.0; // 物理台阶边缘（真实起跳点，上报底盘用）
     double step_exit_u = 0.0;
     double release_u = 1.0;
     Eigen::Vector2d step_enter_pos_map = Eigen::Vector2d::Zero();

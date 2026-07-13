@@ -19,8 +19,6 @@ public:
         const CostMapGridView& masked_global_grid,
         double prediction_dt,
         double schedule_rho,
-        const DirectionMapGridView& dir_grid,
-        const GridInfo& dir_info,
         double remaining_energy,
         double rfr_pwr_limit,
         const CapabilityProfile& blended_profile,
@@ -73,8 +71,6 @@ private:
     const CostMapGridView& masked_global_grid_;
     double prediction_dt_;
     LPVDiscreteModel model_ {};
-    const DirectionMapGridView& dir_grid_;
-    GridInfo dir_info_;
     double remaining_energy_;
     double rfr_pwr_limit_;
     CapabilityProfile blended_profile_;

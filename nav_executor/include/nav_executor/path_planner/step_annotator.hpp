@@ -17,6 +17,7 @@ struct StepDetectionParams {
     double prepare_distance;
     double active_distance;
     double release_distance;
+    double gate_transition_distance; // 约束窗软门控两侧过渡带宽度 (m)
 };
 
 // 台阶几何标注器：规划期基于方向场对样条做一次扫描，产出不可变的 StepPlanSegment 列表装入 AnnotatedPath.step_segments。

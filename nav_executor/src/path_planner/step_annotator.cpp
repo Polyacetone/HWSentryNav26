@@ -59,28 +59,17 @@ double retreat_path_u_by_distance(const StepDetectionParams& p, const SplinePath
     return u;
 }
 
-std::optional<ActiveStepMode> build_step_command(
+const TerrainStepRule* lookup_step_rule(
     const StepDirection direction,
     const Eigen::Vector2d& step_enter_pos_map,
-    const double step_enter_u,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints
 ) {
     const Eigen::Vector2d g = direction_map.map_coord_to_grid(step_enter_pos_map);
     const uint8_t label = direction_map.terrain_at(g);
     const TerrainStepRule* rule = terrain_constraints.selected_mode(label, direction == StepDirection::UP);
-
-    if (!rule || rule->chassis_mode == 0) {
-        return std::nullopt;
-    }
-
-    return ActiveStepMode {
-        .mode = rule->chassis_mode,
-        .capability = rule->capability,
-        .speed_min = rule->speed.min,
-        .speed_max = rule->speed.max,
-        .step_entry_u = step_enter_u,
-    };
+    if (!rule || rule->chassis_mode == 0) return nullptr;
+    return rule;
 }
 
 } // anonymous namespace
@@ -134,20 +123,32 @@ std::vector<StepPlanSegment> build_step_plan(
         const Eigen::Vector2d step_exit_pos = path.position(step_exit_u);
         const double step_enter_u = static_cast<double>(active->start_index) * u_step;
 
-        auto command = build_step_command(
-            active->direction, active->step_enter_pos_map, step_enter_u, direction_map, terrain_constraints
+        const TerrainStepRule* rule = lookup_step_rule(
+            active->direction, active->step_enter_pos_map, direction_map, terrain_constraints
         );
-        if (command) {
+        if (rule) {
+            // commit_u：物理边缘上游回退 run_up，作为所有运行时约束的锚点。
+            const double commit_u = retreat_path_u_by_distance(p, path, step_enter_u, rule->run_up);
+
             StepPlanSegment seg;
+            seg.commit_u = commit_u;
             seg.step_enter_u = step_enter_u;
             seg.step_exit_u = step_exit_u;
             seg.step_enter_pos_map = active->step_enter_pos_map;
             seg.step_exit_pos_map = step_exit_pos;
             seg.dir_map = active->dir_map;
             seg.direction = active->direction;
-            seg.command = *command;
+            seg.command = ActiveStepMode {
+                .mode = rule->chassis_mode,
+                .capability = rule->capability,
+                .speed_min = rule->speed.min,
+                .speed_max = rule->speed.max,
+                .commit_u = commit_u,
+                .exit_u = step_exit_u,
+                .dir_map = active->dir_map.normalized(),
+            };
             seg.terrain_label = active->label;
-            seg.requires_high_performance = terrain_constraints.selected_mode(active->label, active->direction == StepDirection::UP)->requires_high_performance;
+            seg.requires_high_performance = rule->requires_high_performance;
             plan.push_back(std::move(seg));
         }
         active.reset();
@@ -199,9 +200,12 @@ std::vector<StepPlanSegment> build_step_plan(
     if (plan.empty()) return plan;
 
     // ── 计算 prepare / active / release u 边界 ──
+    // prepare / active 自 commit_u（而非物理边缘）上游回退：commit 是上位机视角的台阶起点，
+    // 能力档 blend 与抬腿指令都以它为基准，从而保证 prepare ≤ active ≤ commit 的余量恒定，
+    // 与助跑提前量 run_up 解耦。
     for (StepPlanSegment& segment : plan) {
-        segment.prepare_u = retreat_path_u_by_distance(p, path, segment.step_enter_u, p.prepare_distance);
-        segment.active_u = retreat_path_u_by_distance(p, path, segment.step_enter_u, p.active_distance);
+        segment.prepare_u = retreat_path_u_by_distance(p, path, segment.commit_u, p.prepare_distance);
+        segment.active_u = retreat_path_u_by_distance(p, path, segment.commit_u, p.active_distance);
         segment.release_u = advance_path_u_by_distance(p, path, segment.step_exit_u, p.release_distance);
     }
 
@@ -212,17 +216,17 @@ std::vector<StepPlanSegment> build_step_plan(
 
         if (cur.prepare_u >= prev_seg.release_u) {
             if (cur.active_u < cur.prepare_u) cur.active_u = cur.prepare_u;
-            if (prev_seg.active_u > prev_seg.step_enter_u) prev_seg.active_u = prev_seg.step_enter_u;
+            if (prev_seg.active_u > prev_seg.commit_u) prev_seg.active_u = prev_seg.commit_u;
             continue;
         }
 
-        cur.prepare_u = std::min(prev_seg.release_u, cur.step_enter_u);
+        cur.prepare_u = std::min(prev_seg.release_u, cur.commit_u);
         if (cur.prepare_u < prev_seg.release_u) {
             prev_seg.release_u = std::max(prev_seg.step_exit_u, cur.prepare_u);
         }
 
         if (cur.active_u < cur.prepare_u) cur.active_u = cur.prepare_u;
-        if (prev_seg.active_u > prev_seg.step_enter_u) prev_seg.active_u = prev_seg.step_enter_u;
+        if (prev_seg.active_u > prev_seg.commit_u) prev_seg.active_u = prev_seg.commit_u;
 
         if (cur.prepare_u < prev_seg.release_u) {
             RCLCPP_WARN(
@@ -235,14 +239,32 @@ std::vector<StepPlanSegment> build_step_plan(
         }
     }
 
+    // ── 终值 clamp + 门控软边界 + 回填 command ──
+    // 不变式：prepare ≤ active ≤ commit ≤ step_enter ≤ step_exit ≤ release。
+    // 约束窗软门控：在 commit 上游 gate_transition_distance 处 0→1，在 exit 下游同宽 1→0，
+    // 使 MPC 首控点跨过 commit 那一帧的速度/航向惩罚连续变化。
     for (StepPlanSegment& segment : plan) {
-        segment.prepare_u = std::min(segment.prepare_u, segment.step_enter_u);
-        segment.active_u = std::clamp(segment.active_u, segment.prepare_u, segment.step_enter_u);
+        segment.commit_u = std::min(segment.commit_u, segment.step_enter_u);
+        segment.prepare_u = std::min(segment.prepare_u, segment.commit_u);
+        segment.active_u = std::clamp(segment.active_u, segment.prepare_u, segment.commit_u);
         segment.step_exit_u = std::max(segment.step_exit_u, segment.step_enter_u);
         segment.release_u = std::max(segment.release_u, segment.step_exit_u);
-        segment.command.step_entry_u = segment.step_enter_u;
+
+        const double gate_start_u = std::max(
+            segment.prepare_u,
+            retreat_path_u_by_distance(p, path, segment.commit_u, p.gate_transition_distance)
+        );
+        const double gate_end_u = std::min(
+            segment.release_u,
+            advance_path_u_by_distance(p, path, segment.step_exit_u, p.gate_transition_distance)
+        );
+
         segment.command.prepare_u = segment.prepare_u;
         segment.command.active_u = segment.active_u;
+        segment.command.commit_u = segment.commit_u;
+        segment.command.exit_u = segment.step_exit_u;
+        segment.command.gate_start_u = gate_start_u;
+        segment.command.gate_end_u = gate_end_u;
         segment.command.release_u = segment.release_u;
     }
 

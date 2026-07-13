@@ -51,8 +51,8 @@ TrajectorySeed LongitudinalPlanner::plan(
     const int initial_v = nearest_cell(x0(ix::V), v_min, v_step, v_count);
     layers[0][static_cast<size_t>(initial_s * v_count + initial_v)].cost = 0.0;
 
-    const double entry_s = step_mode && step_mode->step_entry_u
-        ? path.arc_length(0.0, std::clamp(*step_mode->step_entry_u, 0.0, 1.0), 40)
+    const double entry_s = step_mode
+        ? path.arc_length(0.0, std::clamp(step_mode->commit_u, 0.0, 1.0), 40)
         : std::numeric_limits<double>::infinity();
     const double acc_max = std::max(profile.motion_constraints.acc_max, 1e-3);
 

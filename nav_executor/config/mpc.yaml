@@ -15,7 +15,7 @@
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
         global_search:
-          enable: true # 启用异步多模态全局种子搜索
+          enable: false # 启用异步多模态全局种子搜索
           num_threads: 2 # 采样 rollout 并行线程数
           batch_size: 2048 # 每次迭代采样轨迹数
           iteration_count: 1 # 每个独立模态的采样更新次数
@@ -53,9 +53,9 @@
           q_y: 0.3 # 横向误差管廊外权重（|ey| > y_tube 时二次拉回）
           q_theta: 0.15 # 航向误差权重
           q_u: 1.2 # 每步进度势权重（基于 path_u 的剩余弧长下降）
-          y_tube: 0.6 # 横向误差管廊半宽 (m)：管廊内不惩罚横向偏移，允许主动腾挪对齐/助跑台阶
-          q_term_prog: 0.6 # 终端进度势权重：terminal_cost += q_term_prog * s_remaining(投影 u*)，让优化器看到 horizon 外的进度收益
-          q_term_lateral: 0.6 # 终端横向势权重：terminal_cost += q_term_lateral * |ey|，补偿投影进度势在 cross-track 方向的平坦性，防止 rollout 沿切向越飘越远
+          y_tube: 0.3 # 横向误差管廊半宽 (m)：管廊内不惩罚横向偏移，允许主动腾挪对齐/助跑台阶
+          q_term_prog: 0.3 # 终端进度势权重：terminal_cost += q_term_prog * s_remaining(投影 u*)，让优化器看到 horizon 外的进度收益
+          q_term_lateral: 0.3 # 终端横向势权重：terminal_cost += q_term_lateral * |ey|，补偿投影进度势在 cross-track 方向的平坦性，防止 rollout 沿切向越飘越远
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则

@@ -39,8 +39,6 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    const DirectionMapGridView& dg,
-    const GridInfo& di,
     double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
     std::optional<ActiveStepMode> active_step_mode
@@ -83,25 +81,6 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const double detheta_dpathu = -dtheta_du * duc_dpathu;
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
-    const auto ds = eval_dir_bilinear(dg, di, px, py);
-
-    const Eigen::Vector2d dir = ds.value;
-    const double dir_norm_sq = dir.squaredNorm();
-    const double dir_norm = std::sqrt(ds.value.squaredNorm() + 1e-10);
-    const double inv_dir_norm = 1.0 / dir_norm;
-    const double cos_t = std::cos(theta);
-    const double sin_t = std::sin(theta);
-    const Eigen::Vector2d heading(cos_t, sin_t);
-
-    const Eigen::Vector2d ddir_dx = ds.J.col(0);
-    const Eigen::Vector2d ddir_dy = ds.J.col(1);
-    const double dnorm_dx = dir.dot(ddir_dx) * inv_dir_norm;
-    const double dnorm_dy = dir.dot(ddir_dy) * inv_dir_norm;
-
-    const double cross = heading.x() * dir.y() - heading.y() * dir.x();
-    const double dcross_dtheta = -sin_t * dir.y() - cos_t * dir.x();
-    const double dcross_dx = cos_t * ddir_dx.y() - sin_t * ddir_dx.x();
-    const double dcross_dy = cos_t * ddir_dy.y() - sin_t * ddir_dy.x();
 
     const double dv_lim = motion_lim.acc_max * MPC_DT;
     const double dw_lim = motion_lim.alpha_max * MPC_DT;
@@ -160,65 +139,70 @@ FollowResidualLinearization follow_residual_linearized_impl(
     out.jx(9, ix::X) = env_w.obstacle * cs.dx / 255.0;
     out.jx(9, ix::Y) = env_w.obstacle * cs.dy / 255.0;
 
-    const double sign_cross = sign_or_zero(cross);
-    out.r(10) = terrain_w.direction * std::abs(cross);
-    out.jx(10, ix::X) = terrain_w.direction * sign_cross * dcross_dx;
-    out.jx(10, ix::Y) = terrain_w.direction * sign_cross * dcross_dy;
-    out.jx(10, ix::THETA) = terrain_w.direction * sign_cross * dcross_dtheta;
-
+    // ── 台阶约束（残差 10/11/12/13）──
+    // 全部锚在 commit_u（上位机视角的台阶起点），随预测 path_u 由 step_window_gate 调度。
+    // 门控对 path_u 的梯度冻结：约束跟随轨迹前移，但不诱导优化器移动 path_u 逃逸。
+    //   - 10 方向对齐：航向 theta 与规划期常量穿越方向 dir_map 对齐，仅 theta 雅可比。
+    //   - 11 速度窗：v_act 保持在 [speed_min, speed_max]，仅 V 雅可比。
+    //   两者作用区间 [commit_u, exit_u]（含两侧软过渡）。
+    //   - 12/13 可达包络：commit 前整形速度剖面使其在 commit 处可行进窗，仅 V/PATH_U 雅可比。
     if (is_active_follow_step_mode(active_step_mode)) {
         const double speed_min = active_step_mode->speed_min;
         const double speed_max = active_step_mode->speed_max;
-        const double v_err = v_act < speed_min
-            ? (speed_min - v_act)
-            : (v_act > speed_max ? (v_act - speed_max) : 0.0);
-        const double abs_v_err = std::abs(v_err);
-        const double relu_vstep = abs_v_err;
+        const double gate = step_window_gate(uc, *active_step_mode);
 
-        if (dir_norm_sq > 1e-10) {
-            out.r(11) = terrain_w.step_vel_weight * dir_norm * relu_vstep;
-            out.jx(11, ix::X) = terrain_w.step_vel_weight * dnorm_dx * relu_vstep;
-            out.jx(11, ix::Y) = terrain_w.step_vel_weight * dnorm_dy * relu_vstep;
-            out.jx(11, ix::V) = terrain_w.step_vel_weight * dir_norm
+        if (gate > 0.0) {
+            const Eigen::Vector2d& dir = active_step_mode->dir_map; // 归一化常量
+            const double cos_t = std::cos(theta);
+            const double sin_t = std::sin(theta);
+            const double cross = cos_t * dir.y() - sin_t * dir.x();
+            const double dcross_dtheta = -sin_t * dir.y() - cos_t * dir.x();
+            const double sign_cross = sign_or_zero(cross);
+            out.r(10) = terrain_w.direction * gate * std::abs(cross);
+            out.jx(10, ix::THETA) = terrain_w.direction * gate * sign_cross * dcross_dtheta;
+
+            const double relu_vstep = v_act < speed_min
+                ? (speed_min - v_act)
+                : (v_act > speed_max ? (v_act - speed_max) : 0.0);
+            out.r(11) = terrain_w.step_vel_weight * gate * relu_vstep;
+            out.jx(11, ix::V) = terrain_w.step_vel_weight * gate
                 * ((v_act < speed_min) ? -1.0 : (v_act > speed_max) ? 1.0 : 0.0);
         }
 
-        if (active_step_mode->step_entry_u.has_value()) {
-            const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
-            const double path_u = std::clamp(uc, 0.0, 1.0);
-            if (path_u < entry_u) {
-                const double d = spline.arc_length(path_u, entry_u, 8);
+        const double commit_u = std::clamp(active_step_mode->commit_u, 0.0, 1.0);
+        const double path_u = std::clamp(uc, 0.0, 1.0);
+        if (path_u < commit_u) {
+            const double d = spline.arc_length(path_u, commit_u, 8);
 
-                const auto se2 = spline.eval(path_u);
-                const double ds_du = se2.ds_du * duc_dpathu;
+            const auto se2 = spline.eval(path_u);
+            const double ds_du = se2.ds_du * duc_dpathu;
 
-                const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
-                const double r_lo_expr = std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d;
-                const double r_hi_expr = v_act * v_act - 2.0 * a_guide * d;
-                const double r_lo = std::sqrt(std::max(0.0, r_lo_expr));
-                const double r_hi = std::sqrt(std::max(0.0, r_hi_expr));
+            const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
+            const double r_lo_expr = std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d;
+            const double r_hi_expr = v_act * v_act - 2.0 * a_guide * d;
+            const double r_lo = std::sqrt(std::max(0.0, r_lo_expr));
+            const double r_hi = std::sqrt(std::max(0.0, r_hi_expr));
 
-                const double relu_lo = positive_part(speed_min - r_lo);
-                out.r(12) = std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * relu_lo;
-                if (relu_lo > 0.0) {
-                    const bool lo_active = r_lo_expr > 0.0;
-                    const double inv_r_lo = 1.0 / std::max(r_lo, REACHABILITY_EPS);
-                    const double drlo_dv = (lo_active && v_act > 0.0) ? (v_act * inv_r_lo) : 0.0;
-                    const double drlo_du = lo_active ? (-a_guide * ds_du * inv_r_lo) : 0.0;
-                    out.jx(12, ix::V) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_dv;
-                    out.jx(12, ix::PATH_U) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_du;
-                }
+            const double relu_lo = positive_part(speed_min - r_lo);
+            out.r(12) = std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * relu_lo;
+            if (relu_lo > 0.0) {
+                const bool lo_active = r_lo_expr > 0.0;
+                const double inv_r_lo = 1.0 / std::max(r_lo, REACHABILITY_EPS);
+                const double drlo_dv = (lo_active && v_act > 0.0) ? (v_act * inv_r_lo) : 0.0;
+                const double drlo_du = lo_active ? (-a_guide * ds_du * inv_r_lo) : 0.0;
+                out.jx(12, ix::V) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_dv;
+                out.jx(12, ix::PATH_U) = -std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * drlo_du;
+            }
 
-                const double relu_hi = positive_part(r_hi - speed_max);
-                out.r(13) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * relu_hi;
-                if (relu_hi > 0.0) {
-                    const bool hi_active = r_hi_expr > 0.0;
-                    const double inv_r_hi = 1.0 / std::max(r_hi, REACHABILITY_EPS);
-                    const double drhi_dv = hi_active ? (v_act * inv_r_hi) : 0.0;
-                    const double drhi_du = hi_active ? (a_guide * ds_du * inv_r_hi) : 0.0;
-                    out.jx(13, ix::V) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_dv;
-                    out.jx(13, ix::PATH_U) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_du;
-                }
+            const double relu_hi = positive_part(r_hi - speed_max);
+            out.r(13) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * relu_hi;
+            if (relu_hi > 0.0) {
+                const bool hi_active = r_hi_expr > 0.0;
+                const double inv_r_hi = 1.0 / std::max(r_hi, REACHABILITY_EPS);
+                const double drhi_dv = hi_active ? (v_act * inv_r_hi) : 0.0;
+                const double drhi_du = hi_active ? (a_guide * ds_du * inv_r_hi) : 0.0;
+                out.jx(13, ix::V) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_dv;
+                out.jx(13, ix::PATH_U) = std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * drhi_du;
             }
         }
     }
@@ -247,8 +231,6 @@ double follow_running_cost_value_only_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    const DirectionMapGridView& dg,
-    const GridInfo& di,
     double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
     std::optional<ActiveStepMode> active_step_mode,
@@ -280,8 +262,6 @@ double follow_running_cost_value_only_impl(
     const double ey = -ex * se.sin_r + ey_w * se.cos_r;
     const double etheta = wrap_pi(theta - se.thetar);
 
-    const Eigen::Vector2d dir = eval_dir_bilinear_value_only(dg, di, px, py);
-
     double cost_value;
     if (cached_cost_value && *cached_cost_value >= 0.0) {
         cost_value = *cached_cost_value;
@@ -290,9 +270,6 @@ double follow_running_cost_value_only_impl(
         cost_value = eval_cost_bilinear(cg, ci, px, py).value;
     }
 
-    const double dir_norm_sq = dir.squaredNorm();
-    const double dir_norm = std::sqrt(dir_norm_sq);
-    const double cross = std::cos(theta) * dir.y() - std::sin(theta) * dir.x();
     const double a_lat = std::abs(v_cmd * w_cmd);
 
     const double dv_lim = motion_lim.acc_max * MPC_DT;
@@ -311,32 +288,34 @@ double follow_running_cost_value_only_impl(
     cost += 0.5 * (motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim)) * (motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim));
     cost += 0.5 * (motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max)) * (motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max));
     cost += 0.5 * (env_w.obstacle * cost_value / 255.0) * (env_w.obstacle * cost_value / 255.0);
-    cost += 0.5 * (terrain_w.direction * std::abs(cross)) * (terrain_w.direction * std::abs(cross));
 
+    // ── 台阶约束（与 follow_residual_linearized_impl 逐项对应）──
     if (is_active_follow_step_mode(active_step_mode)) {
         const double speed_min = active_step_mode->speed_min;
         const double speed_max = active_step_mode->speed_max;
-        const double v_err = v_act < speed_min
-            ? (speed_min - v_act)
-            : (v_act > speed_max ? (v_act - speed_max) : 0.0);
-        const double relu_vstep = std::abs(v_err);
+        const double gate = step_window_gate(uc, *active_step_mode);
 
-        if (dir_norm_sq > 1e-10) {
-            cost += 0.5 * (terrain_w.step_vel_weight * dir_norm * relu_vstep) * (terrain_w.step_vel_weight * dir_norm * relu_vstep);
+        if (gate > 0.0) {
+            const Eigen::Vector2d& dir = active_step_mode->dir_map;
+            const double cross = std::cos(theta) * dir.y() - std::sin(theta) * dir.x();
+            cost += 0.5 * (terrain_w.direction * gate * std::abs(cross)) * (terrain_w.direction * gate * std::abs(cross));
+
+            const double relu_vstep = v_act < speed_min
+                ? (speed_min - v_act)
+                : (v_act > speed_max ? (v_act - speed_max) : 0.0);
+            cost += 0.5 * (terrain_w.step_vel_weight * gate * relu_vstep) * (terrain_w.step_vel_weight * gate * relu_vstep);
         }
 
-        if (active_step_mode->step_entry_u.has_value()) {
-            const double entry_u = std::clamp(*active_step_mode->step_entry_u, 0.0, 1.0);
-            const double path_u = std::clamp(uc, 0.0, 1.0);
-            if (path_u < entry_u) {
-                const double d = spline.arc_length(path_u, entry_u, 8);
-                const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
-                const double r_lo = std::sqrt(std::max(0.0, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
-                const double r_hi = std::sqrt(std::max(0.0, v_act * v_act - 2.0 * a_guide * d));
+        const double commit_u = std::clamp(active_step_mode->commit_u, 0.0, 1.0);
+        const double path_u = std::clamp(uc, 0.0, 1.0);
+        if (path_u < commit_u) {
+            const double d = spline.arc_length(path_u, commit_u, 8);
+            const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
+            const double r_lo = std::sqrt(std::max(0.0, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
+            const double r_hi = std::sqrt(std::max(0.0, v_act * v_act - 2.0 * a_guide * d));
 
-                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo)) * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo));
-                cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max)) * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max));
-            }
+            cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo)) * (std::sqrt(std::max(terrain_w.step_reachability_lo, 0.0)) * positive_part(speed_min - r_lo));
+            cost += 0.5 * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max)) * (std::sqrt(std::max(terrain_w.step_reachability_hi, 0.0)) * positive_part(r_hi - speed_max));
         }
     }
 
@@ -445,8 +424,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     const CostMapGridView& masked_global_grid,
     double prediction_dt,
     double schedule_rho,
-    const DirectionMapGridView& dir_grid,
-    const GridInfo& dir_info,
     double remaining_energy,
     double rfr_pwr_limit,
     const CapabilityProfile& blended_profile,
@@ -460,8 +437,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     masked_global_grid_(masked_global_grid),
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-    dir_grid_(dir_grid),
-    dir_info_(dir_info),
     remaining_energy_(remaining_energy),
     rfr_pwr_limit_(rfr_pwr_limit),
     blended_profile_(blended_profile),
@@ -516,8 +491,6 @@ FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const Splin
         masked_global_grid_,
         prediction_dt_,
         model_.rho,
-        dir_grid_,
-        dir_info_,
         remaining_energy_,
         rfr_pwr_limit_,
         blended_profile_,
@@ -571,7 +544,7 @@ template<int Horizon>
 double FollowProblemT<Horizon>::running_cost_value_only(int k, const StateVec& x, const ControlVec& u, double* cached_cost_value) const {
     return follow_running_cost_value_only_impl(
         x, u, spline_, p_,
-        cost_grid_for_step(k), cost_info_, dir_grid_, dir_info_,
+        cost_grid_for_step(k), cost_info_,
         rfr_pwr_limit_, blended_profile_.motion_constraints,
         active_step_mode_, cached_cost_value
     );
@@ -590,7 +563,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 ) const {
     const auto& cg = cost_grid_for_step(k);
     const auto lin = follow_residual_linearized_impl(
-        x, u, spline_, p_, cg, cost_info_, dir_grid_, dir_info_,
+        x, u, spline_, p_, cg, cost_info_,
         rfr_pwr_limit_, blended_profile_.motion_constraints,
         active_step_mode_
     );

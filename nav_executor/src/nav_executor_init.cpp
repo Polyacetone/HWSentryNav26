@@ -219,6 +219,7 @@ void NavExecutorNode::load_terrain_config() {
                         .capability = capability_level_from_string(declare_parameter<std::string>(mode_prefix + ".capability")),
                         .speed = {.min = declare_parameter<double>(mode_prefix + ".speed.min"), .max = declare_parameter<double>(mode_prefix + ".speed.max")},
                         .requires_high_performance = declare_parameter<bool>(mode_prefix + ".requires_high_perf"),
+                        .run_up = declare_parameter<double>(mode_prefix + ".run_up"),
                     };
                 }
                 target.push_back(mode_map[mode_name]);
@@ -317,6 +318,7 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .prepare_distance = declare_parameter<double>("path_planner.step.detection.prepare_distance"),
         .active_distance = declare_parameter<double>("path_planner.step.detection.active_distance"),
         .release_distance = declare_parameter<double>("path_planner.step.detection.release_distance"),
+        .gate_transition_distance = declare_parameter<double>("path_planner.step.detection.gate_transition_distance"),
     };
     c.enable_debug = enable_debug_;
     return c;

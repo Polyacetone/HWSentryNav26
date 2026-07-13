@@ -85,6 +85,7 @@ struct TerrainStepRule {
     CapabilityLevel capability = CapabilityLevel::LOW;
     TerrainSpeedRange speed;
     bool requires_high_performance = false;
+    double run_up = 0.0; // 助跑提前量 (m)：约束锚点自物理台阶边缘上游回退该距离（冲量动作填 0）
 };
 
 struct TerrainLabelRule {

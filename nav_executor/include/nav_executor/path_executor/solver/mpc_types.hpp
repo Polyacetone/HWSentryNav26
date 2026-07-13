@@ -264,14 +264,24 @@ struct EnergyParams {
     double weight;
 };
 
+// 运行时台阶约束参数。所有 u 锚点语义（prepare ≤ active ≤ commit ≤ 物理边缘 ≤ exit ≤ release）
+// 在规划期由 step_annotator 计算并冻结。
+//
+// commit_u 是「上位机视角的台阶起点」：引入助跑提前量后，速度可达包络、速度窗、方向对齐
+// 全部提前到 commit_u 施加，而非物理台阶边缘。物理边缘（真实起跳点，上报底盘用）由
+// StepPlanSegment.step_enter_u 单独持有，二者不混用。
 struct ActiveStepMode {
     uint8_t mode = chassis_mode::NORMAL;
     CapabilityLevel capability = CapabilityLevel::LOW;
     double speed_min = 0.0;
     double speed_max = 0.0;
-    std::optional<double> step_entry_u = std::nullopt;
-    double prepare_u = 0.0;
-    double active_u = 0.0;
+    double prepare_u = 0.0;    // 能力档 profile blend 起点
+    double active_u = 0.0;     // 底盘台阶模式激活（抬腿指令）起点
+    double commit_u = 0.0;     // 约束锚点：可达包络靶点 + 约束窗内边界起点
+    double exit_u = 1.0;       // 约束窗内边界终点（物理台阶出口 u）
+    double gate_start_u = 0.0; // 约束窗软起点（commit_u 上游 transition 处，门控 0→1）
+    double gate_end_u = 1.0;   // 约束窗软终点（exit_u 下游 transition 处，门控 1→0）
+    Eigen::Vector2d dir_map = Eigen::Vector2d::Zero(); // 归一化台阶穿越方向（航向对齐目标）
     double release_u = 1.0;
 
     bool operator==(const ActiveStepMode&) const = default;
@@ -324,26 +334,9 @@ struct CostMapGridView {
     const CostMap& map_;
 };
 
-struct DirectionMapGridView {
-    explicit DirectionMapGridView(const DirectionMap& map): map_(map) {}
-
-    Eigen::Vector2d value_at_clamped(int row, int col) const {
-        row = std::max(0, std::min(row, map_.height - 1));
-        col = std::max(0, std::min(col, map_.width - 1));
-        return map_.data[static_cast<size_t>(row * map_.width + col)];
-    }
-
-    const DirectionMap& map_;
-};
-
 struct CostSample {
     double value;
     double dx, dy;
-};
-
-struct DirSample {
-    Eigen::Vector2d value;
-    Eigen::Matrix2d J;
 };
 
 using StateVec = Eigen::Matrix<double, MPC_NX, 1>;

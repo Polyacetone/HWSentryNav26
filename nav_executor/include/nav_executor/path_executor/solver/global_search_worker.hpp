@@ -26,7 +26,6 @@ struct GlobalSearchInput {
     CostMap cost_map;
     CostMap masked_global_map;
     std::vector<CostMap> per_step_cost_maps;
-    DirectionMap direction_map;
     StateVec x0;
     TrajectorySeed warm_seed;
     TrajectorySeed longitudinal_seed;
