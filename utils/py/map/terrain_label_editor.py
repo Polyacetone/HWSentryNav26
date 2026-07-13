@@ -29,6 +29,7 @@ from __future__ import annotations
 import math
 import os
 import tkinter as tk
+from collections.abc import Iterable
 from tkinter import filedialog, messagebox, ttk, simpledialog
 from typing import Optional
 
@@ -170,6 +171,9 @@ class TerrainLabelEditor:
         self.start_y: Optional[int] = None
         self.temp_draw_id: Optional[int] = None
         self._temp_preview: list[int] = []
+        self._brush_preview_id: Optional[int] = None
+        self._hover_xy: Optional[tuple[int, int]] = None
+        self._last_paint_xy: Optional[tuple[int, int]] = None
 
         self._render_cache: Optional[ImageTk.PhotoImage] = None
         self._arrow_items: list[int] = []
@@ -203,12 +207,14 @@ class TerrainLabelEditor:
 
         tk.Frame(toolbar, width=6).pack(side=tk.LEFT)
 
-        tk.Label(toolbar, text="线宽:").pack(side=tk.LEFT, padx=1)
+        tk.Label(toolbar, text="笔刷大小:").pack(side=tk.LEFT, padx=1)
         self.spin_width = tk.Spinbox(toolbar, from_=1, to=30, width=3,
                                      command=self._update_line_width)
         self.spin_width.pack(side=tk.LEFT, padx=2)
         self.spin_width.delete(0, "end")
         self.spin_width.insert(0, "3")
+        self.spin_width.bind("<KeyRelease>", lambda _: self._update_line_width())
+        self.spin_width.bind("<FocusOut>", lambda _: self._update_line_width())
 
         tk.Frame(toolbar, width=10).pack(side=tk.LEFT)
 
@@ -287,7 +293,8 @@ class TerrainLabelEditor:
 
     def _on_mode_change(self) -> None:
         self.mode = self.mode_var.get()
-        self.spin_width.config(state=tk.NORMAL if self.mode == "line" else tk.DISABLED)
+        self.spin_width.config(state=tk.NORMAL if self.mode in ("pixel", "line") else tk.DISABLED)
+        self._update_brush_preview()
         self._update_mode_ui()
 
     def _update_mode_ui(self) -> None:
@@ -299,9 +306,10 @@ class TerrainLabelEditor:
 
     def _update_line_width(self) -> None:
         try:
-            self.line_width = max(1, int(self.spin_width.get()))
+            self.line_width = min(30, max(1, int(self.spin_width.get())))
         except ValueError:
-            self.line_width = 3
+            return
+        self._update_brush_preview()
 
     def _on_label_change(self, _event=None) -> None:
         selected_name = self.label_var.get()
@@ -313,6 +321,7 @@ class TerrainLabelEditor:
             self._last_directional_label = self.current_label
         self._update_color_preview()
         self._update_dir_slider_state()
+        self._update_brush_preview()
         self._update_mode_ui()
 
     def _on_dir_slider_change(self, _name=None, _index=None, _mode=None) -> None:
@@ -345,6 +354,7 @@ class TerrainLabelEditor:
                 self.label_var.set(TERRAIN_NAMES[label])
                 self._update_color_preview()
                 self._update_dir_slider_state()
+                self._update_brush_preview()
                 self._update_mode_ui()
         elif event.char in ("o", "O"):
             self.open_map()
@@ -560,10 +570,14 @@ class TerrainLabelEditor:
         self._render_cache = ImageTk.PhotoImage(img)
 
         self.canvas.delete("all")
+        self.temp_draw_id = None
+        self._temp_preview.clear()
+        self._brush_preview_id = None
         self.canvas.create_image(0, 0, image=self._render_cache, anchor=tk.NW)
         self.canvas.config(scrollregion=(0, 0, sw, sh))
 
         self._draw_arrows()
+        self._update_brush_preview()
 
     def _render_base_image(self) -> np.ndarray:
         assert self.terrain is not None
@@ -660,15 +674,17 @@ class TerrainLabelEditor:
 
     # ── 坐标系转换 ───────────────────────────────────────────
 
-    def _canvas_to_img_xy(self, event) -> Optional[tuple[int, int]]:
+    def _canvas_to_img_xy(self, event, *, clamp: bool = False) -> Optional[tuple[int, int]]:
         if self.terrain is None:
             return None
         h, w = self.terrain.shape
         cx = self.canvas.canvasx(event.x)
         cy = self.canvas.canvasy(event.y)
-        x = int(cx / self.scale)
-        y_disp = int(cy / self.scale)
+        x = math.floor(cx / self.scale)
+        y_disp = math.floor(cy / self.scale)
         y = (h - 1) - y_disp
+        if clamp:
+            return min(w - 1, max(0, x)), min(h - 1, max(0, y))
         if x < 0 or y < 0 or x >= w or y >= h:
             return None
         return x, y
@@ -683,11 +699,15 @@ class TerrainLabelEditor:
 
         xy = self._canvas_to_img_xy(event)
         if xy is None:
+            self._hover_xy = None
+            self._clear_brush_preview()
             self.status_coord.config(text="X:-, Y:-")
             self.status_label.config(text="标签: -, 方向: -, 高程: -")
             return
 
         x, y = xy
+        self._hover_xy = xy
+        self._update_brush_preview()
         self.status_coord.config(text=f"X:{x}, Y:{y}")
 
         label = int(self.terrain[y, x])
@@ -703,6 +723,8 @@ class TerrainLabelEditor:
         )
 
     def _on_mouse_leave(self, _event: tk.Event) -> None:
+        self._hover_xy = None
+        self._clear_brush_preview()
         self.status_coord.config(text="X:-, Y:-")
         self.status_label.config(text="标签: -, 方向: -, 高程: -")
 
@@ -715,10 +737,14 @@ class TerrainLabelEditor:
 
         self._save_state()
         self._pixel_dirty = False
+        self._last_paint_xy = None
         x, y = xy
+        self._hover_xy = xy
+        self.canvas.grab_set()
 
         if self.mode == "pixel":
-            self._paint_pixel(x, y)
+            self._paint_brush(x, y)
+            self._last_paint_xy = xy
         else:
             self.start_x = x
             self.start_y = y
@@ -731,62 +757,108 @@ class TerrainLabelEditor:
                     outline=terrain_color_hex(self.current_label), width=2, dash=(4, 2),
                 )
             elif self.mode == "line":
-                color = terrain_color_hex(self.current_label)
-                rid = self.canvas.create_rectangle(
-                    sx, sy, sx + self.scale, sy + self.scale,
-                    outline="", fill=color,
-                )
-                self._temp_preview = [rid]
+                self._update_temp_line(x, y)
+        self._update_brush_preview()
 
     def _on_mouse_drag(self, event: tk.Event) -> None:
         if self.terrain is None:
             return
-        xy = self._canvas_to_img_xy(event)
+        xy = self._canvas_to_img_xy(event, clamp=True)
         if xy is None:
             return
         x, y = xy
+        self._hover_xy = xy
 
         if self.mode == "pixel":
-            self._paint_pixel(x, y)
+            if self._last_paint_xy is None:
+                self._paint_brush(x, y)
+            else:
+                self._paint_brush_stroke(*self._last_paint_xy, x, y)
+            self._last_paint_xy = xy
         elif self.mode == "rect" and self.temp_draw_id is not None:
             self._update_temp_rect(x, y)
         elif self.mode == "line" and self.start_x is not None:
             self._update_temp_line(x, y)
+        self._update_brush_preview()
 
     def _on_mouse_up(self, event: tk.Event) -> None:
         if self.terrain is None:
             return
-        xy = self._canvas_to_img_xy(event)
-        if xy is None:
-            return
-        x, y = xy
+        xy = self._canvas_to_img_xy(event, clamp=True)
+        try:
+            if xy is None:
+                return
+            x, y = xy
 
-        if self.mode == "rect" and self.temp_draw_id is not None:
-            self._apply_rect(x, y)
-        elif self.mode == "line" and self.start_x is not None:
-            self._apply_line(x, y)
-        elif self.mode == "pixel" and self._pixel_dirty:
-            self._schedule_lazy_refresh()
+            if self.mode == "rect" and self.temp_draw_id is not None:
+                self._apply_rect(x, y)
+            elif self.mode == "line" and self.start_x is not None:
+                self._apply_line(x, y)
+            elif self.mode == "pixel" and self._pixel_dirty:
+                self._schedule_lazy_refresh()
+        finally:
+            self._last_paint_xy = None
+            if self.canvas.grab_current() == self.canvas:
+                self.canvas.grab_release()
 
     # ── 标注操作 ─────────────────────────────────────────────
 
-    def _paint_pixel(self, x: int, y: int) -> None:
+    def _paint_brush(self, x: int, y: int) -> None:
+        self._paint_pixels(self._brush_footprint(x, y, self.line_width))
+
+    def _paint_brush_stroke(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        pixels = {
+            pixel
+            for x, y in self._rasterize_line(x0, y0, x1, y1)
+            for pixel in self._brush_footprint(x, y, self.line_width)
+        }
+        self._paint_pixels(pixels)
+
+    def _paint_pixels(self, pixels: Iterable[tuple[int, int]]) -> None:
         assert self.terrain is not None and self.direction is not None
         h = self.terrain.shape[0]
-        self.terrain[y, x] = self.current_label
-        if self.current_label in DIRECTIONAL_LABELS:
-            self.direction[y, x] = self.current_dir_value.get()
-        else:
-            self.direction[y, x] = 0
-
-        sx = x * self.scale
-        sy = (h - 1 - y) * self.scale
         color = terrain_color_hex(self.current_label)
-        self.canvas.create_rectangle(
-            sx, sy, sx + self.scale, sy + self.scale,
-            outline="", fill=color,
+        final_dir = self.current_dir_value.get() if self.current_label in DIRECTIONAL_LABELS else 0
+        painted = False
+        for px, py in pixels:
+            if not (0 <= py < h and 0 <= px < self.terrain.shape[1]):
+                continue
+            painted = True
+            self.terrain[py, px] = self.current_label
+            self.direction[py, px] = final_dir
+            sx = px * self.scale
+            sy = (h - 1 - py) * self.scale
+            self.canvas.create_rectangle(
+                sx, sy, sx + self.scale, sy + self.scale,
+                outline="", fill=color,
+            )
+        self._pixel_dirty = self._pixel_dirty or painted
+
+    def _clear_brush_preview(self) -> None:
+        if self._brush_preview_id is not None:
+            self.canvas.delete(self._brush_preview_id)
+            self._brush_preview_id = None
+
+    def _update_brush_preview(self) -> None:
+        self._clear_brush_preview()
+        if self.terrain is None or self._hover_xy is None or self.mode not in ("pixel", "line"):
+            return
+
+        x, y = self._hover_xy
+        h = self.terrain.shape[0]
+        w = self.terrain.shape[1]
+        if not (0 <= x < w and 0 <= y < h):
+            self._hover_xy = None
+            return
+        offset = -(self.line_width // 2)
+        left = (x + offset) * self.scale
+        right = (x + offset + self.line_width) * self.scale
+        top = (h - y - offset - self.line_width) * self.scale
+        bottom = (h - y - offset) * self.scale
+        self._brush_preview_id = self.canvas.create_rectangle(
+            left, top, right, bottom,
+            outline=terrain_color_light_hex(self.current_label), width=2, dash=(4, 3),
         )
-        self._pixel_dirty = True
 
     def _schedule_lazy_refresh(self) -> None:
         if self._lazy_refresh_id is not None:
@@ -833,22 +905,20 @@ class TerrainLabelEditor:
         self._temp_preview.clear()
 
         h = self.terrain.shape[0]
-        half_w = self.line_width // 2
         color = terrain_color_hex(self.current_label)
 
-        for px, py in self._rasterize_line(self.start_x, self.start_y, x, y):
-            for dy in range(-half_w, half_w + 1):
-                for dx in range(-half_w, half_w + 1):
-                    ny = py + dy
-                    nx = px + dx
-                    if 0 <= ny < h and 0 <= nx < self.terrain.shape[1]:
-                        sx = nx * self.scale
-                        sy = (h - 1 - ny) * self.scale
-                        rid = self.canvas.create_rectangle(
-                            sx, sy, sx + self.scale, sy + self.scale,
-                            outline="", fill=color,
-                        )
-                        self._temp_preview.append(rid)
+        pixels = self._line_footprint(
+            self.start_x, self.start_y, x, y, self.line_width,
+            self.terrain.shape[1], h,
+        )
+        for px, py in pixels:
+            sx = px * self.scale
+            sy = (h - 1 - py) * self.scale
+            rid = self.canvas.create_rectangle(
+                sx, sy, sx + self.scale, sy + self.scale,
+                outline="", fill=color,
+            )
+            self._temp_preview.append(rid)
 
     def _apply_line(self, x: int, y: int) -> None:
         assert self.terrain is not None and self.direction is not None
@@ -861,22 +931,53 @@ class TerrainLabelEditor:
         dir_val = direction_angle_from_line(self.start_x, self.start_y, x, y)
         label = self.current_label
 
-        half_w = self.line_width // 2
         final_dir = dir_val if label in DIRECTIONAL_LABELS else 0
-        for px, py in self._rasterize_line(self.start_x, self.start_y, x, y):
-            for dy in range(-half_w, half_w + 1):
-                for dx in range(-half_w, half_w + 1):
-                    ny = py + dy
-                    nx = px + dx
-                    if 0 <= ny < self.terrain.shape[0] and 0 <= nx < self.terrain.shape[1]:
-                        self.terrain[ny, nx] = label
-                        self.direction[ny, nx] = final_dir
+        pixels = self._line_footprint(
+            self.start_x, self.start_y, x, y, self.line_width,
+            self.terrain.shape[1], self.terrain.shape[0],
+        )
+        for px, py in pixels:
+            self.terrain[py, px] = label
+            self.direction[py, px] = final_dir
 
         if self.temp_draw_id is not None:
             self.canvas.delete(self.temp_draw_id)
             self.temp_draw_id = None
         self.start_x = self.start_y = None
         self._refresh_display()
+
+    @staticmethod
+    def _brush_footprint(x: int, y: int, width: int) -> list[tuple[int, int]]:
+        """返回以 (x, y) 为落点、边长严格为 width 的方形笔刷像素。"""
+        offset = -(width // 2)
+        return [
+            (x + dx, y + dy)
+            for dy in range(offset, offset + width)
+            for dx in range(offset, offset + width)
+        ]
+
+    @classmethod
+    def _line_footprint(
+        cls,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        width: int,
+        map_width: int,
+        map_height: int,
+    ) -> list[tuple[int, int]]:
+        """用方形笔刷沿中心线扫掠，起终点均保留完整笔刷。"""
+        if (x1, y1) < (x0, y0):
+            x0, y0, x1, y1 = x1, y1, x0, y0
+
+        pixels = {
+            pixel
+            for x, y in cls._rasterize_line(x0, y0, x1, y1)
+            for pixel in cls._brush_footprint(x, y, width)
+            if 0 <= pixel[0] < map_width and 0 <= pixel[1] < map_height
+        }
+        return sorted(pixels, key=lambda pixel: (pixel[1], pixel[0]))
 
     @staticmethod
     def _rasterize_line(x0: int, y0: int, x1: int, y1: int):

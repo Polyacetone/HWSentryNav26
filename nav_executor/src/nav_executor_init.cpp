@@ -433,7 +433,8 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .lat_acc = declare_parameter<double>("mpc.follow.motion_constraint_weights.lat_acc")
             },
             .terrain_limits = {
-                .step_reachability_guide_acc = declare_parameter<double>("mpc.follow.terrain_limits.step_reachability_guide_acc")
+                .step_reachability_guide_acc = declare_parameter<double>("mpc.follow.terrain_limits.step_reachability_guide_acc"),
+                .step_feasibility_margin_band = declare_parameter<double>("mpc.follow.terrain_limits.step_feasibility_margin_band")
             },
             .terrain_weights = {
                 .step_vel_weight = declare_parameter<double>("mpc.follow.terrain_weights.internal.velocity_window"),

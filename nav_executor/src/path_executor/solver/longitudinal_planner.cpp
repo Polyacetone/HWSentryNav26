@@ -53,7 +53,7 @@ TrajectorySeed LongitudinalPlanner::plan(
 
     const StepTraversalConstraint* const approach_step = step_constraint_schedule.approach_constraint_at(current_path_u);
     const double entry_s = approach_step
-        ? path.arc_length(0.0, std::clamp(approach_step->commit_u, 0.0, 1.0), 40)
+        ? path.arc_length(0.0, std::clamp(approach_step->step_enter_u, 0.0, 1.0), 40)
         : std::numeric_limits<double>::infinity();
     const double acc_max = std::max(profile.motion_constraints.acc_max, 1e-3);
 

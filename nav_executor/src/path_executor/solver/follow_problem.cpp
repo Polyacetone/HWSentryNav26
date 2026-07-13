@@ -156,32 +156,50 @@ FollowResidualLinearization follow_residual_linearized_impl(
         const double gate = step_window_gate(uc, *internal_step);
 
         if (gate > 0.0) {
+            // 助跑可行性因子 f：仅在物理边缘上游（uc < step_enter_u）才可能 <1；越过边缘后
+            // 已无后退退路，f≡1。作为冻结门控（不并入雅可比），与 step_window_gate 一致，
+            // 避免优化器移动 v/path_u 逃避约束。gf = gate * f 调度“助跑期建立约束”的施加。
+            double f = 1.0;
+            if (uc < internal_step->step_enter_u) {
+                const double d_edge = spline.arc_length(
+                    std::clamp(uc, 0.0, 1.0), std::clamp(internal_step->step_enter_u, 0.0, 1.0), 8
+                );
+                const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
+                f = step_feasibility_factor(
+                    v_act, d_edge, speed_min, a_guide, follow.terrain_limits.step_feasibility_margin_band
+                );
+            }
+            const double gf = gate * f;
+
             const Eigen::Vector2d& dir = internal_step->dir_map; // 归一化常量
             const double cos_t = std::cos(theta);
             const double sin_t = std::sin(theta);
             const double cross = cos_t * dir.y() - sin_t * dir.x();
             const double dcross_dtheta = -sin_t * dir.y() - cos_t * dir.x();
             const double sign_cross = sign_or_zero(cross);
-            out.r(10) = terrain_w.direction * gate * std::abs(cross);
-            out.jx(10, ix::THETA) = terrain_w.direction * gate * sign_cross * dcross_dtheta;
+            out.r(10) = terrain_w.direction * gf * std::abs(cross);
+            out.jx(10, ix::THETA) = terrain_w.direction * gf * sign_cross * dcross_dtheta;
 
-            const double relu_vstep = v_act < speed_min
-                ? (speed_min - v_act)
-                : (v_act > speed_max ? (v_act - speed_max) : 0.0);
-            out.r(11) = terrain_w.step_vel_weight * gate * relu_vstep;
-            out.jx(11, ix::V) = terrain_w.step_vel_weight * gate
-                * ((v_act < speed_min) ? -1.0 : (v_act > speed_max) ? 1.0 : 0.0);
+            // 速度窗：under-speed 分支受 f 门控（不可行时释放，让位于后退退路）；
+            // over-speed 分支不受 f 影响（任何时候禁止超速进入台阶）。
+            if (v_act < speed_min) {
+                out.r(11) = terrain_w.step_vel_weight * gf * (speed_min - v_act);
+                out.jx(11, ix::V) = -terrain_w.step_vel_weight * gf;
+            } else if (v_act > speed_max) {
+                out.r(11) = terrain_w.step_vel_weight * gate * (v_act - speed_max);
+                out.jx(11, ix::V) = terrain_w.step_vel_weight * gate;
+            }
 
-            out.r(15) = terrain_w.step_omega * gate * w_cmd;
-            out.ju(15, 1) = terrain_w.step_omega * gate;
+            out.r(15) = terrain_w.step_omega * gf * w_cmd;
+            out.ju(15, 1) = terrain_w.step_omega * gf;
 
-            out.r(16) = terrain_w.step_dv * gate * dv_cmd;
-            out.ju(16, 0) = terrain_w.step_dv * gate;
-            out.jx(16, ix::DV) = -terrain_w.step_dv * gate;
+            out.r(16) = terrain_w.step_dv * gf * dv_cmd;
+            out.ju(16, 0) = terrain_w.step_dv * gf;
+            out.jx(16, ix::DV) = -terrain_w.step_dv * gf;
 
-            out.r(17) = terrain_w.step_domega * gate * dw_cmd;
-            out.ju(17, 1) = terrain_w.step_domega * gate;
-            out.jx(17, ix::DW) = -terrain_w.step_domega * gate;
+            out.r(17) = terrain_w.step_domega * gf * dw_cmd;
+            out.ju(17, 1) = terrain_w.step_domega * gf;
+            out.jx(17, ix::DW) = -terrain_w.step_domega * gf;
         }
 
     }
@@ -192,10 +210,12 @@ FollowResidualLinearization follow_residual_linearized_impl(
     if (approach_step) {
         const double speed_min = approach_step->speed_min;
         const double speed_max = approach_step->speed_max;
-        const double commit_u = std::clamp(approach_step->commit_u, 0.0, 1.0);
+        // 可达包络参考点为物理边缘 step_enter_u（贯穿 run_up 平地段）：d→0 处退化为入口速度地板，
+        // 守住“到真实起跳点必须达速”，同时全程提供“太慢又太近→减小 path_u 后退腾距离”的退路梯度。
+        const double enter_u = std::clamp(approach_step->step_enter_u, 0.0, 1.0);
         const double path_u = std::clamp(uc, 0.0, 1.0);
-        if (path_u < commit_u) {
-            const double d = spline.arc_length(path_u, commit_u, 8);
+        if (path_u < enter_u) {
+            const double d = spline.arc_length(path_u, enter_u, 8);
 
             const auto se2 = spline.eval(path_u);
             const double ds_du = se2.ds_du * duc_dpathu;
@@ -322,17 +342,32 @@ double follow_running_cost_value_only_impl(
         const double gate = step_window_gate(uc, *internal_step);
 
         if (gate > 0.0) {
+            // 助跑可行性因子 f（与 linearized 路径逐项对应）。
+            double f = 1.0;
+            if (uc < internal_step->step_enter_u) {
+                const double d_edge = spline.arc_length(
+                    std::clamp(uc, 0.0, 1.0), std::clamp(internal_step->step_enter_u, 0.0, 1.0), 8
+                );
+                const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
+                f = step_feasibility_factor(
+                    v_act, d_edge, speed_min, a_guide, follow.terrain_limits.step_feasibility_margin_band
+                );
+            }
+            const double gf = gate * f;
+
             const Eigen::Vector2d& dir = internal_step->dir_map;
             const double cross = std::cos(theta) * dir.y() - std::sin(theta) * dir.x();
-            cost += 0.5 * (terrain_w.direction * gate * std::abs(cross)) * (terrain_w.direction * gate * std::abs(cross));
+            cost += 0.5 * (terrain_w.direction * gf * std::abs(cross)) * (terrain_w.direction * gf * std::abs(cross));
 
+            // under-speed 受 f 门控；over-speed 不受 f 影响。
+            const double vstep_scale = (v_act < speed_min) ? gf : gate;
             const double relu_vstep = v_act < speed_min
                 ? (speed_min - v_act)
                 : (v_act > speed_max ? (v_act - speed_max) : 0.0);
-            cost += 0.5 * (terrain_w.step_vel_weight * gate * relu_vstep) * (terrain_w.step_vel_weight * gate * relu_vstep);
-            cost += 0.5 * (terrain_w.step_omega * gate * w_cmd) * (terrain_w.step_omega * gate * w_cmd);
-            cost += 0.5 * (terrain_w.step_dv * gate * dv_cmd) * (terrain_w.step_dv * gate * dv_cmd);
-            cost += 0.5 * (terrain_w.step_domega * gate * dw_cmd) * (terrain_w.step_domega * gate * dw_cmd);
+            cost += 0.5 * (terrain_w.step_vel_weight * vstep_scale * relu_vstep) * (terrain_w.step_vel_weight * vstep_scale * relu_vstep);
+            cost += 0.5 * (terrain_w.step_omega * gf * w_cmd) * (terrain_w.step_omega * gf * w_cmd);
+            cost += 0.5 * (terrain_w.step_dv * gf * dv_cmd) * (terrain_w.step_dv * gf * dv_cmd);
+            cost += 0.5 * (terrain_w.step_domega * gf * dw_cmd) * (terrain_w.step_domega * gf * dw_cmd);
         }
 
     }
@@ -343,10 +378,10 @@ double follow_running_cost_value_only_impl(
     if (approach_step) {
         const double speed_min = approach_step->speed_min;
         const double speed_max = approach_step->speed_max;
-        const double commit_u = std::clamp(approach_step->commit_u, 0.0, 1.0);
+        const double enter_u = std::clamp(approach_step->step_enter_u, 0.0, 1.0);
         const double path_u = std::clamp(uc, 0.0, 1.0);
-        if (path_u < commit_u) {
-            const double d = spline.arc_length(path_u, commit_u, 8);
+        if (path_u < enter_u) {
+            const double d = spline.arc_length(path_u, enter_u, 8);
             const double a_guide = std::max(follow.terrain_limits.step_reachability_guide_acc, REACHABILITY_EPS);
             const double r_lo = std::sqrt(std::max(0.0, std::max(0.0, v_act) * std::max(0.0, v_act) + 2.0 * a_guide * d));
             const double r_hi = std::sqrt(std::max(0.0, v_act * v_act - 2.0 * a_guide * d));

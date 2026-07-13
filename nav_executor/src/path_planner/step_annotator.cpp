@@ -145,6 +145,7 @@ std::vector<StepPlanSegment> build_step_plan(
             seg.traversal_constraint.speed_min = rule->speed.min;
             seg.traversal_constraint.speed_max = rule->speed.max;
             seg.traversal_constraint.commit_u = commit_u;
+            seg.traversal_constraint.step_enter_u = step_enter_u;
             seg.traversal_constraint.exit_u = step_exit_u;
             seg.traversal_constraint.dir_map = active->dir_map.normalized();
             seg.terrain_label = active->label;
@@ -264,6 +265,7 @@ std::vector<StepPlanSegment> build_step_plan(
             p, path, segment.commit_u, p.approach_distance
         );
         constraint.commit_u = segment.commit_u;
+        constraint.step_enter_u = segment.step_enter_u;
         constraint.exit_u = segment.step_exit_u;
         constraint.gate_start_u = gate_start_u;
         constraint.gate_end_u = gate_end_u;

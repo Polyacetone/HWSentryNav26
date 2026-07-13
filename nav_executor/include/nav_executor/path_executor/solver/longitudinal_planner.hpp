@@ -8,7 +8,7 @@ struct LongitudinalPlannerParams {
     int progress_cells = 81;
     int velocity_cells = 41;
     int acceleration_samples = 5;
-    double reverse_clearance = 0.6;
+    double reverse_clearance = 1.2;
     double step_speed_violation_weight = 40.0;
     double progress_weight = 1.0;
     double control_change_weight = 0.1;

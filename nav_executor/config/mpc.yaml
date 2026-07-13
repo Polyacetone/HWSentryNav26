@@ -66,7 +66,8 @@
           alpha_limit: 12.0 # 角速度指令变化率超限惩罚
           lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
         terrain_limits:
-          step_reachability_guide_acc: 1.2 # 台阶入口可达势函数的引导加速度 (m/s^2)
+          step_reachability_guide_acc: 0.8 # 台阶入口可达势函数的引导加速度 (m/s^2)；也用于助跑可行性因子 f 的 r_reach 估计。
+          step_feasibility_margin_band: 0.4 # 助跑可行性因子 f 的 smoothstep 过渡带宽 (m/s)：r_reach 超出 speed_min 该带宽即认为可行，助跑期速度窗/方向对齐满功率施加；不足则平滑释放，让位于后退退路
         terrain_weights:
           approach:
             reachability_lo: 0.8 # 台阶入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速

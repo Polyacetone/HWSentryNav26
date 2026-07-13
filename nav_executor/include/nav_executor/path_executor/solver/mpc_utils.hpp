@@ -80,6 +80,26 @@ inline double step_window_gate(double uc, const StepTraversalConstraint& m) {
     return w > 1e-9 ? smoothstep((m.gate_end_u - uc) / w) : 1.0;
 }
 
+// 助跑可行性因子 f ∈ [0,1]：判断“从当前状态全力加速，能否在物理起跳点 step_enter_u 前
+// 达到入口速度下限 speed_min”。
+//   r_reach = sqrt(max(0,v)^2 + 2*a_guide*d_edge)   （d_edge = 到 step_enter_u 的剩余弧长）
+//   f = smoothstep((r_reach - speed_min) / band)
+// f=1：可行 → 助跑期建立约束（速度窗 under-speed 分支、方向对齐）满功率施加，保留起跳前
+//       提前达速与对齐的语义；
+// f=0：不可行（又慢又贴近边缘）→ 上述约束释放，让位于可达包络的“后退腾距离”退路梯度，
+//       避免优化器被逼着违规猛冲或原地停滞。
+//
+// 门控 f 只作用于助跑期建立约束；入口速度地板（可达包络 lo 分支在 d_edge→0 的退化形态）
+// 与超速分支不受 f 影响，始终在线，防止“低速蹭过边缘”钻空子。
+inline double step_feasibility_factor(double v_act, double d_edge, double speed_min, double a_guide, double band) {
+    const double r_reach = std::sqrt(std::max(0.0, positive_part(v_act) * positive_part(v_act) + 2.0 * a_guide * d_edge));
+    if (band <= 1e-9) {
+        return r_reach >= speed_min ? 1.0 : 0.0;
+    }
+    const double t = std::clamp((r_reach - speed_min) / band, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 inline double lpv_schedule_z(double leg_h, double leg_psi) {
     return leg_h * std::cos(leg_psi);
 }

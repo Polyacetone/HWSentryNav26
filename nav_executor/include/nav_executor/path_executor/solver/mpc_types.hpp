@@ -1,10 +1,6 @@
 #pragma once
 
 #include <array>
-#include <expected>
-#include <memory>
-#include <optional>
-#include <string>
 #include <vector>
 #include <Eigen/Dense>
 #include <nav_executor/common/chassis_defs.hpp>
@@ -54,6 +50,7 @@ struct MPCFollowCommandWeights {
 
 struct MPCFollowTerrainLimits {
     double step_reachability_guide_acc;
+    double step_feasibility_margin_band; // 助跑可行性因子 f 的 smoothstep 过渡带宽 (m/s)
 };
 
 struct MPCFollowTerrainWeights {
@@ -270,11 +267,19 @@ struct EnergyParams {
 };
 
 // 路径台阶约束。仅供 MPC 按每个预测状态的 PATH_U 查询，不携带底盘模式或 FSM 语义。
+//
+// 锚点语义（沿路径 u 从小到大）：
+//   approach_start_u ≤ commit_u ≤ step_enter_u ≤ exit_u
+//   - commit_u：上位机视角的台阶起点（物理边缘上游回退 run_up）。速度窗/方向对齐等
+//     “助跑期建立约束”自 commit_u 起施加，实现起跳前的提前达速与对齐。
+//   - step_enter_u：物理台阶边缘（真实起跳点）。这是“助跑是否还来得及”的物理截止点，
+//     可达包络/入口速度地板以此为参考终点，可行性因子 f 也以此判定。
 struct StepTraversalConstraint {
     double speed_min = 0.0;
     double speed_max = 0.0;
     double approach_start_u = 0.0;
     double commit_u = 0.0;
+    double step_enter_u = 0.0;
     double exit_u = 1.0;
     double gate_start_u = 0.0;
     double gate_end_u = 1.0;
@@ -297,10 +302,13 @@ public:
         return nullptr;
     }
 
+    // 可达包络作用域贯穿到物理边缘 step_enter_u（而非 commit_u）：run_up 平地段虽已施加
+    // 助跑期建立约束（速度窗/对齐），但可达包络仍需在此提供“太慢又太近→后退腾距离”的退路
+    // 梯度，且入口速度地板（d→0 退化形态）必须一路守到真实起跳点。
     [[nodiscard]] const StepTraversalConstraint* approach_constraint_at(const double path_u) const {
         for (const auto& constraint : constraints_) {
             if (path_u < constraint.approach_start_u) break;
-            if (path_u < constraint.commit_u) return &constraint;
+            if (path_u < constraint.step_enter_u) return &constraint;
         }
         return nullptr;
     }
