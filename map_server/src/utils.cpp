@@ -55,6 +55,45 @@ TerrainMapData load_terrain_msgpack(const std::string& path) {
     return data;
 }
 
+NavigationMapData load_navigation_maps(
+    const std::string& path,
+    MapInflationParams inflation_params
+) {
+    const TerrainMapData terrain_data = load_terrain_msgpack(path);
+    inflation_params.resolution = terrain_data.resolution;
+
+    cv::Mat obstacle_mask = cv::Mat::zeros(terrain_data.height, terrain_data.width, CV_8UC1);
+    for (int y = 0; y < terrain_data.height; ++y) {
+        const size_t row_offset = static_cast<size_t>(y) * static_cast<size_t>(terrain_data.width);
+        uint8_t* row = obstacle_mask.ptr<uint8_t>(y);
+        for (int x = 0; x < terrain_data.width; ++x) {
+            if (terrain_data.terrain[row_offset + static_cast<size_t>(x)]
+                == static_cast<uint8_t>(TerrainType::OBSTACLE)) {
+                row[x] = 255;
+            }
+        }
+    }
+    cv::Mat cost_map = inflate_cost_map(obstacle_mask, inflation_params);
+
+    cv::Mat angle;
+    cv::Mat magnitude;
+    inflate_direction_field(terrain_data, inflation_params, angle, magnitude);
+    const cv::Mat terrain_labels(
+        terrain_data.height, terrain_data.width, CV_8UC1,
+        const_cast<uint8_t*>(terrain_data.terrain.data())
+    );
+    cv::Mat direction_map;
+    build_terrain_3chan(angle, magnitude, terrain_labels, direction_map);
+
+    return {
+        .width = terrain_data.width,
+        .height = terrain_data.height,
+        .resolution = terrain_data.resolution,
+        .cost_map = std::move(cost_map),
+        .direction_map = std::move(direction_map),
+    };
+}
+
 cv::Mat inflate_cost_map(
     const cv::Mat& source,
     const MapInflationParams& params

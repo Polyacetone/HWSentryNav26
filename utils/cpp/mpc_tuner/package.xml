@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.ros.org/schema/package_format3.xsd"?>
+<package format="3">
+  <name>mpc_tuner</name>
+  <version>0.1.0</version>
+  <description>Offline closed-loop tuner for nav_executor follow MPC</description>
+  <maintainer email="mitsuha.2213@gmail.com">@Polyacetone</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>nav_executor</depend>
+  <depend>map_server</depend>
+  <depend>common_libs</depend>
+  <depend>yaml-cpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>msgpack-cxx</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

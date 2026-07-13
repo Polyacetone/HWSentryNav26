@@ -35,6 +35,7 @@ public:
     [[nodiscard]] SplineEval eval(double u) const;
     [[nodiscard]] Eigen::Vector2d position(double u) const { return spline_.evaluate(u); }
     [[nodiscard]] Eigen::Vector2d tangent(double u) const { return spline_.derivative(u, 1); }
+    [[nodiscard]] const std::vector<Eigen::Vector2d>& control_points() const { return spline_.getControlPoints(); }
     [[nodiscard]] double arc_length(double u0, double u1, int samples = 8) const;
 
     [[nodiscard]] double project(

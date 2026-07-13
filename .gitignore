@@ -7,3 +7,4 @@ __pycache__/
 
 /map_server/maps/
 /odom_localizer/maps/
+/utils/cpp/mpc_tuner/scenes/

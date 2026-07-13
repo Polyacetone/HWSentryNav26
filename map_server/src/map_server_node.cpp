@@ -610,34 +610,13 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
 }
 
 void MapServerNode::load_nav_map(const std::string& filename) {
-    auto terrain_data = map_utils::load_terrain_msgpack(filename);
-    map_resolution_ = terrain_data.resolution;
+    auto maps = map_utils::load_navigation_maps(filename, map_inflation_params_);
+    map_resolution_ = maps.resolution;
     map_inflation_params_.resolution = map_resolution_;
-    map_size_x_ = terrain_data.width;
-    map_size_y_ = terrain_data.height;
-
-    // 障碍物膨胀 → global cost map
-    cv::Mat obs_mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
-    for (int y = 0; y < map_size_y_; y++) {
-        const size_t base = static_cast<size_t>(y) * static_cast<size_t>(map_size_x_);
-        uint8_t* row = obs_mask.ptr<uint8_t>(y);
-        for (int x = 0; x < map_size_x_; x++) {
-            if (terrain_data.terrain[base + static_cast<size_t>(x)] == static_cast<uint8_t>(map_utils::TerrainType::OBSTACLE)) {
-                row[x] = 255;
-            }
-        }
-    }
-    global_cost_map_ = map_utils::inflate_cost_map(obs_mask, map_inflation_params_);
-
-    // 方向场膨胀 → angle + magnitude
-    cv::Mat angle, magnitude, terrain_labels;
-    map_utils::inflate_direction_field(terrain_data, map_inflation_params_, angle, magnitude);
-
-    // raw label 直通
-    terrain_labels = cv::Mat(map_size_y_, map_size_x_, CV_8UC1, terrain_data.terrain.data()).clone();
-
-    // 合并为 3 通道: ch0=angle, ch1=magnitude, ch2=label
-    map_utils::build_terrain_3chan(angle, magnitude, terrain_labels, global_direction_map_);
+    map_size_x_ = maps.width;
+    map_size_y_ = maps.height;
+    global_cost_map_ = std::move(maps.cost_map);
+    global_direction_map_ = std::move(maps.direction_map);
 }
 
 void MapServerNode::pub_direction_map(

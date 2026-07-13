@@ -1,0 +1,30 @@
+tuner:
+  study:
+    seed: 2026
+    population_size: 32
+    elite_fraction: 0.20
+    generations: 20
+    initial_std: 0.45
+    min_std: 0.03
+  episode:
+    default_timeout: 20.0
+    goal_radius: 0.5
+    target_arrival_speed: 0.1
+    acceptable_arrival_speed: 0.3
+    high_cost_threshold: 30.0
+    lethal_cost_threshold: 250.0
+    severe_step_heading_error_deg: 30.0
+    severe_step_speed_margin: 0.2
+  search_space:
+    # Positive weights are searched logarithmically. Ranges are YAML values,
+    # not the squared effective coefficients used by residual costs.
+    q_y: [0.08, 1.20]
+    q_theta: [0.04, 0.80]
+    q_u: [0.25, 4.00]
+    y_tube: [0.10, 0.50]
+    q_term_prog: [0.05, 1.50]
+    q_term_lateral: [0.05, 1.50]
+    r_v: [0.002, 0.10]
+    r_omega: [0.002, 0.10]
+    r_dv: [0.03, 1.00]
+    r_domega: [0.02, 0.80]

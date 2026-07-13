@@ -31,6 +31,14 @@ struct MapInflationParams {
     double resolution = 0.0; // map resolution (m/px), must be set before calling inflation functions
 };
 
+struct NavigationMapData {
+    int width;
+    int height;
+    double resolution;
+    cv::Mat cost_map;
+    cv::Mat direction_map;
+};
+
 constexpr bool is_directional_label(uint8_t label) {
     return
         label == static_cast<uint8_t>(TerrainType::SLOPE) ||
@@ -41,6 +49,11 @@ constexpr bool is_directional_label(uint8_t label) {
 }
 
 TerrainMapData load_terrain_msgpack(const std::string& path);
+
+NavigationMapData load_navigation_maps(
+    const std::string& path,
+    MapInflationParams inflation_params
+);
 
 cv::Mat inflate_cost_map(
     const cv::Mat& source,

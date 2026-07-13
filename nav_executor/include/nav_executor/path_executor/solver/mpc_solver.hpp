@@ -1,5 +1,6 @@
 #pragma once
 
+#include <expected>
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
 #include <nav_executor/common/spline_path.hpp>
 #include <nav_executor/path_executor/solver/follow_problem.hpp>
