@@ -9,28 +9,20 @@ HoldProblem::HoldProblem(
     const MPCParams& params,
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
-    double schedule_rho,
-    double remaining_energy,
-    double rfr_pwr_limit
+    double schedule_rho
 ):
     goal_(goal_map),
     p_(params),
     cost_grid_(cost_grid),
     cost_info_(cost_info),
-    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-    remaining_energy_(remaining_energy),
-    rfr_pwr_limit_(rfr_pwr_limit) {}
+    model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)) {}
 
 StateVec HoldProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
-    StateVec xn = mpc_dynamics(x, u, model_);
-    apply_capacitor_energy_dynamics(xn, x, p_.power_model, rfr_pwr_limit_);
-    return xn;
+    return mpc_dynamics(x, u, model_);
 }
 
 void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u, MatXX& dfx, MatXU& dfu) const {
     mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
-    const StateVec xn = mpc_dynamics(x, u, model_);
-    apply_capacitor_energy_jacobian(dfx, dfu, x, xn, p_.power_model);
 }
 
 ControlVec HoldProblem::u_lower() const {
@@ -50,8 +42,7 @@ HoldResidualVec hold_residual_impl(
     const Eigen::Vector2d& goal,
     const MPCParams& p,
     const CostMapGridView& cg,
-    const GridInfo& ci,
-    double /*rfr_pwr_limit*/
+    const GridInfo& ci
 ) {
     const auto& hold = p.hold;
     const auto& goal_w = hold.goal_weights;
@@ -120,9 +111,7 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
 
 double HoldProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     (void)k;
-    return residual_cost(
-        hold_residual_impl(x, u, goal_, p_, cost_grid_, cost_info_, rfr_pwr_limit_)
-    ) + energy_hinge_cost(p_.energy, x(ix::ENERGY));
+    return residual_cost(hold_residual_impl(x, u, goal_, p_, cost_grid_, cost_info_));
 }
 
 void HoldProblem::running_cost_derivatives(
@@ -137,10 +126,9 @@ void HoldProblem::running_cost_derivatives(
 ) const {
     (void)k;
     auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
-        return hold_residual_impl(xv, uv, goal_, p_, cost_grid_, cost_info_, rfr_pwr_limit_);
+        return hold_residual_impl(xv, uv, goal_, p_, cost_grid_, cost_info_);
     };
     gauss_newton_running_derivatives<HOLD_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
-    add_energy_hinge_gradient(p_.energy, x, lx);
 }
 
 double HoldProblem::terminal_cost(const StateVec& x) const {

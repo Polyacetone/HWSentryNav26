@@ -37,8 +37,6 @@ struct MotionIntent {
 struct MotionObservation {
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();
     ChassisMotionState chassis_state;
-    double remaining_energy = 0.0;
-    double rfr_pwr_limit = 0.0;
     uint8_t chassis_leg_mode = 4;
     uint8_t comp_stage = 4;
     std::chrono::steady_clock::time_point stamp;

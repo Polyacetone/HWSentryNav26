@@ -39,7 +39,6 @@ FollowResidualLinearization follow_residual_linearized_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
     const std::shared_ptr<const StepConstraintSchedule>& step_constraint_schedule
 ) {
@@ -274,7 +273,6 @@ double follow_running_cost_value_only_impl(
     const MPCParams& p,
     const CostMapGridView& cg,
     const GridInfo& ci,
-    double /*rfr_pwr_limit*/,
     const MPCMotionConstraints& motion_lim,
     const std::shared_ptr<const StepConstraintSchedule>& step_constraint_schedule,
     double* cached_cost_value
@@ -391,10 +389,6 @@ double follow_running_cost_value_only_impl(
         }
     }
 
-    if (p.energy.enable) {
-        cost += energy_hinge_cost(p.energy, x(ix::ENERGY));
-    }
-
     const double uc_clamped = std::clamp(uc, 0.0, 1.0);
     const double s_remaining = spline.arc_length(uc_clamped, 1.0, 8);
 
@@ -496,8 +490,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     const CostMapGridView& masked_global_grid,
     double prediction_dt,
     double schedule_rho,
-    double remaining_energy,
-    double rfr_pwr_limit,
     const CapabilityProfile& blended_profile,
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
     double current_path_u
@@ -509,8 +501,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     masked_global_grid_(masked_global_grid),
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-    remaining_energy_(remaining_energy),
-    rfr_pwr_limit_(rfr_pwr_limit),
     blended_profile_(blended_profile),
     step_constraint_schedule_(std::move(step_constraint_schedule)),
     current_path_u_(current_path_u) {
@@ -521,7 +511,6 @@ template<int Horizon>
 StateVec FollowProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
     StateVec xn = mpc_dynamics(x, u, model_);
     xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, spline_);
-    apply_capacitor_energy_dynamics(xn, x, p_.power_model, rfr_pwr_limit_);
     return xn;
 }
 
@@ -533,9 +522,6 @@ void FollowProblemT<Horizon>::dynamics_jacobians(int, const StateVec& x, const C
     const double dout_din = clamp_derivative_piecewise(adv.u_next_extrap, SplinePath::U_EXTRAP_MIN, SplinePath::U_EXTRAP_MAX);
     dfx.row(ix::PATH_U) = (dout_din * adv.du_next_dx).transpose();
     dfu.row(ix::PATH_U).setZero();
-    StateVec xn = mpc_dynamics(x, u, model_);
-    xn(ix::PATH_U) = advance_u_progress(x(ix::PATH_U), x, spline_);
-    apply_capacitor_energy_jacobian(dfx, dfu, x, xn, p_.power_model);
 }
 
 template<int Horizon>
@@ -563,8 +549,6 @@ FollowProblemT<Horizon> FollowProblemT<Horizon>::with_reference_path(const Splin
         masked_global_grid_,
         prediction_dt_,
         model_.rho,
-        remaining_energy_,
-        rfr_pwr_limit_,
         blended_profile_,
         step_constraint_schedule_,
         current_path_u_
@@ -617,7 +601,7 @@ double FollowProblemT<Horizon>::running_cost_value_only(int k, const StateVec& x
     return follow_running_cost_value_only_impl(
         x, u, spline_, p_,
         cost_grid_for_step(k), cost_info_,
-        rfr_pwr_limit_, blended_profile_.motion_constraints,
+        blended_profile_.motion_constraints,
         step_constraint_schedule_, cached_cost_value
     );
 }
@@ -636,13 +620,12 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     const auto& cg = cost_grid_for_step(k);
     const auto lin = follow_residual_linearized_impl(
         x, u, spline_, p_, cg, cost_info_,
-        rfr_pwr_limit_, blended_profile_.motion_constraints,
+        blended_profile_.motion_constraints,
         step_constraint_schedule_
     );
 
     lx = lin.jx.transpose() * lin.r;
     lu = lin.ju.transpose() * lin.r;
-    add_energy_hinge_gradient(p_.energy, x, lx);
 
     {
         const double uc_raw = x(ix::PATH_U);

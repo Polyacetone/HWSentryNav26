@@ -155,11 +155,6 @@ void MPCSolver::reset_warm_start() {
     }
 }
 
-void MPCSolver::set_energy_state(double remaining_energy, double rfr_pwr_limit) {
-    remaining_energy_ = remaining_energy;
-    rfr_pwr_limit_ = rfr_pwr_limit;
-}
-
 void MPCSolver::update_observer(const ChassisMotionState& chassis_state) {
     const double v_act = chassis_state.velocity;
     const double w_act = chassis_state.omega;
@@ -209,7 +204,6 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::DV) = cmd_clamped.x();
     x0(ix::DW) = cmd_clamped.y();
     x0(ix::PATH_U) = path_u;
-    x0(ix::ENERGY) = remaining_energy_;
     return x0;
 }
 
@@ -286,7 +280,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const FollowProblem problem(
         global_path, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
-        remaining_energy_, rfr_pwr_limit_, blended_profile, step_constraint_schedule, u0
+        blended_profile, step_constraint_schedule, u0
     );
 
     fddp::SolverOptions opts;
@@ -358,8 +352,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             .step_constraint_schedule = std::move(step_constraint_schedule),
             .prediction_dt = pred_dt,
             .schedule_rho = schedule_rho,
-            .remaining_energy = remaining_energy_,
-            .rfr_pwr_limit = rfr_pwr_limit_,
             .current_path_u = u0,
             .sequence = follow_sequence_,
         });
@@ -430,7 +422,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const GridInfo ci = make_grid_info(cost_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    StopProblem prob(params_, cg, ci, schedule_rho, remaining_energy_, rfr_pwr_limit_);
+    StopProblem prob(params_, cg, ci, schedule_rho);
     if (stop_warm_) {
         shift_warm_start(stop_solver_);
     } else {
@@ -479,7 +471,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const GridInfo ci = make_grid_info(cost_map);
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
 
-    HoldProblem prob(goal_map, params_, cg, ci, schedule_rho, remaining_energy_, rfr_pwr_limit_);
+    HoldProblem prob(goal_map, params_, cg, ci, schedule_rho);
     if (hold_warm_) {
         shift_warm_start(hold_solver_);
     } else {

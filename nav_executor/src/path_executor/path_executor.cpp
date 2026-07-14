@@ -32,7 +32,6 @@ void PathExecutor::sync_mpc_context(const ExecutorInput& input, const bool allow
     if (allow_observer_update) {
         mpc_controller_->update_observer(input.observation.chassis_state);
     }
-    mpc_controller_->set_energy_state(input.observation.remaining_energy, input.observation.rfr_pwr_limit);
 }
 
 void PathExecutor::apply_held_command(ExecutorOutput& output) const {

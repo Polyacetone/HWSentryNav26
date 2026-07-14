@@ -171,8 +171,6 @@ void NavExecutorNode::control_tick() {
     ein.intent.spin_fast = (spin_state_ == SpinState::SPIN_FAST);
     ein.observation.chassis_pose_map = chassis_pose_map;
     ein.observation.chassis_state = chassis_state_;
-    ein.observation.remaining_energy = remaining_energy_supercap_filtered_;
-    ein.observation.rfr_pwr_limit = rfr_pwr_limit_;
     ein.observation.chassis_leg_mode = chassis_leg_mode_;
     ein.observation.comp_stage = comp_stage_;
     ein.observation.stamp = stamp;

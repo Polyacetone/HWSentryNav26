@@ -290,11 +290,6 @@ RuntimeConfig load_runtime_config(const std::filesystem::path& directory) {
 
     const YAML::Node mpc = ros_params(directory / "mpc.yaml");
     load_follow(out, mpc);
-    out.mpc.energy = {
-        .enable = value<bool>(mpc, "mpc.energy.enable"),
-        .threshold = value<double>(mpc, "mpc.energy.threshold"),
-        .weight = value<double>(mpc, "mpc.energy.weight"),
-    };
 
     const YAML::Node km = ros_params(directory / "kinematic_model.yaml")["kinematic_model"];
     auto& k = out.mpc.kinematic_model;
@@ -305,9 +300,6 @@ RuntimeConfig load_runtime_config(const std::filesystem::path& directory) {
     k.w_lam0 = value<double>(km, "w_lam0"); k.w_k0 = value<double>(km, "w_k0"); k.w_cf0 = value<double>(km, "w_cf0"); k.w_lam1 = value<double>(km, "w_lam1"); k.w_k1 = value<double>(km, "w_k1"); k.w_cf1 = value<double>(km, "w_cf1");
     k.xh0_bias = value<double>(km, "xh0_bias"); k.xh0_psi = value<double>(km, "xh0_psi"); k.xh0_v = value<double>(km, "xh0_v");
     k.psi_bias = value<double>(km, "psi_bias"); k.psi_gain = value<double>(km, "psi_gain"); k.psi_v = value<double>(km, "psi_v"); k.obs_lv = value<double>(km, "obs_lv"); k.obs_lpsi = value<double>(km, "obs_lpsi");
-
-    const YAML::Node power = ros_params(directory / "power_model.yaml")["power_model"];
-    for (int i = 0; i < nav_executor::PWR_N; ++i) out.mpc.power_model.coeffs[static_cast<size_t>(i)] = power["c" + std::to_string(i)].as<double>();
 
     const YAML::Node planner = ros_params(directory / "path_planner.yaml");
     out.planner = {

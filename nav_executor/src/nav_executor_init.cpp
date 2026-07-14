@@ -505,8 +505,7 @@ MPCParams NavExecutorNode::load_mpc_params() {
                     .heading_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.heading"),
                     .hidden_state_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.hidden_state"),
                     .velocity_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.velocity"),
-                    .omega_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.omega"),
-                    .energy_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.energy")
+                    .omega_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.omega")
                 },
                 .candidate_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.candidate_count")),
                 .min_period_ms = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.min_period_ms")),
@@ -598,11 +597,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
             },
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.hold.max_iters"))
         },
-        .energy = {
-            .enable = declare_parameter<bool>("mpc.energy.enable"),
-            .threshold = declare_parameter<double>("mpc.energy.threshold"),
-            .weight = declare_parameter<double>("mpc.energy.weight")
-        },
         .kinematic_model = {
             .z_ref = declare_parameter<double>("kinematic_model.z_ref"),
             .z_scale = declare_parameter<double>("kinematic_model.z_scale"),
@@ -638,15 +632,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .psi_v = declare_parameter<double>("kinematic_model.psi_v"),
             .obs_lv = declare_parameter<double>("kinematic_model.obs_lv"),
             .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi")
-        },
-        .power_model = {
-            .coeffs = [this]() {
-                std::array<double, PWR_N> coeffs {};
-                for (int i = 0; i < PWR_N; ++i) {
-                    coeffs[static_cast<size_t>(i)] = declare_parameter<double>("power_model.c" + std::to_string(i));
-                }
-                return coeffs;
-            }()
         }
     };
     return mpc_params;

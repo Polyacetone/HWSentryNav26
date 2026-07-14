@@ -29,7 +29,6 @@ StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const LPVDiscreteM
     xn(ix::DV) = u(0);
     xn(ix::DW) = u(1);
     xn(ix::PATH_U) = x(ix::PATH_U);
-    xn(ix::ENERGY) = x(ix::ENERGY);
     return xn;
 }
 
@@ -97,7 +96,6 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const LP
     fx(ix::W, ix::DW) = dwn_ddw;
 
     fx(ix::PATH_U, ix::PATH_U) = 1.0;
-    fx(ix::ENERGY, ix::ENERGY) = 1.0;
 
     fu(ix::DV, 0) = 1.0;
     fu(ix::DW, 1) = 1.0;

@@ -33,8 +33,6 @@ struct GlobalSearchInput {
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule;
     double prediction_dt = MPC_DT;
     double schedule_rho = 0.0;
-    double remaining_energy = 0.0;
-    double rfr_pwr_limit = 0.0;
     double current_path_u = 0.0;
     uint64_t sequence = 0;
     uint64_t generation = 0;

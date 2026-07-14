@@ -16,7 +16,7 @@ namespace nav_executor {
 namespace {
 
 struct SearchStateKey {
-    std::array<int, 10> values {};
+    std::array<int, 9> values {};
 
     bool operator==(const SearchStateKey&) const = default;
 };
@@ -65,7 +65,6 @@ SearchStateKey state_key(
         quantize(state(ix::W), params.omega_bin),
         quantize(state(ix::DV), params.velocity_bin),
         quantize(state(ix::DW), params.omega_bin),
-        quantize(state(ix::ENERGY), params.energy_bin),
     }};
 }
 
@@ -98,7 +97,7 @@ BeamSearch::BeamSearch(GlobalSearchBeamParams params): params_(params) {
     if (!valid_bin(params_.progress_bin) || !valid_bin(params_.longitudinal_bin)
         || !valid_bin(params_.lateral_bin) || !valid_bin(params_.heading_bin)
         || !valid_bin(params_.hidden_state_bin) || !valid_bin(params_.velocity_bin)
-        || !valid_bin(params_.omega_bin) || !valid_bin(params_.energy_bin)) {
+        || !valid_bin(params_.omega_bin)) {
         throw std::invalid_argument("global_search beam state bin resolutions must be finite and positive");
     }
 }

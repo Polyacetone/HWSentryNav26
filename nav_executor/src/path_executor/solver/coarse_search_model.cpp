@@ -154,21 +154,6 @@ CoarseTransition CoarseSearchModel::transition(
     middle_state(ix::W) = middle.omega;
     middle_state(ix::DV) = result.controls[static_cast<size_t>(half_steps - 1)](0);
     middle_state(ix::DW) = result.controls[static_cast<size_t>(half_steps - 1)](1);
-    const auto& power_model = problem_.params().power_model;
-    double energy = state(ix::ENERGY);
-    for (int i = 1; i <= half_steps; ++i) {
-        const auto& previous = corrected_trace.states[static_cast<size_t>(i - 1)];
-        const auto& current = corrected_trace.states[static_cast<size_t>(i)];
-        const double power = predict_power(
-            power_model,
-            current.velocity,
-            current.omega,
-            (current.velocity - previous.velocity) / MPC_DT,
-            (current.omega - previous.omega) / MPC_DT
-        );
-        energy += (problem_.charge_power_limit() - power) * MPC_DT;
-    }
-    middle_state(ix::ENERGY) = energy;
     middle_state(ix::PATH_U) = std::clamp(
         state(ix::PATH_U) + half_dt * path_progress_rate(middle_state),
         SplinePath::U_EXTRAP_MIN,
@@ -184,19 +169,6 @@ CoarseTransition CoarseSearchModel::transition(
     result.state(ix::W) = end.omega;
     result.state(ix::DV) = result.controls[static_cast<size_t>(step_count - 1)](0);
     result.state(ix::DW) = result.controls[static_cast<size_t>(step_count - 1)](1);
-    for (int i = half_steps + 1; i <= step_count; ++i) {
-        const auto& previous = corrected_trace.states[static_cast<size_t>(i - 1)];
-        const auto& current = corrected_trace.states[static_cast<size_t>(i)];
-        const double power = predict_power(
-            power_model,
-            current.velocity,
-            current.omega,
-            (current.velocity - previous.velocity) / MPC_DT,
-            (current.omega - previous.omega) / MPC_DT
-        );
-        energy += (problem_.charge_power_limit() - power) * MPC_DT;
-    }
-    result.state(ix::ENERGY) = energy;
     result.state(ix::PATH_U) = std::clamp(
         state(ix::PATH_U) + total_dt * path_progress_rate(middle_state),
         SplinePath::U_EXTRAP_MIN,

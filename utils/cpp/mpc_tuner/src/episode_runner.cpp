@@ -230,7 +230,7 @@ EpisodeMetrics run_episode(
         runtime.profile_blend, logger.get_child("step")
     );
     step_controller.set_path(scenario.path);
-    WheelLegPlant plant(params.power_model);
+    WheelLegPlant plant;
     plant.reset(scenario.spec.start_pose, seed);
     solver.reset_warm_start();
     solver.reset_observer();
@@ -259,7 +259,6 @@ EpisodeMetrics run_episode(
         step_controller.update_active_segment(path_u);
         step_controller.tick_profile_blend();
         solver.update_observer(current.chassis);
-        solver.set_energy_state(current.energy, plant.referee_power_limit());
 
         const std::vector<const nav_executor::CostMap*> prediction_maps;
         auto result = solver.solve_follow(

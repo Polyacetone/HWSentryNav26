@@ -19,8 +19,6 @@ public:
         const CostMapGridView& masked_global_grid,
         double prediction_dt,
         double schedule_rho,
-        double remaining_energy,
-        double rfr_pwr_limit,
         const CapabilityProfile& blended_profile,
         std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
         double current_path_u
@@ -53,7 +51,6 @@ public:
     [[nodiscard]] const CapabilityProfile& capability_profile() const { return blended_profile_; }
     [[nodiscard]] const SplinePath& reference_path() const { return spline_; }
     [[nodiscard]] const LPVDiscreteModel& discrete_model() const { return model_; }
-    [[nodiscard]] double charge_power_limit() const { return rfr_pwr_limit_; }
     [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const SplinePath& spline) const;
 
 private:
@@ -74,8 +71,6 @@ private:
     const CostMapGridView& masked_global_grid_;
     double prediction_dt_;
     LPVDiscreteModel model_ {};
-    double remaining_energy_;
-    double rfr_pwr_limit_;
     CapabilityProfile blended_profile_;
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule_;
     double current_path_u_;

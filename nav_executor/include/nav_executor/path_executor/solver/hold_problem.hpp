@@ -14,9 +14,7 @@ public:
         const MPCParams& params,
         const CostMapGridView& cost_grid,
         const GridInfo& cost_info,
-        double schedule_rho,
-        double remaining_energy,
-        double rfr_pwr_limit
+        double schedule_rho
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -46,8 +44,6 @@ private:
     const CostMapGridView& cost_grid_;
     GridInfo cost_info_;
     LPVDiscreteModel model_ {};
-    double remaining_energy_;
-    double rfr_pwr_limit_;
 };
 
 } // namespace nav_executor

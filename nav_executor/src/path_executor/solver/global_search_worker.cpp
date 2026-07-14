@@ -82,7 +82,7 @@ std::optional<GlobalSearchOutput> GlobalSearchWorker::process(GlobalSearchInput 
     const FollowProblem problem(
         input.path, mpc_params_, step_grids, make_grid_info(input.cost_map), masked_grid,
         input.prediction_dt, input.schedule_rho,
-        input.remaining_energy, input.rfr_pwr_limit, input.blended_profile, input.step_constraint_schedule,
+        input.blended_profile, input.step_constraint_schedule,
         input.current_path_u
     );
     const auto solve_start = std::chrono::steady_clock::now();

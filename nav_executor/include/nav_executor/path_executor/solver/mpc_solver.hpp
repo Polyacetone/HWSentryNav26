@@ -34,7 +34,6 @@ public:
 
     void update_observer(const ChassisMotionState& chassis_state);
     void reset_observer();
-    void set_energy_state(double remaining_energy, double rfr_pwr_limit);
 
     [[nodiscard]] double hidden_state_estimate() const {
         return x_h_hat_;
@@ -90,9 +89,6 @@ private:
     double prev_w_act_ = 0.0;
     double prev_schedule_rho_ = 0.0;
     bool observer_initialized_ = false;
-
-    double remaining_energy_ = 200.0;
-    double rfr_pwr_limit_ = 90.0;
 
     int fddp_lethal_consecutive_count_ = 0;
     uint64_t follow_sequence_ = 0;

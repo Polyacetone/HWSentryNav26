@@ -78,7 +78,7 @@ constexpr std::array<Coefficients, 4> U_D_COEFFICIENTS {{
 
 } // namespace
 
-WheelLegPlant::WheelLegPlant(const nav_executor::PowerModelParams& power_model): power_model_(power_model) {
+WheelLegPlant::WheelLegPlant() {
     update_model_cache();
 }
 
@@ -89,7 +89,6 @@ void WheelLegPlant::reset(const Eigen::Vector3d& pose, const uint64_t seed) {
     velocity_target_ = omega_target_ = velocity_applied_ = omega_applied_ = 0.0;
     theta_target_ = pose.z();
     s_reference_ = 0.0;
-    energy_ = 1300.0;
     rng_.seed(seed);
 }
 
@@ -184,27 +183,13 @@ void WheelLegPlant::lqr_substep() {
     pose_.z() = wrap_pi(state_(2));
 }
 
-void WheelLegPlant::update_power(const double previous_v, const double previous_w) {
-    const double v = state_(1), w = state_(3);
-    const double acceleration = (v - previous_v) / DT;
-    const double alpha = (w - previous_w) / DT;
-    const auto smooth_abs = [](const double x) { return std::sqrt(x * x + 0.05 * 0.05); };
-    const auto& c = power_model_.coeffs;
-    const double power = c[0] + c[1]*v*acceleration + c[2]*w*alpha + c[3]*acceleration*acceleration
-        + c[4]*alpha*alpha + c[5]*smooth_abs(v) + c[6]*smooth_abs(w) + c[7]*v*v + c[8]*w*w
-        + c[9]*smooth_abs(acceleration) + c[10]*smooth_abs(alpha) + c[11]*smooth_abs(v*w);
-    energy_ = std::clamp(energy_ + (referee_power_limit_ - power) * DT, 0.0, 1300.0);
-}
-
 std::vector<PlantSample> WheelLegPlant::step(const Eigen::Vector2d& command, const double duration) {
     std::tie(velocity_target_, omega_target_) = clamp_command(command.x(), command.y());
     const int substeps = std::max(1, static_cast<int>(std::lround(duration / DT)));
     std::vector<PlantSample> samples;
     samples.reserve(static_cast<size_t>(substeps));
     for (int i = 0; i < substeps; ++i) {
-        const double previous_v = state_(1), previous_w = state_(3);
         lqr_substep();
-        update_power(previous_v, previous_w);
         samples.push_back(sample());
     }
     return samples;
@@ -219,7 +204,6 @@ PlantSample WheelLegPlant::sample() const {
             .leg_h = 0.5 * (leg_left_ + leg_right_),
             .leg_psi = 0.5 * (state_(4) + state_(6)),
         },
-        .energy = energy_,
     };
 }
 

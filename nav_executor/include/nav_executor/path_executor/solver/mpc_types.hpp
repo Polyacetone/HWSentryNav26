@@ -10,15 +10,14 @@ namespace nav_executor {
 
 constexpr int MPC_HORIZON = 60;
 constexpr double MPC_DT = 0.05;
-constexpr int MPC_NX = 10;
+constexpr int MPC_NX = 9;
 constexpr int MPC_NU = 2;
-constexpr int PWR_N = 12;
 
 constexpr double SOLVER_TOL_GRAD = 1e-6;
 constexpr double SOLVER_TOL_COST = 1e-8;
 
 namespace ix {
-    enum { X = 0, Y, THETA, XH, V, W, DV, DW, PATH_U, ENERGY };
+    enum { X = 0, Y, THETA, XH, V, W, DV, DW, PATH_U };
 }
 
 struct MPCStartCommandLimits {
@@ -116,10 +115,6 @@ struct LPVKinematicModelParams {
     double obs_lpsi;
 };
 
-struct PowerModelParams {
-    std::array<double, PWR_N> coeffs {};
-};
-
 struct LPVDiscreteModel {
     double rho;
     double ad00;
@@ -164,7 +159,6 @@ struct GlobalSearchBeamParams {
     double hidden_state_bin;
     double velocity_bin;
     double omega_bin;
-    double energy_bin;
 };
 
 struct GlobalSearchParams {
@@ -261,12 +255,6 @@ struct MPCHoldParams {
     int max_iters;
 };
 
-struct EnergyParams {
-    bool enable;
-    double threshold;
-    double weight;
-};
-
 // 路径台阶约束。仅供 MPC 按每个预测状态的 PATH_U 查询，不携带底盘模式或 FSM 语义。
 //
 // 锚点语义（沿路径 u 从小到大）：
@@ -346,9 +334,7 @@ struct MPCParams {
     MPCStopParams stop;
     MPCHoldParams hold;
 
-    EnergyParams energy;
     LPVKinematicModelParams kinematic_model;
-    PowerModelParams power_model;
 };
 
 struct GridInfo {
