@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -88,6 +89,110 @@ void write_validation(
     }
 }
 
+void write_final_parameters(
+    const std::filesystem::path& path,
+    const mpc_tuner::ParameterCandidate& baseline,
+    const mpc_tuner::ParameterCandidate& best
+) {
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("Failed to write " + path.string());
+    out << "parameter,baseline_value,best_value,baseline_normalized,best_normalized\n";
+    out << std::setprecision(12);
+    for (size_t i = 0; i < mpc_tuner::PARAMETER_COUNT; ++i) {
+        out << mpc_tuner::PARAMETER_DESCRIPTORS[i].name << ',' << baseline.values[i] << ',' << best.values[i] << ','
+            << baseline.normalized[i] << ',' << best.normalized[i] << '\n';
+    }
+}
+
+std::vector<mpc_tuner::ExecutedFeature> features_for_parameter(const std::string_view parameter) {
+    using Feature = mpc_tuner::ExecutedFeature;
+    if (parameter == "q_y" || parameter == "y_tube") return {Feature::LATERAL_TUBE};
+    if (parameter == "q_theta") return {Feature::HEADING};
+    if (parameter == "q_u") return {Feature::PROGRESS};
+    if (parameter == "q_term_prog") return {Feature::TERMINAL_PROGRESS};
+    if (parameter == "q_term_lateral") return {Feature::TERMINAL_LATERAL};
+    if (parameter == "r_v") return {Feature::COMMAND_V};
+    if (parameter == "r_omega") return {Feature::COMMAND_OMEGA};
+    if (parameter == "r_dv") return {Feature::COMMAND_DV};
+    if (parameter == "r_domega") return {Feature::COMMAND_DOMEGA};
+    if (parameter == "environment_obstacle") return {Feature::OBSTACLE};
+    if (parameter == "step_direction") return {Feature::STEP_DIRECTION};
+    if (parameter == "step_velocity_window") return {Feature::STEP_VELOCITY};
+    if (parameter == "step_reachability_lo") return {Feature::STEP_REACHABILITY_LO};
+    if (parameter == "step_reachability_hi") return {Feature::STEP_REACHABILITY_HI};
+    if (parameter == "q_v_final") return {Feature::TERMINAL_BRAKE};
+    if (parameter == "motion_penalty_scale") {
+        return {Feature::ACC_LIMIT, Feature::ALPHA_LIMIT, Feature::LAT_ACCEL};
+    }
+    if (parameter == "step_smoothness_scale") {
+        return {Feature::STEP_OMEGA, Feature::STEP_DV, Feature::STEP_DOMEGA};
+    }
+    throw std::runtime_error("No feature coverage mapping for parameter " + std::string(parameter));
+}
+
+struct CoverageTotals {
+    std::array<double, mpc_tuner::EXECUTED_FEATURE_COUNT> raw_sum {};
+    std::array<uint64_t, mpc_tuner::EXECUTED_FEATURE_COUNT> active_samples {};
+    std::array<uint64_t, mpc_tuner::EXECUTED_FEATURE_COUNT> sample_count {};
+};
+
+CoverageTotals aggregate_coverage(const std::vector<mpc_tuner::EpisodeMetrics>& episodes) {
+    CoverageTotals totals;
+    for (const auto& episode : episodes) {
+        for (size_t i = 0; i < mpc_tuner::EXECUTED_FEATURE_COUNT; ++i) {
+            totals.raw_sum[i] += episode.feature_coverage.raw_sum[i];
+            totals.active_samples[i] += episode.feature_coverage.active_samples[i];
+            totals.sample_count[i] += episode.feature_coverage.sample_count[i];
+        }
+    }
+    return totals;
+}
+
+void write_coverage_report(
+    const std::filesystem::path& feature_path,
+    const std::filesystem::path& parameter_path,
+    const std::string_view candidate_label,
+    const std::string_view split,
+    const std::vector<mpc_tuner::EpisodeMetrics>& episodes
+) {
+    const CoverageTotals totals = aggregate_coverage(episodes);
+    std::ofstream feature_out(feature_path, std::ios::app);
+    std::ofstream parameter_out(parameter_path, std::ios::app);
+    if (!feature_out || !parameter_out) throw std::runtime_error("Failed to write coverage report");
+    feature_out << std::setprecision(12);
+    parameter_out << std::setprecision(12);
+
+    for (size_t i = 0; i < mpc_tuner::EXECUTED_FEATURE_COUNT; ++i) {
+        const double rate = totals.sample_count[i] == 0 ? 0.0
+            : static_cast<double>(totals.active_samples[i]) / static_cast<double>(totals.sample_count[i]);
+        feature_out << "executed_trajectory," << candidate_label << ',' << split << ',' << mpc_tuner::EXECUTED_FEATURE_NAMES[i] << ','
+                    << totals.raw_sum[i] << ',' << totals.active_samples[i] << ',' << totals.sample_count[i] << ','
+                    << rate << '\n';
+    }
+    for (const auto& descriptor : mpc_tuner::PARAMETER_DESCRIPTORS) {
+        double raw_sum = 0.0;
+        uint64_t active_samples = 0;
+        uint64_t sample_count = 0;
+        for (const auto feature : features_for_parameter(descriptor.name)) {
+            const size_t i = static_cast<size_t>(feature);
+            raw_sum += totals.raw_sum[i];
+            active_samples += totals.active_samples[i];
+            sample_count += totals.sample_count[i];
+        }
+        const double rate = sample_count == 0 ? 0.0 : static_cast<double>(active_samples) / sample_count;
+        parameter_out << "executed_trajectory," << candidate_label << ',' << split << ',' << descriptor.name << ',' << raw_sum << ','
+                      << active_samples << ',' << sample_count << ',' << rate << '\n';
+    }
+}
+
+void initialize_coverage_reports(const std::filesystem::path& output_directory) {
+    std::ofstream feature_out(output_directory / "feature_coverage.csv");
+    std::ofstream parameter_out(output_directory / "parameter_coverage.csv");
+    if (!feature_out || !parameter_out) throw std::runtime_error("Failed to initialize coverage reports");
+    feature_out << "coverage_source,candidate,split,feature,raw_sum,active_samples,sample_count,activation_rate\n";
+    parameter_out << "coverage_source,candidate,split,parameter,raw_sum,active_samples,sample_count,activation_rate\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -119,6 +224,7 @@ int main(int argc, char** argv) {
         };
 
         std::filesystem::create_directories(args.output);
+        initialize_coverage_reports(args.output);
         mpc_tuner::ParameterCandidate best = baseline;
         if (args.smoke) {
             auto [fitness, episodes] = evaluate(baseline);
@@ -142,9 +248,25 @@ int main(int argc, char** argv) {
             best = mpc_tuner::run_cem(runtime.mpc, tuner_config, evaluate, args.output, report_progress);
         }
 
+        write_final_parameters(args.output / "final_parameters.csv", baseline, best);
+        const auto best_training = evaluate_set(scenarios, "train", runtime, tuner_config, best, logger);
+        write_coverage_report(
+            args.output / "feature_coverage.csv", args.output / "parameter_coverage.csv",
+            "best", "train", best_training
+        );
+        const auto baseline_training = evaluate_set(scenarios, "train", runtime, tuner_config, baseline, logger);
+        write_coverage_report(
+            args.output / "feature_coverage.csv", args.output / "parameter_coverage.csv",
+            "baseline", "train", baseline_training
+        );
+
         const auto validation = evaluate_set(scenarios, "validation", runtime, tuner_config, best, logger);
         if (!validation.empty()) {
             write_validation(args.output / "validation.csv", validation);
+            write_coverage_report(
+                args.output / "feature_coverage.csv", args.output / "parameter_coverage.csv",
+                "best", "validation", validation
+            );
             // 验证集为独立体检，不含正则项（lambda=0），只反映真实质量。
             const auto best_fitness = mpc_tuner::aggregate_fitness(
                 validation, tuner_config.episode, best, baseline, 0.0
@@ -159,6 +281,10 @@ int main(int argc, char** argv) {
             // 因此仅作告警而非自动回退——把最终取舍权留给人工审阅 best_params.yaml。
             const auto baseline_validation = evaluate_set(
                 scenarios, "validation", runtime, tuner_config, baseline, logger
+            );
+            write_coverage_report(
+                args.output / "feature_coverage.csv", args.output / "parameter_coverage.csv",
+                "baseline", "validation", baseline_validation
             );
             const auto baseline_fitness = mpc_tuner::aggregate_fitness(
                 baseline_validation, tuner_config.episode, baseline, baseline, 0.0

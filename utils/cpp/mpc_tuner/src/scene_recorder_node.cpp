@@ -62,7 +62,6 @@ public:
         output_directory_ = std::filesystem::absolute(
             declare_parameter<std::string>("output_directory", ".")
         );
-        route_timeout_ = declare_parameter<double>("route_timeout", 20.0);
         const auto seed_values = declare_parameter<std::vector<int64_t>>(
             "seeds", std::vector<int64_t> {1}
         );
@@ -185,7 +184,6 @@ private:
         spec.split = split_;
         spec.start_pose = *draft_start_;
         spec.goal = {message.pose.position.x, message.pose.position.y};
-        spec.timeout = route_timeout_;
         spec.seeds = seeds_;
 
         RCLCPP_INFO(get_logger(), "Planning candidate %s...", spec.name.c_str());
@@ -296,7 +294,6 @@ private:
 
     std::string split_;
     std::filesystem::path output_directory_;
-    double route_timeout_ = 20.0;
     std::vector<uint64_t> seeds_;
     RuntimeConfig runtime_config_;
     MapSnapshot map_snapshot_;

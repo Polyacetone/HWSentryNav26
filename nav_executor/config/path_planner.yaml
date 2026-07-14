@@ -73,41 +73,41 @@
 
         warmup:
           samples_per_meter: 10.0 # warmup 阶段采样密度
-          max_iterations: 60 # warmup 最大优化迭代次数
+          max_iterations: 20 # warmup 最大优化迭代次数
           max_curvature: 1.2 # warmup 阶段全局曲率上限
           obstacle_weight: 2.0 # 障碍物代价权重
-          direction_weight: 20.0 # 方向对齐代价权重
+          direction_weight: 8.0 # 方向对齐代价权重
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
-          smoothness_weight: 0.005 # 样条光滑性正则权重
-          length_penalty_weight: 0.01 # 路径长度惩罚权重
+          smoothness_weight: 0.002 # 样条光滑性正则权重
+          length_penalty_weight: 0.002 # 路径长度惩罚权重
           curvature:
-            base_weight: 0.1 # 曲率基础惩罚权重
-            base_beta: 4.0 # 曲率基础惩罚 softplus beta
-            limit_weight: 10.0 # 曲率超限惩罚权重
-            limit_beta: 16.0 # 曲率超限惩罚 softplus beta
+            base_weight: 0.01 # 曲率基础惩罚权重
+            base_beta: 8.0 # 曲率基础惩罚 softplus beta
+            limit_weight: 8.0 # 曲率超限惩罚权重
+            limit_beta: 8.0 # 曲率超限惩罚 softplus beta
             min_speed_epsilon: 0.05 # 低速时曲率计算的正则化 epsilon (m/s)
             speed_gate_threshold: 0.15 # 速度门控阈值，低速时抑制曲率代价 (m/s)
 
         main:
           samples_per_meter: 10.0 # main 阶段采样密度
-          max_iterations: 60 # main 每次迭代的最大优化步数
-          max_refinement_iterations: 1 # main 阶段细化迭代次数（台阶区间收敛后停止）
-          near_max_curvature: 0.3 # 台阶附近区域曲率上限
-          far_max_curvature: 1.6 # 远离台阶区域曲率上限
-          step_extension_distance: 0.3 # 台阶区间前后扩展距离 (m)
-          step_transition_distance: 0.3 # 近/远曲率之间平滑过渡距离 (m)
+          max_iterations: 20 # main 每次迭代的最大优化步数
+          max_refinement_iterations: 3 # main 阶段细化迭代次数（台阶区间收敛后停止）
+          near_max_curvature: 0.35 # 台阶附近区域曲率上限
+          far_max_curvature: 1.2 # 远离台阶区域曲率上限
+          step_extension_distance: 1.0 # 台阶区间前后扩展距离 (m)
+          step_transition_distance: 0.5 # 近/远曲率之间平滑过渡距离 (m)
           interval_iou_threshold: 0.85 # 台阶区间 IoU 阈值，收敛后提前退出细化
           obstacle_weight: 2.0 # 障碍物代价权重
-          direction_weight: 60.0 # 方向对齐代价权重
+          direction_weight: 8.0 # 方向对齐代价权重
           step_weight: 0.25 # 台阶区域穿越代价权重
           start_end_weight: 30.0 # 起终点位置约束权重
-          smoothness_weight: 0.003 # 样条光滑度正则权重
-          length_penalty_weight: 0.01 # 路径长度惩罚权重
+          smoothness_weight: 0.002 # 样条光滑度正则权重
+          length_penalty_weight: 0.002 # 路径长度惩罚权重
           curvature:
-            base_weight: 0.1 # 曲率基础惩罚权重
-            base_beta: 4.0 # 曲率基础惩罚 softplus beta
-            limit_weight: 15.0 # 曲率超限惩罚权重
-            limit_beta: 16.0 # 曲率超限惩罚 softplus beta
+            base_weight: 0.01 # 曲率基础惩罚权重
+            base_beta: 8.0 # 曲率基础惩罚 softplus beta
+            limit_weight: 8.0 # 曲率超限惩罚权重
+            limit_beta: 8.0 # 曲率超限惩罚 softplus beta
             min_speed_epsilon: 0.05 # 低速时曲率计算的正则 epsilon (m/s)
             speed_gate_threshold: 0.15 # 速度门控阈值，低速时抑制曲率代价 (m/s)

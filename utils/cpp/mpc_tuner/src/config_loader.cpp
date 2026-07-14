@@ -212,16 +212,18 @@ TunerConfig load_tuner_config(const std::filesystem::path& path) {
         throw std::runtime_error("study.progress_interval_seconds must be positive");
     }
     const YAML::Node episode = root["episode"];
-    out.episode.default_timeout = episode["default_timeout"].as<double>();
+    out.episode.timeout = episode["timeout"].as<double>();
     out.episode.goal_radius = episode["goal_radius"].as<double>();
     out.episode.target_arrival_speed = episode["target_arrival_speed"].as<double>();
-    out.episode.acceptable_arrival_speed = episode["acceptable_arrival_speed"].as<double>();
     out.episode.high_cost_threshold = episode["high_cost_threshold"].as<double>();
     out.episode.lethal_cost_threshold = episode["lethal_cost_threshold"].as<double>();
     out.episode.severe_step_heading_error =
         episode["severe_step_heading_error_deg"].as<double>() * std::numbers::pi / 180.0;
     out.episode.severe_step_speed_margin = episode["severe_step_speed_margin"].as<double>();
     out.episode.forward_progress_epsilon = episode["forward_progress_epsilon"].as<double>();
+    if (!(out.episode.timeout > 0.0)) {
+        throw std::runtime_error("episode.timeout must be positive");
+    }
     load_soft_fitness(out.episode, episode);
 
     // 搜索空间由参数描述表驱动（单一真相源）：tuner.yaml 的 search_space 提供可选的逐参数区间覆盖，

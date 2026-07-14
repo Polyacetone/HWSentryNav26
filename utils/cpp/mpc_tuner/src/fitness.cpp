@@ -26,7 +26,7 @@ double episode_soft_cost(const EpisodeMetrics& m, const EpisodeConfig& config) {
     const double t_ref = std::max(m.path_length / scales.reference_speed, 1e-3);
     const double time_term = normalized(m.elapsed_time, t_ref);
 
-    // 到达剩余速度：超过 target 的部分，按 [target, acceptable] 带宽归一。
+    // 到达剩余速度：超过 target 的部分按独立特征尺度归一，尺度越小则惩罚越强。
     const double arrival_excess = std::max(0.0, m.arrival_speed - config.target_arrival_speed);
     const double arrival_term = normalized(arrival_excess, scales.arrival_speed_band);
 

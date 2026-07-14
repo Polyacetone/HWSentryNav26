@@ -154,7 +154,7 @@ MapSnapshot map_snapshot(const msgpack::object& object) {
 }
 
 void pack_route(Packer& packer, const StoredRoute& route) {
-    packer.pack_map(8);
+    packer.pack_map(7);
     pack_key(packer, "name"); packer.pack(route.spec.name);
     pack_key(packer, "start");
     packer.pack_array(3);
@@ -162,7 +162,6 @@ void pack_route(Packer& packer, const StoredRoute& route) {
     packer.pack(route.spec.start_pose.y());
     packer.pack(route.spec.start_pose.z());
     pack_key(packer, "goal"); pack_vector2(packer, route.spec.goal);
-    pack_key(packer, "timeout"); packer.pack(route.spec.timeout);
     pack_key(packer, "seeds"); packer.pack(route.spec.seeds);
     pack_key(packer, "spline_control_points");
     packer.pack_array(static_cast<uint32_t>(route.spline_control_points.size()));
@@ -187,7 +186,6 @@ StoredRoute stored_route(const msgpack::object& object, const std::string& split
         start.via.array.ptr[2].as<double>(),
     };
     route.spec.goal = vector2(field(object, "goal"));
-    route.spec.timeout = value<double>(object, "timeout");
     route.spec.seeds = value<std::vector<uint64_t>>(object, "seeds");
 
     const auto& points = field(object, "spline_control_points");
@@ -208,7 +206,8 @@ StoredRoute stored_route(const msgpack::object& object, const std::string& split
 }
 
 void validate_bundle(const SceneBundle& bundle) {
-    if (bundle.format_version != SceneBundle::FORMAT_VERSION) {
+    if (bundle.format_version != SceneBundle::LEGACY_FORMAT_VERSION
+        && bundle.format_version != SceneBundle::FORMAT_VERSION) {
         throw std::runtime_error("Unsupported scene bundle version: " + std::to_string(bundle.format_version));
     }
     if (bundle.split != "train" && bundle.split != "validation") {
@@ -240,6 +239,9 @@ void validate_bundle(const SceneBundle& bundle) {
 } // namespace
 
 void write_scene_bundle(const SceneBundle& bundle, const std::filesystem::path& path) {
+    if (bundle.format_version != SceneBundle::FORMAT_VERSION) {
+        throw std::runtime_error("Cannot write legacy scene bundle version: " + std::to_string(bundle.format_version));
+    }
     validate_bundle(bundle);
     std::ofstream stream(path, std::ios::binary);
     if (!stream) throw std::runtime_error("Failed to open scene bundle for writing: " + path.string());

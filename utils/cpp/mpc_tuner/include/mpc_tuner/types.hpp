@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -21,12 +22,52 @@
 
 namespace mpc_tuner {
 
+enum class ExecutedFeature : size_t {
+    LATERAL_TUBE,
+    HEADING,
+    PROGRESS,
+    COMMAND_V,
+    COMMAND_OMEGA,
+    COMMAND_DV,
+    COMMAND_DOMEGA,
+    ACC_LIMIT,
+    ALPHA_LIMIT,
+    LAT_ACCEL,
+    OBSTACLE,
+    STEP_DIRECTION,
+    STEP_VELOCITY,
+    STEP_REACHABILITY_LO,
+    STEP_REACHABILITY_HI,
+    STEP_OMEGA,
+    STEP_DV,
+    STEP_DOMEGA,
+    TERMINAL_BRAKE,
+    TERMINAL_PROGRESS,
+    TERMINAL_LATERAL,
+    COUNT,
+};
+
+constexpr size_t EXECUTED_FEATURE_COUNT = static_cast<size_t>(ExecutedFeature::COUNT);
+
+constexpr std::array<std::string_view, EXECUTED_FEATURE_COUNT> EXECUTED_FEATURE_NAMES {
+    "lateral_tube", "heading", "progress", "command_v", "command_omega", "command_dv", "command_domega",
+    "acc_limit", "alpha_limit", "lat_accel", "obstacle", "step_direction", "step_velocity",
+    "step_reachability_lo", "step_reachability_hi", "step_omega", "step_dv", "step_domega",
+    "terminal_brake", "terminal_progress", "terminal_lateral",
+};
+
+// 闭环实际执行轨迹上的场景覆盖统计，不依赖 MPCSolver 的内部预测或诊断接口。
+struct ExecutedFeatureCoverage {
+    std::array<double, EXECUTED_FEATURE_COUNT> raw_sum {};
+    std::array<uint64_t, EXECUTED_FEATURE_COUNT> active_samples {};
+    std::array<uint64_t, EXECUTED_FEATURE_COUNT> sample_count {};
+};
+
 struct ScenarioSpec {
     std::string name;
     std::string split;
     Eigen::Vector3d start_pose = Eigen::Vector3d::Zero();
     Eigen::Vector2d goal = Eigen::Vector2d::Zero();
-    double timeout = 20.0;
     std::vector<uint64_t> seeds;
 };
 
@@ -48,7 +89,8 @@ struct StoredRoute {
 };
 
 struct SceneBundle {
-    static constexpr uint32_t FORMAT_VERSION = 1;
+    static constexpr uint32_t FORMAT_VERSION = 2;
+    static constexpr uint32_t LEGACY_FORMAT_VERSION = 1;
 
     uint32_t format_version = FORMAT_VERSION;
     std::string split;
@@ -81,7 +123,7 @@ struct StudyConfig {
 // 再乘以下方 SoftWeights。尺度是物理/经验问题，权重是价值取舍问题，两者刻意分离。
 struct SoftScales {
     double reference_speed = 2.0;          // 参考通行速度 (m/s)，用于每路线时间归一 t_ref = 弧长 / v_ref
-    double arrival_speed_band = 0.2;       // 到达剩余速度归一带宽 (m/s) = acceptable - target
+    double arrival_speed_band = 0.2;       // 超出目标到达速度部分的归一化尺度 (m/s)，越小惩罚越强
     double cross_track = 0.3;              // 横向偏离归一尺度 (m)，取管廊半宽 y_tube
     double high_cost_integral = 1.0;       // 经过代价积分软膝盖尺度
     double accel_floor = 1.8;              // 平滑度地板：线加速度阈值 (m/s²)，取 acc_max
@@ -101,10 +143,9 @@ struct SoftWeights {
 };
 
 struct EpisodeConfig {
-    double default_timeout = 20.0;
+    double timeout = 20.0;
     double goal_radius = 0.5;
     double target_arrival_speed = 0.1;
-    double acceptable_arrival_speed = 0.3;
     double high_cost_threshold = 30.0;
     double lethal_cost_threshold = 250.0;
     double severe_step_heading_error = 0.5235987755982988; // 30° in rad
@@ -173,12 +214,17 @@ struct EpisodeMetrics {
     double minor_step_heading_violation = 0.0;// 台阶角轻微违规积分（前进段）
     double cross_track_squared_integral = 0.0;
     double smoothness_excess_integral = 0.0;  // 超出物理加速度地板的抖动积分
+
+    ExecutedFeatureCoverage feature_coverage;
 };
 
 // 两层适应度：
 //   第一层（硬门槛）——字典序元组，安全绝对优先，各类事件计数 + 连续伴随量，无需权重。
-//     顺序：hazard > 台阶速度严重 > 台阶角严重 > 非到达。
-//   第二层（软标量）——单一连续加权代价，时间主导，供 CEM 在安全候选间做平滑排序。
+//     层级顺序（按用户约定，越靠前越优先）：
+//       1) hazard            —— 致命障碍/卡死停留，绝对优先
+//       2) 到达目标          —— failed_scenarios + progress_deficit（未到达时越接近完成越好）
+//       3) 台阶区域安全      —— 严重速度 + 严重航向合并计数（角度+速度同层）
+//   第二层（软标量）——单一连续加权代价，时间主导，仅对安全且到达的候选做平滑排序。
 struct Fitness {
     // 第一层：硬门槛
     int hazard_events = 0;
@@ -194,11 +240,17 @@ struct Fitness {
     double soft_cost = std::numeric_limits<double>::infinity();
 
     [[nodiscard]] auto ordering_key() const {
+        // 排名层级（字典序，越靠前越优先）：
+        //   1. hazard            —— 致命障碍/卡死停留，安全绝对优先
+        //   2. 到达目标          —— 未到达次数 + 未到达时进度缺口
+        //   3. 台阶区域安全      —— 严重速度 + 严重航向违规合并计数（角度+速度同层）
+        //   4. 软代价            —— 仅用于安全且到达的候选间平滑排序
+        const int step_zone_violations = severe_step_speed_events + severe_step_heading_events;
+        const double step_zone_excess = severe_step_speed_excess + severe_step_heading_excess;
         return std::tuple {
             hazard_events, hazard_duration,
-            severe_step_speed_events, severe_step_speed_excess,
-            severe_step_heading_events, severe_step_heading_excess,
             failed_scenarios, progress_deficit,
+            step_zone_violations, step_zone_excess,
             soft_cost,
         };
     }

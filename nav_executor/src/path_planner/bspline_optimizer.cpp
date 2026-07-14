@@ -1,7 +1,13 @@
 #include <ceres/ceres.h>
+#include <ceres/crs_matrix.h>
+#include <Eigen/Eigenvalues>
+
+#include <numbers>
 #include <nav_executor/path_planner/bspline_optimizer.hpp>
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <uniform_bspline_ceres/uniform_bspline_ceres.hpp>
+
+#include <rclcpp/logging.hpp>
 
 namespace nav_executor {
 using Spline = ubs::UniformBSpline<double, 2, double, Eigen::Vector2d, std::vector<Eigen::Vector2d>>;
@@ -14,6 +20,7 @@ using nav_executor::DirectionMap;
 using nav_executor::Spline;
 
 constexpr double EPS = 1e-9;
+const rclcpp::Logger OPTIMIZER_LOGGER = rclcpp::get_logger("nav_executor.path_planner.optimizer");
 
 ceres::Solver::Options default_solver_options(int max_iterations) {
     ceres::Solver::Options options;
@@ -110,6 +117,22 @@ struct StageSolveParams {
     int max_iterations;
     double length_penalty_weight;
     nav_executor::BSplineOptimizer::CurvaturePenaltyParams curvature;
+};
+
+struct ResidualCostSummary {
+    double obstacle = 0.0;
+    double direction = 0.0;
+    double step = 0.0;
+    double length = 0.0;
+    double curvature = 0.0;
+    int direction_samples = 0;
+    double max_direction_error_deg = 0.0;
+    Eigen::Vector2d max_direction_error_pos_map = Eigen::Vector2d::Zero();
+    double max_curvature = 0.0;
+    Eigen::Vector2d max_curvature_pos_map = Eigen::Vector2d::Zero();
+    double start_end = 0.0;
+    double start_error_m = 0.0;
+    double goal_error_m = 0.0;
 };
 
 SampledSpline sample_spline(
@@ -626,6 +649,153 @@ private:
     const nav_executor::BSplineOptimizer::CurvaturePenaltyParams params_;
 };
 
+ResidualCostSummary summarize_residual_costs(
+    const Spline& spline,
+    const CostMap& cost_map,
+    const DirectionMap& direction_map,
+    const std::vector<ProblemSample>& problem_samples,
+    const StageSolveParams& params,
+    double step_norm_threshold,
+    double step_norm_transition,
+    const Eigen::Vector2d& start_grid,
+    const Eigen::Vector2d& goal_grid
+) {
+    ResidualCostSummary summary;
+    for (const ProblemSample& sample : problem_samples) {
+        const Eigen::Vector2d pos = spline.evaluate(sample.u);
+        const Eigen::Vector2d vel = spline.derivative(sample.u, 1);
+        const Eigen::Vector2d acc = spline.derivative(sample.u, 2);
+        const auto direction_sample = direction_map.interpolate_with_gradient(pos);
+        const double direction_norm = direction_sample.value.norm();
+        const double gate = step_gate(direction_norm, step_norm_threshold, step_norm_transition);
+
+        const double obstacle_residual = params.obstacle_weight * cost_map.interpolate(pos);
+        summary.obstacle += obstacle_residual * obstacle_residual;
+
+        const double speed_grid = std::sqrt(vel.squaredNorm() + EPS);
+        if (gate > 0.0 && direction_norm > EPS) {
+            const double cross = vel.x() * direction_sample.value.y() - vel.y() * direction_sample.value.x();
+            const double alignment = cross / (speed_grid * direction_norm);
+            const double direction_residual = params.direction_weight * gate * alignment;
+            summary.direction += direction_residual * direction_residual;
+            summary.direction_samples += 1;
+            const double direction_error_deg = std::asin(std::clamp(std::abs(alignment), 0.0, 1.0)) * 180.0 / std::numbers::pi;
+            if (direction_error_deg > summary.max_direction_error_deg) {
+                summary.max_direction_error_deg = direction_error_deg;
+                summary.max_direction_error_pos_map = cost_map.grid_coord_to_map(pos);
+            }
+        }
+
+        const double step_residual = params.step_weight * gate;
+        summary.step += step_residual * step_residual;
+
+        const double speed_sq_grid = vel.squaredNorm();
+        const double speed_m = cost_map.resolution * std::sqrt(speed_sq_grid + EPS);
+        const double speed_gate_threshold = std::max(params.curvature.speed_gate_threshold, 1e-6);
+        const double speed_gate = speed_m * speed_m / (speed_m * speed_m + speed_gate_threshold * speed_gate_threshold);
+        const double min_speed_grid = std::max(params.curvature.min_speed_epsilon / std::max(cost_map.resolution, 1e-6), 1e-6);
+        const double safe_speed_sq_grid = speed_sq_grid + min_speed_grid * min_speed_grid;
+        const double curvature = (vel.x() * acc.y() - vel.y() * acc.x())
+            / (std::max(cost_map.resolution, 1e-6) * safe_speed_sq_grid * std::sqrt(safe_speed_sq_grid));
+        const double curvature_mag = std::sqrt(curvature * curvature + EPS);
+        const double curvature_residual = speed_gate * (
+            params.curvature.base_weight * smooth_relu(curvature_mag, params.curvature.base_beta)
+            + params.curvature.limit_weight * smooth_relu(curvature_mag - sample.max_curvature, params.curvature.limit_beta)
+        );
+        summary.curvature += curvature_residual * curvature_residual;
+        if (curvature_mag > summary.max_curvature) {
+            summary.max_curvature = curvature_mag;
+            summary.max_curvature_pos_map = cost_map.grid_coord_to_map(pos);
+        }
+
+        const double length_residual = params.length_penalty_weight * speed_m;
+        summary.length += length_residual * length_residual;
+    }
+
+    const Eigen::Vector2d start_error_grid = spline.evaluate(0.0) - start_grid;
+    const Eigen::Vector2d goal_error_grid = spline.evaluate(1.0) - goal_grid;
+    summary.start_end = params.start_end_weight * params.start_end_weight
+        * (start_error_grid.squaredNorm() + goal_error_grid.squaredNorm());
+    summary.start_error_m = start_error_grid.norm() * cost_map.resolution;
+    summary.goal_error_m = goal_error_grid.norm() * cost_map.resolution;
+    return summary;
+}
+
+void log_jacobian_diagnostics(ceres::Problem& problem, const ResidualCostSummary& costs, const char* stage_name, int refinement_iteration) {
+    ceres::Problem::EvaluateOptions evaluate_options;
+    ceres::CRSMatrix jacobian;
+    double total_cost = 0.0;
+    if (!problem.Evaluate(evaluate_options, &total_cost, nullptr, nullptr, &jacobian)) {
+        RCLCPP_DEBUG(OPTIMIZER_LOGGER, "stage=%s iter=%d Jacobian evaluation failed", stage_name, refinement_iteration);
+        return;
+    }
+
+    Eigen::MatrixXd normal = Eigen::MatrixXd::Zero(jacobian.num_cols, jacobian.num_cols);
+    for (int row = 0; row < jacobian.num_rows; ++row) {
+        for (int lhs = jacobian.rows[row]; lhs < jacobian.rows[row + 1]; ++lhs) {
+            for (int rhs = jacobian.rows[row]; rhs < jacobian.rows[row + 1]; ++rhs) {
+                normal(jacobian.cols[lhs], jacobian.cols[rhs]) += jacobian.values[lhs] * jacobian.values[rhs];
+            }
+        }
+    }
+
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigensolver(normal);
+    if (eigensolver.info() != Eigen::Success) {
+        RCLCPP_DEBUG(OPTIMIZER_LOGGER, "stage=%s iter=%d normal-matrix eigensolve failed", stage_name, refinement_iteration);
+        return;
+    }
+
+    const Eigen::VectorXd eigenvalues = eigensolver.eigenvalues();
+    const double max_eigenvalue = std::max(eigenvalues.maxCoeff(), 0.0);
+    const double rank_threshold = std::max(max_eigenvalue * 1e-12, 1e-18);
+    int effective_rank = 0;
+    double min_effective_eigenvalue = std::numeric_limits<double>::infinity();
+    for (const double eigenvalue : eigenvalues) {
+        if (eigenvalue > rank_threshold) {
+            ++effective_rank;
+            min_effective_eigenvalue = std::min(min_effective_eigenvalue, eigenvalue);
+        }
+    }
+    const double condition_number = effective_rank > 0
+        ? std::sqrt(max_eigenvalue / min_effective_eigenvalue)
+        : std::numeric_limits<double>::infinity();
+    const double reported_rss = costs.obstacle + costs.direction + costs.step + costs.length + costs.curvature + costs.start_end;
+    const double unclassified_rss = std::max(0.0, 2.0 * total_cost - reported_rss);
+
+    RCLCPP_DEBUG(
+        OPTIMIZER_LOGGER,
+        "stage=%s iter=%d objective=%.3e J_rows=%d J_cols=%d rank=%d cond(J)=%.3e eig=[%.3e,%.3e] "
+        "rss{obs=%.3e dir=%.3e step=%.3e len=%.3e curv=%.3e endpoint=%.3e other=%.3e} "
+        "endpoint_err_m{start=%.3f goal=%.3f} dir{active=%d max_err_deg=%.1f at=(%.2f,%.2f)} "
+        "max_curv=%.3f at=(%.2f,%.2f)",
+        stage_name,
+        refinement_iteration,
+        total_cost,
+        jacobian.num_rows,
+        jacobian.num_cols,
+        effective_rank,
+        condition_number,
+        min_effective_eigenvalue,
+        max_eigenvalue,
+        costs.obstacle,
+        costs.direction,
+        costs.step,
+        costs.length,
+        costs.curvature,
+        costs.start_end,
+        unclassified_rss,
+        costs.start_error_m,
+        costs.goal_error_m,
+        costs.direction_samples,
+        costs.max_direction_error_deg,
+        costs.max_direction_error_pos_map.x(),
+        costs.max_direction_error_pos_map.y(),
+        costs.max_curvature,
+        costs.max_curvature_pos_map.x(),
+        costs.max_curvature_pos_map.y()
+    );
+}
+
 std::expected<void, std::string> solve_stage(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
@@ -635,7 +805,9 @@ std::expected<void, std::string> solve_stage(
     double step_norm_threshold,
     double step_norm_transition,
     const Eigen::Vector2d& start_grid,
-    const Eigen::Vector2d& goal_grid
+    const Eigen::Vector2d& goal_grid,
+    const char* stage_name,
+    int refinement_iteration
 ) {
     ubs::UniformBSplineCeres<Spline> spline_ceres(spline);
     ceres::Problem problem;
@@ -746,6 +918,21 @@ std::expected<void, std::string> solve_stage(
         return std::unexpected(summary.BriefReport());
     }
 
+    if (OPTIMIZER_LOGGER.get_effective_level() <= rclcpp::Logger::Level::Debug) {
+        const ResidualCostSummary residual_costs = summarize_residual_costs(
+            spline,
+            cost_map,
+            direction_map,
+            problem_samples,
+            params,
+            step_norm_threshold,
+            step_norm_transition,
+            start_grid,
+            goal_grid
+        );
+        log_jacobian_diagnostics(problem, residual_costs, stage_name, refinement_iteration);
+    }
+
     return {};
 }
 } // namespace
@@ -804,7 +991,9 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
             params_.step_norm_threshold,
             params_.step_norm_transition,
             start_grid,
-            goal_grid
+            goal_grid,
+            "warmup",
+            0
         );
         !warmup_result) {
         return std::unexpected("Warmup optimization failed: " + warmup_result.error());
@@ -883,7 +1072,9 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
                 params_.step_norm_threshold,
                 params_.step_norm_transition,
                 start_grid,
-                goal_grid
+                goal_grid,
+                "main",
+                iter
             );
             !main_result) {
             return std::unexpected("Main optimization failed: " + main_result.error());
