@@ -20,7 +20,9 @@ set(core_sources
   src/config_loader.cpp
   src/console_input.cpp
   src/episode_runner.cpp
+  src/fitness.cpp
   src/optimizer.cpp
+  src/parameter_mapping.cpp
   src/scenario_compiler.cpp
   src/scene_bundle.cpp
   src/scene_map.cpp

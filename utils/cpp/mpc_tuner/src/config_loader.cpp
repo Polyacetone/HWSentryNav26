@@ -165,6 +165,29 @@ void load_follow(RuntimeConfig& out, const YAML::Node& root) {
     p.max_iters = value<int>(root, "mpc.follow.max_iters");
 }
 
+// 读取软标量的尺度与权重；两者均为可选块，缺省时沿用 EpisodeConfig 的内置默认值。
+void load_soft_fitness(EpisodeConfig& episode, const YAML::Node& node) {
+    if (const YAML::Node scales = node["soft_scales"]) {
+        SoftScales& s = episode.soft_scales;
+        if (scales["reference_speed"]) s.reference_speed = scales["reference_speed"].as<double>();
+        if (scales["arrival_speed_band"]) s.arrival_speed_band = scales["arrival_speed_band"].as<double>();
+        if (scales["cross_track"]) s.cross_track = scales["cross_track"].as<double>();
+        if (scales["high_cost_integral"]) s.high_cost_integral = scales["high_cost_integral"].as<double>();
+        if (scales["accel_floor"]) s.accel_floor = scales["accel_floor"].as<double>();
+        if (scales["alpha_floor"]) s.alpha_floor = scales["alpha_floor"].as<double>();
+    }
+    if (const YAML::Node weights = node["soft_weights"]) {
+        SoftWeights& w = episode.soft_weights;
+        if (weights["time"]) w.time = weights["time"].as<double>();
+        if (weights["high_cost"]) w.high_cost = weights["high_cost"].as<double>();
+        if (weights["arrival_speed"]) w.arrival_speed = weights["arrival_speed"].as<double>();
+        if (weights["step_speed_minor"]) w.step_speed_minor = weights["step_speed_minor"].as<double>();
+        if (weights["step_heading_minor"]) w.step_heading_minor = weights["step_heading_minor"].as<double>();
+        if (weights["cross_track"]) w.cross_track = weights["cross_track"].as<double>();
+        if (weights["smoothness"]) w.smoothness = weights["smoothness"].as<double>();
+    }
+}
+
 } // namespace
 
 TunerConfig load_tuner_config(const std::filesystem::path& path) {
@@ -180,6 +203,7 @@ TunerConfig load_tuner_config(const std::filesystem::path& path) {
         .min_std = study["min_std"].as<double>(),
         .parallel_workers = study["parallel_workers"].as<int>(),
         .progress_interval_seconds = study["progress_interval_seconds"].as<double>(),
+        .regularization_lambda = study["regularization_lambda"].as<double>(),
     };
     if (out.study.population_size < 2) throw std::runtime_error("study.population_size must be at least 2");
     if (out.study.generations < 1) throw std::runtime_error("study.generations must be positive");
@@ -188,24 +212,34 @@ TunerConfig load_tuner_config(const std::filesystem::path& path) {
         throw std::runtime_error("study.progress_interval_seconds must be positive");
     }
     const YAML::Node episode = root["episode"];
-    out.episode = {
-        .default_timeout = episode["default_timeout"].as<double>(),
-        .goal_radius = episode["goal_radius"].as<double>(),
-        .target_arrival_speed = episode["target_arrival_speed"].as<double>(),
-        .acceptable_arrival_speed = episode["acceptable_arrival_speed"].as<double>(),
-        .high_cost_threshold = episode["high_cost_threshold"].as<double>(),
-        .lethal_cost_threshold = episode["lethal_cost_threshold"].as<double>(),
-        .severe_step_heading_error = episode["severe_step_heading_error_deg"].as<double>() * std::numbers::pi / 180.0,
-        .severe_step_speed_margin = episode["severe_step_speed_margin"].as<double>(),
-    };
-    const std::array<std::string, PARAMETER_COUNT> names {
-        "q_y", "q_theta", "q_u", "y_tube", "q_term_prog", "q_term_lateral",
-        "r_v", "r_omega", "r_dv", "r_domega",
-    };
-    for (size_t i = 0; i < names.size(); ++i) {
-        const auto bounds = root["search_space"][names[i]].as<std::vector<double>>();
-        if (bounds.size() != 2 || !(bounds[0] < bounds[1])) throw std::runtime_error("Invalid search range for " + names[i]);
-        out.search_ranges[i] = {.name = names[i], .lower = bounds[0], .upper = bounds[1], .logarithmic = names[i] != "y_tube"};
+    out.episode.default_timeout = episode["default_timeout"].as<double>();
+    out.episode.goal_radius = episode["goal_radius"].as<double>();
+    out.episode.target_arrival_speed = episode["target_arrival_speed"].as<double>();
+    out.episode.acceptable_arrival_speed = episode["acceptable_arrival_speed"].as<double>();
+    out.episode.high_cost_threshold = episode["high_cost_threshold"].as<double>();
+    out.episode.lethal_cost_threshold = episode["lethal_cost_threshold"].as<double>();
+    out.episode.severe_step_heading_error =
+        episode["severe_step_heading_error_deg"].as<double>() * std::numbers::pi / 180.0;
+    out.episode.severe_step_speed_margin = episode["severe_step_speed_margin"].as<double>();
+    out.episode.forward_progress_epsilon = episode["forward_progress_epsilon"].as<double>();
+    load_soft_fitness(out.episode, episode);
+
+    // 搜索空间由参数描述表驱动（单一真相源）：tuner.yaml 的 search_space 提供可选的逐参数区间覆盖，
+    // 未列出的参数回退到描述表中的默认区间。这样新增可调参数只需改描述表，配置文件按需覆盖。
+    const YAML::Node search_space = root["search_space"];
+    for (size_t i = 0; i < PARAMETER_COUNT; ++i) {
+        const ParameterDescriptor& desc = PARAMETER_DESCRIPTORS[i];
+        double lower = desc.default_lower;
+        double upper = desc.default_upper;
+        if (const YAML::Node override_node = search_space[std::string(desc.name)]) {
+            const auto bounds = override_node.as<std::vector<double>>();
+            if (bounds.size() != 2 || !(bounds[0] < bounds[1])) {
+                throw std::runtime_error("Invalid search range override for " + std::string(desc.name));
+            }
+            lower = bounds[0];
+            upper = bounds[1];
+        }
+        out.search_ranges[i] = {.name = desc.name, .lower = lower, .upper = upper, .logarithmic = desc.logarithmic};
     }
     return out;
 }

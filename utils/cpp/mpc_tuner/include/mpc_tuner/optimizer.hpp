@@ -21,22 +21,12 @@ struct OptimizationProgress {
 
 using ProgressFunction = std::function<void(const OptimizationProgress&)>;
 
-ParameterCandidate baseline_candidate(
-    const nav_executor::MPCParams& params,
-    const TunerConfig& config
-);
-
 ParameterCandidate run_cem(
     const nav_executor::MPCParams& base_params,
     const TunerConfig& config,
     const EvaluateFunction& evaluate,
     const std::filesystem::path& output_directory,
     const ProgressFunction& report_progress
-);
-
-void write_parameter_overlay(
-    const ParameterCandidate& candidate,
-    const std::filesystem::path& path
 );
 
 } // namespace mpc_tuner
