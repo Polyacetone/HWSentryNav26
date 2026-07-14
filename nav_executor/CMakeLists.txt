@@ -13,9 +13,6 @@ ament_auto_find_build_dependencies()
 file(GLOB_RECURSE sources CONFIGURE_DEPENDS "src/*.cpp")
 ament_auto_add_library(${PROJECT_NAME} SHARED ${sources})
 
-find_package(OpenMP REQUIRED)
-target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
-
 find_package(Eigen3 REQUIRED)
 target_link_libraries(${PROJECT_NAME} Eigen3::Eigen)
 

@@ -492,19 +492,22 @@ MPCParams NavExecutorNode::load_mpc_params() {
             },
             .global_search = {
                 .enable = declare_parameter<bool>("mpc.follow.global_search.enable"),
-                .num_threads = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.num_threads")),
-                .batch_size = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.batch_size")),
-                .iteration_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.iteration_count")),
-                .elite_fraction = declare_parameter<double>("mpc.follow.global_search.elite_fraction"),
-                .sampling_std = {
-                    .velocity = declare_parameter<double>("mpc.follow.global_search.sampling_std.velocity"),
-                    .omega = declare_parameter<double>("mpc.follow.global_search.sampling_std.omega")
+                .beam = {
+                    .macro_steps = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.macro_steps")),
+                    .beam_width = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.width")),
+                    .velocity_acceleration_samples = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.velocity_acceleration_samples")),
+                    .omega_acceleration_samples = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.omega_acceleration_samples")),
+                    .per_state_limit = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.per_state_limit")),
+                    .exact_candidate_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.exact_candidate_count")),
+                    .progress_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.progress"),
+                    .longitudinal_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.longitudinal"),
+                    .lateral_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.lateral"),
+                    .heading_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.heading"),
+                    .hidden_state_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.hidden_state"),
+                    .velocity_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.velocity"),
+                    .omega_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.omega"),
+                    .energy_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.energy")
                 },
-                .noise_smoothing = {
-                    .window = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.noise_smoothing.window")),
-                    .passes = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.noise_smoothing.passes"))
-                },
-                .include_nominal_trajectory = declare_parameter<bool>("mpc.follow.global_search.include_nominal_trajectory"),
                 .candidate_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.candidate_count")),
                 .min_period_ms = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.min_period_ms")),
                 .max_seed_age_ticks = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.max_seed_age_ticks")),

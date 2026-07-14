@@ -150,25 +150,26 @@ struct MPCFollowProjection {
     double local_search_lazy_distance;
 };
 
-struct GlobalSearchSamplingStd {
-    double velocity;
-    double omega;
-};
-
-struct GlobalSearchNoiseSmoothing {
-    int window;
-    int passes;
+struct GlobalSearchBeamParams {
+    int macro_steps;
+    int beam_width;
+    int velocity_acceleration_samples;
+    int omega_acceleration_samples;
+    int per_state_limit;
+    int exact_candidate_count;
+    double progress_bin;
+    double longitudinal_bin;
+    double lateral_bin;
+    double heading_bin;
+    double hidden_state_bin;
+    double velocity_bin;
+    double omega_bin;
+    double energy_bin;
 };
 
 struct GlobalSearchParams {
     bool enable;
-    int num_threads;
-    int batch_size;
-    int iteration_count;
-    double elite_fraction;
-    GlobalSearchSamplingStd sampling_std;
-    GlobalSearchNoiseSmoothing noise_smoothing;
-    bool include_nominal_trajectory;
+    GlobalSearchBeamParams beam;
     int candidate_count = 2;
     int min_period_ms = 200;
     int max_seed_age_ticks = 8;

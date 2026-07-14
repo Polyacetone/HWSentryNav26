@@ -12,31 +12,48 @@ GlobalSearchResult GlobalSearch::search(
     const int candidate_count
 ) const {
     GlobalSearchResult result;
-    const std::array<const TrajectorySeed*, 2> initial_means {&warm_seed, &longitudinal_seed};
     const int mode_count = std::max(candidate_count, 0);
-    result.candidates.reserve(static_cast<size_t>(mode_count));
-    for (int mode_index = 0; mode_index < mode_count; ++mode_index) {
-        const TrajectorySeed& initial_mean = *initial_means[static_cast<size_t>(mode_index) % initial_means.size()];
-        const auto sampled = optimizer_.optimize(problem, x0, initial_mean.controls);
-        if (!sampled.valid) continue;
-        TrajectorySeed candidate;
-        candidate.controls = sampled.us;
-        candidate.source = SeedSource::GLOBAL;
-        candidate.origin_seq = warm_seed.origin_seq;
-        result.candidates.push_back(std::move(candidate));
-    }
-    std::sort(result.candidates.begin(), result.candidates.end(), [&](const auto& lhs, const auto& rhs) {
-        return evaluate_seed(problem, lhs, x0).cost < evaluate_seed(problem, rhs, x0).cost;
-    });
-    result.debug_paths.reserve(result.candidates.size());
-    for (const auto& candidate : result.candidates) {
-        const auto evaluation = evaluate_seed(problem, candidate, x0);
+    if (mode_count == 0) return result;
+
+    struct EvaluatedCandidate {
+        TrajectorySeed seed;
+        SeedEvaluation evaluation;
+    };
+    std::vector<EvaluatedCandidate> evaluated;
+    auto coarse_candidates = beam_search_.search(problem, x0);
+    evaluated.reserve(coarse_candidates.size() + 1);
+    for (auto& coarse : coarse_candidates) {
+        coarse.origin_seq = warm_seed.origin_seq;
+        auto evaluation = evaluate_seed(problem, coarse, x0);
         if (!evaluation.valid) continue;
+        evaluated.push_back(EvaluatedCandidate {
+            .seed = std::move(coarse),
+            .evaluation = std::move(evaluation),
+        });
+    }
+    auto longitudinal_evaluation = evaluate_seed(problem, longitudinal_seed, x0);
+    if (longitudinal_evaluation.valid) {
+        evaluated.push_back(EvaluatedCandidate {
+            .seed = longitudinal_seed,
+            .evaluation = std::move(longitudinal_evaluation),
+        });
+    }
+    std::sort(evaluated.begin(), evaluated.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.evaluation.cost < rhs.evaluation.cost;
+    });
+    if (static_cast<int>(evaluated.size()) > mode_count) {
+        evaluated.resize(static_cast<size_t>(mode_count));
+    }
+
+    result.candidates.reserve(evaluated.size());
+    result.debug_paths.reserve(evaluated.size());
+    for (auto& candidate : evaluated) {
         auto& path = result.debug_paths.emplace_back();
         path.reserve(MPC_HORIZON + 1);
-        for (const auto& state : evaluation.states) {
+        for (const auto& state : candidate.evaluation.states) {
             path.emplace_back(state(ix::X), state(ix::Y));
         }
+        result.candidates.push_back(std::move(candidate.seed));
     }
     return result;
 }

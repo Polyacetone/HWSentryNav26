@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include <nav_executor/path_executor/solver/cem_optimizer.hpp>
+#include <nav_executor/path_executor/solver/beam_search.hpp>
 #include <nav_executor/path_executor/solver/trajectory_seed.hpp>
 
 namespace nav_executor {
@@ -14,7 +14,7 @@ struct GlobalSearchResult {
 
 class GlobalSearch {
 public:
-    explicit GlobalSearch(GlobalSearchParams params): optimizer_(params) {}
+    explicit GlobalSearch(GlobalSearchParams params): beam_search_(params.beam) {}
 
     [[nodiscard]] GlobalSearchResult search(
         const FollowProblem& problem,
@@ -25,7 +25,7 @@ public:
     ) const;
 
 private:
-    CEMOptimizer optimizer_;
+    BeamSearch beam_search_;
 };
 
 } // namespace nav_executor

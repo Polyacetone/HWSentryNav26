@@ -16,17 +16,22 @@
         max_iters: 20 # FDDP 求解器最大迭代次数
         global_search:
           enable: true # 启用异步多模态全局种子搜索
-          num_threads: 2 # 采样 rollout 并行线程数
-          batch_size: 2048 # 每次迭代采样轨迹数
-          iteration_count: 1 # 每个独立模态的采样更新次数
-          elite_fraction: 0.1 # CEM 每轮用于更新模态均值的最优样本比例
-          sampling_std:
-            velocity: 0.8 # 线速度采样标准差 (m/s)
-            omega: 2.0 # 角速度采样标准差 (rad/s)
-          noise_smoothing:
-            window: 5 # 时间相关噪声平滑窗口，增强轨迹可执行性
-            passes: 2 # 平滑迭代次数
-          include_nominal_trajectory: true # 采样集中显式保留名义轨迹，避免随机搜索退化时丢掉已有好解
+          beam:
+            macro_steps: 4 # 每个搜索宏步包含的 20Hz MPC 步数；4 对应 0.2s
+            width: 256 # 每层保留的状态数
+            velocity_acceleration_samples: 3 # [-acc_max, acc_max] 内均匀采样数
+            omega_acceleration_samples: 5 # [-alpha_max, alpha_max] 内均匀采样数
+            per_state_limit: 2 # 每个离散状态格最多保留的不同来向
+            exact_candidate_count: 24 # 使用完整 20Hz 灰盒模型复验的粗搜索候选数
+            state_bins:
+              progress: 0.015 # path_u 离散分辨率
+              longitudinal: 0.20 # 相对 path_u 参考点的沿轨位置误差分辨率 (m)
+              lateral: 0.20 # 相对参考路径横向误差分辨率 (m)
+              heading: 0.25 # 航向误差分辨率 (rad)
+              hidden_state: 0.20 # 纵向灰盒隐藏状态分辨率
+              velocity: 0.20 # 实际线速度分辨率 (m/s)
+              omega: 0.50 # 实际角速度分辨率 (rad/s)
+              energy: 50.0 # 电容能量分辨率 (J)
           candidate_count: 2 # 异步全局搜索保留的独立模态候选数
           min_period_ms: 100 # 全局搜索线程最短周期
           max_seed_age_ticks: 8 # 注入种子的最大控制周期年龄

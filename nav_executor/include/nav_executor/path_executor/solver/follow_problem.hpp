@@ -51,6 +51,9 @@ public:
     [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
     [[nodiscard]] const MPCParams& params() const;
     [[nodiscard]] const CapabilityProfile& capability_profile() const { return blended_profile_; }
+    [[nodiscard]] const SplinePath& reference_path() const { return spline_; }
+    [[nodiscard]] const LPVDiscreteModel& discrete_model() const { return model_; }
+    [[nodiscard]] double charge_power_limit() const { return rfr_pwr_limit_; }
     [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const SplinePath& spline) const;
 
 private:
