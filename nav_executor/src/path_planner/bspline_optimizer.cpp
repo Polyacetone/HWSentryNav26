@@ -1,13 +1,10 @@
 #include <ceres/ceres.h>
-#include <ceres/crs_matrix.h>
-#include <Eigen/Eigenvalues>
 
-#include <numbers>
+#include <numeric>
+
 #include <nav_executor/path_planner/bspline_optimizer.hpp>
 #include <uniform_bspline/uniform_bspline.hpp>
 #include <uniform_bspline_ceres/uniform_bspline_ceres.hpp>
-
-#include <rclcpp/logging.hpp>
 
 namespace nav_executor {
 using Spline = ubs::UniformBSpline<double, 2, double, Eigen::Vector2d, std::vector<Eigen::Vector2d>>;
@@ -20,7 +17,7 @@ using nav_executor::DirectionMap;
 using nav_executor::Spline;
 
 constexpr double EPS = 1e-9;
-const rclcpp::Logger OPTIMIZER_LOGGER = rclcpp::get_logger("nav_executor.path_planner.optimizer");
+constexpr double TANGENT_REGULARIZATION_BETA = 10.0;
 
 ceres::Solver::Options default_solver_options(int max_iterations) {
     ceres::Solver::Options options;
@@ -106,33 +103,15 @@ struct StepInterval {
 struct ProblemSample {
     double u;
     double max_curvature;
+    double integration_length_m;
+    double integration_parameter;
 };
 
 struct StageSolveParams {
-    double obstacle_weight;
-    double direction_weight;
-    double step_weight;
-    double start_end_weight;
-    double smoothness_weight;
+    nav_executor::BSplineOptimizer::ObjectiveWeights objective_weights;
     int max_iterations;
-    double length_penalty_weight;
+    nav_executor::BSplineOptimizer::TangentRegularizationParams tangent_regularization;
     nav_executor::BSplineOptimizer::CurvaturePenaltyParams curvature;
-};
-
-struct ResidualCostSummary {
-    double obstacle = 0.0;
-    double direction = 0.0;
-    double step = 0.0;
-    double length = 0.0;
-    double curvature = 0.0;
-    int direction_samples = 0;
-    double max_direction_error_deg = 0.0;
-    Eigen::Vector2d max_direction_error_pos_map = Eigen::Vector2d::Zero();
-    double max_curvature = 0.0;
-    Eigen::Vector2d max_curvature_pos_map = Eigen::Vector2d::Zero();
-    double start_end = 0.0;
-    double start_error_m = 0.0;
-    double goal_error_m = 0.0;
 };
 
 SampledSpline sample_spline(
@@ -297,13 +276,21 @@ std::vector<ProblemSample> build_problem_samples(
 ) {
     std::vector<ProblemSample> problem_samples;
     problem_samples.reserve(sampled_spline.samples.size());
-    for (const SplineSample& sample : sampled_spline.samples) {
+    const auto& samples = sampled_spline.samples;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const SplineSample& sample = samples[i];
         const double distance_to_step_m = distance_to_intervals(sample.arc_length_m, step_intervals);
+        const double prev_arc_length = i == 0 ? sample.arc_length_m : samples[i - 1].arc_length_m;
+        const double next_arc_length = i + 1 == samples.size() ? sample.arc_length_m : samples[i + 1].arc_length_m;
+        const double prev_u = i == 0 ? sample.u : samples[i - 1].u;
+        const double next_u = i + 1 == samples.size() ? sample.u : samples[i + 1].u;
         problem_samples.push_back({
             .u = sample.u,
             .max_curvature = curvature_limit_from_distance(
                 distance_to_step_m, near_max_curvature, far_max_curvature, transition_distance_m
             ),
+            .integration_length_m = 0.5 * (next_arc_length - prev_arc_length),
+            .integration_parameter = 0.5 * (next_u - prev_u),
         });
     }
     return problem_samples;
@@ -354,8 +341,12 @@ public:
     ObstacleCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
         const CostMap& cost_map,
-        double weight
-    ): pos_evaluator_(pos_evaluator), cost_map_(cost_map), weight_(weight) {
+        double weight,
+        double integration_length_m
+    ):
+        pos_evaluator_(pos_evaluator),
+        cost_map_(cost_map),
+        residual_scale_(weight * std::sqrt(integration_length_m) / 255.0) {
         mutable_parameter_block_sizes()->clear();
         for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; ++i) {
             mutable_parameter_block_sizes()->push_back(2);
@@ -367,7 +358,7 @@ public:
         Eigen::Vector2d point;
         pos_evaluator_.evaluate(parameters[0], parameters[1], parameters[2], point.data());
         const double cost = cost_map_.interpolate(point);
-        residuals[0] = weight_ * cost;
+        residuals[0] = residual_scale_ * cost;
         if (jacobians) {
             const Eigen::Vector2d cost_gradient = cost_map_.gradient(point);
             for (size_t i = 0; i < pos_evaluator_.ControlPointsSupport; ++i) {
@@ -375,7 +366,7 @@ public:
                     continue;
                 }
 
-                const Eigen::Vector2d jac = weight_ * pos_evaluator_.basisVals_[i] * cost_gradient;
+                const Eigen::Vector2d jac = residual_scale_ * pos_evaluator_.basisVals_[i] * cost_gradient;
                 jacobians[i][0] = jac.x();
                 jacobians[i][1] = jac.y();
             }
@@ -386,7 +377,7 @@ public:
 private:
     const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
     const CostMap& cost_map_;
-    const double weight_;
+    const double residual_scale_;
 };
 
 class DirectionCostFunction : public ceres::CostFunction {
@@ -394,17 +385,16 @@ public:
     DirectionCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
         const ubs::UniformBSplineCeresEvaluator<Spline>& vel_evaluator,
-        const CostMap& cost_map,
         const DirectionMap& direction_map,
         double weight,
+        double integration_length_m,
         double step_norm_threshold,
         double step_norm_transition
     ):
         pos_evaluator_(pos_evaluator),
         vel_evaluator_(vel_evaluator),
-        cost_map_(cost_map),
         direction_map_(direction_map),
-        weight_(weight),
+        residual_scale_(weight * std::sqrt(integration_length_m)),
         step_norm_threshold_(step_norm_threshold),
         step_norm_transition_(step_norm_transition) {
         mutable_parameter_block_sizes()->clear();
@@ -431,7 +421,7 @@ public:
         const double safe_dir_norm = std::max(dir_norm, epsilon);
         const double cross = vel.x() * dir.y() - vel.y() * dir.x();
         const double alignment = cross / (speed * safe_dir_norm);
-        residuals[0] = weight_ * gate * alignment;
+        residuals[0] = residual_scale_ * gate * alignment;
 
         if (jacobians) {
             // d(gate)/d(norm) — smoothstep 导数（门控过渡区外为 0）
@@ -460,11 +450,11 @@ public:
                 const double bp = pos_evaluator_.basisVals_[i];
                 const double bv = vel_evaluator_.basisVals_[i];
 
-                jacobians[i][0] = weight_ * (
+                jacobians[i][0] = residual_scale_ * (
                     bp * (dgate_dpos.x() * alignment + gate * dalignment_dpos.x())
                   + bv * gate * dalignment_dvel.x()
                 );
-                jacobians[i][1] = weight_ * (
+                jacobians[i][1] = residual_scale_ * (
                     bp * (dgate_dpos.y() * alignment + gate * dalignment_dpos.y())
                   + bv * gate * dalignment_dvel.y()
                 );
@@ -477,9 +467,8 @@ public:
 private:
     const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
     const ubs::UniformBSplineCeresEvaluator<Spline> vel_evaluator_;
-    const CostMap& cost_map_;
     const DirectionMap& direction_map_;
-    const double weight_;
+    const double residual_scale_;
     const double step_norm_threshold_;
     const double step_norm_transition_;
 };
@@ -488,16 +477,15 @@ class StepFieldMagnitudeCostFunction : public ceres::CostFunction {
 public:
     StepFieldMagnitudeCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
-        const CostMap& cost_map,
         const DirectionMap& direction_map,
         double weight,
+        double integration_length_m,
         double step_norm_threshold,
         double step_norm_transition
     ):
         pos_evaluator_(pos_evaluator),
-        cost_map_(cost_map),
         direction_map_(direction_map),
-        weight_(weight),
+        residual_scale_(weight * std::sqrt(integration_length_m)),
         step_norm_threshold_(step_norm_threshold),
         step_norm_transition_(step_norm_transition) {
         mutable_parameter_block_sizes()->clear();
@@ -514,7 +502,7 @@ public:
         const auto sample = direction_map_.interpolate_with_gradient(pos);
         const double dir_norm = sample.value.norm();
         const double gate = step_gate(dir_norm, step_norm_threshold_, step_norm_transition_);
-        residuals[0] = weight_ * gate;
+        residuals[0] = residual_scale_ * gate;
 
         if (jacobians) {
             const double eps = 1e-12;
@@ -528,8 +516,8 @@ public:
             for (size_t i = 0; i < n; ++i) {
                 if (!jacobians[i]) continue;
                 const double bp = pos_evaluator_.basisVals_[i];
-                jacobians[i][0] = weight_ * bp * dgate_dpos.x();
-                jacobians[i][1] = weight_ * bp * dgate_dpos.y();
+                jacobians[i][0] = residual_scale_ * bp * dgate_dpos.x();
+                jacobians[i][1] = residual_scale_ * bp * dgate_dpos.y();
             }
         }
 
@@ -538,9 +526,8 @@ public:
 
 private:
     const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
-    const CostMap& cost_map_;
     const DirectionMap& direction_map_;
-    const double weight_;
+    const double residual_scale_;
     const double step_norm_threshold_;
     const double step_norm_transition_;
 };
@@ -550,22 +537,26 @@ public:
     StartEndPositionCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& pos_evaluator,
         const Eigen::Vector2d& target,
+        double resolution,
         double weight
-    ): pos_evaluator_(pos_evaluator), target_(target), weight_(weight) {}
+    ):
+        pos_evaluator_(pos_evaluator),
+        target_(target),
+        residual_scale_(resolution * weight) {}
 
     template <typename T>
     bool operator()(T const* const p0, T const* const p1, T const* const p2, T* residuals) const {
         T pos[2];
         pos_evaluator_.evaluate(p0, p1, p2, pos);
-        residuals[0] = T(weight_) * (pos[0] - T(target_.x()));
-        residuals[1] = T(weight_) * (pos[1] - T(target_.y()));
+        residuals[0] = T(residual_scale_) * (pos[0] - T(target_.x()));
+        residuals[1] = T(residual_scale_) * (pos[1] - T(target_.y()));
         return true;
     }
 
 private:
     const ubs::UniformBSplineCeresEvaluator<Spline> pos_evaluator_;
     const Eigen::Vector2d target_;
-    const double weight_;
+    const double residual_scale_;
 };
 
 class LengthPenaltyCostFunction {
@@ -573,39 +564,100 @@ public:
     LengthPenaltyCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& vel_evaluator,
         double resolution,
-        double weight
-    ): vel_evaluator_(vel_evaluator), resolution_(resolution), weight_(weight) {}
+        double weight,
+        double integration_parameter
+    ):
+        vel_evaluator_(vel_evaluator),
+        resolution_(resolution),
+        residual_scale_(weight * std::sqrt(integration_parameter)) {}
 
     template <typename T>
     bool operator()(T const* const p0, T const* const p1, T const* const p2, T* residuals) const {
         T vel[2];
         vel_evaluator_.evaluate(p0, p1, p2, vel);
-        // 使用 sqrt 拿到一阶导数的模（物理速度），交给 Ceres 去平方
+        // 1/2 r² = 1/2 weight² * du * |dp/du|，即加权弧长积分。
         const T speed_m = T(resolution_) * ceres::sqrt(vel[0] * vel[0] + vel[1] * vel[1] + T(EPS));
-        residuals[0] = T(weight_) * speed_m;
+        residuals[0] = T(residual_scale_) * ceres::sqrt(speed_m);
         return true;
     }
 
 private:
     const ubs::UniformBSplineCeresEvaluator<Spline> vel_evaluator_;
     const double resolution_;
-    const double weight_;
+    const double residual_scale_;
+};
+
+class TangentRegularityCostFunction {
+public:
+    TangentRegularityCostFunction(
+        const ubs::UniformBSplineCeresEvaluator<Spline>& vel_evaluator,
+        double resolution,
+        double spline_scale,
+        double mean_span_length_m,
+        double min_normalized_ratio,
+        double weight,
+        double integration_parameter
+    ):
+        vel_evaluator_(vel_evaluator),
+        resolution_(resolution),
+        spline_scale_(spline_scale),
+        mean_span_length_m_(mean_span_length_m),
+        min_normalized_ratio_(min_normalized_ratio),
+        residual_scale_(weight * std::sqrt(integration_parameter)) {}
+
+    template <typename T>
+    bool operator()(T const* const p0, T const* const p1, T const* const p2, T* residuals) const {
+        T vel[2];
+        vel_evaluator_.evaluate(p0, p1, p2, vel);
+
+        const T local_tangent_length_m = T(resolution_ / spline_scale_)
+            * ceres::sqrt(vel[0] * vel[0] + vel[1] * vel[1] + T(EPS));
+        const T normalized_tangent = local_tangent_length_m / T(mean_span_length_m_);
+        const T relative_deficit = (T(min_normalized_ratio_) - normalized_tangent)
+            / T(min_normalized_ratio_);
+        residuals[0] = T(residual_scale_) * smooth_relu(relative_deficit, TANGENT_REGULARIZATION_BETA);
+        return true;
+    }
+
+private:
+    const ubs::UniformBSplineCeresEvaluator<Spline> vel_evaluator_;
+    const double resolution_;
+    const double spline_scale_;
+    const double mean_span_length_m_;
+    const double min_normalized_ratio_;
+    const double residual_scale_;
 };
 
 class CurvatureCostFunction {
 public:
+    enum class PenaltyType {
+        BASE,
+        LIMIT,
+    };
+
     CurvatureCostFunction(
         const ubs::UniformBSplineCeresEvaluator<Spline>& vel_evaluator,
         const ubs::UniformBSplineCeresEvaluator<Spline>& acc_evaluator,
         double resolution,
+        double spline_scale,
         double max_curvature,
-        const nav_executor::BSplineOptimizer::CurvaturePenaltyParams& params
+        double weight,
+        double penalty_beta,
+        double integration_length_m,
+        double denominator_regularization_length,
+        double tangent_gate_threshold,
+        PenaltyType penalty_type
     ):
         vel_evaluator_(vel_evaluator),
         acc_evaluator_(acc_evaluator),
         resolution_(resolution),
+        spline_scale_(spline_scale),
         max_curvature_(max_curvature),
-        params_(params) {
+        residual_scale_(weight * std::sqrt(integration_length_m)),
+        penalty_beta_(penalty_beta),
+        denominator_regularization_length_(denominator_regularization_length),
+        tangent_gate_threshold_(tangent_gate_threshold),
+        penalty_type_(penalty_type) {
     }
 
     template <typename T>
@@ -615,29 +667,30 @@ public:
         vel_evaluator_.evaluate(p0, p1, p2, vel);
         acc_evaluator_.evaluate(p0, p1, p2, acc);
 
-        const T speed_sq_grid = vel[0] * vel[0] + vel[1] * vel[1];
-        const T speed_grid = ceres::sqrt(speed_sq_grid + T(EPS));
-        const T speed_m = T(resolution_) * speed_grid;
-        // 单一速度门控: v²/(v²+thresh²)
-        // 低速时曲率代价病态（小速度除零），该门控平滑抑制之。
-        // 当 speed_m = speed_gate_threshold 时代价半衰，物理含义清晰。
-        const double safe_threshold = std::max(params_.speed_gate_threshold, 1e-6);
-        const T gate = speed_m * speed_m / (speed_m * speed_m + T(safe_threshold * safe_threshold));
+        // 对 u 导数按 knot scale 归一化，使正则和门控不随控制点数量变化。
+        const T local_vel_x = vel[0] / T(spline_scale_);
+        const T local_vel_y = vel[1] / T(spline_scale_);
+        const T local_acc_x = acc[0] / T(spline_scale_ * spline_scale_);
+        const T local_acc_y = acc[1] / T(spline_scale_ * spline_scale_);
+        const T tangent_length_sq_m = T(resolution_ * resolution_)
+            * (local_vel_x * local_vel_x + local_vel_y * local_vel_y);
+        const double safe_threshold = std::max(tangent_gate_threshold_, 1e-6);
+        const T gate = tangent_length_sq_m / (tangent_length_sq_m + T(safe_threshold * safe_threshold));
 
-        const double min_speed_grid = std::max(params_.min_speed_epsilon / std::max(resolution_, 1e-6), 1e-6);
-        const T safe_speed_sq_grid = speed_sq_grid + T(min_speed_grid * min_speed_grid);
+        const double denominator_regularization_grid = std::max(
+            denominator_regularization_length_ / std::max(resolution_, 1e-6), 1e-6
+        );
+        const T safe_speed_sq_grid = local_vel_x * local_vel_x + local_vel_y * local_vel_y
+            + T(denominator_regularization_grid * denominator_regularization_grid);
         const T safe_speed_grid = ceres::sqrt(safe_speed_sq_grid);
         const T denom = T(std::max(resolution_, 1e-6)) * safe_speed_sq_grid * safe_speed_grid;
-        const T cross = vel[0] * acc[1] - vel[1] * acc[0];
+        const T cross = local_vel_x * local_acc_y - local_vel_y * local_acc_x;
         const T curvature = cross / denom;
         const T curvature_mag = ceres::sqrt(curvature * curvature + T(EPS));
-
-        const T base_penalty = smooth_relu(curvature_mag, params_.base_beta);
-        const T limit_penalty = smooth_relu(curvature_mag - T(max_curvature_), params_.limit_beta);
-
-        residuals[0] = gate * (
-            T(params_.base_weight) * base_penalty + T(params_.limit_weight) * limit_penalty
-        );
+        const T penalty_argument = penalty_type_ == PenaltyType::BASE
+            ? curvature_mag
+            : curvature_mag - T(max_curvature_);
+        residuals[0] = T(residual_scale_) * gate * smooth_relu(penalty_argument, penalty_beta_);
         return true;
     }
 
@@ -645,156 +698,14 @@ private:
     const ubs::UniformBSplineCeresEvaluator<Spline> vel_evaluator_;
     const ubs::UniformBSplineCeresEvaluator<Spline> acc_evaluator_;
     const double resolution_;
+    const double spline_scale_;
     const double max_curvature_;
-    const nav_executor::BSplineOptimizer::CurvaturePenaltyParams params_;
+    const double residual_scale_;
+    const double penalty_beta_;
+    const double denominator_regularization_length_;
+    const double tangent_gate_threshold_;
+    const PenaltyType penalty_type_;
 };
-
-ResidualCostSummary summarize_residual_costs(
-    const Spline& spline,
-    const CostMap& cost_map,
-    const DirectionMap& direction_map,
-    const std::vector<ProblemSample>& problem_samples,
-    const StageSolveParams& params,
-    double step_norm_threshold,
-    double step_norm_transition,
-    const Eigen::Vector2d& start_grid,
-    const Eigen::Vector2d& goal_grid
-) {
-    ResidualCostSummary summary;
-    for (const ProblemSample& sample : problem_samples) {
-        const Eigen::Vector2d pos = spline.evaluate(sample.u);
-        const Eigen::Vector2d vel = spline.derivative(sample.u, 1);
-        const Eigen::Vector2d acc = spline.derivative(sample.u, 2);
-        const auto direction_sample = direction_map.interpolate_with_gradient(pos);
-        const double direction_norm = direction_sample.value.norm();
-        const double gate = step_gate(direction_norm, step_norm_threshold, step_norm_transition);
-
-        const double obstacle_residual = params.obstacle_weight * cost_map.interpolate(pos);
-        summary.obstacle += obstacle_residual * obstacle_residual;
-
-        const double speed_grid = std::sqrt(vel.squaredNorm() + EPS);
-        if (gate > 0.0 && direction_norm > EPS) {
-            const double cross = vel.x() * direction_sample.value.y() - vel.y() * direction_sample.value.x();
-            const double alignment = cross / (speed_grid * direction_norm);
-            const double direction_residual = params.direction_weight * gate * alignment;
-            summary.direction += direction_residual * direction_residual;
-            summary.direction_samples += 1;
-            const double direction_error_deg = std::asin(std::clamp(std::abs(alignment), 0.0, 1.0)) * 180.0 / std::numbers::pi;
-            if (direction_error_deg > summary.max_direction_error_deg) {
-                summary.max_direction_error_deg = direction_error_deg;
-                summary.max_direction_error_pos_map = cost_map.grid_coord_to_map(pos);
-            }
-        }
-
-        const double step_residual = params.step_weight * gate;
-        summary.step += step_residual * step_residual;
-
-        const double speed_sq_grid = vel.squaredNorm();
-        const double speed_m = cost_map.resolution * std::sqrt(speed_sq_grid + EPS);
-        const double speed_gate_threshold = std::max(params.curvature.speed_gate_threshold, 1e-6);
-        const double speed_gate = speed_m * speed_m / (speed_m * speed_m + speed_gate_threshold * speed_gate_threshold);
-        const double min_speed_grid = std::max(params.curvature.min_speed_epsilon / std::max(cost_map.resolution, 1e-6), 1e-6);
-        const double safe_speed_sq_grid = speed_sq_grid + min_speed_grid * min_speed_grid;
-        const double curvature = (vel.x() * acc.y() - vel.y() * acc.x())
-            / (std::max(cost_map.resolution, 1e-6) * safe_speed_sq_grid * std::sqrt(safe_speed_sq_grid));
-        const double curvature_mag = std::sqrt(curvature * curvature + EPS);
-        const double curvature_residual = speed_gate * (
-            params.curvature.base_weight * smooth_relu(curvature_mag, params.curvature.base_beta)
-            + params.curvature.limit_weight * smooth_relu(curvature_mag - sample.max_curvature, params.curvature.limit_beta)
-        );
-        summary.curvature += curvature_residual * curvature_residual;
-        if (curvature_mag > summary.max_curvature) {
-            summary.max_curvature = curvature_mag;
-            summary.max_curvature_pos_map = cost_map.grid_coord_to_map(pos);
-        }
-
-        const double length_residual = params.length_penalty_weight * speed_m;
-        summary.length += length_residual * length_residual;
-    }
-
-    const Eigen::Vector2d start_error_grid = spline.evaluate(0.0) - start_grid;
-    const Eigen::Vector2d goal_error_grid = spline.evaluate(1.0) - goal_grid;
-    summary.start_end = params.start_end_weight * params.start_end_weight
-        * (start_error_grid.squaredNorm() + goal_error_grid.squaredNorm());
-    summary.start_error_m = start_error_grid.norm() * cost_map.resolution;
-    summary.goal_error_m = goal_error_grid.norm() * cost_map.resolution;
-    return summary;
-}
-
-void log_jacobian_diagnostics(ceres::Problem& problem, const ResidualCostSummary& costs, const char* stage_name, int refinement_iteration) {
-    ceres::Problem::EvaluateOptions evaluate_options;
-    ceres::CRSMatrix jacobian;
-    double total_cost = 0.0;
-    if (!problem.Evaluate(evaluate_options, &total_cost, nullptr, nullptr, &jacobian)) {
-        RCLCPP_DEBUG(OPTIMIZER_LOGGER, "stage=%s iter=%d Jacobian evaluation failed", stage_name, refinement_iteration);
-        return;
-    }
-
-    Eigen::MatrixXd normal = Eigen::MatrixXd::Zero(jacobian.num_cols, jacobian.num_cols);
-    for (int row = 0; row < jacobian.num_rows; ++row) {
-        for (int lhs = jacobian.rows[row]; lhs < jacobian.rows[row + 1]; ++lhs) {
-            for (int rhs = jacobian.rows[row]; rhs < jacobian.rows[row + 1]; ++rhs) {
-                normal(jacobian.cols[lhs], jacobian.cols[rhs]) += jacobian.values[lhs] * jacobian.values[rhs];
-            }
-        }
-    }
-
-    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigensolver(normal);
-    if (eigensolver.info() != Eigen::Success) {
-        RCLCPP_DEBUG(OPTIMIZER_LOGGER, "stage=%s iter=%d normal-matrix eigensolve failed", stage_name, refinement_iteration);
-        return;
-    }
-
-    const Eigen::VectorXd eigenvalues = eigensolver.eigenvalues();
-    const double max_eigenvalue = std::max(eigenvalues.maxCoeff(), 0.0);
-    const double rank_threshold = std::max(max_eigenvalue * 1e-12, 1e-18);
-    int effective_rank = 0;
-    double min_effective_eigenvalue = std::numeric_limits<double>::infinity();
-    for (const double eigenvalue : eigenvalues) {
-        if (eigenvalue > rank_threshold) {
-            ++effective_rank;
-            min_effective_eigenvalue = std::min(min_effective_eigenvalue, eigenvalue);
-        }
-    }
-    const double condition_number = effective_rank > 0
-        ? std::sqrt(max_eigenvalue / min_effective_eigenvalue)
-        : std::numeric_limits<double>::infinity();
-    const double reported_rss = costs.obstacle + costs.direction + costs.step + costs.length + costs.curvature + costs.start_end;
-    const double unclassified_rss = std::max(0.0, 2.0 * total_cost - reported_rss);
-
-    RCLCPP_DEBUG(
-        OPTIMIZER_LOGGER,
-        "stage=%s iter=%d objective=%.3e J_rows=%d J_cols=%d rank=%d cond(J)=%.3e eig=[%.3e,%.3e] "
-        "rss{obs=%.3e dir=%.3e step=%.3e len=%.3e curv=%.3e endpoint=%.3e other=%.3e} "
-        "endpoint_err_m{start=%.3f goal=%.3f} dir{active=%d max_err_deg=%.1f at=(%.2f,%.2f)} "
-        "max_curv=%.3f at=(%.2f,%.2f)",
-        stage_name,
-        refinement_iteration,
-        total_cost,
-        jacobian.num_rows,
-        jacobian.num_cols,
-        effective_rank,
-        condition_number,
-        min_effective_eigenvalue,
-        max_eigenvalue,
-        costs.obstacle,
-        costs.direction,
-        costs.step,
-        costs.length,
-        costs.curvature,
-        costs.start_end,
-        unclassified_rss,
-        costs.start_error_m,
-        costs.goal_error_m,
-        costs.direction_samples,
-        costs.max_direction_error_deg,
-        costs.max_direction_error_pos_map.x(),
-        costs.max_direction_error_pos_map.y(),
-        costs.max_curvature,
-        costs.max_curvature_pos_map.x(),
-        costs.max_curvature_pos_map.y()
-    );
-}
 
 std::expected<void, std::string> solve_stage(
     const CostMap& cost_map,
@@ -805,16 +716,29 @@ std::expected<void, std::string> solve_stage(
     double step_norm_threshold,
     double step_norm_transition,
     const Eigen::Vector2d& start_grid,
-    const Eigen::Vector2d& goal_grid,
-    const char* stage_name,
-    int refinement_iteration
+    const Eigen::Vector2d& goal_grid
 ) {
     ubs::UniformBSplineCeres<Spline> spline_ceres(spline);
     ceres::Problem problem;
     std::vector<double*> parameter_pointers(spline_ceres.getNumPointParameterPointers());
+    const double spline_scale = spline.getScale(0);
+    const double sampled_length_m = std::accumulate(
+        problem_samples.begin(),
+        problem_samples.end(),
+        0.0,
+        [](double total, const ProblemSample& sample) {
+            return total + sample.integration_length_m;
+        }
+    );
+    const double mean_span_length_m = std::max(sampled_length_m / spline_scale, EPS);
 
-    if (params.smoothness_weight > 0.0) {
-        spline_ceres.addSmoothnessResiduals<2>(problem, params.smoothness_weight);
+    if (params.objective_weights.smoothness > 0.0) {
+        // 该库接收 objective 权重；换算后其 residual 系数仍是配置的 weight。
+        const double normalized_smoothness_weight = 0.5
+            * params.objective_weights.smoothness * params.objective_weights.smoothness
+            * cost_map.resolution * cost_map.resolution
+            / std::pow(spline_scale, 3.0);
+        spline_ceres.addSmoothnessResiduals<2>(problem, normalized_smoothness_weight);
     }
 
     for (const ProblemSample& sample : problem_samples) {
@@ -824,22 +748,24 @@ std::expected<void, std::string> solve_stage(
         const auto vel_evaluator = spline_ceres.getEvaluator(data, {1});
         const auto acc_evaluator = spline_ceres.getEvaluator(data, {2});
 
-        if (params.obstacle_weight > 0.0) {
+        if (params.objective_weights.obstacle > 0.0) {
             problem.AddResidualBlock(
-                new ObstacleCostFunction(pos_evaluator, cost_map, params.obstacle_weight),
+                new ObstacleCostFunction(
+                    pos_evaluator, cost_map, params.objective_weights.obstacle, sample.integration_length_m
+                ),
                 nullptr,
                 parameter_pointers
             );
         }
 
-        if (params.direction_weight > 0.0) {
+        if (params.objective_weights.direction > 0.0) {
             problem.AddResidualBlock(
                 new DirectionCostFunction(
                     pos_evaluator,
                     vel_evaluator,
-                    cost_map,
                     direction_map,
-                    params.direction_weight,
+                    params.objective_weights.direction,
+                    sample.integration_length_m,
                     step_norm_threshold,
                     step_norm_transition
                 ),
@@ -848,13 +774,13 @@ std::expected<void, std::string> solve_stage(
             );
         }
 
-        if (params.step_weight > 0.0) {
+        if (params.objective_weights.step_traversal > 0.0) {
             problem.AddResidualBlock(
                 new StepFieldMagnitudeCostFunction(
                     pos_evaluator,
-                    cost_map,
                     direction_map,
-                    params.step_weight,
+                    params.objective_weights.step_traversal,
+                    sample.integration_length_m,
                     step_norm_threshold,
                     step_norm_transition
                 ),
@@ -863,20 +789,77 @@ std::expected<void, std::string> solve_stage(
             );
         }
 
-        if (params.length_penalty_weight > 0.0) {
+        if (params.objective_weights.length > 0.0) {
             problem.AddResidualBlock(
                 new ceres::AutoDiffCostFunction<LengthPenaltyCostFunction, 1, 2, 2, 2>(
-                    new LengthPenaltyCostFunction(vel_evaluator, cost_map.resolution, params.length_penalty_weight)
+                    new LengthPenaltyCostFunction(
+                        vel_evaluator,
+                        cost_map.resolution,
+                        params.objective_weights.length,
+                        sample.integration_parameter
+                    )
                 ),
                 nullptr,
                 parameter_pointers
             );
         }
 
-        if (params.curvature.base_weight > 0.0 || params.curvature.limit_weight > 0.0) {
+        if (params.tangent_regularization.weight > 0.0
+            && params.tangent_regularization.min_normalized_ratio > 0.0) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<TangentRegularityCostFunction, 1, 2, 2, 2>(
+                    new TangentRegularityCostFunction(
+                        vel_evaluator,
+                        cost_map.resolution,
+                        spline_scale,
+                        mean_span_length_m,
+                        params.tangent_regularization.min_normalized_ratio,
+                        params.tangent_regularization.weight,
+                        sample.integration_parameter
+                    )
+                ),
+                nullptr,
+                parameter_pointers
+            );
+        }
+
+        if (params.curvature.base.weight > 0.0) {
             problem.AddResidualBlock(
                 new ceres::AutoDiffCostFunction<CurvatureCostFunction, 1, 2, 2, 2>(
-                    new CurvatureCostFunction(vel_evaluator, acc_evaluator, cost_map.resolution, sample.max_curvature, params.curvature)
+                    new CurvatureCostFunction(
+                        vel_evaluator,
+                        acc_evaluator,
+                        cost_map.resolution,
+                        spline_scale,
+                        sample.max_curvature,
+                        params.curvature.base.weight,
+                        params.curvature.base.beta,
+                        sample.integration_length_m,
+                        params.curvature.denominator_regularization_length,
+                        params.curvature.tangent_gate_threshold,
+                        CurvatureCostFunction::PenaltyType::BASE
+                    )
+                ),
+                nullptr,
+                parameter_pointers
+            );
+        }
+        if (params.curvature.limit.weight > 0.0) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<CurvatureCostFunction, 1, 2, 2, 2>(
+                    new CurvatureCostFunction(
+                        vel_evaluator,
+                        acc_evaluator,
+                        cost_map.resolution,
+                        spline_scale,
+                        sample.max_curvature,
+                        params.curvature.limit.weight,
+                        params.curvature.limit.beta,
+                        sample.integration_length_m,
+                        params.curvature.denominator_regularization_length,
+                        params.curvature.tangent_gate_threshold,
+                        CurvatureCostFunction::PenaltyType::LIMIT
+                    )
                 ),
                 nullptr,
                 parameter_pointers
@@ -884,7 +867,7 @@ std::expected<void, std::string> solve_stage(
         }
     }
 
-    if (params.start_end_weight > 0.0) {
+    if (params.objective_weights.endpoint > 0.0) {
         const auto start_data = spline_ceres.getPointData(0.0);
         const auto goal_data = spline_ceres.getPointData(1.0);
         const auto start_evaluator = spline_ceres.getEvaluator(start_data);
@@ -896,14 +879,18 @@ std::expected<void, std::string> solve_stage(
 
         problem.AddResidualBlock(
             new ceres::AutoDiffCostFunction<StartEndPositionCostFunction, 2, 2, 2, 2>(
-                new StartEndPositionCostFunction(start_evaluator, start_grid, params.start_end_weight)
+                new StartEndPositionCostFunction(
+                    start_evaluator, start_grid, cost_map.resolution, params.objective_weights.endpoint
+                )
             ),
             nullptr,
             start_parameter_pointers
         );
         problem.AddResidualBlock(
             new ceres::AutoDiffCostFunction<StartEndPositionCostFunction, 2, 2, 2, 2>(
-                new StartEndPositionCostFunction(goal_evaluator, goal_grid, params.start_end_weight)
+                new StartEndPositionCostFunction(
+                    goal_evaluator, goal_grid, cost_map.resolution, params.objective_weights.endpoint
+                )
             ),
             nullptr,
             goal_parameter_pointers
@@ -916,21 +903,6 @@ std::expected<void, std::string> solve_stage(
     ceres::Solve(options, &problem, &summary);
     if (!summary.IsSolutionUsable()) {
         return std::unexpected(summary.BriefReport());
-    }
-
-    if (OPTIMIZER_LOGGER.get_effective_level() <= rclcpp::Logger::Level::Debug) {
-        const ResidualCostSummary residual_costs = summarize_residual_costs(
-            spline,
-            cost_map,
-            direction_map,
-            problem_samples,
-            params,
-            step_norm_threshold,
-            step_norm_transition,
-            start_grid,
-            goal_grid
-        );
-        log_jacobian_diagnostics(problem, residual_costs, stage_name, refinement_iteration);
     }
 
     return {};
@@ -961,26 +933,22 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         spline,
         cost_map,
         direction_map,
-        params_.warmup.samples_per_meter,
+        params_.warmup.solver.samples_per_meter,
         length_hint_m
     );
     const std::vector<ProblemSample> warmup_problem_samples = build_problem_samples(
         warmup_sampling,
         {},
-        params_.warmup.max_curvature,
-        params_.warmup.max_curvature,
+        params_.warmup.curvature.max_curvature,
+        params_.warmup.curvature.max_curvature,
         0.0
     );
 
     const StageSolveParams warmup_params = {
-        .obstacle_weight = params_.warmup.obstacle_weight,
-        .direction_weight = params_.warmup.direction_weight,
-        .step_weight = params_.warmup.step_weight,
-        .start_end_weight = params_.warmup.start_end_weight,
-        .smoothness_weight = params_.warmup.smoothness_weight,
-        .max_iterations = params_.warmup.max_iterations,
-        .length_penalty_weight = params_.warmup.length_penalty_weight,
-        .curvature = params_.warmup.curvature,
+        .objective_weights = params_.warmup.objective_weights,
+        .max_iterations = params_.warmup.solver.max_iterations,
+        .tangent_regularization = params_.warmup.tangent_regularization,
+        .curvature = params_.warmup.curvature.penalty,
     };
     if (const auto warmup_result = solve_stage(
             cost_map,
@@ -988,12 +956,10 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
             spline,
             warmup_problem_samples,
             warmup_params,
-            params_.step_norm_threshold,
-            params_.step_norm_transition,
+            params_.step_detection.norm_threshold,
+            params_.step_detection.norm_transition,
             start_grid,
-            goal_grid,
-            "warmup",
-            0
+            goal_grid
         );
         !warmup_result) {
         return std::unexpected("Warmup optimization failed: " + warmup_result.error());
@@ -1004,7 +970,7 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         spline,
         cost_map,
         direction_map,
-        params_.warmup.samples_per_meter,
+        params_.warmup.solver.samples_per_meter,
         length_hint_m
     );
     std::vector<Eigen::Vector2d> warmup_path;
@@ -1017,50 +983,46 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
         spline,
         cost_map,
         direction_map,
-        params_.step_detection_samples_per_meter,
+        params_.step_detection.samples_per_meter,
         length_hint_m
     ).total_length_m, cost_map.resolution);
 
     const StageSolveParams main_params = {
-        .obstacle_weight = params_.main.obstacle_weight,
-        .direction_weight = params_.main.direction_weight,
-        .step_weight = params_.main.step_weight,
-        .start_end_weight = params_.main.start_end_weight,
-        .smoothness_weight = params_.main.smoothness_weight,
-        .max_iterations = params_.main.max_iterations,
-        .length_penalty_weight = params_.main.length_penalty_weight,
-        .curvature = params_.main.curvature,
+        .objective_weights = params_.main.objective_weights,
+        .max_iterations = params_.main.solver.max_iterations,
+        .tangent_regularization = params_.main.tangent_regularization,
+        .curvature = params_.main.curvature.penalty,
     };
 
-    const int main_refinement_iterations = params_.main.max_refinement_iterations;
+    const int main_refinement_iterations = params_.main.refinement.max_iterations;
     for (int iter = 0; iter < main_refinement_iterations; ++iter) {
         const SampledSpline detection_before = sample_spline(
             spline,
             cost_map,
             direction_map,
-            params_.step_detection_samples_per_meter,
+            params_.step_detection.samples_per_meter,
             length_hint_m
         );
         const std::vector<StepInterval> step_intervals_before = detect_step_intervals(
             detection_before,
             terrain_constraints,
-            params_.step_norm_threshold,
-            params_.main.step_extension_distance
+            params_.step_detection.norm_threshold,
+            params_.main.curvature.step_extension_distance
         );
 
         const SampledSpline main_sampling = sample_spline(
             spline,
             cost_map,
             direction_map,
-            params_.main.samples_per_meter,
+            params_.main.solver.samples_per_meter,
             std::max(detection_before.total_length_m, cost_map.resolution)
         );
         const std::vector<ProblemSample> main_problem_samples = build_problem_samples(
             main_sampling,
             step_intervals_before,
-            params_.main.near_max_curvature,
-            params_.main.far_max_curvature,
-            params_.main.step_transition_distance
+            params_.main.curvature.near_step_max_curvature,
+            params_.main.curvature.far_from_step_max_curvature,
+            params_.main.curvature.step_transition_distance
         );
 
         if (const auto main_result = solve_stage(
@@ -1069,12 +1031,10 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
                 spline,
                 main_problem_samples,
                 main_params,
-                params_.step_norm_threshold,
-                params_.step_norm_transition,
+                params_.step_detection.norm_threshold,
+                params_.step_detection.norm_transition,
                 start_grid,
-                goal_grid,
-                "main",
-                iter
+                goal_grid
             );
             !main_result) {
             return std::unexpected("Main optimization failed: " + main_result.error());
@@ -1084,23 +1044,27 @@ std::expected<std::tuple<std::vector<Eigen::Vector2d>, std::vector<Eigen::Vector
             spline,
             cost_map,
             direction_map,
-            params_.step_detection_samples_per_meter,
+            params_.step_detection.samples_per_meter,
             std::max(main_sampling.total_length_m, cost_map.resolution)
         );
         const std::vector<StepInterval> step_intervals_after = detect_step_intervals(
             detection_after,
             terrain_constraints,
-            params_.step_norm_threshold,
-            params_.main.step_extension_distance
+            params_.step_detection.norm_threshold,
+            params_.main.curvature.step_extension_distance
         );
         length_hint_m = std::max(detection_after.total_length_m, cost_map.resolution);
 
-        if (interval_iou(step_intervals_before, step_intervals_after) >= params_.main.interval_iou_threshold) {
+        if (interval_iou(step_intervals_before, step_intervals_after)
+            >= params_.main.refinement.interval_iou_threshold) {
             break;
         }
     }
 
-    const double output_samples_per_meter = std::max(params_.warmup.samples_per_meter, params_.main.samples_per_meter);
+    const double output_samples_per_meter = std::max(
+        params_.warmup.solver.samples_per_meter,
+        params_.main.solver.samples_per_meter
+    );
     const SampledSpline final_sampling = sample_spline(
         spline,
         cost_map,

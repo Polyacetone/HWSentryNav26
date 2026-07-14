@@ -67,47 +67,65 @@
       #  BSplineOptimizer — 样条路径优化
       # ═══════════════════════════════════════════════
       path_optimizer:
-        step_norm_threshold: 0.01 # 优化器中判断台阶区域的模长下界
-        step_norm_transition: 0.05 # 台阶门控函数的平滑过渡区间
-        step_detection_samples_per_meter: 10.0 # 台阶区间检测采样密度 (samples/m)
+        step_detection:
+          norm_threshold: 0.01 # 优化器中判断台阶区域的方向场模长下界
+          norm_transition: 0.05 # 台阶门控函数的方向场模长过渡区间
+          samples_per_meter: 10.0 # 台阶区间检测采样密度 (samples/m)
 
         warmup:
-          samples_per_meter: 10.0 # warmup 阶段采样密度
-          max_iterations: 20 # warmup 最大优化迭代次数
-          max_curvature: 1.2 # warmup 阶段全局曲率上限
-          obstacle_weight: 2.0 # 障碍物代价权重
-          direction_weight: 8.0 # 方向对齐代价权重
-          step_weight: 0.25 # 台阶区域穿越代价权重
-          start_end_weight: 30.0 # 起终点位置约束权重
-          smoothness_weight: 0.002 # 样条光滑性正则权重
-          length_penalty_weight: 0.002 # 路径长度惩罚权重
+          solver:
+            samples_per_meter: 10.0 # warmup 阶段残差采样密度
+            max_iterations: 30 # Ceres 最大优化迭代次数
+          objective_weights:
+            obstacle: 300.0 # 归一化障碍物场残差权重
+            direction: 10.0 # 台阶方向误差残差权重
+            step_traversal: 0.5 # 台阶区域穿越残差权重
+            endpoint: 100.0 # 起终点米制位置误差残差权重
+            smoothness: 10.0 # 米制控制点二阶差分残差权重
+            length: 1.0 # 路径长度残差权重
+          tangent_regularization:
+            weight: 50.0 # 归一化切向长度下界残差权重，抑制局部参数化塌缩
+            min_normalized_ratio: 0.35 # 每 knot 切向长度相对路径平均每 knot 长度的下界
           curvature:
-            base_weight: 0.01 # 曲率基础惩罚权重
-            base_beta: 8.0 # 曲率基础惩罚 softplus beta
-            limit_weight: 8.0 # 曲率超限惩罚权重
-            limit_beta: 8.0 # 曲率超限惩罚 softplus beta
-            min_speed_epsilon: 0.05 # 低速时曲率计算的正则化 epsilon (m/s)
-            speed_gate_threshold: 0.15 # 速度门控阈值，低速时抑制曲率代价 (m/s)
+            max_curvature: 1.2 # warmup 阶段全局曲率上限 (1/m)
+            base:
+              weight: 0.1 # 全曲率范围的基础残差权重
+              beta: 8.0 # 基础曲率 smooth-ReLU 锐度
+            limit:
+              weight: 10.0 # 曲率超限残差权重
+              beta: 8.0 # 曲率超限 smooth-ReLU 锐度
+            numerical:
+              denominator_regularization_length: 0.05 # 曲率分母防奇异尺度；不是切向长度下界 (m/knot)
+              tangent_gate_threshold: 0.15 # 低切向时衰减曲率残差的半响应尺度 (m/knot)
 
         main:
-          samples_per_meter: 10.0 # main 阶段采样密度
-          max_iterations: 20 # main 每次迭代的最大优化步数
-          max_refinement_iterations: 3 # main 阶段细化迭代次数（台阶区间收敛后停止）
-          near_max_curvature: 0.35 # 台阶附近区域曲率上限
-          far_max_curvature: 1.2 # 远离台阶区域曲率上限
-          step_extension_distance: 1.0 # 台阶区间前后扩展距离 (m)
-          step_transition_distance: 0.5 # 近/远曲率之间平滑过渡距离 (m)
-          interval_iou_threshold: 0.85 # 台阶区间 IoU 阈值，收敛后提前退出细化
-          obstacle_weight: 2.0 # 障碍物代价权重
-          direction_weight: 8.0 # 方向对齐代价权重
-          step_weight: 0.25 # 台阶区域穿越代价权重
-          start_end_weight: 30.0 # 起终点位置约束权重
-          smoothness_weight: 0.002 # 样条光滑度正则权重
-          length_penalty_weight: 0.002 # 路径长度惩罚权重
+          solver:
+            samples_per_meter: 10.0 # main 阶段残差采样密度
+            max_iterations: 30 # 每轮 Ceres 最大优化迭代次数
+          refinement:
+            max_iterations: 3 # 台阶区间外层细化次数
+            interval_iou_threshold: 0.85 # 台阶区间 IoU 达到该值后提前收敛
+          objective_weights:
+            obstacle: 300.0 # 归一化障碍物场残差权重
+            direction: 10.0 # 台阶方向误差残差权重
+            step_traversal: 0.5 # 台阶区域穿越残差权重
+            endpoint: 100.0 # 起终点米制位置误差残差权重
+            smoothness: 10.0 # 米制控制点二阶差分残差权重
+            length: 1.0 # 路径长度残差权重
+          tangent_regularization:
+            weight: 50.0 # 归一化切向长度下界残差权重，抑制局部参数化塌缩
+            min_normalized_ratio: 0.35 # 每 knot 切向长度相对路径平均每 knot 长度的下界
           curvature:
-            base_weight: 0.01 # 曲率基础惩罚权重
-            base_beta: 8.0 # 曲率基础惩罚 softplus beta
-            limit_weight: 8.0 # 曲率超限惩罚权重
-            limit_beta: 8.0 # 曲率超限惩罚 softplus beta
-            min_speed_epsilon: 0.05 # 低速时曲率计算的正则 epsilon (m/s)
-            speed_gate_threshold: 0.15 # 速度门控阈值，低速时抑制曲率代价 (m/s)
+            near_step_max_curvature: 0.35 # 台阶附近区域曲率上限 (1/m)
+            far_from_step_max_curvature: 1.2 # 远离台阶区域曲率上限 (1/m)
+            step_extension_distance: 1.0 # 台阶区间前后扩展距离 (m)
+            step_transition_distance: 1.0 # 近/远曲率上限的平滑过渡距离 (m)
+            base:
+              weight: 0.1 # 全曲率范围的基础残差权重
+              beta: 8.0 # 基础曲率 smooth-ReLU 锐度
+            limit:
+              weight: 10.0 # 曲率超限残差权重
+              beta: 8.0 # 曲率超限 smooth-ReLU 锐度
+            numerical:
+              denominator_regularization_length: 0.05 # 曲率分母防奇异尺度；不是切向长度下界 (m/knot)
+              tangent_gate_threshold: 0.15 # 低切向时衰减曲率残差的半响应尺度 (m/knot)

@@ -57,12 +57,49 @@ nav_executor::BSplineOptimizer::CurvaturePenaltyParams curvature_params(
     const YAML::Node& root, const std::string& prefix
 ) {
     return {
-        .base_weight = value<double>(root, prefix + ".base_weight"),
-        .base_beta = value<double>(root, prefix + ".base_beta"),
-        .limit_weight = value<double>(root, prefix + ".limit_weight"),
-        .limit_beta = value<double>(root, prefix + ".limit_beta"),
-        .min_speed_epsilon = value<double>(root, prefix + ".min_speed_epsilon"),
-        .speed_gate_threshold = value<double>(root, prefix + ".speed_gate_threshold"),
+        .base = {
+            .weight = value<double>(root, prefix + ".base.weight"),
+            .beta = value<double>(root, prefix + ".base.beta"),
+        },
+        .limit = {
+            .weight = value<double>(root, prefix + ".limit.weight"),
+            .beta = value<double>(root, prefix + ".limit.beta"),
+        },
+        .denominator_regularization_length = value<double>(
+            root, prefix + ".numerical.denominator_regularization_length"
+        ),
+        .tangent_gate_threshold = value<double>(root, prefix + ".numerical.tangent_gate_threshold"),
+    };
+}
+
+nav_executor::BSplineOptimizer::SolverParams solver_params(
+    const YAML::Node& root, const std::string& prefix
+) {
+    return {
+        .samples_per_meter = value<double>(root, prefix + ".samples_per_meter"),
+        .max_iterations = value<int>(root, prefix + ".max_iterations"),
+    };
+}
+
+nav_executor::BSplineOptimizer::ObjectiveWeights objective_weights(
+    const YAML::Node& root, const std::string& prefix
+) {
+    return {
+        .obstacle = value<double>(root, prefix + ".obstacle"),
+        .direction = value<double>(root, prefix + ".direction"),
+        .step_traversal = value<double>(root, prefix + ".step_traversal"),
+        .endpoint = value<double>(root, prefix + ".endpoint"),
+        .smoothness = value<double>(root, prefix + ".smoothness"),
+        .length = value<double>(root, prefix + ".length"),
+    };
+}
+
+nav_executor::BSplineOptimizer::TangentRegularizationParams tangent_regularization_params(
+    const YAML::Node& root, const std::string& prefix
+) {
+    return {
+        .weight = value<double>(root, prefix + ".weight"),
+        .min_normalized_ratio = value<double>(root, prefix + ".min_normalized_ratio"),
     };
 }
 
@@ -312,25 +349,35 @@ RuntimeConfig load_runtime_config(const std::filesystem::path& directory) {
     };
     const std::string po = "path_planner.path_optimizer";
     out.path_optimizer = {
-        .step_norm_threshold = value<double>(planner, po + ".step_norm_threshold"),
-        .step_norm_transition = value<double>(planner, po + ".step_norm_transition"),
-        .step_detection_samples_per_meter = value<double>(planner, po + ".step_detection_samples_per_meter"),
+        .step_detection = {
+            .norm_threshold = value<double>(planner, po + ".step_detection.norm_threshold"),
+            .norm_transition = value<double>(planner, po + ".step_detection.norm_transition"),
+            .samples_per_meter = value<double>(planner, po + ".step_detection.samples_per_meter"),
+        },
         .warmup = {
-            .obstacle_weight = value<double>(planner, po + ".warmup.obstacle_weight"), .direction_weight = value<double>(planner, po + ".warmup.direction_weight"),
-            .step_weight = value<double>(planner, po + ".warmup.step_weight"), .start_end_weight = value<double>(planner, po + ".warmup.start_end_weight"),
-            .smoothness_weight = value<double>(planner, po + ".warmup.smoothness_weight"), .samples_per_meter = value<double>(planner, po + ".warmup.samples_per_meter"),
-            .max_iterations = value<int>(planner, po + ".warmup.max_iterations"), .max_curvature = value<double>(planner, po + ".warmup.max_curvature"),
-            .length_penalty_weight = value<double>(planner, po + ".warmup.length_penalty_weight"), .curvature = curvature_params(planner, po + ".warmup.curvature"),
+            .solver = solver_params(planner, po + ".warmup.solver"),
+            .objective_weights = objective_weights(planner, po + ".warmup.objective_weights"),
+            .tangent_regularization = tangent_regularization_params(planner, po + ".warmup.tangent_regularization"),
+            .curvature = {
+                .max_curvature = value<double>(planner, po + ".warmup.curvature.max_curvature"),
+                .penalty = curvature_params(planner, po + ".warmup.curvature"),
+            },
         },
         .main = {
-            .obstacle_weight = value<double>(planner, po + ".main.obstacle_weight"), .direction_weight = value<double>(planner, po + ".main.direction_weight"),
-            .step_weight = value<double>(planner, po + ".main.step_weight"), .start_end_weight = value<double>(planner, po + ".main.start_end_weight"),
-            .smoothness_weight = value<double>(planner, po + ".main.smoothness_weight"), .samples_per_meter = value<double>(planner, po + ".main.samples_per_meter"),
-            .max_iterations = value<int>(planner, po + ".main.max_iterations"), .max_refinement_iterations = value<int>(planner, po + ".main.max_refinement_iterations"),
-            .near_max_curvature = value<double>(planner, po + ".main.near_max_curvature"), .far_max_curvature = value<double>(planner, po + ".main.far_max_curvature"),
-            .step_extension_distance = value<double>(planner, po + ".main.step_extension_distance"), .step_transition_distance = value<double>(planner, po + ".main.step_transition_distance"),
-            .interval_iou_threshold = value<double>(planner, po + ".main.interval_iou_threshold"), .length_penalty_weight = value<double>(planner, po + ".main.length_penalty_weight"),
-            .curvature = curvature_params(planner, po + ".main.curvature"),
+            .solver = solver_params(planner, po + ".main.solver"),
+            .refinement = {
+                .max_iterations = value<int>(planner, po + ".main.refinement.max_iterations"),
+                .interval_iou_threshold = value<double>(planner, po + ".main.refinement.interval_iou_threshold"),
+            },
+            .objective_weights = objective_weights(planner, po + ".main.objective_weights"),
+            .tangent_regularization = tangent_regularization_params(planner, po + ".main.tangent_regularization"),
+            .curvature = {
+                .near_step_max_curvature = value<double>(planner, po + ".main.curvature.near_step_max_curvature"),
+                .far_from_step_max_curvature = value<double>(planner, po + ".main.curvature.far_from_step_max_curvature"),
+                .step_extension_distance = value<double>(planner, po + ".main.curvature.step_extension_distance"),
+                .step_transition_distance = value<double>(planner, po + ".main.curvature.step_transition_distance"),
+                .penalty = curvature_params(planner, po + ".main.curvature"),
+            },
         },
     };
     out.step_dist_offset = value<double>(ros_params(directory / "path_executor.yaml"), "path_executor.misc.step_dist_offset");

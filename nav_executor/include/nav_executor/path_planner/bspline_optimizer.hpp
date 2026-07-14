@@ -11,50 +11,79 @@ public:
     using Ptr = std::shared_ptr<BSplineOptimizer>;
     using ConstPtr = std::shared_ptr<const BSplineOptimizer>;
 
+    // 所有 weight 均直接乘到量纲归一化后的 residual 上，再由 Ceres 平方。
+    struct StepDetectionParams {
+        double norm_threshold;
+        double norm_transition;
+        double samples_per_meter;
+    };
+
+    struct SolverParams {
+        double samples_per_meter;
+        int max_iterations;
+    };
+
+    struct ObjectiveWeights {
+        double obstacle;
+        double direction;
+        double step_traversal;
+        double endpoint;
+        double smoothness;
+        double length;
+    };
+
+    struct SmoothPenaltyParams {
+        double weight;
+        double beta;
+    };
+
     struct CurvaturePenaltyParams {
-        double base_weight;
-        double base_beta;
-        double limit_weight;
-        double limit_beta;
-        double min_speed_epsilon;
-        double speed_gate_threshold;
+        SmoothPenaltyParams base;
+        SmoothPenaltyParams limit;
+        double denominator_regularization_length;
+        double tangent_gate_threshold;
+    };
+
+    struct TangentRegularizationParams {
+        double weight;
+        double min_normalized_ratio;
+    };
+
+    struct WarmupCurvatureParams {
+        double max_curvature;
+        CurvaturePenaltyParams penalty;
+    };
+
+    struct MainCurvatureParams {
+        double near_step_max_curvature;
+        double far_from_step_max_curvature;
+        double step_extension_distance;
+        double step_transition_distance;
+        CurvaturePenaltyParams penalty;
+    };
+
+    struct RefinementParams {
+        int max_iterations;
+        double interval_iou_threshold;
     };
 
     struct WarmupParams {
-        double obstacle_weight;
-        double direction_weight;
-        double step_weight;
-        double start_end_weight;
-        double smoothness_weight;
-        double samples_per_meter;
-        int max_iterations;
-        double max_curvature;
-        double length_penalty_weight;
-        CurvaturePenaltyParams curvature;
+        SolverParams solver;
+        ObjectiveWeights objective_weights;
+        TangentRegularizationParams tangent_regularization;
+        WarmupCurvatureParams curvature;
     };
 
     struct MainParams {
-        double obstacle_weight;
-        double direction_weight;
-        double step_weight;
-        double start_end_weight;
-        double smoothness_weight;
-        double samples_per_meter;
-        int max_iterations;
-        int max_refinement_iterations;
-        double near_max_curvature;
-        double far_max_curvature;
-        double step_extension_distance;
-        double step_transition_distance;
-        double interval_iou_threshold;
-        double length_penalty_weight;
-        CurvaturePenaltyParams curvature;
+        SolverParams solver;
+        RefinementParams refinement;
+        ObjectiveWeights objective_weights;
+        TangentRegularizationParams tangent_regularization;
+        MainCurvatureParams curvature;
     };
 
     struct Params {
-        double step_norm_threshold;
-        double step_norm_transition;
-        double step_detection_samples_per_meter;
+        StepDetectionParams step_detection;
         WarmupParams warmup;
         MainParams main;
     };
