@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 #include <cmath>
+#include <optional>
 #include <vector>
 #include <uniform_bspline/uniform_bspline.hpp>
 
@@ -18,6 +19,13 @@ struct SplineEval {
     double kappa = 0.0;
 };
 
+struct PathProjection {
+    double u = 0.0;
+    double arc_length = 0.0;
+    Eigen::Vector2d position = Eigen::Vector2d::Zero();
+    double distance = 0.0;
+};
+
 class SplinePath {
 public:
     static constexpr double U_MIN = 0.0;
@@ -25,31 +33,20 @@ public:
     static constexpr double U_EXTRAP_MIN = -0.5;
     static constexpr double U_EXTRAP_MAX = 1.5;
 
-    explicit SplinePath(const std::vector<Eigen::Vector2d>& cps): spline_(cps) {
-        spline_.setExtrapolate(true);
-    }
-    explicit SplinePath(std::vector<Eigen::Vector2d>&& cps): spline_(std::move(cps)) {
-        spline_.setExtrapolate(true);
-    }
+    explicit SplinePath(const std::vector<Eigen::Vector2d>& cps);
+    explicit SplinePath(std::vector<Eigen::Vector2d>&& cps);
 
     [[nodiscard]] SplineEval eval(double u) const;
-    [[nodiscard]] Eigen::Vector2d position(double u) const { return spline_.evaluate(u); }
-    [[nodiscard]] Eigen::Vector2d tangent(double u) const { return spline_.derivative(u, 1); }
+    [[nodiscard]] Eigen::Vector2d position(double u) const { return eval(u).p; }
+    [[nodiscard]] Eigen::Vector2d tangent(double u) const { return eval(u).d1; }
     [[nodiscard]] const std::vector<Eigen::Vector2d>& control_points() const { return spline_.getControlPoints(); }
     [[nodiscard]] double arc_length(double u0, double u1, int samples = 8) const;
+    [[nodiscard]] double arc_length_at_u(double u) const;
+    [[nodiscard]] double u_at_arc_length(double arc_length) const;
+    [[nodiscard]] double length() const { return total_length_; }
 
-    [[nodiscard]] double project(
-        const Eigen::Vector2d& pos, double u_hint,
-        int num_samples, double search_window,
-        double local_search_lazy_distance
-    ) const;
-
-    [[nodiscard]] double project_extrapolated(
-        const Eigen::Vector2d& pos, double u_hint,
-        int num_samples, double search_window,
-        double local_search_lazy_distance,
-        double u_min = U_EXTRAP_MIN,
-        double u_max = U_EXTRAP_MAX
+    [[nodiscard]] std::optional<PathProjection> project(
+        const Eigen::Vector2d& pos, double min_arc_length, double max_arc_length
     ) const;
 
     static double clamp_u(double u) { return std::clamp(u, U_MIN, U_MAX); }
@@ -60,7 +57,11 @@ public:
 
 private:
     using SplineD = ubs::UniformBSpline<double, 2, double, Eigen::Vector2d, std::vector<Eigen::Vector2d>>;
+    void build_arc_length_table();
+
     SplineD spline_;
+    std::vector<double> sample_arc_lengths_;
+    double total_length_ = 0.0;
 };
 
 }

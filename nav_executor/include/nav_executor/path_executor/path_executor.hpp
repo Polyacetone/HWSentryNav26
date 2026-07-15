@@ -8,6 +8,7 @@
 #include <rclcpp/logger.hpp>
 
 #include <nav_executor/common/chassis_defs.hpp>
+#include <nav_executor/common/route_tracker.hpp>
 #include <nav_executor/path_executor/state_machine.hpp>
 #include <nav_executor/path_executor/step_controller.hpp>
 #include <nav_executor/path_executor/progress_monitor.hpp>
@@ -20,7 +21,7 @@ namespace nav_executor {
 
 struct PathExecutorParams {
     double stop_threshold_dist;
-    double stop_threshold_u;
+    double stop_threshold_remaining_distance;
     double step_dist_offset;
     NoProgressGuardParams follow_no_progress_guard;
     NoProgressGuardParams stepping_no_progress_guard;
@@ -57,6 +58,7 @@ struct ExecutorInput {
     MotionIntent intent;
     MotionObservation observation;
     MotionEnvironment environment;
+    std::optional<RouteEstimate> route;
 };
 
 struct ExecutorOutput {
@@ -72,9 +74,6 @@ struct ExecutorOutput {
     bool goal_reached = false;
     bool executor_replan_event = false;
     bool mpc_lethal = false;
-
-    // 当前投影 u（供顶层 RouteMonitor 复用为下周期 seed 及诊断）
-    double current_u = 0.0;
 
     // 调试
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
@@ -129,8 +128,6 @@ private:
     void remember_command_output(const ExecutorOutput& output);
     void on_state_transition(MotionState prev, MotionState next, bool allow_warm_start_reset);
 
-    [[nodiscard]] double project_path_u(const ExecutorInput& input, const SplinePath& path, double seed_u) const;
-
     std::unique_ptr<StateMachine> control_fsm_;
     std::shared_ptr<MPCSolver> mpc_controller_;
     StepController step_controller_;
@@ -144,7 +141,6 @@ private:
     // 当前绑定的 path（身份用于检测切换）
     AnnotatedPath::ConstPtr bound_path_;
 
-    double last_reference_u_ = 0.0;
     bool last_spin_high_priority_ = false;
     MotionState last_motion_state_ = MotionState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();

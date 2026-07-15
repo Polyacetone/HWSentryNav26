@@ -57,8 +57,14 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
 
     task_ = std::make_unique<TaskManager>(load_task_params(), planner_.get(), get_logger());
 
+    route_tracker_params_ = {
+        .initial_search_distance = declare_parameter<double>("task_manager.route_tracker.initial_search_distance"),
+        .max_progress_rate = declare_parameter<double>("task_manager.route_tracker.max_progress_rate"),
+        .progress_tolerance = declare_parameter<double>("task_manager.route_tracker.progress_tolerance"),
+        .max_cross_track_error = declare_parameter<double>("task_manager.route_tracker.max_cross_track_error"),
+    };
+    route_tracker_ = std::make_unique<RouteTracker>(route_tracker_params_);
     proj_guard_params_ = {
-        .dist_max = declare_parameter<double>("task_manager.route_monitor.proj_guard.dist_max"),
         .cost_max = declare_parameter<double>("task_manager.route_monitor.proj_guard.cost_max"),
         .cost_samples = static_cast<int>(declare_parameter<int>("task_manager.route_monitor.proj_guard.cost_samples"))
     };
@@ -204,12 +210,15 @@ void NavExecutorNode::load_terrain_config() {
 
         for (const auto& dir : {"up", "down"}) {
             const auto prefix = std::string("terrain_profiles.directional_labels.") + entry_name + "." + dir;
-            const auto names = declare_parameter<std::vector<std::string>>(prefix);
+            const auto names = declare_parameter<std::vector<std::string>>(prefix, std::vector<std::string>{});
 
             auto& target = (dir == std::string("up")) ? dir_modes.up : dir_modes.down;
             target.reserve(names.size());
 
             for (const std::string& mode_name : names) {
+                // sentinel "disabled" —— 在该方向屏蔽此地形（无需在 modes 中定义）
+                if (mode_name == "disabled") { continue; }
+
                 // mode 参数只 declare 一次，缓存到 mode_map 后复用
                 if (mode_map.find(mode_name) == mode_map.end()) {
                     const std::string mode_prefix = std::string("terrain_profiles.directional_labels.") + entry_name + ".modes." + mode_name;
@@ -284,7 +293,7 @@ FsmParams NavExecutorNode::load_fsm_params() {
 PathExecutorParams NavExecutorNode::load_executor_params() {
     PathExecutorParams p;
     p.stop_threshold_dist = declare_parameter<double>("path_executor.misc.stop_threshold_dist");
-    p.stop_threshold_u = declare_parameter<double>("path_executor.misc.stop_threshold_u");
+    p.stop_threshold_remaining_distance = declare_parameter<double>("path_executor.misc.stop_threshold_remaining_distance");
     p.step_dist_offset = declare_parameter<double>("path_executor.misc.step_dist_offset");
     p.follow_no_progress_guard = {
         .landmark_spacing = declare_parameter<double>("path_executor.no_progress_guard.follow.landmark_spacing"),
@@ -484,11 +493,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .q_v_final = declare_parameter<double>("mpc.follow.terminal_weights.q_v_final"),
                 .a_brake = declare_parameter<double>("mpc.follow.terminal_weights.a_brake"),
                 .slow_down_target_vel = declare_parameter<double>("mpc.follow.terminal_weights.slow_down_target_vel")
-            },
-            .projection = {
-                .proj_num_samples = static_cast<int>(declare_parameter<int>("mpc.follow.projection.num_samples")),
-                .proj_search_window = declare_parameter<double>("mpc.follow.projection.search_window"),
-                .local_search_lazy_distance = declare_parameter<double>("mpc.follow.projection.local_search_lazy_distance")
             },
             .global_search = {
                 .enable = declare_parameter<bool>("mpc.follow.global_search.enable"),

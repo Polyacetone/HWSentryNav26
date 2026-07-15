@@ -139,12 +139,6 @@ struct MPCFollowTerminalWeights {
     double slow_down_target_vel;
 };
 
-struct MPCFollowProjection {
-    int proj_num_samples;
-    double proj_search_window;
-    double local_search_lazy_distance;
-};
-
 struct GlobalSearchBeamParams {
     int macro_steps;
     int beam_width;
@@ -189,7 +183,6 @@ struct MPCFollowParams {
     MPCFollowTerrainWeights terrain_weights;
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowTerminalWeights terminal_weights;
-    MPCFollowProjection projection;
     GlobalSearchParams global_search;
     MPCFollowRolloutSafetyParams rollout_safety;
     int max_iters;

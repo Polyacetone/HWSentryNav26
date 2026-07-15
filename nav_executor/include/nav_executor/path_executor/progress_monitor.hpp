@@ -1,12 +1,8 @@
 #pragma once
 
 #include <chrono>
-#include <vector>
-
-#include <Eigen/Core>
 #include <rclcpp/logger.hpp>
 
-#include <nav_executor/common/spline_path.hpp>
 #include <nav_executor/path_executor/state_machine.hpp>
 
 namespace nav_executor {
@@ -20,10 +16,8 @@ class ProgressMonitor {
 public:
     explicit ProgressMonitor(rclcpp::Logger logger);
 
-    void recompute_landmarks(const SplinePath& path, double spacing);
-
     bool update_and_check_no_progress(
-        double current_u,
+        double current_arc_length,
         const NoProgressGuardParams& params,
         MotionState current_state,
         MotionState prev_state,
@@ -31,10 +25,7 @@ public:
     );
 
     void reset();
-    void clear();
-
 private:
-    std::vector<double> follow_landmarks_u_;
     int follow_max_landmark_idx_ = -1;
     std::chrono::steady_clock::time_point follow_max_landmark_time_ = {};
     MotionState last_no_progress_check_state_ = MotionState::IDLE;

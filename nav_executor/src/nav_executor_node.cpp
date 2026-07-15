@@ -120,6 +120,12 @@ void NavExecutorNode::control_tick() {
     );
 
     const AnnotatedPath::ConstPtr active_path_before_update = task_->active_path();
+    std::optional<RouteEstimate> route_estimate = route_tracker_->update(
+        active_path_before_update,
+        chassis_pose_map,
+        chassis_state_.velocity,
+        stamp
+    );
     RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
 
@@ -140,10 +146,14 @@ void NavExecutorNode::control_tick() {
         task_input.plan_snapshot.performance = performance;
     }
 
-    if (active_path_before_update && previous_motion_feedback_.motion_state == MotionState::FOLLOW) {
+    const MotionState previous_state = previous_motion_feedback_.motion_state;
+    const bool route_monitoring_state = previous_state == MotionState::FOLLOW
+        || previous_state == MotionState::STOPPING
+        || previous_state == MotionState::IDLE;
+    if (active_path_before_update && route_estimate && route_monitoring_state) {
         RouteMonitorInput rm;
         rm.active_path = active_path_before_update;
-        rm.current_u = previous_motion_feedback_.route_u;
+        rm.route = *route_estimate;
         rm.chassis_pos_map = chassis_pose_map.head<2>();
         rm.masked_global_cost_map = route_context.masked_global.get();
         rm.current_dynamic_cost_map = current_cost_map_.get();
@@ -160,6 +170,15 @@ void NavExecutorNode::control_tick() {
 
     const TaskUpdateOutput task_output = task_->update(task_input);
 
+    if (task_output.command.active_path != active_path_before_update) {
+        route_estimate = route_tracker_->update(
+            task_output.command.active_path,
+            chassis_pose_map,
+            chassis_state_.velocity,
+            stamp
+        );
+    }
+
     route_context = build_route_context(cost_layers, direction_layers, task_output.command.active_path);
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
 
@@ -169,6 +188,7 @@ void NavExecutorNode::control_tick() {
     ein.intent.spin_requested = (spin_state_ != SpinState::STOP);
     ein.intent.spin_high_priority = spin_high_priority_;
     ein.intent.spin_fast = (spin_state_ == SpinState::SPIN_FAST);
+    ein.route = route_estimate;
     ein.observation.chassis_pose_map = chassis_pose_map;
     ein.observation.chassis_state = chassis_state_;
     ein.observation.chassis_leg_mode = chassis_leg_mode_;
@@ -190,7 +210,6 @@ void NavExecutorNode::control_tick() {
     previous_motion_feedback_.executor_replan_event = out.executor_replan_event;
     previous_motion_feedback_.mpc_lethal = out.mpc_lethal;
     previous_motion_feedback_.lethal_path = out.mpc_lethal ? task_output.command.active_path : nullptr;
-    previous_motion_feedback_.route_u = out.current_u;
     previous_motion_feedback_.motion_state = out.motion_state;
 
     if (out.valid) {

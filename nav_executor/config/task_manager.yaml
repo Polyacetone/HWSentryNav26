@@ -4,12 +4,17 @@
       goal_equivalence_distance: 0.3 # goal-to-goal 去重阈值 (m)
       plan_cooldown: 0.5 # 同一 goal 失败重试冷却 (s)
 
+      route_tracker:
+        initial_search_distance: 0.5 # 新路径仅允许在起点附近建立初始进度，覆盖规划延迟但禁止跳到后段 (m)
+        max_progress_rate: 5.0 # 路径进度变化率的物理上限，用于限制相邻周期搜索范围 (m/s)
+        progress_tolerance: 0.3 # 预测进度之外允许的定位与模型误差 (m)
+        max_cross_track_error: 2.0 # 超过该横向距离视为跟踪丢失并重规划 (m)
+
       # ═══════════════════════════════════════════════
-      #  RouteMonitor — 路径监控（投影守卫 + 台阶阻塞）
+      #  RouteMonitor — 路径监控（投影连线 + 台阶阻塞）
       # ═══════════════════════════════════════════════
       route_monitor:
         proj_guard:
-          dist_max: 2.0 # 当前位置到样条投影点距离 > 该值则取消 follow (m)
           cost_max: 240.0 # 投影连线最大障碍物代价 > 该值则取消 follow (0~255)
           cost_samples: 20 # 连线代价估计采样数
         step_block:

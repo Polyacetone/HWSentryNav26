@@ -9,7 +9,7 @@
         global_search:
           enable: true # 启用异步多模态全局种子搜索
           beam:
-            macro_steps: 4 # 每个搜索宏步包含的 20Hz MPC 步数；4 对应 0.2s
+            macro_steps: 4 # 每个搜索宏步包含的 20Hz MPC 步数
             width: 256 # 每层保留的状态数
             velocity_acceleration_samples: 3 # [-acc_max, acc_max] 内均匀采样数
             omega_acceleration_samples: 5 # [-alpha_max, alpha_max] 内均匀采样数
@@ -80,11 +80,6 @@
           q_v_final: 0.2 # 终端减速权重（全程激活）：v_allowed = sqrt(2 * a_brake * s + v_target^2)
           a_brake: 2.0 # m/s², 期望制动减速度
           slow_down_target_vel: 0.1 # m/s, 终点目标速度
-        projection:
-          num_samples: 50 # 投影到样条参数u的采样数
-          search_window: 0.1 # 局部搜索窗口 (0~1)
-          local_search_lazy_distance: 0.1 # 局部搜索找到合适投影点的距离阈值 (m)
-
       # ═══════════════════════════════════════════════
       #  Stop — 停止求解器
       # ═══════════════════════════════════════════════

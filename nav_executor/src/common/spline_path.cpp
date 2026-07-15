@@ -2,9 +2,57 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <Eigen/Core>
 
 namespace nav_executor {
+
+namespace {
+
+constexpr int ARC_LENGTH_ESTIMATE_SAMPLES = 200;
+constexpr double ARC_LENGTH_SAMPLE_SPACING = 0.05;
+constexpr int ARC_LENGTH_MAX_SAMPLES = 20000;
+constexpr int PROJECTION_REFINEMENT_ITERATIONS = 16;
+
+} // anonymous namespace
+
+SplinePath::SplinePath(const std::vector<Eigen::Vector2d>& cps) : spline_(cps) {
+    spline_.setExtrapolate(true);
+    build_arc_length_table();
+}
+
+SplinePath::SplinePath(std::vector<Eigen::Vector2d>&& cps) : spline_(std::move(cps)) {
+    spline_.setExtrapolate(true);
+    build_arc_length_table();
+}
+
+void SplinePath::build_arc_length_table() {
+    double estimated_length = 0.0;
+    Eigen::Vector2d previous = spline_.evaluate(0.0);
+    for (int i = 1; i <= ARC_LENGTH_ESTIMATE_SAMPLES; ++i) {
+        const double u = static_cast<double>(i) / static_cast<double>(ARC_LENGTH_ESTIMATE_SAMPLES);
+        const Eigen::Vector2d current = spline_.evaluate(u);
+        estimated_length += (current - previous).norm();
+        previous = current;
+    }
+
+    const int sample_count = std::clamp(
+        static_cast<int>(std::ceil(estimated_length / ARC_LENGTH_SAMPLE_SPACING)),
+        ARC_LENGTH_ESTIMATE_SAMPLES,
+        ARC_LENGTH_MAX_SAMPLES
+    );
+    sample_arc_lengths_.assign(static_cast<size_t>(sample_count + 1), 0.0);
+
+    previous = spline_.evaluate(0.0);
+    for (int i = 1; i <= sample_count; ++i) {
+        const double u = static_cast<double>(i) / static_cast<double>(sample_count);
+        const Eigen::Vector2d current = spline_.evaluate(u);
+        sample_arc_lengths_[static_cast<size_t>(i)] = sample_arc_lengths_[static_cast<size_t>(i - 1)]
+            + (current - previous).norm();
+        previous = current;
+    }
+    total_length_ = sample_arc_lengths_.back();
+}
 
 SplineEval SplinePath::eval(const double u) const {
     SplineEval out;
@@ -47,107 +95,87 @@ SplineEval SplinePath::eval(const double u) const {
     return out;
 }
 
-double SplinePath::arc_length(const double u0, const double u1, int samples) const {
-    const int n = std::max(1, samples);
-    const double ua = std::clamp(u0, 0.0, 1.0);
-    const double ub = std::clamp(u1, 0.0, 1.0);
-    if (std::abs(ub - ua) <= 1e-9) {
-        return 0.0;
-    }
-
-    const double h = (ub - ua) / static_cast<double>(n);
-    double acc = 0.0;
-    for (int i = 0; i <= n; ++i) {
-        const Eigen::Vector2d d1 = spline_.derivative(ua + h * static_cast<double>(i), 1);
-        const double w = (i == 0 || i == n) ? 1.0 : ((i % 2 == 0) ? 2.0 : 4.0);
-        acc += w * d1.norm();
-    }
-    return std::abs(h) * acc / 3.0;
+double SplinePath::arc_length(const double u0, const double u1, const int) const {
+    return std::abs(arc_length_at_u(u1) - arc_length_at_u(u0));
 }
 
-double SplinePath::project(
-    const Eigen::Vector2d& pos, const double u_hint,
-    const int num_samples, const double search_window,
-    const double local_search_lazy_distance
-) const {
-    const auto search = [&](const double a, const double b, const int n) {
-        double best_u = a;
-        double best_d2 = std::numeric_limits<double>::infinity();
-        for (int i = 0; i <= n; i++) {
-            const double u = a + (b - a) * (static_cast<double>(i) / static_cast<double>(n));
-            const Eigen::Vector2d p = spline_.evaluate(u);
-            const double d2 = (p - pos).squaredNorm();
-            if (d2 < best_d2) {
-                best_d2 = d2;
-                best_u = u;
-            }
-        }
-        return best_u;
-    };
-
-    double u_best = search(
-        std::clamp(u_hint - search_window, 0.0, 1.0),
-        std::clamp(u_hint + search_window, 0.0, 1.0),
-        num_samples
-    );
-
-    if ((spline_.evaluate(u_best) - pos).norm() <= local_search_lazy_distance) {
-        return std::clamp(u_best, 0.0, 1.0);
-    }
-
-    u_best = search(0.0, 1.0, num_samples);
-    u_best = search(
-        std::clamp(u_best - search_window, 0.0, 1.0),
-        std::clamp(u_best + search_window, 0.0, 1.0),
-        num_samples
-    );
-
-    return std::clamp(u_best, 0.0, 1.0);
+double SplinePath::arc_length_at_u(const double u) const {
+    if (sample_arc_lengths_.empty()) return 0.0;
+    const double clamped_u = std::clamp(u, 0.0, 1.0);
+    const double scaled = clamped_u * static_cast<double>(sample_arc_lengths_.size() - 1);
+    const size_t lower = static_cast<size_t>(std::floor(scaled));
+    const size_t upper = std::min(lower + 1, sample_arc_lengths_.size() - 1);
+    const double t = scaled - static_cast<double>(lower);
+    return std::lerp(sample_arc_lengths_[lower], sample_arc_lengths_[upper], t);
 }
 
-double SplinePath::project_extrapolated(
-    const Eigen::Vector2d& pos, const double u_hint,
-    const int num_samples, const double search_window,
-    const double local_search_lazy_distance,
-    const double u_min, const double u_max
+double SplinePath::u_at_arc_length(const double arc_length) const {
+    if (sample_arc_lengths_.empty() || total_length_ <= 1e-12) return 0.0;
+    const double clamped = std::clamp(arc_length, 0.0, total_length_);
+    const auto upper_it = std::lower_bound(sample_arc_lengths_.begin(), sample_arc_lengths_.end(), clamped);
+    if (upper_it == sample_arc_lengths_.begin()) return 0.0;
+    if (upper_it == sample_arc_lengths_.end()) return 1.0;
+
+    const size_t upper = static_cast<size_t>(std::distance(sample_arc_lengths_.begin(), upper_it));
+    const size_t lower = upper - 1;
+    const double span = sample_arc_lengths_[upper] - sample_arc_lengths_[lower];
+    const double t = span > 1e-12 ? (clamped - sample_arc_lengths_[lower]) / span : 0.0;
+    return (static_cast<double>(lower) + t) / static_cast<double>(sample_arc_lengths_.size() - 1);
+}
+
+std::optional<PathProjection> SplinePath::project(
+    const Eigen::Vector2d& pos, double min_arc_length, double max_arc_length
 ) const {
-    double u_best = project(
-        pos,
-        std::clamp(u_hint, 0.0, 1.0),
-        num_samples,
-        search_window,
-        local_search_lazy_distance
-    );
+    if (sample_arc_lengths_.size() < 2) return std::nullopt;
+    min_arc_length = std::clamp(min_arc_length, 0.0, total_length_);
+    max_arc_length = std::clamp(max_arc_length, 0.0, total_length_);
+    if (min_arc_length > max_arc_length) std::swap(min_arc_length, max_arc_length);
 
-    double best_d2 = (spline_.evaluate(u_best) - pos).squaredNorm();
+    const double min_u = u_at_arc_length(min_arc_length);
+    const double max_u = u_at_arc_length(max_arc_length);
+    const int table_segments = static_cast<int>(sample_arc_lengths_.size() - 1);
+    const int first = std::clamp(static_cast<int>(std::floor(min_u * table_segments)), 0, table_segments - 1);
+    const int last = std::clamp(static_cast<int>(std::ceil(max_u * table_segments)), first + 1, table_segments);
 
-    const auto check_endpoint_extension = [&](const double u_edge) {
-        const Eigen::Vector2d p_edge = spline_.evaluate(u_edge);
-        const Eigen::Vector2d d1_edge = spline_.derivative(u_edge, 1);
-        const double tangent_norm2 = d1_edge.squaredNorm();
-        if (tangent_norm2 <= 1e-9) return;
-
-        double u_ext = u_edge;
-        if (u_edge <= 0.0) {
-            u_ext = (pos - p_edge).dot(d1_edge) / tangent_norm2;
-            if (u_ext >= 0.0) return;
-        } else {
-            u_ext = 1.0 + (pos - p_edge).dot(d1_edge) / tangent_norm2;
-            if (u_ext <= 1.0) return;
-        }
-
-        const Eigen::Vector2d p_ext = p_edge + d1_edge * (u_ext - u_edge);
-        const double d2 = (p_ext - pos).squaredNorm();
+    double best_u = min_u;
+    double best_d2 = (spline_.evaluate(min_u) - pos).squaredNorm();
+    for (int i = first; i < last; ++i) {
+        const double ua = std::max(min_u, static_cast<double>(i) / table_segments);
+        const double ub = std::min(max_u, static_cast<double>(i + 1) / table_segments);
+        if (ub < ua) continue;
+        const Eigen::Vector2d a = spline_.evaluate(ua);
+        const Eigen::Vector2d b = spline_.evaluate(ub);
+        const Eigen::Vector2d ab = b - a;
+        const double t = ab.squaredNorm() > 1e-12
+            ? std::clamp((pos - a).dot(ab) / ab.squaredNorm(), 0.0, 1.0)
+            : 0.0;
+        const double candidate_u = std::lerp(ua, ub, t);
+        const double d2 = (spline_.evaluate(candidate_u) - pos).squaredNorm();
         if (d2 < best_d2) {
             best_d2 = d2;
-            u_best = u_ext;
+            best_u = candidate_u;
         }
+    }
+
+    double left = std::max(min_u, best_u - 1.0 / table_segments);
+    double right = std::min(max_u, best_u + 1.0 / table_segments);
+    for (int i = 0; i < PROJECTION_REFINEMENT_ITERATIONS; ++i) {
+        const double m1 = left + (right - left) / 3.0;
+        const double m2 = right - (right - left) / 3.0;
+        if ((spline_.evaluate(m1) - pos).squaredNorm() <= (spline_.evaluate(m2) - pos).squaredNorm()) {
+            right = m2;
+        } else {
+            left = m1;
+        }
+    }
+    best_u = 0.5 * (left + right);
+    const Eigen::Vector2d projected = spline_.evaluate(best_u);
+    return PathProjection {
+        .u = best_u,
+        .arc_length = arc_length_at_u(best_u),
+        .position = projected,
+        .distance = (projected - pos).norm(),
     };
-
-    check_endpoint_extension(0.0);
-    check_endpoint_extension(1.0);
-
-    return std::clamp(u_best, u_min, u_max);
 }
 
 bool SplinePath::operator==(const SplinePath& other) const {

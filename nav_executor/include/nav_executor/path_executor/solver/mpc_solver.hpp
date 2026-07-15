@@ -43,6 +43,7 @@ public:
         const SplinePath& global_path,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
+        double current_path_u,
         const CostMap& cost_map,
         const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
@@ -73,16 +74,12 @@ private:
     MPCParams params_;
     rclcpp::Logger logger_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
-    double last_u_ = 0.0;
-
     fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
     bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
-
-    std::optional<SplinePath> prev_ref_control_points_;
 
     double x_h_hat_ = 0.0;
     double prev_v_act_ = 0.0;

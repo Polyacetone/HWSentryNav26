@@ -75,7 +75,7 @@ enum class MotionState : uint8_t {
 struct FsmInput {
     bool has_path = false;       // 当前存在 active_path
     bool has_hold_goal = false;  // 当前存在 hold_goal（应进入 FIXED 保持）
-    bool reach_goal = false;     // 路径终点已到达（dist/u 阈值）
+    bool reach_goal = false;     // 终点距离与路径剩余弧长均满足阈值
     bool step_nonpreemptible = false;
     bool resumed_from_stopped = false;
 

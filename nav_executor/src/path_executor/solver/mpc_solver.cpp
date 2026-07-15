@@ -145,7 +145,6 @@ void MPCSolver::reset_warm_start() {
     follow_warm_ = false;
     stop_warm_ = false;
     hold_warm_ = false;
-    last_u_ = 0.0;
     fddp_lethal_consecutive_count_ = 0;
     if (global_search_worker_) global_search_worker_->clear();
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
@@ -211,6 +210,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const SplinePath& global_path,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
+    const double current_path_u,
     const CostMap& cost_map,
     const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
@@ -225,16 +225,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         );
     }
 
-    const bool path_changed = !(prev_ref_control_points_ && *prev_ref_control_points_ == global_path);
-    const double projection_hint = path_changed ? 0.0 : std::clamp(last_u_, 0.0, 1.0);
-    const double u0 = global_path.project_extrapolated(
-        chassis_pose_map.head<2>(),
-        projection_hint,
-        params_.follow.projection.proj_num_samples,
-        params_.follow.projection.proj_search_window,
-        params_.follow.projection.local_search_lazy_distance
-    );
-    last_u_ = u0;
+    const double u0 = std::clamp(current_path_u, 0.0, 1.0);
 
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -256,8 +247,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         chassis_state,
         params_.kinematic_model
     );
-
-    prev_ref_control_points_ = global_path;
 
     std::vector<CostMapGridView> step_cost_grids;
     if (per_step_cost_maps.empty()) {

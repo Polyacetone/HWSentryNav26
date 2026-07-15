@@ -24,6 +24,7 @@
 #include <interfaces/msg/nav_executor_state.hpp>
 
 #include <nav_executor/common/world_context.hpp>
+#include <nav_executor/common/route_tracker.hpp>
 #include <nav_executor/task_manager/task_manager.hpp>
 #include <nav_executor/path_executor/path_executor.hpp>
 #include <nav_executor/path_executor/step_controller.hpp>
@@ -96,6 +97,7 @@ private:
     double prediction_horizon_seconds_ = 2.0;
     double prediction_weight_decay_ = 1.0;
     FollowProjectionGuardParams proj_guard_params_{};
+    RouteTrackerParams route_tracker_params_{};
     StepBlockReplanParams step_block_params_{};
     PerformanceReplanParams performance_replan_params_{};
 
@@ -103,6 +105,7 @@ private:
     std::unique_ptr<PathPlanner> planner_;
     std::unique_ptr<PathExecutor> executor_;
     std::unique_ptr<TaskManager> task_;
+    std::unique_ptr<RouteTracker> route_tracker_;
 
     // 只读配置（跨线程共享）
     TerrainProfiles terrain_profiles_;

@@ -25,15 +25,13 @@ const char* replan_reason_str(const ReplanReason reason) {
 namespace {
 
 // ── projection guard ──
-bool check_projection_guard(const RouteMonitorInput& in, const SplinePath& path, rclcpp::Logger logger) {
+bool check_projection_guard(const RouteMonitorInput& in, rclcpp::Logger logger) {
     const Eigen::Vector2d pos_map = in.chassis_pos_map;
-    const Eigen::Vector2d proj_map = path.position(in.current_u);
-    const double proj_dist = (proj_map - pos_map).norm();
-
-    if (in.proj_guard.dist_max > 0.0 && proj_dist > in.proj_guard.dist_max) {
-        RCLCPP_WARN(logger, "RouteMonitor: projection too far (dist=%.2f m > %.2f m)", proj_dist, in.proj_guard.dist_max);
+    if (in.route.status != RouteTrackingStatus::TRACKED || in.route.path != in.active_path) {
+        RCLCPP_WARN(logger, "RouteMonitor: route tracking lost (cross_track_error=%.2f m)", in.route.cross_track_error);
         return true;
     }
+    const Eigen::Vector2d proj_map = in.route.projected_position;
 
     if (!in.masked_global_cost_map || in.proj_guard.cost_max < 0.0 || in.proj_guard.cost_max >= 255.0) {
         return false;
@@ -74,7 +72,7 @@ std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, 
     if (samples <= 0) return stats;
 
     auto advance_path_u = [&](const double distance) {
-        double u = std::clamp(in.current_u, 0.0, 1.0);
+        double u = std::clamp(in.route.u, 0.0, 1.0);
         double travelled = 0.0;
         while (u < 1.0 && travelled < distance) {
             const Eigen::Vector2d d1 = path.tangent(u);
@@ -175,10 +173,10 @@ std::optional<ReplanReason> check_performance(const RouteMonitorInput& in, rclcp
     }
     if (!path.planning_performance.high_performance || in.current_performance.high_performance) return std::nullopt;
 
-    const double lookahead_u = advance_path_u_by_distance(path.spline, in.current_u, in.performance.lookahead_distance);
+    const double lookahead_u = advance_path_u_by_distance(path.spline, in.route.u, in.performance.lookahead_distance);
     for (const StepPlanSegment& segment : path.step_segments) {
         if (!segment.requires_high_performance) continue;
-        if (segment.prepare_u <= in.current_u || segment.prepare_u > lookahead_u) continue;
+        if (segment.prepare_u <= in.route.u || segment.prepare_u > lookahead_u) continue;
         RCLCPP_WARN(logger, "RouteMonitor: high-performance crossing ahead is no longer available");
         return ReplanReason::PERFORMANCE_DEGRADED;
     }
@@ -189,7 +187,6 @@ std::optional<ReplanReason> check_performance(const RouteMonitorInput& in, rclcp
 
 RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Logger logger) {
     RouteMonitorReport report;
-    report.current_u = input.current_u;
 
     if (!input.active_path) return report;
     const SplinePath& path = input.active_path->spline;
@@ -201,7 +198,7 @@ RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Log
         return report;
     }
 
-    if (check_projection_guard(input, path, logger)) {
+    if (check_projection_guard(input, logger)) {
         report.needs_replan = true;
         report.reason = ReplanReason::PROJECTION_GUARD;
         return report;

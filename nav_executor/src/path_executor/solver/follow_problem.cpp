@@ -664,12 +664,16 @@ FollowProblemT<Horizon>::evaluate_terminal(const StateVec& x) const {
     TerminalEval out;
     if (w_prog <= 0.0 && w_lat <= 0.0) return out;
 
-    const auto& proj = p_.follow.projection;
     const Eigen::Vector2d p_xy(x(ix::X), x(ix::Y));
     const double hint = std::clamp(x(ix::PATH_U), 0.0, 1.0);
-    const double u_star = spline_.project(
-        p_xy, hint, proj.proj_num_samples, proj.proj_search_window, proj.local_search_lazy_distance
+    constexpr double projection_window = 3.0;
+    const double hint_arc = spline_.arc_length_at_u(hint);
+    const auto projection = spline_.project(
+        p_xy,
+        hint_arc - projection_window,
+        hint_arc + projection_window
     );
+    const double u_star = projection ? projection->u : hint;
     const double uc = std::clamp(u_star, 0.0, 1.0);
     const auto se = spline_.eval(uc);
 

@@ -58,16 +58,6 @@ void PathExecutor::remember_command_output(const ExecutorOutput& output) {
     has_last_command_output_ = true;
 }
 
-double PathExecutor::project_path_u(const ExecutorInput& input, const SplinePath& path, const double seed_u) const {
-    return path.project_extrapolated(
-        input.observation.chassis_pose_map.head<2>(),
-        seed_u,
-        mpc_controller_->params().follow.projection.proj_num_samples,
-        mpc_controller_->params().follow.projection.proj_search_window,
-        mpc_controller_->params().follow.projection.local_search_lazy_distance
-    );
-}
-
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
 ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
@@ -115,22 +105,16 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     const MotionState prev_state = last_motion_state_;
     sync_mpc_context(input, chassis_controllable);
 
-    const bool has_path = static_cast<bool>(input.intent.active_path);
+    const bool has_bound_path = static_cast<bool>(input.intent.active_path);
+    const bool has_path = has_bound_path && input.route
+        && input.route->path == input.intent.active_path
+        && input.route->status == RouteTrackingStatus::TRACKED;
 
     // ── path 绑定切换（新的不可变包 → 重置台阶/进度状态）──
     if (input.intent.active_path != bound_path_) {
         bound_path_ = input.intent.active_path;
         step_controller_.set_path(bound_path_);
-        if (has_path) {
-            const double spacing = std::max(0.1, std::min(
-                params_.follow_no_progress_guard.landmark_spacing,
-                params_.stepping_no_progress_guard.landmark_spacing
-            ));
-            progress_monitor_.recompute_landmarks(bound_path_->spline, spacing);
-        } else {
-            progress_monitor_.clear();
-        }
-        last_reference_u_ = 0.0;
+        progress_monitor_.reset();
         mpc_controller_->reset_warm_start();
     }
 
@@ -145,11 +129,11 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         );
     }
 
-    // ── 投影 u（每周期从上周期 u 作 seed 重新投影）──
     double current_u = 0.0;
+    double current_arc_length = 0.0;
     if (has_path) {
-        current_u = project_path_u(input, bound_path_->spline, last_reference_u_);
-        last_reference_u_ = current_u;
+        current_u = input.route->u;
+        current_arc_length = input.route->arc_length;
         if (prev_state == MotionState::FOLLOW || prev_state == MotionState::STEPPING) {
             step_controller_.update_active_segment(current_u);
         }
@@ -160,24 +144,25 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     if (!command_blocked && has_path) {
         if (prev_state == MotionState::FOLLOW) {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
-                current_u, params_.follow_no_progress_guard, MotionState::FOLLOW, prev_state, input.observation.stamp
+                current_arc_length, params_.follow_no_progress_guard, MotionState::FOLLOW, prev_state, input.observation.stamp
             );
         } else if (prev_state == MotionState::STEPPING) {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
-                current_u, params_.stepping_no_progress_guard, MotionState::STEPPING, prev_state, input.observation.stamp
+                current_arc_length, params_.stepping_no_progress_guard, MotionState::STEPPING, prev_state, input.observation.stamp
             );
         }
     }
 
-    const bool dist_reached = has_path
+    const bool endpoint_reached = has_path
         && ((input.observation.chassis_pose_map.head<2>() - bound_path_->spline.position(1.0)).norm() < params_.stop_threshold_dist);
-    const bool u_reached = has_path && (current_u > params_.stop_threshold_u);
+    const bool progress_reached = has_path
+        && input.route->remaining_length < params_.stop_threshold_remaining_distance;
 
     // ── 组装 FSM 输入 ──
     FsmInput fsm_input;
     fsm_input.has_path = has_path;
     fsm_input.has_hold_goal = input.intent.hold_goal.has_value();
-    fsm_input.reach_goal = dist_reached || u_reached;
+    fsm_input.reach_goal = endpoint_reached && progress_reached;
     fsm_input.step_nonpreemptible = has_path && step_controller_.is_step_nonpreemptible(current_u);
     fsm_input.resumed_from_stopped = resumed_from_stopped;
     fsm_input.command_blocked = command_blocked;
@@ -228,7 +213,6 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     }
 
     output.motion_state = state;
-    output.current_u = current_u;
     output.goal_reached = fsm_output.goal_reached;
     output.executor_replan_event = fsm_output.executor_replan_event;
     output.mpc_lethal = mpc_lethal_pending_;
@@ -261,16 +245,11 @@ void PathExecutor::on_state_transition(const MotionState prev, const MotionState
     }
 
     if (prev_follow_like && !next_follow_like) {
-        last_reference_u_ = 0.0;
         progress_monitor_.reset();
         mpc_lethal_pending_ = false;
         if (allow_warm_start_reset) {
             mpc_controller_->reset_warm_start();
         }
-    }
-
-    if (next_follow_like && !prev_follow_like) {
-        last_reference_u_ = 0.0;
     }
 
     if (prev == MotionState::HAZARD_RECOVERY && next != MotionState::HAZARD_RECOVERY) {
@@ -333,13 +312,14 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
         return out;
     }
 
-    const double u0 = last_reference_u_;
+    if (!input.route || input.route->status != RouteTrackingStatus::TRACKED) return out;
+    const double u0 = input.route->u;
     const SplinePath& path = input.intent.active_path->spline;
 
     step_controller_.tick_profile_blend();
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_follow(
-        path, input.observation.chassis_pose_map, input.observation.chassis_state,
+        path, input.observation.chassis_pose_map, input.observation.chassis_state, u0,
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         step_controller_.current_blended_profile(),
         input.intent.active_path->step_constraint_schedule,

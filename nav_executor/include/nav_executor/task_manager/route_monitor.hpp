@@ -6,12 +6,12 @@
 #include <rclcpp/logger.hpp>
 
 #include <nav_executor/common/annotated_path.hpp>
+#include <nav_executor/common/route_tracker.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 
 namespace nav_executor {
 
 struct FollowProjectionGuardParams {
-    double dist_max;
     double cost_max;
     int cost_samples;
 };
@@ -43,7 +43,7 @@ const char* replan_reason_str(ReplanReason reason);
 // RouteMonitor 输入，由 nav_executor_node 每周期组装后传入。
 struct RouteMonitorInput {
     AnnotatedPath::ConstPtr active_path;
-    double current_u = 0.0;
+    RouteEstimate route;
 
     Eigen::Vector2d chassis_pos_map = Eigen::Vector2d::Zero();
 
@@ -63,12 +63,11 @@ struct RouteMonitorInput {
 };
 
 struct RouteMonitorReport {
-    double current_u = 0.0;
     bool needs_replan = false;
     ReplanReason reason = ReplanReason::NONE;
 };
 
-// 顶层 FOLLOW 阶段的 path monitoring：无状态纯函数，仅当 motion_state==FOLLOW 且 active_path 非空时调用。
+// 顶层可抢占阶段的 path monitoring：无状态纯函数，仅在 active_path 非空时调用。
 // 输出 needs_replan 的合法原因见 ReplanReason。
 RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Logger logger);
 
