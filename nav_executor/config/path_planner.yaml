@@ -6,14 +6,78 @@
       # ═══════════════════════════════════════════════
       planner:
         goal_reached_distance: 0.5 # robot-to-goal 近距离短路阈值 (m)：< 此值则 COMPLETE / USE_AS_FIXED
-        skip_distance: 0.5 # 起终点距离 < 此值时跳过 A* 直接构造样条初值 (m)
-        a_star:
-          step_alignment_weight: 6.0 # A* 台阶对齐代价权重
-          obstacle_weight: 4.0 # A* 障碍物代价权重
-          step_proximity_weight: 0.6 # A* 台阶接近度代价权重
-          step_mode_dot_threshold: 0.3 # A* 方向禁止通行的点积阈值
-          downsampled_waypoint_max_interval: 5 # A* 路径降采样最大间隔
-          feasible_threshold: 100 # A* 格子可通行性判定代价阈值 (0~255)
+        skip_distance: 0.5 # 起终点距离 < 此值时跳过 kinodynamic 直接直连种子 (m)
+        seed_resample_distance: 0.5 # kinodynamic 种子重采样间隔 (m)，决定 MINCO 段数（预留）
+
+      # ═══════════════════════════════════════════════
+      #  Dijkstra — cost-to-goal 场（kinodynamic 启发 + 开阔 seed）
+      # ═══════════════════════════════════════════════
+      dijkstra:
+        obstacle_weight: 0.02 # 障碍代价系数（cost∈[0,255] 与步长同量级缩放）
+        feasible_threshold: 200 # cost >= 此值不扩散 (0~255)
+
+      # ═══════════════════════════════════════════════
+      #  Kinodynamic A* — 最简差速车拓扑发现
+      # ═══════════════════════════════════════════════
+      kinodynamic:
+        vel_max: 2.0 # 线速度上限 (m/s)
+        vel_min: -1.6 # 线速度下限（倒车）(m/s)
+        omega_max: 6.0 # 角速度上限 (rad/s)
+        accel_max: 1.8 # 线加速度上限 (m/s²)
+        a_lat_max: 2.0 # 侧向加速度上限 |v·ω| (m/s²)
+        accel_samples: 5 # [-accel_max, accel_max] 采样数
+        omega_samples: 7 # [-omega_max, omega_max] 采样数
+        primitive_duration: 0.3 # 每原语积分时长 (s)
+        collision_substeps: 4 # 原语内碰撞检查细分步数
+        dedup_xy: 0.2 # 位置去重分辨率 (m)
+        dedup_theta: 0.314 # 朝向去重分辨率 (rad) ≈18°
+        dedup_v: 0.4 # 速度去重分辨率 (m/s)
+        time_weight: 1.0 # 每原语时长代价
+        reverse_weight: 0.3 # 倒车额外代价（偏好前进，不禁止）
+        heuristic_weight: 1.0 # Dijkstra h 权重（>1 加速但失最优性）
+        goal_tolerance: 0.3 # 到 goal 位置容差 (m)
+        max_expansions: 200000 # 展开节点上限（内存/时间护栏）
+
+      # ═══════════════════════════════════════════════
+      #  MINCO — 时空优化（自研 GCOPTER 思路）
+      # ═══════════════════════════════════════════════
+      minco:
+        weights:
+          energy: 1.0 # min-jerk 能量
+          time: 16.0 # 总时长
+          obstacle: 1000.0 # 障碍罚
+          velocity: 100.0 # 带符号速度界
+          lateral_acc: 100.0 # |v·ω| ≤ a_lat
+          omega: 100.0 # |ω| 界
+          accel: 100.0 # |a| 界
+          theta_rate: 1.0 # θ̇ 正则
+          heading_follow: 1.0 # |v| 大时 θ 跟随运动方向软偏好
+          step_alignment: 200.0 # 台阶内车身轴与方向场对齐
+          step_velocity: 200.0 # 台阶内按所选模式约束速度窗
+        limits:
+          vel_max: 2.0
+          vel_min: -1.6
+          omega_max: 6.0
+          acc_max: 1.8
+          a_lat_max: 2.0
+        samples_per_segment: 16 # 每段约束采样点数
+        step_entry_window_fraction: 0.25 # 入口前后相邻段施加软速度窗的局部比例
+        max_iterations: 200 # L-BFGS 每轮最大迭代
+        nonholonomic:
+          rho_init: 50.0 # AL 初始罚因子
+          rho_max: 10000.0 # AL 罚因子上限
+          rho_scale: 3.0 # 每轮 AL 放大
+          al_rounds: 10 # AL 外层轮数
+          tolerance: 0.01 # AL 提前收敛目标：max|横向速度| (m/s)
+          acceptance_tolerance: 0.10 # 最终接纳上限；0.08m/s 在 1.6m/s 时约为 2.9° 速度方向偏差
+        min_segment_time: 0.05 # 段时长下限 (s)
+        validation:
+          samples_per_segment: 32 # 最终验收逐段采样数；每段包含两端点
+          velocity_tolerance: 0.1 # 一般带符号速度与入口速度窗容差 (m/s)
+          omega_tolerance: 0.1 # 角速度上限容差 (rad/s)
+          acceleration_tolerance: 0.1 # 平动加速度上限容差 (m/s²)
+          lateral_acceleration_tolerance: 0.1 # |v*omega| 上限容差 (m/s²)
+          step_velocity_tolerance: 0.1 # 台阶内部速度窗容差 (m/s)
 
       # ═══════════════════════════════════════════════
       #  Traversability — 通行性规则（planner 可行性判定）
@@ -34,7 +98,7 @@
       start_prediction:
         enable: true # 是否启用起点前推预测
         max_accel: 2.0 # 最大减速度 (m/s²)，用于估算制动距离
-        planning_delay: 0.2 # A* + 样条期望耗时 (s)
+        planning_delay: 0.2 # Dijkstra + Kinodynamic A* + MINCO 期望耗时 (s)
         min_speed: 0.3 # 低于该速度不做起点前推 (m/s)
         collision_check_step: 0.05 # 预测起点直线可达性采样间隔 (m)
 
@@ -60,72 +124,4 @@
           chassis_activation_distance: 1.0 # 底盘台阶模式与 FSM 不可抢占起点 → commit 点距离 (m)
           fsm_release_distance: 0.3 # STEPPING 退出点相对物理台阶出口的额外推进距离 (m)
         mpc_constraints:
-          approach_distance: 2.0 # 入口速度可达性约束起点 → commit 点距离 (m)
           gate_transition_distance: 0.3 # 台阶内部 MPC 约束窗两侧软门控过渡带宽度 (m)
-
-      # ═══════════════════════════════════════════════
-      #  BSplineOptimizer — 样条路径优化
-      # ═══════════════════════════════════════════════
-      path_optimizer:
-        step_detection:
-          norm_threshold: 0.01 # 优化器中判断台阶区域的方向场模长下界
-          norm_transition: 0.05 # 台阶门控函数的方向场模长过渡区间
-          samples_per_meter: 10.0 # 台阶区间检测采样密度 (samples/m)
-
-        warmup:
-          solver:
-            samples_per_meter: 10.0 # warmup 阶段残差采样密度
-            max_iterations: 30 # Ceres 最大优化迭代次数
-          objective_weights:
-            obstacle: 300.0 # 归一化障碍物场残差权重
-            direction: 10.0 # 台阶方向误差残差权重
-            step_traversal: 0.5 # 台阶区域穿越残差权重
-            endpoint: 100.0 # 起终点米制位置误差残差权重
-            smoothness: 10.0 # 米制控制点二阶差分残差权重
-            length: 1.0 # 路径长度残差权重
-          tangent_regularization:
-            weight: 50.0 # 归一化切向长度下界残差权重，抑制局部参数化塌缩
-            min_normalized_ratio: 0.35 # 每 knot 切向长度相对路径平均每 knot 长度的下界
-          curvature:
-            max_curvature: 1.2 # warmup 阶段全局曲率上限 (1/m)
-            base:
-              weight: 0.1 # 全曲率范围的基础残差权重
-              beta: 8.0 # 基础曲率 smooth-ReLU 锐度
-            limit:
-              weight: 10.0 # 曲率超限残差权重
-              beta: 8.0 # 曲率超限 smooth-ReLU 锐度
-            numerical:
-              denominator_regularization_length: 0.05 # 曲率分母防奇异尺度；不是切向长度下界 (m/knot)
-              tangent_gate_threshold: 0.15 # 低切向时衰减曲率残差的半响应尺度 (m/knot)
-
-        main:
-          solver:
-            samples_per_meter: 10.0 # main 阶段残差采样密度
-            max_iterations: 30 # 每轮 Ceres 最大优化迭代次数
-          refinement:
-            max_iterations: 3 # 台阶区间外层细化次数
-            interval_iou_threshold: 0.85 # 台阶区间 IoU 达到该值后提前收敛
-          objective_weights:
-            obstacle: 300.0 # 归一化障碍物场残差权重
-            direction: 10.0 # 台阶方向误差残差权重
-            step_traversal: 0.5 # 台阶区域穿越残差权重
-            endpoint: 100.0 # 起终点米制位置误差残差权重
-            smoothness: 10.0 # 米制控制点二阶差分残差权重
-            length: 1.0 # 路径长度残差权重
-          tangent_regularization:
-            weight: 50.0 # 归一化切向长度下界残差权重，抑制局部参数化塌缩
-            min_normalized_ratio: 0.35 # 每 knot 切向长度相对路径平均每 knot 长度的下界
-          curvature:
-            near_step_max_curvature: 0.35 # 台阶附近区域曲率上限 (1/m)
-            far_from_step_max_curvature: 1.2 # 远离台阶区域曲率上限 (1/m)
-            step_extension_distance: 1.0 # 台阶区间前后扩展距离 (m)
-            step_transition_distance: 1.0 # 近/远曲率上限的平滑过渡距离 (m)
-            base:
-              weight: 0.1 # 全曲率范围的基础残差权重
-              beta: 8.0 # 基础曲率 smooth-ReLU 锐度
-            limit:
-              weight: 10.0 # 曲率超限残差权重
-              beta: 8.0 # 曲率超限 smooth-ReLU 锐度
-            numerical:
-              denominator_regularization_length: 0.05 # 曲率分母防奇异尺度；不是切向长度下界 (m/knot)
-              tangent_gate_threshold: 0.15 # 低切向时衰减曲率残差的半响应尺度 (m/knot)

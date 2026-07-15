@@ -171,12 +171,12 @@ bool StepController::should_activate_chassis_mode(const double current_u) const 
     return is_step_nonpreemptible(current_u);
 }
 
-uint8_t StepController::compute_step_distance_cm(const SplinePath& path, const double current_u) const {
+uint8_t StepController::compute_step_distance_cm(const MincoTrajectory& path, const double current_u) const {
     const StepPlanSegment* const segment = current_command_segment(current_u);
     if (!segment) return 0;
     if (current_u >= segment->step_enter_u) return 0;
 
-    const double distance = path.arc_length(current_u, segment->step_enter_u);
+    const double distance = path.arc_length_between(current_u, segment->step_enter_u);
     const double adjusted_distance = distance + step_dist_offset_;
     const int64_t rounded_cm = std::lround(adjusted_distance * 100.0);
     return static_cast<uint8_t>(std::clamp<int64_t>(rounded_cm, 0, 255));

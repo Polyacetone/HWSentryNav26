@@ -8,7 +8,7 @@
 #include <Eigen/Core>
 
 #include <nav_executor/path_planner/nav_map.hpp>
-#include <nav_executor/common/spline_path.hpp>
+#include <nav_executor/common/minco_trajectory.hpp>
 
 namespace nav_executor {
 
@@ -38,7 +38,7 @@ public:
     [[nodiscard]] bool ready() const { return static_cast<bool>(base_direction_map_); }
 
     // 对给定路径（nullopt = 无路径经过）产出台阶掩码层。无副作用。
-    [[nodiscard]] Layers compute(const std::optional<SplinePath>& global_path) const;
+    [[nodiscard]] Layers compute(const std::optional<MincoTrajectory>& global_path) const;
 
     [[nodiscard]] DirectionMap::ConstPtr base_direction_map() const { return base_direction_map_; }
 
@@ -49,7 +49,7 @@ private:
         double alpha;
     };
 
-    [[nodiscard]] double approximate_path_length(const SplinePath& spline) const;
+    [[nodiscard]] double approximate_path_length(const MincoTrajectory& spline) const;
     void build_kernel(double resolution);
     void apply_kernel_at(const Eigen::Vector2i& grid_coord, std::vector<double>& max_alpha) const;
 

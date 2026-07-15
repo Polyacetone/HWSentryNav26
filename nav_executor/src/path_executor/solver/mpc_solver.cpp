@@ -2,7 +2,6 @@
 #include <nav_executor/path_executor/solver/mpc_utils.hpp>
 #include <nav_executor/path_executor/solver/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/solver/lpv_model.hpp>
-#include <nav_executor/path_executor/solver/trajectory_seed.hpp>
 
 namespace nav_executor {
 
@@ -118,22 +117,7 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 // ── MPCSolver 方法 ──
 
-MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger) : params_(params), logger_(std::move(logger)) {
-    const auto& search = params_.follow.global_search;
-    GlobalSearchWorkerParams worker_params;
-    worker_params.enable = search.enable;
-    worker_params.candidate_count = search.candidate_count;
-    worker_params.min_period_ms = search.min_period_ms;
-    worker_params.max_seed_age_ticks = search.max_seed_age_ticks;
-    worker_params.selector = {
-        .improvement_margin = search.improvement_margin,
-        .hysteresis_count = search.hysteresis_count,
-        .refinement_iterations = search.refinement_iterations,
-    };
-    global_search_worker_ = std::make_unique<GlobalSearchWorker>(
-        params_, worker_params, logger_.get_child("global_search")
-    );
-}
+MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger) : params_(params), logger_(std::move(logger)) {}
 
 MPCSolver::~MPCSolver() = default;
 
@@ -146,7 +130,6 @@ void MPCSolver::reset_warm_start() {
     stop_warm_ = false;
     hold_warm_ = false;
     fddp_lethal_consecutive_count_ = 0;
-    if (global_search_worker_) global_search_worker_->clear();
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
         stop_solver_.us[k].setZero();
@@ -207,10 +190,10 @@ StateVec MPCSolver::make_initial_state(
 }
 
 std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow(
-    const SplinePath& global_path,
+    const MincoTrajectory& global_trajectory,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
-    const double current_path_u,
+    const double current_tau,
     const CostMap& cost_map,
     const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
@@ -225,7 +208,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         );
     }
 
-    const double u0 = std::clamp(current_path_u, 0.0, 1.0);
+    const double u0 = std::clamp(current_tau, 0.0, 1.0);
 
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -268,8 +251,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
 
     const FollowProblem problem(
-        global_path, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
-        blended_profile, step_constraint_schedule, u0
+        global_trajectory, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
+        blended_profile, step_constraint_schedule
     );
 
     fddp::SolverOptions opts;
@@ -285,19 +268,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
     scale_solver_controls(follow_solver_, problem);
 
-    const TrajectorySeed longitudinal_seed = longitudinal_planner_.plan(
-        problem, global_path, x0, *step_constraint_schedule, follow_sequence_
-    );
-    std::vector<std::vector<Eigen::Vector2d>> global_search_paths;
-    if (global_search_worker_) {
-        if (auto injected = global_search_worker_->take_latest(follow_sequence_)) {
-            if (injected->injected_seed) {
-                follow_solver_.us = injected->injected_seed->controls;
-                scale_solver_controls(follow_solver_, problem);
-            }
-            global_search_paths = std::move(injected->debug_paths);
-        }
-    }
     rollout_solver_states(follow_solver_, problem, x0);
     follow_solver_.solve(problem, opts);
     follow_warm_ = true;
@@ -317,33 +287,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             prediction.v_pred.push_back(x(ix::V));
             prediction.w_pred.push_back(x(ix::W));
         }
-    }
-    prediction.rollout_paths = std::move(global_search_paths);
-
-    if (global_search_worker_) {
-        std::vector<CostMap> step_maps;
-        step_maps.reserve(per_step_cost_maps.size());
-        for (const CostMap* map : per_step_cost_maps) step_maps.push_back(*map);
-        TrajectorySeed incumbent {
-            .controls = follow_solver_.us,
-            .source = SeedSource::WARM_START,
-            .origin_seq = follow_sequence_,
-        };
-        global_search_worker_->submit(GlobalSearchInput {
-            .path = global_path,
-            .cost_map = cost_map,
-            .masked_global_map = masked_global_map,
-            .per_step_cost_maps = std::move(step_maps),
-            .x0 = x0,
-            .warm_seed = std::move(incumbent),
-            .longitudinal_seed = longitudinal_seed,
-            .blended_profile = blended_profile,
-            .step_constraint_schedule = std::move(step_constraint_schedule),
-            .prediction_dt = pred_dt,
-            .schedule_rho = schedule_rho,
-            .current_path_u = u0,
-            .sequence = follow_sequence_,
-        });
     }
 
     if (check_lethal_status) {

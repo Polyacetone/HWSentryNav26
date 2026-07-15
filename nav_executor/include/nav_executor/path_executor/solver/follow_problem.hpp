@@ -1,18 +1,29 @@
 #pragma once
 
+#include <memory>
+#include <optional>
+
+#include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
-#include <nav_executor/common/spline_path.hpp>
 #include <nav_executor/path_executor/solver/lpv_model.hpp>
 #include <nav_executor/path_executor/solver/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/solver/fddp_solver.hpp>
 
 namespace nav_executor {
 
+// 参数化轨迹跟踪问题（替换旧 SplinePath 版 FollowProblemT）。
+//
+// 参考载体是 MincoTrajectory：按归一参数 τ∈[0,1] 跟踪，含独立朝向 θ_ref 与零弧长旋转段。
+// 状态 ix::PATH_U 语义为 τ。跟随把 τ 当作参数化路径参数（非强制时间，见落地版 Q1b）。
+//
+// 代价导数走有限差分 Gauss-Newton（与 stop/hold 一致，落地版 Q3 决策 B）：残差函数是
+// 唯一真值源，不再手推雅可比。τ-进度作为状态转移的一部分放进 dynamics，其雅可比行单独
+// 有限差分（物理动力学行仍用解析 mpc_dynamics_jacobians）。
 template<int Horizon>
 class FollowProblemT {
 public:
     FollowProblemT(
-        const SplinePath& spline,
+        MincoTrajectory trajectory,
         const MPCParams& params,
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
@@ -20,8 +31,7 @@ public:
         double prediction_dt,
         double schedule_rho,
         const CapabilityProfile& blended_profile,
-        std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
-        double current_path_u
+        std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule
     );
 
     StateVec dynamics(int k, const StateVec& x, const ControlVec& u) const;
@@ -47,24 +57,20 @@ public:
     ControlVec u_upper() const;
 
     [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
-    [[nodiscard]] const MPCParams& params() const;
+    [[nodiscard]] const MPCParams& params() const { return p_; }
     [[nodiscard]] const CapabilityProfile& capability_profile() const { return blended_profile_; }
-    [[nodiscard]] const SplinePath& reference_path() const { return spline_; }
+    [[nodiscard]] const MincoTrajectory& reference_trajectory() const { return trajectory_; }
     [[nodiscard]] const LPVDiscreteModel& discrete_model() const { return model_; }
-    [[nodiscard]] FollowProblemT<Horizon> with_reference_path(const SplinePath& spline) const;
+
+    // 调速因子 s(e)∈(0,1]：随跟踪误差平滑衰减（仅减速）。公开以供进度监视 / 调试复用。
+    [[nodiscard]] double clock_governor(const TrajSample& s, const StateVec& x) const;
+    // τ 推进一步（名义时钟 × 调速因子）。
+    [[nodiscard]] double advance_tau(double tau, const StateVec& x) const;
 
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
 
-    // 终端 cost-to-go 势的值与其对 (x,y) 的梯度（已含权重）。
-    struct TerminalEval {
-        double value = 0.0;
-        Eigen::Vector2d grad_xy = Eigen::Vector2d::Zero();
-    };
-    TerminalEval evaluate_terminal(const StateVec& x) const;
-
-    Eigen::Vector2d goal_xy_;
-    SplinePath spline_;
+    MincoTrajectory trajectory_;
     const MPCParams& p_;
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;
@@ -73,7 +79,8 @@ private:
     LPVDiscreteModel model_ {};
     CapabilityProfile blended_profile_;
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule_;
-    double current_path_u_;
+    double total_arc_ = 0.0;  // 参考总弧长，用于进度奖励的量纲缩放
+    double total_time_ = 0.0; // 参考总时长，用于名义时钟速率 1/T
 };
 
 using FollowProblem = FollowProblemT<MPC_HORIZON>;

@@ -28,7 +28,7 @@ void StepRoutingMask::initialize(const CostMap& cost_map, DirectionMap::ConstPtr
     build_kernel(base_direction_map_->resolution);
 }
 
-StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<SplinePath>& global_path) const {
+StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajectory>& global_path) const {
     if (!base_direction_map_) return {};
 
     std::vector<double> max_alpha(base_step_cost_data_.size(), 0.0);
@@ -106,7 +106,7 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<SplinePath>
     return {std::move(step_cost_layer), std::move(masked_direction_map)};
 }
 
-double StepRoutingMask::approximate_path_length(const SplinePath& spline) const {
+double StepRoutingMask::approximate_path_length(const MincoTrajectory& spline) const {
     const int samples = std::max(1, params_.length_num_samples);
     double len = 0.0;
     const double du = 1.0 / static_cast<double>(samples);

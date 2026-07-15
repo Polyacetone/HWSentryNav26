@@ -130,10 +130,8 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     }
 
     double current_u = 0.0;
-    double current_arc_length = 0.0;
     if (has_path) {
-        current_u = input.route->u;
-        current_arc_length = input.route->arc_length;
+        current_u = input.route->tau;
         if (prev_state == MotionState::FOLLOW || prev_state == MotionState::STEPPING) {
             step_controller_.update_active_segment(current_u);
         }
@@ -144,17 +142,17 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     if (!command_blocked && has_path) {
         if (prev_state == MotionState::FOLLOW) {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
-                current_arc_length, params_.follow_no_progress_guard, MotionState::FOLLOW, prev_state, input.observation.stamp
+                current_u, params_.follow_no_progress_guard, MotionState::FOLLOW, prev_state, input.observation.stamp
             );
         } else if (prev_state == MotionState::STEPPING) {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
-                current_arc_length, params_.stepping_no_progress_guard, MotionState::STEPPING, prev_state, input.observation.stamp
+                current_u, params_.stepping_no_progress_guard, MotionState::STEPPING, prev_state, input.observation.stamp
             );
         }
     }
 
     const bool endpoint_reached = has_path
-        && ((input.observation.chassis_pose_map.head<2>() - bound_path_->spline.position(1.0)).norm() < params_.stop_threshold_dist);
+        && ((input.observation.chassis_pose_map.head<2>() - bound_path_->trajectory.position(1.0)).norm() < params_.stop_threshold_dist);
     const bool progress_reached = has_path
         && input.route->remaining_length < params_.stop_threshold_remaining_distance;
 
@@ -240,12 +238,15 @@ void PathExecutor::on_state_transition(const MotionState prev, const MotionState
     const bool prev_follow_like = (prev == MotionState::FOLLOW) || (prev == MotionState::STEPPING);
     const bool next_follow_like = (next == MotionState::FOLLOW) || (next == MotionState::STEPPING);
 
+    if (prev_follow_like || next_follow_like) {
+        progress_monitor_.reset();
+    }
+
     if (prev == MotionState::STUCK_REVERSE || prev == MotionState::HAZARD_RECOVERY) {
         safety_monitor_.reset_stuck();
     }
 
     if (prev_follow_like && !next_follow_like) {
-        progress_monitor_.reset();
         mpc_lethal_pending_ = false;
         if (allow_warm_start_reset) {
             mpc_controller_->reset_warm_start();
@@ -313,8 +314,8 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     }
 
     if (!input.route || input.route->status != RouteTrackingStatus::TRACKED) return out;
-    const double u0 = input.route->u;
-    const SplinePath& path = input.intent.active_path->spline;
+    const double u0 = input.route->tau;
+    const MincoTrajectory& path = input.intent.active_path->trajectory;
 
     step_controller_.tick_profile_blend();
     const SolveTimer timer;
@@ -365,9 +366,6 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     out.mpc_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
-    if (!prediction.rollout_paths.empty()) {
-        out.global_search_rollouts = std::move(const_cast<MPCPrediction&>(prediction).rollout_paths);
-    }
     out.step_dist_cm = step_controller_.compute_step_distance_cm(path, u0);
     out.valid = true;
 

@@ -6,7 +6,7 @@
 #include <Eigen/Core>
 
 #include <nav_executor/common/chassis_defs.hpp>
-#include <nav_executor/common/spline_path.hpp>
+#include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
 
@@ -34,9 +34,10 @@ struct StepPlanSegment {
 struct AnnotatedPath {
     using ConstPtr = std::shared_ptr<const AnnotatedPath>;
 
-    explicit AnnotatedPath(SplinePath spline_in) : spline(std::move(spline_in)) {}
+    explicit AnnotatedPath(MincoTrajectory trajectory_in) : trajectory(std::move(trajectory_in)) {}
 
-    SplinePath spline;
+    // 参数化全状态轨迹（替换旧 2D SplinePath）：按 τ∈[0,1] 求值 (x,y,θ,v,...)。
+    MincoTrajectory trajectory;
 
     Eigen::Vector2d goal_pos = Eigen::Vector2d::Zero();
     bool goal_fixed = false;

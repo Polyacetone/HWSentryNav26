@@ -3,7 +3,6 @@
 #include <Eigen/Core>
 #include <limits>
 #include <optional>
-#include <nav_executor/common/spline_path.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 
 namespace nav_executor {

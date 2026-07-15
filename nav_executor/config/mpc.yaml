@@ -6,29 +6,9 @@
       # ═══════════════════════════════════════════════
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
-        global_search:
-          enable: true # 启用异步多模态全局种子搜索
-          beam:
-            macro_steps: 4 # 每个搜索宏步包含的 20Hz MPC 步数
-            width: 256 # 每层保留的状态数
-            velocity_acceleration_samples: 3 # [-acc_max, acc_max] 内均匀采样数
-            omega_acceleration_samples: 5 # [-alpha_max, alpha_max] 内均匀采样数
-            per_state_limit: 2 # 每个离散状态格最多保留的不同来向
-            exact_candidate_count: 24 # 使用完整 20Hz 灰盒模型复验的粗搜索候选数
-            state_bins:
-              progress: 0.015 # path_u 离散分辨率
-              longitudinal: 0.20 # 相对 path_u 参考点的沿轨位置误差分辨率 (m)
-              lateral: 0.20 # 相对参考路径横向误差分辨率 (m)
-              heading: 0.25 # 航向误差分辨率 (rad)
-              hidden_state: 0.20 # 纵向灰盒隐藏状态分辨率
-              velocity: 0.20 # 实际线速度分辨率 (m/s)
-              omega: 0.50 # 实际角速度分辨率 (rad/s)
-          candidate_count: 2 # 异步全局搜索保留的独立模态候选数
-          min_period_ms: 100 # 全局搜索线程最短周期
-          max_seed_age_ticks: 8 # 注入种子的最大控制周期年龄
-          improvement_margin: 0.01 # 挑战者相对 incumbent 的最小后验代价改善比例
-          hysteresis_count: 1 # 连续改善达到该次数后才允许切换模态
-          refinement_iterations: 20 # worker 对每个候选执行的 FDDP 精修次数
+        governed_clock:
+          error_scale: 0.5 # 综合跟踪误差达到该尺度时，tau 推进率降至名义值一半
+          heading_weight: 1.0 # 航向误差 rad 到综合误差度量的换算权重
         rollout_safety:
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
@@ -47,11 +27,10 @@
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
         tracking_weights:
           q_y: 0.3 # 横向误差管廊外权重（|ey| > y_tube 时二次拉回）
-          q_theta: 0.15 # 航向误差权重
-          q_u: 1.2 # 每步进度势权重（基于 path_u 的剩余弧长下降）
+          q_theta: 0.15 # 航向误差权重（相对独立 θ_ref）
+          q_v: 1.0 # 纵向速度跟踪权重：v_act 跟随参考带符号速度 v_ref(τ)，驱动折返段反向
+          q_u: 1.2 # 每步进度势权重（基于 τ 的剩余弧长下降）
           y_tube: 0.3 # 横向误差管廊半宽 (m)：管廊内不惩罚横向偏移，允许主动腾挪对齐/助跑台阶
-          q_term_prog: 0.3 # 终端进度势权重：terminal_cost += q_term_prog * s_remaining(投影 u*)，让优化器看到 horizon 外的进度收益
-          q_term_lateral: 0.3 # 终端横向势权重：terminal_cost += q_term_lateral * |ey|，补偿投影进度势在 cross-track 方向的平坦性，防止 rollout 沿切向越飘越远
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
@@ -61,13 +40,7 @@
           acc_limit: 12.0 # 速度指令变化率超限惩罚
           alpha_limit: 12.0 # 角速度指令变化率超限惩罚
           lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
-        terrain_limits:
-          step_reachability_guide_acc: 0.8 # 台阶入口可达势函数的引导加速度 (m/s^2)；也用于助跑可行性因子 f 的 r_reach 估计。
-          step_feasibility_margin_band: 0.4 # 助跑可行性因子 f 的 smoothstep 过渡带宽 (m/s)：r_reach 超出 speed_min 该带宽即认为可行，助跑期速度窗/方向对齐满功率施加；不足则平滑释放，让位于后退退路
         terrain_weights:
-          approach:
-            reachability_lo: 0.8 # 台阶入口前最小可达速度势函数权重，鼓励必要时后退腾挪并加速
-            reachability_hi: 0.8 # 台阶入口前最大可达速度势函数权重，避免以过高速度进入台阶
           internal:
             velocity_window: 2.0 # 台阶内部速度窗惩罚
             direction: 2.4 # 台阶内部穿越方向对齐惩罚
@@ -76,10 +49,6 @@
             omega_smooth: 0.5 # 台阶内部角速度指令变化惩罚，避免突变
         environment_weights:
           obstacle: 5.0 # 避障权重（全局+局部融合代价）
-        terminal_weights:
-          q_v_final: 0.2 # 终端减速权重（全程激活）：v_allowed = sqrt(2 * a_brake * s + v_target^2)
-          a_brake: 2.0 # m/s², 期望制动减速度
-          slow_down_target_vel: 0.1 # m/s, 终点目标速度
       # ═══════════════════════════════════════════════
       #  Stop — 停止求解器
       # ═══════════════════════════════════════════════

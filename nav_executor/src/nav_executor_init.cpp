@@ -3,9 +3,27 @@
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/core.hpp>
 
+#include <cmath>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace nav_executor {
+
+namespace {
+
+void require_parameter(const bool condition, const char* message) {
+    if (!condition) throw std::invalid_argument(message);
+}
+
+bool positive_finite(const double value) {
+    return std::isfinite(value) && value > 0.0;
+}
+
+bool nonnegative_finite(const double value) {
+    return std::isfinite(value) && value >= 0.0;
+}
+
+} // anonymous namespace
 
 NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav_executor", options) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
@@ -20,7 +38,6 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.w_pred_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("node.debug.final_cost_map_pub_topic"), 1);
-        debug_global_search_rollouts_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(declare_parameter<std::string>("node.debug.global_search_rollouts_pub_topic"), 1);
     }
 
     load_terrain_config();
@@ -41,17 +58,8 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     step_params.length_num_samples = static_cast<int>(declare_parameter<int>("path_planner.step_mask.length_num_samples"));
     step_routing_mask_ = std::make_shared<StepRoutingMask>(step_params);
 
-    auto a_star = std::make_shared<AStarPlanner>(
-        declare_parameter<double>("path_planner.planner.a_star.step_alignment_weight"),
-        declare_parameter<double>("path_planner.planner.a_star.obstacle_weight"),
-        declare_parameter<double>("path_planner.planner.a_star.step_proximity_weight"),
-        declare_parameter<double>("path_planner.planner.a_star.step_mode_dot_threshold"),
-        static_cast<int>(declare_parameter<int>("path_planner.planner.a_star.downsampled_waypoint_max_interval")),
-        static_cast<int>(declare_parameter<int>("path_planner.planner.a_star.feasible_threshold"))
-    );
-    auto optimizer = std::make_shared<BSplineOptimizer>(load_optimizer_params());
     planner_ = std::make_unique<PathPlanner>(
-        load_planner_config(), a_star, optimizer, step_routing_mask_, get_logger()
+        load_planner_config(), step_routing_mask_, get_logger()
     );
     planner_->start();
 
@@ -59,10 +67,11 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
 
     route_tracker_params_ = {
         .initial_search_distance = declare_parameter<double>("task_manager.route_tracker.initial_search_distance"),
-        .max_progress_rate = declare_parameter<double>("task_manager.route_tracker.max_progress_rate"),
-        .progress_tolerance = declare_parameter<double>("task_manager.route_tracker.progress_tolerance"),
-        .max_cross_track_error = declare_parameter<double>("task_manager.route_tracker.max_cross_track_error"),
+        .max_tracking_error = declare_parameter<double>("task_manager.route_tracker.max_tracking_error"),
+        .governed_clock = mpc_params.follow.governed_clock,
     };
+    require_parameter(nonnegative_finite(route_tracker_params_.initial_search_distance), "route_tracker.initial_search_distance must be finite and non-negative");
+    require_parameter(positive_finite(route_tracker_params_.max_tracking_error), "route_tracker.max_tracking_error must be finite and positive");
     route_tracker_ = std::make_unique<RouteTracker>(route_tracker_params_);
     proj_guard_params_ = {
         .cost_max = declare_parameter<double>("task_manager.route_monitor.proj_guard.cost_max"),
@@ -296,13 +305,22 @@ PathExecutorParams NavExecutorNode::load_executor_params() {
     p.stop_threshold_remaining_distance = declare_parameter<double>("path_executor.misc.stop_threshold_remaining_distance");
     p.step_dist_offset = declare_parameter<double>("path_executor.misc.step_dist_offset");
     p.follow_no_progress_guard = {
-        .landmark_spacing = declare_parameter<double>("path_executor.no_progress_guard.follow.landmark_spacing"),
+        .tau_landmark_spacing = declare_parameter<double>("path_executor.no_progress_guard.follow.tau_landmark_spacing"),
         .timeout = declare_parameter<double>("path_executor.no_progress_guard.follow.timeout"),
     };
     p.stepping_no_progress_guard = {
-        .landmark_spacing = declare_parameter<double>("path_executor.no_progress_guard.stepping.landmark_spacing"),
+        .tau_landmark_spacing = declare_parameter<double>("path_executor.no_progress_guard.stepping.tau_landmark_spacing"),
         .timeout = declare_parameter<double>("path_executor.no_progress_guard.stepping.timeout"),
     };
+    require_parameter(p.follow_no_progress_guard.tau_landmark_spacing > 0.0
+        && p.follow_no_progress_guard.tau_landmark_spacing <= 1.0,
+        "follow tau_landmark_spacing must be in (0, 1]");
+    require_parameter(p.stepping_no_progress_guard.tau_landmark_spacing > 0.0
+        && p.stepping_no_progress_guard.tau_landmark_spacing <= 1.0,
+        "stepping tau_landmark_spacing must be in (0, 1]");
+    require_parameter(positive_finite(p.follow_no_progress_guard.timeout)
+        && positive_finite(p.stepping_no_progress_guard.timeout),
+        "no-progress timeouts must be finite and positive");
     return p;
 }
 
@@ -320,6 +338,64 @@ PlannerConfig NavExecutorNode::load_planner_config() {
     c.nudge_max_distance = declare_parameter<double>("path_planner.nudge.max_distance");
     c.goal_reached_distance = declare_parameter<double>("path_planner.planner.goal_reached_distance");
     c.skip_distance = declare_parameter<double>("path_planner.planner.skip_distance");
+    c.seed_resample_distance = declare_parameter<double>("path_planner.planner.seed_resample_distance");
+
+    c.dijkstra = {
+        .obstacle_weight = declare_parameter<double>("path_planner.dijkstra.obstacle_weight"),
+        .feasible_threshold = static_cast<int>(declare_parameter<int>("path_planner.dijkstra.feasible_threshold")),
+    };
+    c.kinodynamic = {
+        .vel_max = declare_parameter<double>("path_planner.kinodynamic.vel_max"),
+        .vel_min = declare_parameter<double>("path_planner.kinodynamic.vel_min"),
+        .omega_max = declare_parameter<double>("path_planner.kinodynamic.omega_max"),
+        .accel_max = declare_parameter<double>("path_planner.kinodynamic.accel_max"),
+        .a_lat_max = declare_parameter<double>("path_planner.kinodynamic.a_lat_max"),
+        .accel_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.accel_samples")),
+        .omega_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.omega_samples")),
+        .primitive_duration = declare_parameter<double>("path_planner.kinodynamic.primitive_duration"),
+        .collision_substeps = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.collision_substeps")),
+        .dedup_xy = declare_parameter<double>("path_planner.kinodynamic.dedup_xy"),
+        .dedup_theta = declare_parameter<double>("path_planner.kinodynamic.dedup_theta"),
+        .dedup_v = declare_parameter<double>("path_planner.kinodynamic.dedup_v"),
+        .time_weight = declare_parameter<double>("path_planner.kinodynamic.time_weight"),
+        .reverse_weight = declare_parameter<double>("path_planner.kinodynamic.reverse_weight"),
+        .heuristic_weight = declare_parameter<double>("path_planner.kinodynamic.heuristic_weight"),
+        .goal_tolerance = declare_parameter<double>("path_planner.kinodynamic.goal_tolerance"),
+        .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.max_expansions")),
+    };
+    c.minco = {
+        .weights = {
+            .energy = declare_parameter<double>("path_planner.minco.weights.energy"),
+            .time = declare_parameter<double>("path_planner.minco.weights.time"),
+            .obstacle = declare_parameter<double>("path_planner.minco.weights.obstacle"),
+            .velocity = declare_parameter<double>("path_planner.minco.weights.velocity"),
+            .lateral_acc = declare_parameter<double>("path_planner.minco.weights.lateral_acc"),
+            .omega = declare_parameter<double>("path_planner.minco.weights.omega"),
+            .accel = declare_parameter<double>("path_planner.minco.weights.accel"),
+            .theta_rate = declare_parameter<double>("path_planner.minco.weights.theta_rate"),
+            .heading_follow = declare_parameter<double>("path_planner.minco.weights.heading_follow"),
+            .step_alignment = declare_parameter<double>("path_planner.minco.weights.step_alignment"),
+            .step_velocity = declare_parameter<double>("path_planner.minco.weights.step_velocity"),
+        },
+        .limits = {
+            .vel_max = declare_parameter<double>("path_planner.minco.limits.vel_max"),
+            .vel_min = declare_parameter<double>("path_planner.minco.limits.vel_min"),
+            .omega_max = declare_parameter<double>("path_planner.minco.limits.omega_max"),
+            .acc_max = declare_parameter<double>("path_planner.minco.limits.acc_max"),
+            .a_lat_max = declare_parameter<double>("path_planner.minco.limits.a_lat_max"),
+        },
+        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.samples_per_segment")),
+        .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.minco.max_iterations")),
+        .nonholonomic_rho_init = declare_parameter<double>("path_planner.minco.nonholonomic.rho_init"),
+        .nonholonomic_rho_max = declare_parameter<double>("path_planner.minco.nonholonomic.rho_max"),
+        .nonholonomic_rho_scale = declare_parameter<double>("path_planner.minco.nonholonomic.rho_scale"),
+        .nonholonomic_al_rounds = static_cast<int>(declare_parameter<int>("path_planner.minco.nonholonomic.al_rounds")),
+        .nonholonomic_tolerance = declare_parameter<double>("path_planner.minco.nonholonomic.tolerance"),
+        .nonholonomic_acceptance_tolerance = declare_parameter<double>("path_planner.minco.nonholonomic.acceptance_tolerance"),
+        .min_segment_time = declare_parameter<double>("path_planner.minco.min_segment_time"),
+        .step_entry_window_fraction = declare_parameter<double>("path_planner.minco.step_entry_window_fraction"),
+    };
+
     c.step_detection = {
         .detect_norm_threshold = declare_parameter<double>("path_planner.step.detection.detect_norm_threshold"),
         .detect_dot_threshold = declare_parameter<double>("path_planner.step.detection.detect_dot_threshold"),
@@ -327,94 +403,63 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .profile_prepare_distance = declare_parameter<double>("path_planner.step.execution.profile_prepare_distance"),
         .chassis_activation_distance = declare_parameter<double>("path_planner.step.execution.chassis_activation_distance"),
         .fsm_release_distance = declare_parameter<double>("path_planner.step.execution.fsm_release_distance"),
-        .approach_distance = declare_parameter<double>("path_planner.step.mpc_constraints.approach_distance"),
         .gate_transition_distance = declare_parameter<double>("path_planner.step.mpc_constraints.gate_transition_distance"),
     };
+    c.trajectory_validation = {
+        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.validation.samples_per_segment")),
+        .velocity_tolerance = declare_parameter<double>("path_planner.minco.validation.velocity_tolerance"),
+        .omega_tolerance = declare_parameter<double>("path_planner.minco.validation.omega_tolerance"),
+        .acceleration_tolerance = declare_parameter<double>("path_planner.minco.validation.acceleration_tolerance"),
+        .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.minco.validation.lateral_acceleration_tolerance"),
+        .step_velocity_tolerance = declare_parameter<double>("path_planner.minco.validation.step_velocity_tolerance"),
+    };
+    require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255,
+        "path_planner occupied_threshold must be in [0, 255]");
+    require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
+    require_parameter(c.kinodynamic.vel_min < c.kinodynamic.vel_max,
+        "kinodynamic vel_min must be smaller than vel_max");
+    require_parameter(positive_finite(c.kinodynamic.omega_max)
+        && positive_finite(c.kinodynamic.accel_max)
+        && positive_finite(c.kinodynamic.a_lat_max)
+        && positive_finite(c.kinodynamic.primitive_duration)
+        && positive_finite(c.kinodynamic.dedup_xy)
+        && positive_finite(c.kinodynamic.dedup_theta)
+        && positive_finite(c.kinodynamic.dedup_v),
+        "kinodynamic limits, duration, and dedup resolutions must be finite and positive");
+    require_parameter(c.kinodynamic.accel_samples > 0 && c.kinodynamic.omega_samples > 0
+        && c.kinodynamic.collision_substeps > 0 && c.kinodynamic.max_expansions > 0,
+        "kinodynamic sample counts and max_expansions must be positive");
+    require_parameter(c.minco.limits.vel_min < c.minco.limits.vel_max,
+        "MINCO vel_min must be smaller than vel_max");
+    require_parameter(positive_finite(c.minco.limits.omega_max)
+        && positive_finite(c.minco.limits.acc_max)
+        && positive_finite(c.minco.limits.a_lat_max)
+        && positive_finite(c.minco.min_segment_time),
+        "MINCO limits and min_segment_time must be finite and positive");
+    require_parameter(c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0
+        && c.minco.nonholonomic_al_rounds > 0,
+        "MINCO sample and iteration counts must be positive");
+    require_parameter(positive_finite(c.minco.nonholonomic_rho_init)
+        && c.minco.nonholonomic_rho_max >= c.minco.nonholonomic_rho_init
+        && std::isfinite(c.minco.nonholonomic_rho_max)
+        && c.minco.nonholonomic_rho_scale > 1.0,
+        "MINCO AL rho values must satisfy 0 < rho_init <= rho_max and rho_scale > 1");
+    require_parameter(positive_finite(c.minco.nonholonomic_tolerance)
+        && c.minco.nonholonomic_acceptance_tolerance >= c.minco.nonholonomic_tolerance,
+        "MINCO nonholonomic tolerances are invalid");
+    require_parameter(c.minco.step_entry_window_fraction > 0.0
+        && c.minco.step_entry_window_fraction <= 0.5,
+        "MINCO step_entry_window_fraction must be in (0, 0.5]");
+    require_parameter(c.trajectory_validation.samples_per_segment > 0,
+        "trajectory validation samples_per_segment must be positive");
+    require_parameter(nonnegative_finite(c.trajectory_validation.velocity_tolerance)
+        && nonnegative_finite(c.trajectory_validation.omega_tolerance)
+        && nonnegative_finite(c.trajectory_validation.acceleration_tolerance)
+        && nonnegative_finite(c.trajectory_validation.lateral_acceleration_tolerance)
+        && nonnegative_finite(c.trajectory_validation.step_velocity_tolerance),
+        "trajectory validation tolerances must be finite and non-negative");
     c.enable_debug = enable_debug_;
     return c;
-}
-
-BSplineOptimizer::Params NavExecutorNode::load_optimizer_params() {
-    return {
-        .step_detection = {
-            .norm_threshold = declare_parameter<double>("path_planner.path_optimizer.step_detection.norm_threshold"),
-            .norm_transition = declare_parameter<double>("path_planner.path_optimizer.step_detection.norm_transition"),
-            .samples_per_meter = declare_parameter<double>("path_planner.path_optimizer.step_detection.samples_per_meter"),
-        },
-        .warmup = {
-            .solver = {
-                .samples_per_meter = declare_parameter<double>("path_planner.path_optimizer.warmup.solver.samples_per_meter"),
-                .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.path_optimizer.warmup.solver.max_iterations")),
-            },
-            .objective_weights = {
-                .obstacle = declare_parameter<double>("path_planner.path_optimizer.warmup.objective_weights.obstacle"),
-                .direction = declare_parameter<double>("path_planner.path_optimizer.warmup.objective_weights.direction"),
-                .step_traversal = declare_parameter<double>("path_planner.path_optimizer.warmup.objective_weights.step_traversal"),
-                .endpoint = declare_parameter<double>("path_planner.path_optimizer.warmup.objective_weights.endpoint"),
-                .smoothness = declare_parameter<double>("path_planner.path_optimizer.warmup.objective_weights.smoothness"),
-                .length = declare_parameter<double>("path_planner.path_optimizer.warmup.objective_weights.length"),
-            },
-            .tangent_regularization = {
-                .weight = declare_parameter<double>("path_planner.path_optimizer.warmup.tangent_regularization.weight"),
-                .min_normalized_ratio = declare_parameter<double>("path_planner.path_optimizer.warmup.tangent_regularization.min_normalized_ratio"),
-            },
-            .curvature = {
-                .max_curvature = declare_parameter<double>("path_planner.path_optimizer.warmup.curvature.max_curvature"),
-                .penalty = {
-                    .base = {
-                        .weight = declare_parameter<double>("path_planner.path_optimizer.warmup.curvature.base.weight"),
-                        .beta = declare_parameter<double>("path_planner.path_optimizer.warmup.curvature.base.beta"),
-                    },
-                    .limit = {
-                        .weight = declare_parameter<double>("path_planner.path_optimizer.warmup.curvature.limit.weight"),
-                        .beta = declare_parameter<double>("path_planner.path_optimizer.warmup.curvature.limit.beta"),
-                    },
-                    .denominator_regularization_length = declare_parameter<double>("path_planner.path_optimizer.warmup.curvature.numerical.denominator_regularization_length"),
-                    .tangent_gate_threshold = declare_parameter<double>("path_planner.path_optimizer.warmup.curvature.numerical.tangent_gate_threshold"),
-                },
-            },
-        },
-        .main = {
-            .solver = {
-                .samples_per_meter = declare_parameter<double>("path_planner.path_optimizer.main.solver.samples_per_meter"),
-                .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.path_optimizer.main.solver.max_iterations")),
-            },
-            .refinement = {
-                .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.path_optimizer.main.refinement.max_iterations")),
-                .interval_iou_threshold = declare_parameter<double>("path_planner.path_optimizer.main.refinement.interval_iou_threshold"),
-            },
-            .objective_weights = {
-                .obstacle = declare_parameter<double>("path_planner.path_optimizer.main.objective_weights.obstacle"),
-                .direction = declare_parameter<double>("path_planner.path_optimizer.main.objective_weights.direction"),
-                .step_traversal = declare_parameter<double>("path_planner.path_optimizer.main.objective_weights.step_traversal"),
-                .endpoint = declare_parameter<double>("path_planner.path_optimizer.main.objective_weights.endpoint"),
-                .smoothness = declare_parameter<double>("path_planner.path_optimizer.main.objective_weights.smoothness"),
-                .length = declare_parameter<double>("path_planner.path_optimizer.main.objective_weights.length"),
-            },
-            .tangent_regularization = {
-                .weight = declare_parameter<double>("path_planner.path_optimizer.main.tangent_regularization.weight"),
-                .min_normalized_ratio = declare_parameter<double>("path_planner.path_optimizer.main.tangent_regularization.min_normalized_ratio"),
-            },
-            .curvature = {
-                .near_step_max_curvature = declare_parameter<double>("path_planner.path_optimizer.main.curvature.near_step_max_curvature"),
-                .far_from_step_max_curvature = declare_parameter<double>("path_planner.path_optimizer.main.curvature.far_from_step_max_curvature"),
-                .step_extension_distance = declare_parameter<double>("path_planner.path_optimizer.main.curvature.step_extension_distance"),
-                .step_transition_distance = declare_parameter<double>("path_planner.path_optimizer.main.curvature.step_transition_distance"),
-                .penalty = {
-                    .base = {
-                        .weight = declare_parameter<double>("path_planner.path_optimizer.main.curvature.base.weight"),
-                        .beta = declare_parameter<double>("path_planner.path_optimizer.main.curvature.base.beta"),
-                    },
-                    .limit = {
-                        .weight = declare_parameter<double>("path_planner.path_optimizer.main.curvature.limit.weight"),
-                        .beta = declare_parameter<double>("path_planner.path_optimizer.main.curvature.limit.beta"),
-                    },
-                    .denominator_regularization_length = declare_parameter<double>("path_planner.path_optimizer.main.curvature.numerical.denominator_regularization_length"),
-                    .tangent_gate_threshold = declare_parameter<double>("path_planner.path_optimizer.main.curvature.numerical.tangent_gate_threshold"),
-                },
-            },
-        },
-    };
 }
 
 // ═══════════════════════ TaskManager 参数 ═══════════════════
@@ -457,10 +502,9 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .tracking_weights = {
                 .q_y = declare_parameter<double>("mpc.follow.tracking_weights.q_y"),
                 .q_theta = declare_parameter<double>("mpc.follow.tracking_weights.q_theta"),
+                .q_v = declare_parameter<double>("mpc.follow.tracking_weights.q_v"),
                 .q_u = declare_parameter<double>("mpc.follow.tracking_weights.q_u"),
                 .y_tube = declare_parameter<double>("mpc.follow.tracking_weights.y_tube"),
-                .q_term_prog = declare_parameter<double>("mpc.follow.tracking_weights.q_term_prog"),
-                .q_term_lateral = declare_parameter<double>("mpc.follow.tracking_weights.q_term_lateral")
             },
             .command_weights = {
                 .r_v = declare_parameter<double>("mpc.follow.command_weights.r_v"),
@@ -473,14 +517,8 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .alpha_limit = declare_parameter<double>("mpc.follow.motion_constraint_weights.alpha_limit"),
                 .lat_acc = declare_parameter<double>("mpc.follow.motion_constraint_weights.lat_acc")
             },
-            .terrain_limits = {
-                .step_reachability_guide_acc = declare_parameter<double>("mpc.follow.terrain_limits.step_reachability_guide_acc"),
-                .step_feasibility_margin_band = declare_parameter<double>("mpc.follow.terrain_limits.step_feasibility_margin_band")
-            },
             .terrain_weights = {
                 .step_vel_weight = declare_parameter<double>("mpc.follow.terrain_weights.internal.velocity_window"),
-                .step_reachability_lo = declare_parameter<double>("mpc.follow.terrain_weights.approach.reachability_lo"),
-                .step_reachability_hi = declare_parameter<double>("mpc.follow.terrain_weights.approach.reachability_hi"),
                 .direction = declare_parameter<double>("mpc.follow.terrain_weights.internal.direction"),
                 .step_omega = declare_parameter<double>("mpc.follow.terrain_weights.internal.omega"),
                 .step_dv = declare_parameter<double>("mpc.follow.terrain_weights.internal.velocity_smooth"),
@@ -489,39 +527,14 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .environment_weights = {
                 .obstacle = declare_parameter<double>("mpc.follow.environment_weights.obstacle")
             },
-            .terminal_weights = {
-                .q_v_final = declare_parameter<double>("mpc.follow.terminal_weights.q_v_final"),
-                .a_brake = declare_parameter<double>("mpc.follow.terminal_weights.a_brake"),
-                .slow_down_target_vel = declare_parameter<double>("mpc.follow.terminal_weights.slow_down_target_vel")
-            },
-            .global_search = {
-                .enable = declare_parameter<bool>("mpc.follow.global_search.enable"),
-                .beam = {
-                    .macro_steps = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.macro_steps")),
-                    .beam_width = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.width")),
-                    .velocity_acceleration_samples = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.velocity_acceleration_samples")),
-                    .omega_acceleration_samples = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.omega_acceleration_samples")),
-                    .per_state_limit = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.per_state_limit")),
-                    .exact_candidate_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.beam.exact_candidate_count")),
-                    .progress_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.progress"),
-                    .longitudinal_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.longitudinal"),
-                    .lateral_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.lateral"),
-                    .heading_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.heading"),
-                    .hidden_state_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.hidden_state"),
-                    .velocity_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.velocity"),
-                    .omega_bin = declare_parameter<double>("mpc.follow.global_search.beam.state_bins.omega")
-                },
-                .candidate_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.candidate_count")),
-                .min_period_ms = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.min_period_ms")),
-                .max_seed_age_ticks = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.max_seed_age_ticks")),
-                .improvement_margin = declare_parameter<double>("mpc.follow.global_search.improvement_margin"),
-                .hysteresis_count = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.hysteresis_count")),
-                .refinement_iterations = static_cast<int>(declare_parameter<int>("mpc.follow.global_search.refinement_iterations"))
-            },
             .rollout_safety = {
                 .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),
                 .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold"),
                 .fddp_lethal_consecutive_threshold = static_cast<int>(declare_parameter<int>("mpc.follow.rollout_safety.fddp_lethal_consecutive_threshold"))
+            },
+            .governed_clock = {
+                .error_scale = declare_parameter<double>("mpc.follow.governed_clock.error_scale"),
+                .heading_weight = declare_parameter<double>("mpc.follow.governed_clock.heading_weight"),
             },
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },
@@ -638,6 +651,10 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi")
         }
     };
+    require_parameter(positive_finite(mpc_params.follow.governed_clock.error_scale),
+        "mpc.follow.governed_clock.error_scale must be finite and positive");
+    require_parameter(nonnegative_finite(mpc_params.follow.governed_clock.heading_weight),
+        "mpc.follow.governed_clock.heading_weight must be finite and non-negative");
     return mpc_params;
 }
 

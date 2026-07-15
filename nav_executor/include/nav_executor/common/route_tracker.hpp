@@ -11,9 +11,8 @@ namespace nav_executor {
 
 struct RouteTrackerParams {
     double initial_search_distance;
-    double max_progress_rate;
-    double progress_tolerance;
-    double max_cross_track_error;
+    double max_tracking_error;
+    GovernedClockParams governed_clock;
 };
 
 enum class RouteTrackingStatus : uint8_t {
@@ -24,11 +23,11 @@ enum class RouteTrackingStatus : uint8_t {
 struct RouteEstimate {
     AnnotatedPath::ConstPtr path;
     RouteTrackingStatus status = RouteTrackingStatus::LOST;
-    double u = 0.0;
+    double tau = 0.0;
     double arc_length = 0.0;
     double remaining_length = 0.0;
-    Eigen::Vector2d projected_position = Eigen::Vector2d::Zero();
-    double cross_track_error = 0.0;
+    Eigen::Vector2d reference_position = Eigen::Vector2d::Zero();
+    double tracking_error = 0.0;
 };
 
 class RouteTracker {
@@ -38,8 +37,8 @@ public:
     std::optional<RouteEstimate> update(
         AnnotatedPath::ConstPtr path,
         const Eigen::Vector3d& chassis_pose_map,
-        double chassis_velocity,
-        std::chrono::steady_clock::time_point stamp
+        std::chrono::steady_clock::time_point stamp,
+        bool advance_clock
     );
 
     void reset();
@@ -47,7 +46,7 @@ public:
 private:
     RouteTrackerParams params_;
     AnnotatedPath::ConstPtr path_;
-    std::optional<RouteEstimate> accepted_estimate_;
+    std::optional<RouteEstimate> estimate_;
     std::chrono::steady_clock::time_point last_stamp_{};
 };
 

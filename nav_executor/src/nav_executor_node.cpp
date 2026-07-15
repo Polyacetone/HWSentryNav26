@@ -102,6 +102,9 @@ void NavExecutorNode::control_tick() {
 
     previous_motion_feedback_.preemptible = executor_->preemptible();
     previous_motion_feedback_.motion_state = executor_->motion_state();
+    const MotionState tracking_state = previous_motion_feedback_.motion_state;
+    const bool advance_route_clock = (tracking_state == MotionState::FOLLOW || tracking_state == MotionState::STEPPING)
+        && classify_chassis_control_state(chassis_leg_mode_, comp_stage_) == ChassisControlState::NORMAL;
 
     const CostLayers cost_layers {
         .global = global_cost_map_,
@@ -123,8 +126,8 @@ void NavExecutorNode::control_tick() {
     std::optional<RouteEstimate> route_estimate = route_tracker_->update(
         active_path_before_update,
         chassis_pose_map,
-        chassis_state_.velocity,
-        stamp
+        stamp,
+        advance_route_clock
     );
     RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
@@ -174,8 +177,8 @@ void NavExecutorNode::control_tick() {
         route_estimate = route_tracker_->update(
             task_output.command.active_path,
             chassis_pose_map,
-            chassis_state_.velocity,
-            stamp
+            stamp,
+            false
         );
     }
 
@@ -229,7 +232,6 @@ void NavExecutorNode::control_tick() {
                 debug_v_pred_pub_->publish(v_msg);
                 debug_w_pred_pub_->publish(w_msg);
             }
-            if (out.global_search_rollouts) publish_global_search_rollouts(*out.global_search_rollouts);
         }
     }
 
@@ -305,54 +307,6 @@ nav_msgs::msg::Path NavExecutorNode::path_to_nav_msg(const std::vector<Eigen::Ve
     return msg;
 }
 
-void NavExecutorNode::publish_global_search_rollouts(const std::vector<std::vector<Eigen::Vector2d>>& rollouts) {
-    if (!debug_global_search_rollouts_pub_) return;
-
-    visualization_msgs::msg::MarkerArray markers;
-    const auto stamp = now();
-    constexpr float hue_start = 0.0f, hue_end = 300.0f, sat = 1.0f, val = 1.0f;
-
-    for (size_t i = 0; i < rollouts.size(); ++i) {
-        const float t = (rollouts.size() <= 1) ? 0.0f : static_cast<float>(i) / static_cast<float>(rollouts.size() - 1);
-        const float h = hue_start + t * (hue_end - hue_start);
-        const float c = val * sat;
-        const float hp = h / 60.0f;
-        const float x = c * (1.0f - std::abs(std::fmod(hp, 2.0f) - 1.0f));
-        const float m = val - c;
-        float r, g, b;
-        switch (static_cast<int>(hp) % 6) {
-            case 0: r = c; g = x; b = 0; break;
-            case 1: r = x; g = c; b = 0; break;
-            case 2: r = 0; g = c; b = x; break;
-            case 3: r = 0; g = x; b = c; break;
-            case 4: r = x; g = 0; b = c; break;
-            case 5: r = c; g = 0; b = x; break;
-            default: r = 0; g = 0; b = 0; break;
-        }
-        visualization_msgs::msg::Marker marker;
-        marker.header.stamp = stamp;
-        marker.header.frame_id = "map";
-        marker.ns = "global_search_rollouts";
-        marker.id = static_cast<int>(i);
-        marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.scale.x = 0.06;
-        marker.color.a = 0.65f;
-        marker.color.r = r + m;
-        marker.color.g = g + m;
-        marker.color.b = b + m;
-        marker.points.reserve(rollouts[i].size());
-        for (const auto& pt : rollouts[i]) {
-            geometry_msgs::msg::Point p;
-            p.x = pt.x();
-            p.y = pt.y();
-            p.z = 0.0;
-            marker.points.push_back(p);
-        }
-        markers.markers.push_back(std::move(marker));
-    }
-    debug_global_search_rollouts_pub_->publish(markers);
-}
 
 } // namespace nav_executor
 

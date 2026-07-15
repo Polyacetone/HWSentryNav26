@@ -4,6 +4,7 @@
 #include <vector>
 #include <Eigen/Dense>
 #include <nav_executor/common/chassis_defs.hpp>
+#include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 
 namespace nav_executor {
@@ -33,11 +34,10 @@ struct MPCMotionConstraintWeights {
 
 struct MPCFollowTrackingWeights {
     double q_y;            // 横向误差管廊外权重（tube 外二次惩罚）
-    double q_theta;        // 航向误差权重
-    double q_u;            // 逐步进度势权重（基于投影弧长的 cost-to-go 梯度）
+    double q_theta;        // 航向误差权重（相对独立 θ_ref）
+    double q_v;            // 纵向速度跟踪权重：v_act 跟随参考带符号速度 v_ref(τ)，驱动折返段反向
+    double q_u;            // 逐步进度势权重（基于 τ 剩余弧长的 cost-to-go 梯度）
     double y_tube;         // 横向误差管廊半宽 (m)：|ey| < y_tube 内不惩罚，允许横向腾挪
-    double q_term_prog;    // 终端进度势权重：terminal_cost += q_term_prog * s_remaining(u*)
-    double q_term_lateral; // 终端横向势权重：terminal_cost += q_term_lateral * |ey|，补偿投影势的 cross-track 平坦性
 };
 
 struct MPCFollowCommandWeights {
@@ -47,19 +47,12 @@ struct MPCFollowCommandWeights {
     double r_domega;
 };
 
-struct MPCFollowTerrainLimits {
-    double step_reachability_guide_acc;
-    double step_feasibility_margin_band; // 助跑可行性因子 f 的 smoothstep 过渡带宽 (m/s)
-};
-
 struct MPCFollowTerrainWeights {
-    double step_vel_weight;
-    double step_reachability_lo;
-    double step_reachability_hi;
-    double direction;
-    double step_omega;
-    double step_dv;
-    double step_domega;
+    double step_vel_weight; // 速度窗
+    double direction;       // 朝向 ⊥ 台阶对齐
+    double step_omega;      // 台阶内 ω 抑制
+    double step_dv;         // 台阶内 dv 平滑
+    double step_domega;     // 台阶内 dω 平滑
 };
 
 struct MPCFollowEnvironmentWeights {
@@ -133,39 +126,6 @@ struct LPVDiscreteModel {
     double cf2;
 };
 
-struct MPCFollowTerminalWeights {
-    double q_v_final;
-    double a_brake;
-    double slow_down_target_vel;
-};
-
-struct GlobalSearchBeamParams {
-    int macro_steps;
-    int beam_width;
-    int velocity_acceleration_samples;
-    int omega_acceleration_samples;
-    int per_state_limit;
-    int exact_candidate_count;
-    double progress_bin;
-    double longitudinal_bin;
-    double lateral_bin;
-    double heading_bin;
-    double hidden_state_bin;
-    double velocity_bin;
-    double omega_bin;
-};
-
-struct GlobalSearchParams {
-    bool enable;
-    GlobalSearchBeamParams beam;
-    int candidate_count = 2;
-    int min_period_ms = 200;
-    int max_seed_age_ticks = 8;
-    double improvement_margin = 0.05;
-    int hysteresis_count = 2;
-    int refinement_iterations = 8;
-};
-
 struct MPCFollowRolloutSafetyParams {
     bool enable_lethal_obstacle_check;
     double lethal_obstacle_threshold;
@@ -179,12 +139,10 @@ struct MPCFollowParams {
     MPCFollowTrackingWeights tracking_weights;
     MPCFollowCommandWeights command_weights;
     MPCMotionConstraintWeights motion_constraint_weights;
-    MPCFollowTerrainLimits terrain_limits;
     MPCFollowTerrainWeights terrain_weights;
     MPCFollowEnvironmentWeights environment_weights;
-    MPCFollowTerminalWeights terminal_weights;
-    GlobalSearchParams global_search;
     MPCFollowRolloutSafetyParams rollout_safety;
+    GovernedClockParams governed_clock;
     int max_iters;
 };
 
@@ -251,7 +209,7 @@ struct MPCHoldParams {
 // 路径台阶约束。仅供 MPC 按每个预测状态的 PATH_U 查询，不携带底盘模式或 FSM 语义。
 //
 // 锚点语义（沿路径 u 从小到大）：
-//   approach_start_u ≤ commit_u ≤ step_enter_u ≤ exit_u
+//   commit_u ≤ step_enter_u ≤ exit_u
 //   - commit_u：上位机视角的台阶起点（物理边缘上游回退 run_up）。速度窗/方向对齐等
 //     “助跑期建立约束”自 commit_u 起施加，实现起跳前的提前达速与对齐。
 //   - step_enter_u：物理台阶边缘（真实起跳点）。这是“助跑是否还来得及”的物理截止点，
@@ -259,7 +217,6 @@ struct MPCHoldParams {
 struct StepTraversalConstraint {
     double speed_min = 0.0;
     double speed_max = 0.0;
-    double approach_start_u = 0.0;
     double commit_u = 0.0;
     double step_enter_u = 0.0;
     double exit_u = 1.0;
@@ -280,17 +237,6 @@ public:
         for (const auto& constraint : constraints_) {
             if (path_u < constraint.gate_start_u) break;
             if (path_u <= constraint.gate_end_u) return &constraint;
-        }
-        return nullptr;
-    }
-
-    // 可达包络作用域贯穿到物理边缘 step_enter_u（而非 commit_u）：run_up 平地段虽已施加
-    // 助跑期建立约束（速度窗/对齐），但可达包络仍需在此提供“太慢又太近→后退腾距离”的退路
-    // 梯度，且入口速度地板（d→0 退化形态）必须一路守到真实起跳点。
-    [[nodiscard]] const StepTraversalConstraint* approach_constraint_at(const double path_u) const {
-        for (const auto& constraint : constraints_) {
-            if (path_u < constraint.approach_start_u) break;
-            if (path_u < constraint.step_enter_u) return &constraint;
         }
         return nullptr;
     }
@@ -318,8 +264,6 @@ struct MPCPrediction {
     std::vector<double> headings;
     std::vector<double> v_pred;
     std::vector<double> w_pred;
-
-    std::vector<std::vector<Eigen::Vector2d>> rollout_paths;
 };
 
 struct MPCParams {

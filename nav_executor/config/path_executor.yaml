@@ -14,10 +14,10 @@
       # ═══════════════════════════════════════════════
       no_progress_guard:
         follow:
-          landmark_spacing: 1.0 # 路标点沿弧长间隔 (m)
+          tau_landmark_spacing: 0.02 # 归一轨迹参数 tau 的进度分箱宽度
           timeout: 6.0 # 无进度超时 (s)
         stepping:
-          landmark_spacing: 0.3 # 路标点沿弧长间隔 (m)
+          tau_landmark_spacing: 0.01 # 台阶状态使用更细的 tau 进度分箱
           timeout: 6.0 # 无进度超时 (s)
 
       # ═══════════════════════════════════════════════

@@ -5,7 +5,7 @@
 #include <rclcpp/logger.hpp>
 
 #include <nav_executor/common/annotated_path.hpp>
-#include <nav_executor/common/spline_path.hpp>
+#include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 
 namespace nav_executor {
@@ -17,7 +17,6 @@ struct StepDetectionParams {
     double profile_prepare_distance;
     double chassis_activation_distance;
     double fsm_release_distance;
-    double approach_distance;
     double gate_transition_distance; // 约束窗软门控两侧过渡带宽度 (m)
 };
 
@@ -27,7 +26,7 @@ namespace step_annotator {
 
 std::vector<StepPlanSegment> build_step_plan(
     const StepDetectionParams& params,
-    const SplinePath& path,
+    const MincoTrajectory& path,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
     rclcpp::Logger logger

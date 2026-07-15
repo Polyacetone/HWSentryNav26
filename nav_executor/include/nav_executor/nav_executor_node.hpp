@@ -13,7 +13,6 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <interfaces/msg/nav_goal.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
@@ -30,8 +29,6 @@
 #include <nav_executor/path_executor/step_controller.hpp>
 #include <nav_executor/task_manager/route_monitor.hpp>
 #include <nav_executor/path_planner/path_planner.hpp>
-#include <nav_executor/path_planner/a_star_planner.hpp>
-#include <nav_executor/path_planner/bspline_optimizer.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <nav_executor/path_planner/step_routing_mask.hpp>
 #include <nav_executor/path_executor/solver/mpc_solver.hpp>
@@ -52,7 +49,6 @@ private:
     PlannerConfig load_planner_config();
     TaskManagerParams load_task_params();
     ProfileBlendParams load_blend_params();
-    BSplineOptimizer::Params load_optimizer_params();
     CapabilityProfile load_capability_profile(const std::string& prefix);
 
     // ─── ROS 回调 ───
@@ -65,7 +61,6 @@ private:
     bool get_chassis_pose(Eigen::Vector3d& chassis_pose) const;
     void try_init_step_mask();
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
-    void publish_global_search_rollouts(const std::vector<std::vector<Eigen::Vector2d>>& rollouts);
     void publish_diagnostics(const TaskDiagnostics& diag, MotionState motion_state);
 
     // ─── ROS 通信 ───
@@ -82,7 +77,6 @@ private:
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_warmup_path_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr debug_global_search_rollouts_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mpc_path_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;

@@ -6,9 +6,7 @@
 
       route_tracker:
         initial_search_distance: 0.5 # 新路径仅允许在起点附近建立初始进度，覆盖规划延迟但禁止跳到后段 (m)
-        max_progress_rate: 5.0 # 路径进度变化率的物理上限，用于限制相邻周期搜索范围 (m/s)
-        progress_tolerance: 0.3 # 预测进度之外允许的定位与模型误差 (m)
-        max_cross_track_error: 2.0 # 超过该横向距离视为跟踪丢失并重规划 (m)
+        max_tracking_error: 2.0 # 机器人与当前 governed-clock 参考点超过该距离时视为跟踪丢失 (m)
 
       # ═══════════════════════════════════════════════
       #  RouteMonitor — 路径监控（投影连线 + 台阶阻塞）

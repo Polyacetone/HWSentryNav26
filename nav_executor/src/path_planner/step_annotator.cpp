@@ -11,7 +11,7 @@ namespace {
 
 constexpr double ANGLE_EPSILON = 1e-6;
 
-double advance_path_u_by_distance(const StepDetectionParams& p, const SplinePath& path, const double start_u, const double distance) {
+double advance_path_u_by_distance(const StepDetectionParams& p, const MincoTrajectory& path, const double start_u, const double distance) {
     const double resolution = std::max(1e-3, p.path_sample_resolution);
     double u = std::clamp(start_u, 0.0, 1.0);
     double travelled = 0.0;
@@ -31,7 +31,7 @@ double advance_path_u_by_distance(const StepDetectionParams& p, const SplinePath
     return u;
 }
 
-double retreat_path_u_by_distance(const StepDetectionParams& p, const SplinePath& path, const double start_u, const double distance) {
+double retreat_path_u_by_distance(const StepDetectionParams& p, const MincoTrajectory& path, const double start_u, const double distance) {
     const double resolution = std::max(1e-3, p.path_sample_resolution);
     double u = std::clamp(start_u, 0.0, 1.0);
     double travelled = 0.0;
@@ -85,7 +85,7 @@ const TerrainStepRule* lookup_step_rule(
 // 避免每个采样点逐个判断带来的偶发碎片化。
 std::vector<StepPlanSegment> build_step_plan(
     const StepDetectionParams& p,
-    const SplinePath& path,
+    const MincoTrajectory& path,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
     rclcpp::Logger logger
@@ -166,8 +166,10 @@ std::vector<StepPlanSegment> build_step_plan(
         }
 
         const uint8_t label = direction_map.terrain_at(g);
+        const Eigen::Vector2d dir = direction_map.interpolate(g);
 
-        if (label < static_cast<uint8_t>(TerrainType::SLOPE)) {
+        if (label < static_cast<uint8_t>(TerrainType::SLOPE)
+            || dir.norm() < p.detect_norm_threshold) {
             finalize(i);
             continue;
         }
@@ -179,7 +181,6 @@ std::vector<StepPlanSegment> build_step_plan(
         finalize(i);
 
         const Eigen::Vector2d tangent = path.tangent(u);
-        const Eigen::Vector2d dir = direction_map.interpolate(g);
         if (dir.norm() < ANGLE_EPSILON) continue;
 
         const double dot = dir.normalized().dot(tangent.normalized());
@@ -261,9 +262,6 @@ std::vector<StepPlanSegment> build_step_plan(
         );
 
         auto& constraint = segment.traversal_constraint;
-        constraint.approach_start_u = retreat_path_u_by_distance(
-            p, path, segment.commit_u, p.approach_distance
-        );
         constraint.commit_u = segment.commit_u;
         constraint.step_enter_u = segment.step_enter_u;
         constraint.exit_u = segment.step_exit_u;

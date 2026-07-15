@@ -8,7 +8,7 @@
 
 #include <nav_executor/common/chassis_defs.hpp>
 #include <nav_executor/common/annotated_path.hpp>
-#include <nav_executor/common/spline_path.hpp>
+#include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <nav_executor/path_executor/solver/mpc_solver.hpp>
 
@@ -48,7 +48,7 @@ public:
     [[nodiscard]] const StepChassisCommand* current_chassis_command(double current_u) const;
     [[nodiscard]] bool is_step_nonpreemptible(double current_u) const;
     [[nodiscard]] bool should_activate_chassis_mode(double current_u) const;
-    [[nodiscard]] uint8_t compute_step_distance_cm(const SplinePath& path, double current_u) const;
+    [[nodiscard]] uint8_t compute_step_distance_cm(const MincoTrajectory& path, double current_u) const;
 
     void tick_profile_blend();
     [[nodiscard]] const CapabilityProfile& current_blended_profile() const { return current_profile_; }

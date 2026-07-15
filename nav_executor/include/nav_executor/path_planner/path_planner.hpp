@@ -11,8 +11,9 @@
 #include <rclcpp/logger.hpp>
 
 #include <nav_executor/common/annotated_path.hpp>
-#include <nav_executor/path_planner/a_star_planner.hpp>
-#include <nav_executor/path_planner/bspline_optimizer.hpp>
+#include <nav_executor/path_planner/dijkstra_cost_to_goal.hpp>
+#include <nav_executor/path_planner/kinodynamic_astar.hpp>
+#include <nav_executor/path_planner/minco_optimizer.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <nav_executor/path_planner/step_annotator.hpp>
 #include <nav_executor/path_planner/step_routing_mask.hpp>
@@ -63,6 +64,15 @@ struct PlanResult {
 };
 
 struct PlannerConfig {
+    struct TrajectoryValidationParams {
+        int samples_per_segment;
+        double velocity_tolerance;
+        double omega_tolerance;
+        double acceleration_tolerance;
+        double lateral_acceleration_tolerance;
+        double step_velocity_tolerance;
+    };
+
     // 可行性判定
     int occupied_threshold;
     double on_step_threshold;
@@ -80,10 +90,18 @@ struct PlannerConfig {
     // 近距离短路（robot-to-goal 完成阈值，不是 goal-to-goal 去重阈值）
     double goal_reached_distance;
 
-    // A* 短路：起终点距离 < 该值时跳过 A* 直接构造样条初值（fixed 时）
+    // 短路：起终点距离 < 该值时跳过 kinodynamic，直连折线种子
     double skip_distance;
 
+    // MINCO 种子构造：kinodynamic 状态序列的重采样间隔（米），决定 MINCO 段数
+    double seed_resample_distance;
+
+    DijkstraCostToGoal::Params dijkstra;
+    KinodynamicAstar::Params kinodynamic;
+    MincoOptimizer::Params minco;
+
     StepDetectionParams step_detection;
+    TrajectoryValidationParams trajectory_validation;
 
     bool enable_debug;
 };
@@ -93,8 +111,6 @@ class PathPlanner {
 public:
     PathPlanner(
         const PlannerConfig& config,
-        std::shared_ptr<const AStarPlanner> a_star,
-        std::shared_ptr<const BSplineOptimizer> optimizer,
         std::shared_ptr<StepRoutingMask> step_routing_mask,
         rclcpp::Logger logger
     );
@@ -126,8 +142,6 @@ private:
     [[nodiscard]] std::optional<Eigen::Vector2d> nudge_point_to_free(const PlanRequest& req, const Eigen::Vector2d& map_pt, double max_nudge_distance) const;
 
     PlannerConfig config_;
-    std::shared_ptr<const AStarPlanner> a_star_;
-    std::shared_ptr<const BSplineOptimizer> optimizer_;
     std::shared_ptr<StepRoutingMask> step_routing_mask_;
     rclcpp::Logger logger_;
 

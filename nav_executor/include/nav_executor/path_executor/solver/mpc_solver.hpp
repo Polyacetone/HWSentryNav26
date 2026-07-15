@@ -2,12 +2,10 @@
 
 #include <expected>
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
-#include <nav_executor/common/spline_path.hpp>
+#include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_executor/solver/follow_problem.hpp>
 #include <nav_executor/path_executor/solver/stop_problem.hpp>
 #include <nav_executor/path_executor/solver/hold_problem.hpp>
-#include <nav_executor/path_executor/solver/global_search_worker.hpp>
-#include <nav_executor/path_executor/solver/longitudinal_planner.hpp>
 #include <rclcpp/logging.hpp>
 
 namespace nav_executor {
@@ -40,10 +38,10 @@ public:
     }
 
     std::expected<FollowSolveResult, std::string> solve_follow(
-        const SplinePath& global_path,
+        const MincoTrajectory& global_trajectory,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
-        double current_path_u,
+        double current_tau,
         const CostMap& cost_map,
         const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
@@ -89,14 +87,12 @@ private:
 
     int fddp_lethal_consecutive_count_ = 0;
     uint64_t follow_sequence_ = 0;
-    LongitudinalPlanner longitudinal_planner_;
-    std::unique_ptr<GlobalSearchWorker> global_search_worker_;
 
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,
         const ChassisMotionState& chassis_state,
         const Eigen::Vector2d& cmd_clamped,
-        double path_u
+        double path_tau
     ) const;
 };
 
