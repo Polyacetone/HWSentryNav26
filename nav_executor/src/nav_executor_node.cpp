@@ -126,6 +126,7 @@ void NavExecutorNode::control_tick() {
     std::optional<RouteEstimate> route_estimate = route_tracker_->update(
         active_path_before_update,
         chassis_pose_map,
+        chassis_state_.velocity,
         stamp,
         advance_route_clock
     );
@@ -177,6 +178,7 @@ void NavExecutorNode::control_tick() {
         route_estimate = route_tracker_->update(
             task_output.command.active_path,
             chassis_pose_map,
+            chassis_state_.velocity,
             stamp,
             false
         );

@@ -13,8 +13,8 @@ namespace nav_executor {
 
 // 参数化轨迹跟踪问题（替换旧 SplinePath 版 FollowProblemT）。
 //
-// 参考载体是 MincoTrajectory：按归一参数 τ∈[0,1] 跟踪，含独立朝向 θ_ref 与零弧长旋转段。
-// 状态 ix::PATH_U 语义为 τ。跟随把 τ 当作参数化路径参数（非强制时间，见落地版 Q1b）。
+// 参考载体是 MincoTrajectory。PHASE_TIME 是秒制虚拟相位，PHASE_RATE 是相位相对真实时间
+// 的推进率。物理状态始终按 MPC_DT 递推，参考位置按虚拟相位求值。
 //
 // 代价导数走有限差分 Gauss-Newton（与 stop/hold 一致，落地版 Q3 决策 B）：残差函数是
 // 唯一真值源，不再手推雅可比。τ-进度作为状态转移的一部分放进 dynamics，其雅可比行单独
@@ -62,10 +62,7 @@ public:
     [[nodiscard]] const MincoTrajectory& reference_trajectory() const { return trajectory_; }
     [[nodiscard]] const LPVDiscreteModel& discrete_model() const { return model_; }
 
-    // 调速因子 s(e)∈(0,1]：随跟踪误差平滑衰减（仅减速）。公开以供进度监视 / 调试复用。
-    [[nodiscard]] double clock_governor(const TrajSample& s, const StateVec& x) const;
-    // τ 推进一步（名义时钟 × 调速因子）。
-    [[nodiscard]] double advance_tau(double tau, const StateVec& x) const;
+    [[nodiscard]] TrajectoryPhaseState advance_phase(const StateVec& x) const;
 
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;

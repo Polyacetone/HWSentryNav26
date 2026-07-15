@@ -272,22 +272,4 @@ bool MincoTrajectory::operator==(const MincoTrajectory& other) const {
     return true;
 }
 
-double governed_clock_factor(
-    const TrajSample& reference,
-    const Eigen::Vector3d& chassis_pose_map,
-    const GovernedClockParams& params
-) {
-    const double ex = chassis_pose_map.x() - reference.p.x();
-    const double ey = chassis_pose_map.y() - reference.p.y();
-    const double heading_error = std::atan2(
-        std::sin(chassis_pose_map.z() - reference.theta),
-        std::cos(chassis_pose_map.z() - reference.theta)
-    );
-    const double weighted_heading_error = params.heading_weight * heading_error;
-    const double error_squared = ex * ex + ey * ey
-        + weighted_heading_error * weighted_heading_error;
-    const double scale_squared = params.error_scale * params.error_scale;
-    return scale_squared / (scale_squared + error_squared);
-}
-
 } // namespace nav_executor

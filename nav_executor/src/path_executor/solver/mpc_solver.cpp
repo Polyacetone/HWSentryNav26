@@ -174,7 +174,8 @@ StateVec MPCSolver::make_initial_state(
     const Eigen::Vector3d& pose,
     const ChassisMotionState& chassis_state,
     const Eigen::Vector2d& cmd_clamped,
-    double path_u
+    const double phase_time,
+    const double phase_rate
 ) const {
     StateVec x0;
     x0(ix::X) = pose.x();
@@ -185,7 +186,8 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::W) = chassis_state.omega;
     x0(ix::DV) = cmd_clamped.x();
     x0(ix::DW) = cmd_clamped.y();
-    x0(ix::PATH_U) = path_u;
+    x0(ix::PHASE_TIME) = phase_time;
+    x0(ix::PHASE_RATE) = phase_rate;
     return x0;
 }
 
@@ -193,7 +195,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const MincoTrajectory& global_trajectory,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
-    const double current_tau,
+    const double current_phase_time,
+    const double current_phase_rate,
     const CostMap& cost_map,
     const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
@@ -208,7 +211,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         );
     }
 
-    const double u0 = std::clamp(current_tau, 0.0, 1.0);
+    const double phase_time0 = std::clamp(current_phase_time, 0.0, global_trajectory.total_time());
+    const double phase_rate0 = std::clamp(current_phase_rate, 0.0, 1.0);
 
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -248,7 +252,9 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const GridInfo ci = make_grid_info(cost_map);
     const CostMapGridView masked_global_grid(masked_global_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, u0);
+    const StateVec x0 = make_initial_state(
+        chassis_pose_map, chassis_state, cmd0, phase_time0, phase_rate0
+    );
 
     const FollowProblem problem(
         global_trajectory, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
@@ -352,7 +358,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0, 0.0);
 
     StopProblem prob(params_, cg, ci, schedule_rho);
     if (stop_warm_) {
@@ -401,7 +407,7 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0, 0.0);
 
     HoldProblem prob(goal_map, params_, cg, ci, schedule_rho);
     if (hold_warm_) {

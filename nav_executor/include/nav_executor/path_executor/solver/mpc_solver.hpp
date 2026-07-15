@@ -41,7 +41,8 @@ public:
         const MincoTrajectory& global_trajectory,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
-        double current_tau,
+        double current_phase_time,
+        double current_phase_rate,
         const CostMap& cost_map,
         const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
@@ -92,7 +93,8 @@ private:
         const Eigen::Vector3d& pose,
         const ChassisMotionState& chassis_state,
         const Eigen::Vector2d& cmd_clamped,
-        double path_tau
+        double phase_time,
+        double phase_rate
     ) const;
 };
 

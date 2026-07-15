@@ -34,11 +34,6 @@ struct TrajSample {
     double kappa = 0.0;     // 位置曲线曲率
 };
 
-struct GovernedClockParams {
-    double error_scale = 0.5;
-    double heading_weight = 1.0;
-};
-
 // ── 参数化全状态轨迹载体 ──
 //
 // 替换 SplinePath 在参考链中的角色。内部是逐段五次多项式（MINCO min-jerk，C² 连续），
@@ -130,12 +125,5 @@ private:
     double total_arc_length_ = 0.0;
     std::vector<double> arc_samples_;       // 均匀 τ 采样处的累计弧长，size = ARC_SAMPLES+1
 };
-
-// 跟踪误差只允许降低名义轨迹时钟速率。该函数是执行期持久化 tau 与 MPC 预测 tau 的共同语义源。
-[[nodiscard]] double governed_clock_factor(
-    const TrajSample& reference,
-    const Eigen::Vector3d& chassis_pose_map,
-    const GovernedClockParams& params
-);
 
 } // namespace nav_executor

@@ -131,7 +131,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
 
     double current_u = 0.0;
     if (has_path) {
-        current_u = input.route->tau;
+        current_u = input.route->observed_tau;
         if (prev_state == MotionState::FOLLOW || prev_state == MotionState::STEPPING) {
             step_controller_.update_active_segment(current_u);
         }
@@ -314,13 +314,14 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     }
 
     if (!input.route || input.route->status != RouteTrackingStatus::TRACKED) return out;
-    const double u0 = input.route->tau;
+    const double u0 = input.route->observed_tau;
     const MincoTrajectory& path = input.intent.active_path->trajectory;
 
     step_controller_.tick_profile_blend();
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_follow(
-        path, input.observation.chassis_pose_map, input.observation.chassis_state, u0,
+        path, input.observation.chassis_pose_map, input.observation.chassis_state,
+        input.route->phase_time, input.route->phase_rate,
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         step_controller_.current_blended_profile(),
         input.intent.active_path->step_constraint_schedule,
