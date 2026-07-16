@@ -714,6 +714,35 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     );
     if (!opt.success) return fail("MINCO optimization failed: " + opt.error);
     const auto minco_done = std::chrono::steady_clock::now();
+
+    if (config_.enable_debug && opt.diagnostics_valid) {
+        const auto& s = opt.seed_costs;
+        const auto& f = opt.final_costs;
+        static constexpr const char* LBFGS_STATUS[] = {"CONVERGED", "MAX_ITER", "LS_FAILED"};
+        const int status_index = std::clamp(opt.lbfgs_status, 0, 2);
+        RCLCPP_INFO(
+            logger_,
+            "MINCO diag: status=%s iters=%d |grad|_inf %.3g -> %.3g (pos=%.3g, time=%.3g) | "
+            "cost %.3g -> %.3g | waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
+            "seed[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g] "
+            "final[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g]",
+            LBFGS_STATUS[status_index], opt.iterations,
+            opt.initial_grad_inf_norm, opt.final_grad_inf_norm,
+            opt.final_grad_pos_inf_norm, opt.final_grad_time_inf_norm,
+            s.total(), f.total(),
+            opt.free_waypoint_count, opt.waypoint_total_displacement, opt.waypoint_max_displacement,
+            s.energy, s.time, s.obstacle, s.velocity, s.lateral_acc, s.omega, s.accel, s.step_alignment, s.step_velocity,
+            f.energy, f.time, f.obstacle, f.velocity, f.lateral_acc, f.omega, f.accel, f.step_alignment, f.step_velocity
+        );
+        if (opt.grad_check_max_rel_err >= 0.0) {
+            RCLCPP_INFO(
+                logger_,
+                "MINCO grad check (seed): max_abs_err=%.3g max_rel_err=%.3g worst_var=%d",
+                opt.grad_check_max_abs_err, opt.grad_check_max_rel_err,
+                opt.grad_check_worst_index
+            );
+        }
+    }
     if (opt.trajectory.empty()) return fail("MINCO produced empty trajectory");
     std::string trajectory_error;
     bool trajectory_error_is_fatal = false;

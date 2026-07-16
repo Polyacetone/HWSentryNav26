@@ -50,7 +50,7 @@
           lateral_acc: 100.0 # |v·ω| ≤ a_lat
           omega: 100.0 # |ω| 界
           accel: 100.0 # |a| 界
-          step_alignment: 200.0 # 台阶内车身轴与方向场对齐
+          step_alignment: 500.0 # 台阶内车身轴与方向场对齐
           step_velocity: 200.0 # 台阶内按所选模式约束速度窗
         limits:
           vel_max: 2.0 # 线速度上限 (m/s)
@@ -58,9 +58,12 @@
           omega_max: 6.0 # 角速度上限 (rad/s)
           acc_max: 1.8 # 平动加速度上限 (m/s²)
           a_lat_max: 2.0 # 侧向加速度上限 |v·ω| (m/s²)
+        terrain_gate: # 方向地形罚的平滑门控（消除台阶边界代价断崖，保证 strong Wolfe 线搜索连续性）
+          norm_lo: 0.1 # ‖dir‖ 下限：低于则方向地形罚为零
+          norm_hi: 0.9 # ‖dir‖ 上限：高于则方向地形罚全强度
         samples_per_segment: 16 # 每段约束采样点数
         step_entry_window_fraction: 0.25 # 入口前后相邻段施加软速度窗的局部比例
-        max_iterations: 200 # L-BFGS 最大迭代
+        max_iterations: 2000 # L-BFGS 最大迭代
         min_segment_time: 0.05 # 段时长下限 (s)
         validation:
           reject_infeasible: false # 开发期仅 WARN 并接纳约束违规轨迹；非有限值等结构错误仍会拒绝

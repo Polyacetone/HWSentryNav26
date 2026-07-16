@@ -15,11 +15,11 @@ public:
     struct Options {
         int max_iterations = 200;
         int history_size = 8;        // 保留的 (s, y) 对数
-        double grad_tolerance = 1e-5; // ‖g‖_inf 收敛阈
-        double step_tolerance = 1e-9; // 步长下界（线搜索失败判定）
-        double armijo_c = 1e-4;       // 充分下降系数
-        double init_step = 1.0;       // 首次迭代试探步长
-        int max_line_search = 20;
+        double grad_tolerance = 1e-5; // ‖g‖_inf 收敛阈（作用于归一化目标）
+        double step_tolerance = 1e-12; // 步长区间下界（zoom 收缩判定）
+        double armijo_c = 1e-4;       // 充分下降系数 c1（strong Wolfe）
+        double wolfe_c = 0.9;         // 曲率条件系数 c2（strong Wolfe，quasi-Newton 取 0.9）
+        int max_line_search = 24;     // bracket / zoom 各自的最大评估次数
     };
 
     enum class Status {

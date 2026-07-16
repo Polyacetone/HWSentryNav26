@@ -398,10 +398,16 @@ PlannerConfig NavExecutorNode::load_planner_config() {
             .acc_max = declare_parameter<double>("path_planner.minco.limits.acc_max"),
             .a_lat_max = declare_parameter<double>("path_planner.minco.limits.a_lat_max"),
         },
+        .terrain_gate = {
+            .norm_lo = declare_parameter<double>("path_planner.minco.terrain_gate.norm_lo"),
+            .norm_hi = declare_parameter<double>("path_planner.minco.terrain_gate.norm_hi"),
+        },
         .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.samples_per_segment")),
         .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.minco.max_iterations")),
         .min_segment_time = declare_parameter<double>("path_planner.minco.min_segment_time"),
         .step_entry_window_fraction = declare_parameter<double>("path_planner.minco.step_entry_window_fraction"),
+        .debug_check_gradient = enable_debug_,
+        .debug_diagnostics = enable_debug_,
     };
 
     c.step_detection = {
@@ -450,6 +456,9 @@ PlannerConfig NavExecutorNode::load_planner_config() {
     require_parameter(c.minco.step_entry_window_fraction > 0.0
         && c.minco.step_entry_window_fraction <= 0.5,
         "MINCO step_entry_window_fraction must be in (0, 0.5]");
+    require_parameter(c.minco.terrain_gate.norm_lo >= 0.0
+        && c.minco.terrain_gate.norm_hi > c.minco.terrain_gate.norm_lo,
+        "MINCO terrain_gate requires 0 <= norm_lo < norm_hi");
     require_parameter(c.trajectory_validation.samples_per_segment > 0,
         "trajectory validation samples_per_segment must be positive");
     require_parameter(nonnegative_finite(c.trajectory_validation.velocity_tolerance)

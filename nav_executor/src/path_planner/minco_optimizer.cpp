@@ -20,6 +20,18 @@ constexpr double OMEGA_SPEED_REG_SQ = OMEGA_SPEED_REG * OMEGA_SPEED_REG;
 inline double violation(double g) { return std::max(g, 0.0); }
 inline double violation_grad(double g) { return g > 0.0 ? 1.0 : 0.0; }
 
+// C1 光滑门控 smoothstep：x<lo → 0，x>hi → 1，区间内 3t²−2t³ 过渡。
+// 返回 {值, d值/dx}。用于把方向地形罚在台阶边界连续开关，消除代价断崖。
+inline std::pair<double, double> smoothstep_gate(double x, double lo, double hi) {
+    if (hi <= lo) return {x >= hi ? 1.0 : 0.0, 0.0};
+    const double t = (x - lo) / (hi - lo);
+    if (t <= 0.0) return {0.0, 0.0};
+    if (t >= 1.0) return {1.0, 0.0};
+    const double value = t * t * (3.0 - 2.0 * t);
+    const double dvalue = 6.0 * t * (1.0 - t) / (hi - lo);
+    return {value, dvalue};
+}
+
 // 虚拟时间正性重参数化：T = softplus(tau_v) = ln(1+e^{tau_v})，保证 T>0 且光滑。
 // dT/dtau_v = sigmoid(tau_v) = 1/(1+e^{-tau_v})。
 inline double virtual_to_time(double tau_v, double min_t) {
@@ -70,7 +82,8 @@ MincoOptimizer::MincoOptimizer(Params params)
 double MincoOptimizer::accumulate_penalties(
     Workspace& ws,
     Eigen::MatrixXd& grad_c,
-    Eigen::VectorXd& grad_t_explicit
+    Eigen::VectorXd& grad_t_explicit,
+    CostTerms* terms
 ) const {
     const auto& coeffs = ws.minco.coefficients();
     const int n = ws.n_segments;
@@ -81,6 +94,7 @@ double MincoOptimizer::accumulate_penalties(
     double cost = 0.0;
     grad_c.setZero(NCOEF * n, DIM);
     grad_t_explicit.setZero(n);
+    if (terms) *terms = CostTerms {};
 
     for (int seg = 0; seg < n; ++seg) {
         const double T = ws.times[static_cast<size_t>(seg)];
@@ -100,6 +114,7 @@ double MincoOptimizer::accumulate_penalties(
                 + 720.0 * c4 * c5 * T4
                 + 720.0 * c5 * c5 * T5;
             cost += w.energy * energy;
+            if (terms) terms->energy += w.energy * energy;
             grad_c(c_off + 3, d) += w.energy * (72.0 * c3 * T + 144.0 * c4 * T2 + 240.0 * c5 * T3);
             grad_c(c_off + 4, d) += w.energy * (144.0 * c3 * T2 + 384.0 * c4 * T3 + 720.0 * c5 * T4);
             grad_c(c_off + 5, d) += w.energy * (240.0 * c3 * T3 + 720.0 * c4 * T4 + 1440.0 * c5 * T5);
@@ -114,6 +129,7 @@ double MincoOptimizer::accumulate_penalties(
 
         // ── 时间罚 w_time · T ──
         cost += w.time * T;
+        if (terms) terms->time += w.time * T;
         grad_t_explicit(seg) += w.time;
 
         // ── 采样点罚 ──
@@ -152,6 +168,9 @@ double MincoOptimizer::accumulate_penalties(
             // 密度 ρ 及其对 (px,py,vx,vy,ax,ay) 的梯度。
             double density = 0.0;
             double gpx = 0, gpy = 0, gvx = 0, gvy = 0, gax = 0, gay = 0;
+            // 分项密度（诊断用，terms 非空时按 dt 加权累积到 terms）。
+            double d_obstacle = 0, d_velocity = 0, d_lateral_acc = 0;
+            double d_omega = 0, d_accel = 0, d_step_alignment = 0, d_step_velocity = 0;
 
             const double speed2 = vx * vx + vy * vy;
             const double speed = std::sqrt(speed2);
@@ -182,6 +201,7 @@ double MincoOptimizer::accumulate_penalties(
                         ((1.0 - tx) * (c01 - c00) + tx * (c11 - c10)) * inv_scale
                     );
                     density += w.obstacle * 0.5 * cval * cval;
+                    if (terms) d_obstacle += w.obstacle * 0.5 * cval * cval;
                     gpx += w.obstacle * cval * cgrad.x();
                     gpy += w.obstacle * cval * cgrad.y();
                 } else {
@@ -196,6 +216,7 @@ double MincoOptimizer::accumulate_penalties(
                     const double cval = 1.0 + dist / ws.cost_map->resolution;
                     const Eigen::Vector2d cgrad = delta / (dist * ws.cost_map->resolution);
                     density += w.obstacle * 0.5 * cval * cval;
+                    if (terms) d_obstacle += w.obstacle * 0.5 * cval * cval;
                     gpx += w.obstacle * cval * cgrad.x();
                     gpy += w.obstacle * cval * cgrad.y();
                 }
@@ -212,6 +233,7 @@ double MincoOptimizer::accumulate_penalties(
                 const double under = lim.vel_min - v_signed;
                 const double go = violation(over), gu = violation(under);
                 density += w.velocity * 0.5 * (go * go + gu * gu);
+                if (terms) d_velocity += w.velocity * 0.5 * (go * go + gu * gu);
                 const double dv = w.velocity * (go - gu); // dρ/dv_signed
                 gvx += dv * dvs_dvx;
                 gvy += dv * dvs_dvy;
@@ -229,6 +251,7 @@ double MincoOptimizer::accumulate_penalties(
                 const double under = entry.speed_min - v_signed;
                 const double go = violation(over), gu = violation(under);
                 density += w.step_velocity * 0.5 * (go * go + gu * gu);
+                if (terms) d_step_velocity += w.step_velocity * 0.5 * (go * go + gu * gu);
                 const double dv = w.step_velocity * (go - gu);
                 gvx += dv * dvs_dvx;
                 gvy += dv * dvs_dvy;
@@ -247,6 +270,7 @@ double MincoOptimizer::accumulate_penalties(
                 const double mag = std::abs(a_lat) - lim.a_lat_max;
                 const double gm = violation(mag);
                 density += w.lateral_acc * 0.5 * gm * gm;
+                if (terms) d_lateral_acc += w.lateral_acc * 0.5 * gm * gm;
                 const double coeff = w.lateral_acc * gm * ((a_lat > 0) ? 1.0 : -1.0);
                 // ∂a_lat/∂· = ω·∂v_signed/∂· + v_signed·∂ω/∂·
                 gvx += coeff * (omega * dvs_dvx + v_signed * domega_dvx);
@@ -260,6 +284,7 @@ double MincoOptimizer::accumulate_penalties(
                 const double mag = std::abs(omega) - lim.omega_max;
                 const double gm = violation(mag);
                 density += w.omega * 0.5 * gm * gm;
+                if (terms) d_omega += w.omega * 0.5 * gm * gm;
                 const double coeff = w.omega * gm * ((omega > 0) ? 1.0 : -1.0);
                 gvx += coeff * domega_dvx;
                 gvy += coeff * domega_dvy;
@@ -273,12 +298,15 @@ double MincoOptimizer::accumulate_penalties(
                 const double mag = amag - lim.acc_max;
                 const double gm = violation(mag);
                 density += w.accel * 0.5 * gm * gm;
+                if (terms) d_accel += w.accel * 0.5 * gm * gm;
                 const double coeff = w.accel * gm / amag;
                 gax += coeff * ax;
                 gay += coeff * ay;
             }
 
             // 方向地形约束：运动方向与方向场共线（模 π），并满足所选模式速度窗。
+            // 门控 gate=smoothstep(‖dir‖) 连续开关，替代 label/阈值硬开关，保证目标沿采样点
+            // 位移分段光滑（strong Wolfe 前提）。gate 依赖位置，其梯度按乘积法则流回 gpx/gpy。
             if (ws.direction_map && ws.terrain_constraints && speed_ok
                 && (w.step_alignment > 0.0 || w.step_velocity > 0.0)) {
                 const Eigen::Vector2d dg = ws.direction_map->map_coord_to_grid({px, py});
@@ -287,49 +315,80 @@ double MincoOptimizer::accumulate_penalties(
                     const DirectionMap::DirectionSample direction_sample =
                         ws.direction_map->interpolate_with_gradient(dg);
                     const Eigen::Vector2d& raw_dir = direction_sample.value;
-                    if (label >= static_cast<uint8_t>(TerrainType::SLOPE) && raw_dir.norm() > EPS) {
-                        const double dir_norm = raw_dir.norm();
+                    const double dir_norm = raw_dir.norm();
+                    // 门控只在有方向语义（label>=SLOPE）的地形上开启；标签本身离散，但其切换发生在
+                    // ‖dir‖→0 的区域（gate 已连续压到 0），故不引入代价跳变。
+                    const bool directional = label >= static_cast<uint8_t>(TerrainType::SLOPE);
+                    const auto [gate, dgate_dnorm] = directional
+                        ? smoothstep_gate(dir_norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi)
+                        : std::pair<double, double> {0.0, 0.0};
+                    if (gate > 0.0 && dir_norm > EPS) {
                         const Eigen::Vector2d dir = raw_dir / dir_norm;
                         const Eigen::Matrix2d dir_jacobian_map = (
                             (Eigen::Matrix2d::Identity() - dir * dir.transpose()) / dir_norm
                         ) * direction_sample.gradient / ws.direction_map->resolution;
+                        // ∂‖dir‖/∂pos = dirᵀ·(∂raw_dir/∂pos)；∂raw_dir/∂pos = gradient/resolution（map系）。
+                        const Eigen::Vector2d dnorm_dpos =
+                            (direction_sample.gradient.transpose() * dir) / ws.direction_map->resolution;
+                        const Eigen::Vector2d dgate_dpos = dgate_dnorm * dnorm_dpos;
 
-                        // 运动方向单位向量 u = (vx,vy)/speed；对齐误差 e = u×dir = u.x·diry − u.y·dirx。
+                        // 门控内累积的方向地形密度（用于把 gate 的位置梯度按乘积法则回传）。
+                        double terrain_density = 0.0;
+
+                        // (1) 对齐罚：运动方向单位向量 u=(vx,vy)/speed；e = u×dir。
                         const double ux = vx / speed, uy = vy / speed;
                         const double e = ux * dir.y() - uy * dir.x();
-                        density += w.step_alignment * 0.5 * e * e;
-                        const double de = w.step_alignment * e;
-                        // ∂u/∂vx = (1/speed)(1 − ux²)  … 用链式：∂ux/∂vx=(speed2−vx²)/speed³, etc.
+                        const double align_density = w.step_alignment * 0.5 * e * e;
+                        terrain_density += align_density;
+                        density += gate * align_density;
+                        if (terms) d_step_alignment += gate * align_density;
+                        const double de = gate * w.step_alignment * e;
                         const double inv_s = 1.0 / speed;
                         const double inv_s3 = inv_s * inv_s * inv_s;
                         const double dux_dvx = (speed2 - vx * vx) * inv_s3;
                         const double dux_dvy = -vx * vy * inv_s3;
                         const double duy_dvx = -vx * vy * inv_s3;
                         const double duy_dvy = (speed2 - vy * vy) * inv_s3;
-                        // ∂e/∂vx = diry·dux_dvx − dirx·duy_dvx
                         gvx += de * (dir.y() * dux_dvx - dir.x() * duy_dvx);
                         gvy += de * (dir.y() * dux_dvy - dir.x() * duy_dvy);
-                        // ∂e/∂dir = (−uy, ux)；dir 依赖位置。
+                        // ∂e/∂dir = (−uy, ux)；dir 依赖位置（经 dir_jacobian_map）。
                         const Eigen::Vector2d de_ddir(-uy, ux);
                         const Eigen::Vector2d de_dpos = dir_jacobian_map.transpose() * de_ddir;
                         gpx += de * de_dpos.x();
                         gpy += de * de_dpos.y();
 
+                        // (2) 速度窗罚（所选模式）。
                         const TerrainStepRule* rule = ws.terrain_constraints->selected_mode(label, gear >= 0.0);
                         if (rule) {
                             const double over = v_signed - rule->speed.max;
                             const double under = rule->speed.min - v_signed;
                             const double go = violation(over), gu = violation(under);
-                            density += w.step_velocity * 0.5 * (go * go + gu * gu);
-                            const double dv = w.step_velocity * (go - gu);
+                            const double vel_density = w.step_velocity * 0.5 * (go * go + gu * gu);
+                            terrain_density += vel_density;
+                            density += gate * vel_density;
+                            if (terms) d_step_velocity += gate * vel_density;
+                            const double dv = gate * w.step_velocity * (go - gu);
                             gvx += dv * dvs_dvx;
                             gvy += dv * dvs_dvy;
                         }
+
+                        // gate 对位置的梯度（乘积法则）：∂(gate·terrain_density)/∂pos ⊃ terrain_density·∂gate/∂pos。
+                        gpx += terrain_density * dgate_dpos.x();
+                        gpy += terrain_density * dgate_dpos.y();
                     }
                 }
             }
 
             cost += dt * density;
+            if (terms) {
+                terms->obstacle += dt * d_obstacle;
+                terms->velocity += dt * d_velocity;
+                terms->lateral_acc += dt * d_lateral_acc;
+                terms->omega += dt * d_omega;
+                terms->accel += dt * d_accel;
+                terms->step_alignment += dt * d_step_alignment;
+                terms->step_velocity += dt * d_step_velocity;
+            }
 
             // 物理量梯度（含 dt）经 β 映射回 grad_c。
             for (int k = 0; k < NCOEF; ++k) {
@@ -497,6 +556,18 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         result.grad_check_num_time_vars = n;
     }
 
+    // 收敛诊断：记录种子处分项代价、初始梯度范数、自由路点初值位置。
+    Eigen::VectorXd seed_vars;
+    if (params_.debug_diagnostics) {
+        seed_vars = vars;
+        Eigen::VectorXd g_seed(vars.size());
+        evaluate(ws, vars, g_seed); // 重建 ws 至种子解
+        Eigen::MatrixXd grad_c_dbg;
+        Eigen::VectorXd grad_t_dbg;
+        accumulate_penalties(ws, grad_c_dbg, grad_t_dbg, &result.seed_costs);
+        result.initial_grad_inf_norm = g_seed.lpNorm<Eigen::Infinity>();
+    }
+
     const LbfgsMinimizer::Result lr = solver.minimize(cost_fn, vars);
     result.iterations = lr.iterations;
     result.line_search_iterations = lr.line_search_iterations;
@@ -513,6 +584,36 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     result.trajectory = ws.minco.to_trajectory(ws.gears);
     result.cost = lr.cost;
     result.success = true;
+
+    // 收敛诊断：最终分项代价 + 自由路点位移（相对种子）。
+    if (params_.debug_diagnostics) {
+        Eigen::MatrixXd grad_c_dbg;
+        Eigen::VectorXd grad_t_dbg;
+        accumulate_penalties(ws, grad_c_dbg, grad_t_dbg, &result.final_costs);
+        // 最终梯度按类别拆分：前 DIM*nw 为位置变量，其余 n 为时间变量。
+        double g_pos = 0.0, g_time = 0.0;
+        for (int i = 0; i < time_offset; ++i) g_pos = std::max(g_pos, std::abs(scratch_grad(i)));
+        for (int i = time_offset; i < scratch_grad.size(); ++i) g_time = std::max(g_time, std::abs(scratch_grad(i)));
+        result.final_grad_pos_inf_norm = g_pos;
+        result.final_grad_time_inf_norm = g_time;
+        result.lbfgs_status = static_cast<int>(lr.status);
+        double disp_sum = 0.0;
+        double disp_max = 0.0;
+        int free_count = 0;
+        for (int i = 0; i < nw; ++i) {
+            if (ws.waypoint_is_hard[static_cast<size_t>(i)]) continue;
+            const double dx = vars(DIM * i + 0) - seed_vars(DIM * i + 0);
+            const double dy = vars(DIM * i + 1) - seed_vars(DIM * i + 1);
+            const double d = std::hypot(dx, dy);
+            disp_sum += d;
+            disp_max = std::max(disp_max, d);
+            ++free_count;
+        }
+        result.waypoint_total_displacement = disp_sum;
+        result.waypoint_max_displacement = disp_max;
+        result.free_waypoint_count = free_count;
+        result.diagnostics_valid = true;
+    }
     return result;
 }
 
