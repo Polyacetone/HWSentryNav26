@@ -12,11 +12,23 @@ namespace {
 
 constexpr double MIN_SEGMENT_DURATION = 1e-6;
 constexpr double TANGENT_EPS = 1e-9;
+// ω=(ẋÿ−ẏẍ)/‖ṗ‖² 分母的速度正则尺度 (m/s)：抑制 v→0 处 0/0 发散。取较小值，
+// 使正常行驶速度（≳0.3 m/s）下的 ω 误差可忽略。
+constexpr double OMEGA_SPEED_REG = 0.05;
 
 } // anonymous namespace
 
-MincoTrajectory::MincoTrajectory(std::vector<double> durations, std::vector<CoefBlock> coeffs)
-    : durations_(std::move(durations)), coeffs_(std::move(coeffs)) {
+MincoTrajectory::MincoTrajectory(
+    std::vector<double> durations,
+    std::vector<CoefBlock> coeffs,
+    std::vector<double> gears
+)
+    : durations_(std::move(durations)),
+      coeffs_(std::move(coeffs)),
+      gears_(std::move(gears)) {
+    if (gears_.size() != durations_.size()) {
+        gears_.assign(durations_.size(), 1.0); // 缺省全前进
+    }
     cumulative_times_.assign(durations_.size() + 1, 0.0);
     std::partial_sum(durations_.begin(), durations_.end(), cumulative_times_.begin() + 1);
     total_time_ = cumulative_times_.empty() ? 0.0 : cumulative_times_.back();
@@ -71,57 +83,6 @@ double MincoTrajectory::arc_length_between(const double tau0, const double tau1)
     return std::abs(arc_length_at_tau(tau1) - arc_length_at_tau(tau0));
 }
 
-MincoTrajectory MincoTrajectory::from_boundary_states(
-    const std::vector<BoundaryState>& states,
-    const std::vector<double>& durations
-) {
-    const size_t segment_count = durations.size();
-    if (states.size() != segment_count + 1 || segment_count == 0) {
-        return MincoTrajectory {};
-    }
-
-    std::vector<CoefBlock> coeffs(segment_count);
-    for (size_t seg = 0; seg < segment_count; ++seg) {
-        const double t_dur = std::max(durations[seg], MIN_SEGMENT_DURATION);
-        const BoundaryState& s0 = states[seg];
-        const BoundaryState& s1 = states[seg + 1];
-
-        // 每段每维求唯一五次多项式 p(t)，t∈[0,T]，匹配两端 pos/vel/acc（min-jerk）。
-        // c0=p0, c1=v0, c2=a0/2 直接给定；c3/c4/c5 解 3×3。
-        Eigen::Matrix3d a_mat;
-        a_mat << std::pow(t_dur, 3), std::pow(t_dur, 4), std::pow(t_dur, 5),
-                 3.0 * std::pow(t_dur, 2), 4.0 * std::pow(t_dur, 3), 5.0 * std::pow(t_dur, 4),
-                 6.0 * t_dur, 12.0 * std::pow(t_dur, 2), 20.0 * std::pow(t_dur, 3);
-        const Eigen::Matrix3d a_inv = a_mat.inverse();
-
-        CoefBlock& coef = coeffs[seg];
-        for (int dim = 0; dim < DIM; ++dim) {
-            const double p0 = s0.pos(dim);
-            const double v0 = s0.vel(dim);
-            const double acc0 = s0.acc(dim);
-            const double p1 = s1.pos(dim);
-            const double v1 = s1.vel(dim);
-            const double acc1 = s1.acc(dim);
-
-            const Eigen::Vector3d rhs(
-                p1 - p0 - v0 * t_dur - 0.5 * acc0 * t_dur * t_dur,
-                v1 - v0 - acc0 * t_dur,
-                acc1 - acc0
-            );
-            const Eigen::Vector3d higher = a_inv * rhs;
-
-            coef(0, dim) = p0;
-            coef(1, dim) = v0;
-            coef(2, dim) = 0.5 * acc0;
-            coef(3, dim) = higher(0);
-            coef(4, dim) = higher(1);
-            coef(5, dim) = higher(2);
-        }
-    }
-
-    return MincoTrajectory(durations, std::move(coeffs));
-}
-
 MincoTrajectory::Locator MincoTrajectory::locate_time(const double t) const {
     Locator loc;
     if (durations_.empty()) return loc;
@@ -136,55 +97,72 @@ MincoTrajectory::Locator MincoTrajectory::locate_time(const double t) const {
 }
 
 TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) const {
-    // 段内多项式求值，导数对**真实时间**（局部时间即真实时间）。τ 换算在 eval 层完成。
+    // 段内 2D 平坦多项式求值，导数对**真实时间**（局部时间即真实时间）。τ 换算在 eval 层完成。
     const CoefBlock& coef = coeffs_[static_cast<size_t>(segment)];
+    const double gear = gears_[static_cast<size_t>(segment)];
+    const double T = durations_[static_cast<size_t>(segment)];
 
-    Eigen::Matrix<double, DIM, 1> pos = Eigen::Matrix<double, DIM, 1>::Zero();
-    Eigen::Matrix<double, DIM, 1> vel_t = Eigen::Matrix<double, DIM, 1>::Zero();
-    Eigen::Matrix<double, DIM, 1> acc_t = Eigen::Matrix<double, DIM, 1>::Zero();
+    Eigen::Vector2d pos = Eigen::Vector2d::Zero();
+    Eigen::Vector2d vel_t = Eigen::Vector2d::Zero();
+    Eigen::Vector2d acc_t = Eigen::Vector2d::Zero();
 
     double t_pow = 1.0;                 // t^k
     for (int k = 0; k < NCOEF; ++k) {
-        for (int dim = 0; dim < DIM; ++dim) {
-            pos(dim) += coef(k, dim) * t_pow;
-        }
+        for (int dim = 0; dim < DIM; ++dim) pos(dim) += coef(k, dim) * t_pow;
         t_pow *= local_t;
     }
-    // 一阶导：Σ_{k>=1} k c_k t^{k-1}
-    t_pow = 1.0;
+    t_pow = 1.0; // 一阶导：Σ_{k>=1} k c_k t^{k-1}
     for (int k = 1; k < NCOEF; ++k) {
-        for (int dim = 0; dim < DIM; ++dim) {
-            vel_t(dim) += static_cast<double>(k) * coef(k, dim) * t_pow;
-        }
+        for (int dim = 0; dim < DIM; ++dim) vel_t(dim) += static_cast<double>(k) * coef(k, dim) * t_pow;
         t_pow *= local_t;
     }
-    // 二阶导：Σ_{k>=2} k(k-1) c_k t^{k-2}
-    t_pow = 1.0;
+    t_pow = 1.0; // 二阶导：Σ_{k>=2} k(k-1) c_k t^{k-2}
     for (int k = 2; k < NCOEF; ++k) {
-        for (int dim = 0; dim < DIM; ++dim) {
-            acc_t(dim) += static_cast<double>(k * (k - 1)) * coef(k, dim) * t_pow;
-        }
+        for (int dim = 0; dim < DIM; ++dim) acc_t(dim) += static_cast<double>(k * (k - 1)) * coef(k, dim) * t_pow;
         t_pow *= local_t;
     }
 
     // 真实时间导数 → τ 导数：τ = t/total_time ⇒ d/dτ = total_time · d/dt。
     const double s = total_time_;
     TrajSample out;
-    out.p = pos.head<2>();
-    out.theta = pos(2);
-    out.dp_dtau = vel_t.head<2>() * s;
-    out.ddp_dtau = acc_t.head<2>() * s * s;
-    out.dtheta_dtau = vel_t(2) * s;
+    out.p = pos;
+    out.dp_dtau = vel_t * s;
+    out.ddp_dtau = acc_t * s * s;
 
-    // 位置曲线切线帧（几何量，由 τ 导数或时间导数得到的方向一致）。
+    // 位置曲线切线帧（几何量，与 gear 无关）。
     out.ds_dtau = out.dp_dtau.norm();
     out.phi = std::atan2(out.dp_dtau.y(), out.dp_dtau.x());
     out.sin_phi = std::sin(out.phi);
     out.cos_phi = std::cos(out.phi);
-
     const double cross = out.dp_dtau.x() * out.ddp_dtau.y() - out.dp_dtau.y() * out.ddp_dtau.x();
     const double ds = out.ds_dtau;
     out.kappa = ds > TANGENT_EPS ? cross / (ds * ds * ds) : 0.0;
+
+    // ── 平坦朝向：θ_body = atan2(gear · 运动方向)。──
+    const double speed_t = vel_t.norm();
+    Eigen::Vector2d motion_dir = vel_t;
+    if (speed_t <= TANGENT_EPS) {
+        // v=0（尖点 / 端点）：运动方向取自段**内侧**一小步的速度——该处 speed>0，其方向
+        // 即本段行进方向（gear 已编码前进 / 倒车），无需翻正。端点 a、j 可能同时退化，
+        // 用有限步比 l'Hôpital 更稳。
+        const double h = std::max(T * 1e-3, 1e-4);
+        const double t_probe = local_t < 0.5 * T ? local_t + h : local_t - h;
+        Eigen::Vector2d v_probe = Eigen::Vector2d::Zero();
+        double tp = 1.0;
+        for (int k = 1; k < NCOEF; ++k) {
+            for (int dim = 0; dim < DIM; ++dim) v_probe(dim) += static_cast<double>(k) * coef(k, dim) * tp;
+            tp *= t_probe;
+        }
+        motion_dir = v_probe;
+        if (motion_dir.norm() <= TANGENT_EPS) motion_dir = acc_t; // 极端退化兜底
+    }
+    out.theta = std::atan2(gear * motion_dir.y(), gear * motion_dir.x());
+
+    // ── 角速度 ω = θ̇ = (ẋÿ − ẏẍ)/‖ṗ‖²（与 gear 无关）。分母用物理速度尺度正则化，
+    //    使尖点 / 端点（v→0）处 ω→0 而非发散；高速时误差可忽略（O(reg²/s²)）。──
+    const double omega_t = (vel_t.x() * acc_t.y() - vel_t.y() * acc_t.x())
+        / (speed_t * speed_t + OMEGA_SPEED_REG * OMEGA_SPEED_REG);
+    out.dtheta_dtau = omega_t * s;
     return out;
 }
 
@@ -268,6 +246,9 @@ bool MincoTrajectory::operator==(const MincoTrajectory& other) const {
     }
     for (size_t i = 0; i < coeffs_.size(); ++i) {
         if (coeffs_[i] != other.coeffs_[i]) return false;
+    }
+    for (size_t i = 0; i < gears_.size(); ++i) {
+        if (gears_[i] != other.gears_[i]) return false;
     }
     return true;
 }

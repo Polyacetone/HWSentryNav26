@@ -388,8 +388,6 @@ PlannerConfig NavExecutorNode::load_planner_config() {
             .lateral_acc = declare_parameter<double>("path_planner.minco.weights.lateral_acc"),
             .omega = declare_parameter<double>("path_planner.minco.weights.omega"),
             .accel = declare_parameter<double>("path_planner.minco.weights.accel"),
-            .theta_rate = declare_parameter<double>("path_planner.minco.weights.theta_rate"),
-            .heading_follow = declare_parameter<double>("path_planner.minco.weights.heading_follow"),
             .step_alignment = declare_parameter<double>("path_planner.minco.weights.step_alignment"),
             .step_velocity = declare_parameter<double>("path_planner.minco.weights.step_velocity"),
         },
@@ -402,12 +400,6 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         },
         .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.samples_per_segment")),
         .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.minco.max_iterations")),
-        .nonholonomic_rho_init = declare_parameter<double>("path_planner.minco.nonholonomic.rho_init"),
-        .nonholonomic_rho_max = declare_parameter<double>("path_planner.minco.nonholonomic.rho_max"),
-        .nonholonomic_rho_scale = declare_parameter<double>("path_planner.minco.nonholonomic.rho_scale"),
-        .nonholonomic_al_rounds = static_cast<int>(declare_parameter<int>("path_planner.minco.nonholonomic.al_rounds")),
-        .nonholonomic_tolerance = declare_parameter<double>("path_planner.minco.nonholonomic.tolerance"),
-        .nonholonomic_acceptance_tolerance = declare_parameter<double>("path_planner.minco.nonholonomic.acceptance_tolerance"),
         .min_segment_time = declare_parameter<double>("path_planner.minco.min_segment_time"),
         .step_entry_window_fraction = declare_parameter<double>("path_planner.minco.step_entry_window_fraction"),
     };
@@ -453,17 +445,8 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         && positive_finite(c.minco.limits.a_lat_max)
         && positive_finite(c.minco.min_segment_time),
         "MINCO limits and min_segment_time must be finite and positive");
-    require_parameter(c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0
-        && c.minco.nonholonomic_al_rounds > 0,
+    require_parameter(c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0,
         "MINCO sample and iteration counts must be positive");
-    require_parameter(positive_finite(c.minco.nonholonomic_rho_init)
-        && c.minco.nonholonomic_rho_max >= c.minco.nonholonomic_rho_init
-        && std::isfinite(c.minco.nonholonomic_rho_max)
-        && c.minco.nonholonomic_rho_scale > 1.0,
-        "MINCO AL rho values must satisfy 0 < rho_init <= rho_max and rho_scale > 1");
-    require_parameter(positive_finite(c.minco.nonholonomic_tolerance)
-        && c.minco.nonholonomic_acceptance_tolerance >= c.minco.nonholonomic_tolerance,
-        "MINCO nonholonomic tolerances are invalid");
     require_parameter(c.minco.step_entry_window_fraction > 0.0
         && c.minco.step_entry_window_fraction <= 0.5,
         "MINCO step_entry_window_fraction must be in (0, 0.5]");

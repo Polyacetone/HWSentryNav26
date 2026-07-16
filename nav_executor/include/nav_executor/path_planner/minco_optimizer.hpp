@@ -12,16 +12,17 @@
 
 namespace nav_executor {
 
-// ── MINCO 时空优化器（替换 bspline_optimizer）──
+// ── MINCO 时空优化器（微分平坦，替换 bspline_optimizer）──
 //
-// 全状态独立 (x,y,θ) MINCO min-jerk 消元：决策变量 = 内部路点 Q + 段时长 T（经虚拟时间
-// 正性重参数化）。L-BFGS（GCOPTER 依赖，已 vendored）无约束优化，约束以采样罚 + 增广
-// 拉格朗日（非完整约束）实现。梯度经 MincoMinJerk::propagate_gradient 从系数回传到 Q/T。
+// 只优化 2D 平坦输出 (x,y)：决策变量 = 内部路点 Q（DIM×(N-1)）+ 段时长 T（经虚拟时间
+// 正性重参数化）。朝向 θ = atan2(gear·运动方向) 由平坦输出解析导出，非完整约束因此**恒等
+// 满足**，不再需要增广拉格朗日或 θ 自由度。L-BFGS 无约束优化，约束以采样罚实现，梯度经
+// MincoMinJerk::propagate_gradient 从系数回传到 Q/T。换向尖点由 seed 冻结（两侧 v=0）。
 //
-// 目标（落地版 §[3]）：
+// 目标：
 //   J = w_energy·∫‖jerk‖² + w_time·ΣT
-//     + Σ_采样点 [ 障碍 + 速度窗 + |v·ω|≤a_lat + |ω|界 + |a|界 + θ̇正则 ]
-//     + AL(非完整 ẋsinθ − ẏcosθ = 0)
+//     + Σ_采样点 [ 障碍 + 带符号速度窗 + |v·ω|≤a_lat + |ω|界 + |a|界
+//                 + 方向地形对齐 + 台阶速度窗 ]
 class MincoOptimizer {
 public:
     struct Weights {
@@ -32,8 +33,6 @@ public:
         double lateral_acc = 100.0;  // |v·ω| ≤ a_lat_max
         double omega = 100.0;        // |ω| ≤ omega_max
         double accel = 100.0;        // |dv/dt| ≤ acc_max
-        double theta_rate = 1.0;     // θ̇ 正则（抑制不该转处乱转）
-        double heading_follow = 1.0; // |v| 大时 θ 跟随运动方向的软偏好
         double step_alignment = 200.0; // 方向地形内车身轴与穿越方向对齐
         double step_velocity = 200.0;  // 方向地形内所选模式的速度窗
     };
@@ -51,22 +50,15 @@ public:
         Limits limits;
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;
-        double nonholonomic_rho_init = 1.0;   // AL 初始罚因子
-        double nonholonomic_rho_max = 1e4;
-        double nonholonomic_rho_scale = 4.0;  // 每轮 AL 外层放大
-        int nonholonomic_al_rounds = 4;       // AL 外层轮数
-        double nonholonomic_tolerance = 1e-2; // AL 提前收敛目标：max |横向速度| (m/s)
-        double nonholonomic_acceptance_tolerance = 3e-2; // 最终轨迹接纳上限 (m/s)
         double min_segment_time = 0.05;
         double step_entry_window_fraction = 0.25;
         bool debug_check_gradient = false;    // 若开：optimize 起始处对比解析梯度 vs 有限差分并记录
     };
 
-    // 台阶入口只硬约束位置和朝向；内部速度仍是 MINCO 自由变量。
+    // 台阶入口硬约束位置（朝向由平坦输出的运动方向导出，无需单独固定）。
     struct HardWaypoint {
         int waypoint_index = -1;
         Eigen::Vector2d position = Eigen::Vector2d::Zero();
-        double theta = 0.0;
     };
 
     struct StepEntrySpeedWindow {
@@ -80,11 +72,8 @@ public:
         bool success = false;
         double cost = 0.0;
         int iterations = 0;
-        int al_rounds = 0;
-        double final_rho = 0.0;
         double final_grad_inf_norm = 0.0;
         int line_search_iterations = 0;
-        double max_nonholonomic_violation = 0.0;
 
         // 失败诊断（success=false 时填充，供调用方日志）。
         std::string error;
@@ -98,12 +87,16 @@ public:
 
     explicit MincoOptimizer(Params params);
 
-    // 由几何 seed（含朝向 / 速度猜测）初始化并优化。
-    //   seed_states：N+1 个边界全状态（含 head/tail）；durations：N 段初始时长。
-    //   cost_map / 其梯度用于障碍罚。
+    // 由平坦 seed 初始化并优化。
+    //   seed_states：N+1 个 2D 边界全状态（含 head/tail 的 pos/vel/acc，仅 x,y）；
+    //   seed_durations：N 段初始时长；
+    //   seed_gears：N 段换向符号 ±1（前端冻结的离散拓扑）；
+    //   cusp_waypoints：N-1 内部节点掩码，true 表示换向尖点（两侧 v=0）。
     Result optimize(
         const std::vector<MincoMinJerk::BoundaryPVA>& seed_states,
         const std::vector<double>& seed_durations,
+        const std::vector<double>& seed_gears,
+        const std::vector<char>& cusp_waypoints,
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const TerrainTraversalConstraints& terrain_constraints,
@@ -117,16 +110,12 @@ private:
     // L-BFGS 目标 + 梯度回调。
     double evaluate(Workspace& ws, const Eigen::VectorXd& vars, Eigen::VectorXd& grad) const;
 
-    // 沿轨迹采样点累积罚代价与对 (c, T) 的梯度；同时累积非完整违反的 AL 项。
+    // 沿轨迹采样点累积罚代价与对 (c, T) 的梯度。
     double accumulate_penalties(
         Workspace& ws,
         Eigen::MatrixXd& grad_c,
         Eigen::VectorXd& grad_t_explicit
     ) const;
-
-    // AL 外层：用当前 ws.minco 逐采样点算非完整违反 h，更新乘子 lambda += rho·h。
-    // 返回 max|h|。
-    double update_nonholonomic_multipliers(Workspace& ws) const;
 
     Params params_;
 };

@@ -15,17 +15,21 @@ double wrap_angle(double a) {
     return std::atan2(std::sin(a), std::cos(a));
 }
 
-// kinodynamic 状态序列 → MINCO 边界全状态 + 段时长。
+// kinodynamic 状态序列 → MINCO 平坦边界状态 + 段时长 + 换向拓扑。
 struct MincoSeed {
-    std::vector<MincoMinJerk::BoundaryPVA> states;
+    std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
     std::vector<double> durations;
+    std::vector<double> gears;                     // 每段 ±1
+    std::vector<char> cusp_waypoints;              // 每内部节点是否换向尖点
     std::vector<MincoOptimizer::HardWaypoint> hard_waypoints;
     std::vector<MincoOptimizer::StepEntrySpeedWindow> step_entry_speed_windows;
 };
 
-// 把 kinodynamic (x,y,θ,v) 序列重采样后转成 MINCO min-jerk 边界状态。
-//   - 位置速度 = (v cosθ, v sinθ)；朝向速度 θ̇ 由相邻状态差分估计；加速度置零（MINCO 会调整）。
-//   - 距离、显著转向和换向点都会保留，避免把倒车尖点或原地旋转重采样掉。
+// 把 kinodynamic (x,y,θ,v) 序列重采样后转成 MINCO 平坦边界状态 + 换向拓扑。
+//   - 平坦速度 = (v cosθ, v sinθ)（2D）；加速度置零（MINCO 会调整）。
+//   - 每段 gear = 段内主导速度符号（前进 +1 / 倒车 −1），由前端冻结。
+//   - gear 在相邻段翻转处标记为换向尖点：该内部节点两侧 v=0（MINCO 结构化施加）。
+//   - 距离、显著转向和换向点都会保留，避免把倒车尖点重采样掉。
 //   - 段时长沿用 A* 原语时间，避免用低速处的弧长/速度比制造异常长分段。
 MincoSeed build_minco_seed(
     const std::vector<KinodynamicAstar::State>& raw,
@@ -71,12 +75,33 @@ MincoSeed build_minco_seed(
     selected.push_back(raw.size() - 1);
 
     const size_t n = selected.size();
+
+    // ── 每段 gear：段内所有 raw 速度的带符号均值符号；接近 0 时沿用上一段。──
+    seed.gears.assign(n - 1, 1.0);
+    double prev_gear = raw[selected[0]].v < -VELOCITY_EPS ? -1.0 : 1.0;
+    for (size_t i = 0; i + 1 < n; ++i) {
+        double v_sum = 0.0;
+        for (size_t r = selected[i]; r <= selected[i + 1]; ++r) v_sum += raw[r].v;
+        double gear = prev_gear;
+        if (std::abs(v_sum) > VELOCITY_EPS) gear = v_sum < 0.0 ? -1.0 : 1.0;
+        seed.gears[i] = gear;
+        prev_gear = gear;
+    }
+
+    // ── 换向尖点：相邻段 gear 翻转的内部节点（waypoint index = i-1，节点在段 i-1|i 之间）。──
+    seed.cusp_waypoints.assign(n >= 2 ? n - 1 : 0, 0);
+    for (size_t i = 1; i + 1 < n; ++i) {
+        if (seed.gears[i - 1] != seed.gears[i]) {
+            seed.cusp_waypoints[i - 1] = 1;
+        }
+    }
+
     seed.states.resize(n);
     for (size_t i = 0; i < n; ++i) {
         const auto& s = raw[selected[i]];
         auto& bs = seed.states[i];
-        bs.pos << s.x, s.y, s.theta;
-        bs.vel << s.v * std::cos(s.theta), s.v * std::sin(s.theta), 0.0;
+        bs.pos << s.x, s.y;
+        bs.vel << s.v * std::cos(s.theta), s.v * std::sin(s.theta);
         bs.acc.setZero();
     }
     seed.durations.resize(n - 1);
@@ -86,27 +111,8 @@ MincoSeed build_minco_seed(
             0.1
         );
     }
-    // θ̇ 估计填入边界速度第三分量。
-    for (size_t i = 0; i < n; ++i) {
-        double theta_rate = 0.0;
-        if (i == 0 && n >= 2) {
-            theta_rate = wrap_angle(
-                raw[selected[1]].theta - raw[selected[0]].theta
-            ) / seed.durations[0];
-        } else if (i + 1 == n) {
-            theta_rate = wrap_angle(
-                raw[selected[i]].theta - raw[selected[i - 1]].theta
-            ) / seed.durations[i - 1];
-        } else {
-            const double dth = wrap_angle(
-                raw[selected[i + 1]].theta - raw[selected[i - 1]].theta
-            );
-            theta_rate = dth / (seed.durations[i - 1] + seed.durations[i]);
-        }
-        seed.states[i].vel(2) = theta_rate;
-    }
 
-    // 规划终点只约束位置；执行到达前应有可停止的参考。终端 θ 在优化器中是自由变量。
+    // 规划终点只约束位置停止；起点沿用当前运动状态。
     seed.states.back().vel.setZero();
     seed.states.back().acc.setZero();
 
@@ -116,20 +122,18 @@ MincoSeed build_minco_seed(
         const auto& state = raw[raw_index];
         const Eigen::Vector2d grid = direction_map.map_coord_to_grid({state.x, state.y});
         const uint8_t label = direction_map.terrain_at(grid);
-        const Eigen::Vector2d dir = direction_map.interpolate(grid).normalized();
         const Eigen::Vector2d displacement(
             state.x - raw[selected[i - 1]].x,
             state.y - raw[selected[i - 1]].y
         );
-        const Eigen::Vector2d heading(std::cos(state.theta), std::sin(state.theta));
-        const bool positive_direction = (displacement.norm() > 1e-6 ? displacement : heading).dot(dir) >= 0.0;
-        const Eigen::Vector2d traversal_direction = positive_direction ? dir : -dir;
+        const Eigen::Vector2d dir = direction_map.interpolate(grid);
+        const bool positive_direction = displacement.dot(dir) >= 0.0;
         const TerrainStepRule* rule = terrain_constraints.selected_mode(label, positive_direction);
         if (!rule) continue;
+        // 台阶入口硬约束位置；朝向由平坦运动方向自动导出（穿越方向即运动方向）。
         seed.hard_waypoints.push_back(MincoOptimizer::HardWaypoint{
             .waypoint_index = static_cast<int>(i - 1),
             .position = {state.x, state.y},
-            .theta = std::atan2(traversal_direction.y(), traversal_direction.x()),
         });
         seed.step_entry_speed_windows.push_back(MincoOptimizer::StepEntrySpeedWindow{
             .waypoint_index = static_cast<int>(i - 1),
@@ -149,7 +153,6 @@ bool validate_trajectory(
     const double step_norm_threshold,
     const double step_alignment_threshold,
     const MincoOptimizer::Limits& limits,
-    const double nonholonomic_tolerance,
     const double step_entry_window_fraction,
     const PlannerConfig::TrajectoryValidationParams& validation,
     const std::vector<MincoOptimizer::StepEntrySpeedWindow>& step_entry_speed_windows,
@@ -182,17 +185,10 @@ bool validate_trajectory(
                 + " dtheta_dtau=" + std::to_string(s.dtheta_dtau);
             return false;
         }
-        const Eigen::Vector2d velocity = s.dp_dtau / total_time;
         const Eigen::Vector2d acceleration = s.ddp_dtau / (total_time * total_time);
         const double longitudinal_velocity = trajectory.longitudinal_velocity(s);
         const double omega = trajectory.angular_velocity(s);
-        const double nonholonomic_violation = velocity.x() * std::sin(s.theta) - velocity.y() * std::cos(s.theta);
-        if (std::abs(nonholonomic_violation) > nonholonomic_tolerance) {
-            error = "trajectory violates nonholonomic constraint at tau=" + std::to_string(tau)
-                + ": |dx/dt*sin(theta)-dy/dt*cos(theta)|=" + std::to_string(std::abs(nonholonomic_violation))
-                + " > tolerance=" + std::to_string(nonholonomic_tolerance);
-            return false;
-        }
+        // 非完整约束在平坦表示下恒等满足（θ=atan2(gear·ṗ)），无需校验。
         if (longitudinal_velocity < limits.vel_min - validation.velocity_tolerance
             || longitudinal_velocity > limits.vel_max + validation.velocity_tolerance) {
             error = "trajectory violates velocity limit at tau=" + std::to_string(tau)
@@ -708,6 +704,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto opt = optimizer.optimize(
         minco_seed.states,
         minco_seed.durations,
+        minco_seed.gears,
+        minco_seed.cusp_waypoints,
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints,
@@ -717,15 +715,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     if (!opt.success) return fail("MINCO optimization failed: " + opt.error);
     const auto minco_done = std::chrono::steady_clock::now();
     if (opt.trajectory.empty()) return fail("MINCO produced empty trajectory");
-    if (opt.max_nonholonomic_violation > minco_params.nonholonomic_tolerance) {
-        RCLCPP_WARN(
-            logger_,
-            "MINCO accepted with nonholonomic residual %.4f m/s (target %.4f, acceptance %.4f)",
-            opt.max_nonholonomic_violation,
-            minco_params.nonholonomic_tolerance,
-            minco_params.nonholonomic_acceptance_tolerance
-        );
-    }
     std::string trajectory_error;
     bool trajectory_error_is_fatal = false;
     if (!validate_trajectory(
@@ -737,7 +726,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             config_.step_detection.detect_norm_threshold,
             config_.step_detection.detect_dot_threshold,
             minco_params.limits,
-            minco_params.nonholonomic_acceptance_tolerance,
             minco_params.step_entry_window_fraction,
             config_.trajectory_validation,
             minco_seed.step_entry_speed_windows,
@@ -803,22 +791,21 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         );
     }
     const int segment_count = opt.trajectory.segment_count();
-    const int variable_count = 3 * std::max(segment_count - 1, 0) + segment_count + 1;
-    const double dense_workspace_kib = static_cast<double>(
-        8LL * (3LL * 6LL * segment_count * 6LL * segment_count + 12LL * segment_count)
-    ) / 1024.0;
+    const int variable_count = 2 * std::max(segment_count - 1, 0) + segment_count; // 平坦：2D 路点 + 段时长
+    int cusp_count = 0;
+    for (const char c : minco_seed.cusp_waypoints) cusp_count += c ? 1 : 0;
     RCLCPP_INFO(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
         "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, seed_length=%.2f m, raw_states=%zu, "
-        "segments=%d, vars=%d, dense_workspace_est=%.1f KiB, AL=%d, rho=%.1f, nonholo=%.4f, |grad|=%.3g",
+        "segments=%d, vars=%d, cusps=%d, iters=%d, |grad|=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : "", result.path->step_segments.size(),
         std::chrono::duration<double, std::milli>(dijkstra_done - plan_start).count(),
         std::chrono::duration<double, std::milli>(kinodynamic_done - dijkstra_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
-        seed_path_length, seed_states_raw.size(), segment_count, variable_count, dense_workspace_kib,
-        opt.al_rounds, opt.final_rho, opt.max_nonholonomic_violation, opt.final_grad_inf_norm
+        seed_path_length, seed_states_raw.size(), segment_count, variable_count, cusp_count,
+        opt.iterations, opt.final_grad_inf_norm
     );
 
     return result;

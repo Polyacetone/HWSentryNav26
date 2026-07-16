@@ -44,6 +44,7 @@ void MincoMinJerk::reset(const int segment_count) {
         banded_.reset();
         b_.setZero();
     }
+    cusp_.assign(static_cast<size_t>(std::max(new_count - 1, 0)), 0);
     segment_count_ = new_count;
 }
 
@@ -51,11 +52,15 @@ void MincoMinJerk::generate(
     const std::vector<double>& times,
     const BoundaryPVA& head,
     const BoundaryPVA& tail,
-    const Eigen::Matrix<double, DIM, Eigen::Dynamic>& waypoints
+    const Eigen::Matrix<double, DIM, Eigen::Dynamic>& waypoints,
+    const std::vector<char>& cusp_waypoint
 ) {
     const int n = static_cast<int>(times.size());
     reset(n);
     for (int i = 0; i < n; ++i) times_[static_cast<size_t>(i)] = std::max(times[i], MIN_SEG_T);
+    for (int i = 0; i < n - 1 && i < static_cast<int>(cusp_waypoint.size()); ++i) {
+        cusp_[static_cast<size_t>(i)] = cusp_waypoint[static_cast<size_t>(i)];
+    }
 
     // 把 NCOEF 长基向量写入 M 第 row 行、列偏移 c_off 处的连续 NCOEF 列。
     const auto set_row = [this](
@@ -100,19 +105,31 @@ void MincoMinJerk::generate(
         b_.row(row) = waypoints.col(i).transpose();
         ++row;
 
-        // 内部速度由优化自行选择，仅保持 vel/acc/jerk/snap 连续。
-        set_row(row, c_left, b1);
-        set_row(row, c_right, -b1_0);
-        ++row;
-        set_row(row, c_left, b2);
-        set_row(row, c_right, -b2_0);
-        ++row;
-        set_row(row, c_left, b3);
-        set_row(row, c_right, -b3_0);
-        ++row;
-        set_row(row, c_left, b4);
-        set_row(row, c_right, -b4_0);
-        ++row;
+        if (cusp_[static_cast<size_t>(i)]) {
+            // 换向尖点：两侧 v=0（精确），acc/jerk 连续。b 对应行为 0（默认）。
+            set_row(row, c_left, b1); ++row;   // 左段末端 vel = 0
+            set_row(row, c_right, b1_0); ++row; // 右段起点 vel = 0
+            set_row(row, c_left, b2);
+            set_row(row, c_right, -b2_0);
+            ++row;                              // acc 连续
+            set_row(row, c_left, b3);
+            set_row(row, c_right, -b3_0);
+            ++row;                              // jerk 连续
+        } else {
+            // 普通内部节点：内部速度由优化自选，保持 vel/acc/jerk/snap 连续。
+            set_row(row, c_left, b1);
+            set_row(row, c_right, -b1_0);
+            ++row;
+            set_row(row, c_left, b2);
+            set_row(row, c_right, -b2_0);
+            ++row;
+            set_row(row, c_left, b3);
+            set_row(row, c_right, -b3_0);
+            ++row;
+            set_row(row, c_left, b4);
+            set_row(row, c_right, -b4_0);
+            ++row;
+        }
     }
 
     // ── 尾端 3 条：pos/vel/acc（末段 t=T_{n-1}）──
@@ -133,7 +150,7 @@ void MincoMinJerk::generate(
     banded_.solve(coeffs_);
 }
 
-MincoTrajectory MincoMinJerk::to_trajectory() const {
+MincoTrajectory MincoMinJerk::to_trajectory(const std::vector<double>& gears) const {
     std::vector<MincoTrajectory::CoefBlock> blocks(static_cast<size_t>(segment_count_));
     for (int i = 0; i < segment_count_; ++i) {
         MincoTrajectory::CoefBlock blk;
@@ -144,51 +161,38 @@ MincoTrajectory MincoMinJerk::to_trajectory() const {
         }
         blocks[static_cast<size_t>(i)] = blk;
     }
-    return MincoTrajectory(times_, std::move(blocks));
+    return MincoTrajectory(times_, std::move(blocks), gears);
 }
 
 void MincoMinJerk::propagate_gradient(
     const Eigen::MatrixXd& grad_c,
     const Eigen::VectorXd& grad_t_explicit,
     Eigen::Matrix<double, DIM, Eigen::Dynamic>& grad_q,
-    Eigen::VectorXd& grad_t,
-    Eigen::Vector3d* grad_tail_pos
+    Eigen::VectorXd& grad_t
 ) const {
     const int n = segment_count_;
 
-    // 伴随：Mᵀ λ = ∂G/∂c（每维独立，共 3 列）。复用 generate 的 LU 分解做转置回代。
-    Eigen::MatrixXd lambda = grad_c; // (6N)×3
+    // 伴随：Mᵀ λ = ∂G/∂c（每维独立，共 2 列）。复用 generate 的 LU 分解做转置回代。
+    Eigen::MatrixXd lambda = grad_c; // (6N)×2
     banded_.solve_transpose(lambda);
 
     // ── ∂G/∂q_k：b 对 q_k 线性，∂b/∂q_k 在「左段到达」「右段出发」两行为单位。
-    //    对应 generate 中节点 i 的前两行（q 到达 / q 出发）。
+    //    普通节点与尖点节点前两行同为 q 到达 / q 出发。
     grad_q.setZero(DIM, std::max(n - 1, 0));
     for (int i = 0; i < n - 1; ++i) {
-        const int node_row0 = 3 + i * NCOEF; // 该节点 6 条约束的起始行
-        // 行 node_row0（左段到达 q_i）与 node_row0+1（右段出发 q_i）的 b 都 = q_i。
-        // ∂G/∂q_i = λ_row0 + λ_{row0+1}（每维取对应列）。
+        const int node_row0 = 3 + i * NCOEF;
         for (int d = 0; d < DIM; ++d) {
             grad_q(d, i) = lambda(node_row0, d) + lambda(node_row0 + 1, d);
         }
     }
 
-    if (grad_tail_pos) {
-        const int tail_row0 = 3 + (n - 1) * NCOEF;
-        for (int d = 0; d < DIM; ++d) {
-            (*grad_tail_pos)(d) = lambda(tail_row0, d);
-        }
-    }
-
     // ── ∂G/∂T_i = grad_t_explicit_i − Σ_d λ_col_dᵀ (∂M/∂T_i) c_col_d
-    //    ∂M/∂T_i 只影响「以 t=T_i 求值」的行：左段到达/连续性（节点 i 的行）与末端行（i=n-1）。
+    //    ∂M/∂T_i 只影响「以 t=T_i 求值」的行（左段末端项），右段 t=0 行不依赖 T_i。
     grad_t = grad_t_explicit;
     for (int i = 0; i < n; ++i) {
         const double ti = times_[static_cast<size_t>(i)];
         const int c_off = NCOEF * i;
 
-        // 收集依赖 T_i 的行及其对应导数基（对 t 再求一阶）。
-        // 内部节点 i（若存在，i<n-1）：到达(β0)、vel(β1)、acc(β2)、jerk(β3)、snap(β4)在左段末端。
-        // 末段（i=n-1）：末端 pos(β0)、vel(β1)、acc(β2)。
         auto accum_row = [&](int r, int order) {
             // ∂/∂T_i of [β(T_i, order)ᵀ c] = β(T_i, order+1)ᵀ c
             const Eigen::Matrix<double, NCOEF, 1> db = basis(ti, order + 1);
@@ -201,11 +205,17 @@ void MincoMinJerk::propagate_gradient(
 
         if (i < n - 1) {
             const int node_row0 = 3 + i * NCOEF;
-            accum_row(node_row0, 0); // 左段到达 q_i
-            accum_row(node_row0 + 2, 1); // vel 连续（左段项）
-            accum_row(node_row0 + 3, 2); // acc
-            accum_row(node_row0 + 4, 3); // jerk
-            accum_row(node_row0 + 5, 4); // snap
+            accum_row(node_row0, 0);         // 左段到达 q_i（β0）
+            if (cusp_[static_cast<size_t>(i)]) {
+                accum_row(node_row0 + 2, 1); // 左段 vel=0（β1）
+                accum_row(node_row0 + 4, 2); // acc 连续左段项（β2）
+                accum_row(node_row0 + 5, 3); // jerk 连续左段项（β3）
+            } else {
+                accum_row(node_row0 + 2, 1); // vel 连续左段项
+                accum_row(node_row0 + 3, 2); // acc
+                accum_row(node_row0 + 4, 3); // jerk
+                accum_row(node_row0 + 5, 4); // snap
+            }
         } else {
             const int tail_row0 = 3 + (n - 1) * NCOEF;
             accum_row(tail_row0, 0);     // 末端 pos

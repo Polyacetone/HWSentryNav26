@@ -6,16 +6,17 @@
 
 namespace nav_executor {
 
-// ── MINCO 全状态轨迹在某参数 τ / 时刻 t 的求值结果 ──
+// ── MINCO 轨迹在某参数 τ / 时刻 t 的求值结果 ──
 //
-// 关键语义分离（相对旧 SplineEval）：
-//   - theta / dtheta_dtau 是**独立**朝向状态，取自轨迹自身，不再是位置切线的 atan2。
-//     支持倒车（朝前但位置后退）与原地旋转（位置不动、朝向变）。
+// 微分平坦表示：轨迹只优化 2D 平坦输出 p(τ)=(x,y)，朝向 θ 由运动方向解析导出，
+// 每段带一个换向符号 gear∈{+1,−1}（前进 / 倒车）。
+//   - theta = atan2(gear·ẏ, gear·ẋ)：车身轴与（带 gear 符号的）运动方向共线。
+//     非完整约束因此**恒等满足**，不再是独立自由度，也不再需要增广拉格朗日。
+//   - dtheta_dtau = ω·total_time，ω = (ẋÿ − ẏẍ)/‖ṗ‖²（曲率×速度，与 gear 无关）。
+//   - 换向尖点处 ‖ṗ‖→0，θ 与 ω 用加速度方向 l'Hôpital 回退（gear·(ẍ,ÿ)），
+//     由 eval 内部按阈值处理；此处 v=0 但 a≠0，θ_body 连续。
 //   - phi / sin_phi / cos_phi / ds_dtau / kappa 描述**位置曲线**的切线帧，供横向误差
-//     （cross-track）投影使用。横向误差是几何量，其参考帧由 p(τ) 的切线决定，与朝向无关；
-//     倒车时切线反向只翻转 ey 符号，|ey| 与惩罚不变。
-//   - 原地旋转处 |dp/dτ|→0，切线帧退化（ds_dtau→0），由调用方按阈值保护；此时朝向进度
-//     由 dtheta_dtau 接管（见 §3.4 广义进度）。
+//     （cross-track）投影使用。倒车时切线反向只翻转 ey 符号，|ey| 与惩罚不变。
 struct TrajSample {
     // 位置曲线及其对 τ 的导数
     Eigen::Vector2d p = Eigen::Vector2d::Zero();
@@ -34,40 +35,32 @@ struct TrajSample {
     double kappa = 0.0;     // 位置曲线曲率
 };
 
-// ── 参数化全状态轨迹载体 ──
+// ── 参数化平坦轨迹载体 ──
 //
 // 替换 SplinePath 在参考链中的角色。内部是逐段五次多项式（MINCO min-jerk，C² 连续），
-// 每段一个时长 T_i；(x, y, θ) 各一维独立多项式。
+// 每段一个时长 T_i；只含 2D 平坦输出 (x, y) 各一维独立多项式。朝向 θ 由运动方向解析
+// 导出（见 TrajSample），每段附一个换向符号 gear∈{+1,−1}。
 //
 // 归一参数 τ∈[0,1] 与绝对时间线性对应：t = τ · total_time。跟随层把 τ 当作参数化路径
-// 参数使用（非强制时间，见落地版 Q1b），故对外主接口按 τ 求值。
+// 参数使用（非强制时间），故对外主接口按 τ 求值。
 //
-// 本类只负责“表示 + 求值”，不掺入优化。系数由 MINCO 优化器（[3]）产出，或由
-// from_boundary_states 工厂（暖启动 / [4a] 手工桩）构造。
+// 本类只负责“表示 + 求值”，不掺入优化。系数由 MINCO 优化器（[3]）产出。
 class MincoTrajectory {
 public:
-    static constexpr int DIM = 3;               // x, y, theta
+    static constexpr int DIM = 2;               // x, y（平坦输出）
     static constexpr int DEGREE = 5;            // 五次（min-jerk）
     static constexpr int NCOEF = DEGREE + 1;    // 6
 
-    // 单段系数：行 k = t^k 的系数，列 = (x, y, theta)。段内 s(t)=Σ_k coef.row(k)·t^k，t∈[0,T]。
+    // 单段系数：行 k = t^k 的系数，列 = (x, y)。段内 p(t)=Σ_k coef.row(k)·t^k，t∈[0,T]。
     using CoefBlock = Eigen::Matrix<double, NCOEF, DIM>;
 
-    // 单段边界全状态：位置/速度/加速度（(x,y,θ) 各一）。速度分量即 d/dt。
-    struct BoundaryState {
-        Eigen::Matrix<double, DIM, 1> pos = Eigen::Matrix<double, DIM, 1>::Zero();
-        Eigen::Matrix<double, DIM, 1> vel = Eigen::Matrix<double, DIM, 1>::Zero();
-        Eigen::Matrix<double, DIM, 1> acc = Eigen::Matrix<double, DIM, 1>::Zero();
-    };
-
     MincoTrajectory() = default;
-    MincoTrajectory(std::vector<double> durations, std::vector<CoefBlock> coeffs);
-
-    // 由 N+1 个边界全状态 + N 段时长构造逐段五次 Hermite 轨迹。相邻段共享边界状态即保证
-    // C² 连续。用于暖启动与 [4a] 手工桩（含折返 / 原地旋转）。
-    [[nodiscard]] static MincoTrajectory from_boundary_states(
-        const std::vector<BoundaryState>& states,
-        const std::vector<double>& durations
+    // gears：每段换向符号（+1 前进，−1 倒车），size 须等于 durations.size()；
+    // 空则默认全 +1（无倒车段）。
+    MincoTrajectory(
+        std::vector<double> durations,
+        std::vector<CoefBlock> coeffs,
+        std::vector<double> gears = {}
     );
 
     [[nodiscard]] bool empty() const { return durations_.empty(); }
@@ -120,7 +113,8 @@ private:
 
     std::vector<double> durations_;         // 每段时长 T_i
     std::vector<double> cumulative_times_;  // 前缀和，size = segment_count+1，首元素 0
-    std::vector<CoefBlock> coeffs_;         // 每段系数
+    std::vector<CoefBlock> coeffs_;         // 每段系数（2D 平坦输出）
+    std::vector<double> gears_;             // 每段换向符号 ±1
     double total_time_ = 0.0;
     double total_arc_length_ = 0.0;
     std::vector<double> arc_samples_;       // 均匀 τ 采样处的累计弧长，size = ARC_SAMPLES+1
