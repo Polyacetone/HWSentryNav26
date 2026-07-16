@@ -37,6 +37,8 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.warmup_path_pub_topic"), 1);
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.v_pred_pub_topic"), 1);
         debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.w_pred_pub_topic"), 1);
+        debug_phase_time_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.phase_time_pub_topic"), 1);
+        debug_phase_rate_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.phase_rate_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("node.debug.final_cost_map_pub_topic"), 1);
     }
 
@@ -68,10 +70,24 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     route_tracker_params_ = {
         .initial_search_distance = declare_parameter<double>("task_manager.route_tracker.initial_search_distance"),
         .max_tracking_error = declare_parameter<double>("task_manager.route_tracker.max_tracking_error"),
-        .phase = mpc_params.follow.phase,
+        .projection = {
+            .heading_weight = declare_parameter<double>("task_manager.route_tracker.projection_heading_weight"),
+            .velocity_weight = declare_parameter<double>("task_manager.route_tracker.projection_velocity_weight"),
+            .projection_window_backward = declare_parameter<double>("task_manager.route_tracker.projection_window_backward"),
+            .projection_window_forward = declare_parameter<double>("task_manager.route_tracker.projection_window_forward"),
+            .max_backward_step = declare_parameter<double>("task_manager.route_tracker.max_backward_step"),
+            .max_forward_step = declare_parameter<double>("task_manager.route_tracker.max_forward_step"),
+        },
     };
     require_parameter(nonnegative_finite(route_tracker_params_.initial_search_distance), "route_tracker.initial_search_distance must be finite and non-negative");
     require_parameter(positive_finite(route_tracker_params_.max_tracking_error), "route_tracker.max_tracking_error must be finite and positive");
+    require_parameter(nonnegative_finite(route_tracker_params_.projection.heading_weight)
+        && nonnegative_finite(route_tracker_params_.projection.velocity_weight)
+        && positive_finite(route_tracker_params_.projection.projection_window_backward)
+        && positive_finite(route_tracker_params_.projection.projection_window_forward)
+        && nonnegative_finite(route_tracker_params_.projection.max_backward_step)
+        && positive_finite(route_tracker_params_.projection.max_forward_step),
+        "route_tracker projection parameters are invalid");
     route_tracker_ = std::make_unique<RouteTracker>(route_tracker_params_);
     proj_guard_params_ = {
         .cost_max = declare_parameter<double>("task_manager.route_monitor.proj_guard.cost_max"),
@@ -406,6 +422,7 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .gate_transition_distance = declare_parameter<double>("path_planner.step.mpc_constraints.gate_transition_distance"),
     };
     c.trajectory_validation = {
+        .reject_infeasible = declare_parameter<bool>("path_planner.minco.validation.reject_infeasible"),
         .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.validation.samples_per_segment")),
         .velocity_tolerance = declare_parameter<double>("path_planner.minco.validation.velocity_tolerance"),
         .omega_tolerance = declare_parameter<double>("path_planner.minco.validation.omega_tolerance"),
@@ -500,13 +517,12 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 terrain_profiles_.capability_profiles[static_cast<size_t>(HIGH)],
             },
             .tracking_weights = {
-                .q_y = declare_parameter<double>("mpc.follow.tracking_weights.q_y"),
-                .q_lag = declare_parameter<double>("mpc.follow.tracking_weights.q_lag"),
-                .q_theta = declare_parameter<double>("mpc.follow.tracking_weights.q_theta"),
-                .q_v = declare_parameter<double>("mpc.follow.tracking_weights.q_v"),
-                .q_omega = declare_parameter<double>("mpc.follow.tracking_weights.q_omega"),
-                .q_u = declare_parameter<double>("mpc.follow.tracking_weights.q_u"),
-                .y_tube = declare_parameter<double>("mpc.follow.tracking_weights.y_tube"),
+                .contour = declare_parameter<double>("mpc.follow.tracking_weights.contour"),
+                .lag = declare_parameter<double>("mpc.follow.tracking_weights.lag"),
+                .heading = declare_parameter<double>("mpc.follow.tracking_weights.heading"),
+                .velocity = declare_parameter<double>("mpc.follow.tracking_weights.velocity"),
+                .angular_velocity = declare_parameter<double>("mpc.follow.tracking_weights.angular_velocity"),
+                .tangent_blend_speed_scale = declare_parameter<double>("mpc.follow.tracking_weights.tangent_blend_speed_scale"),
             },
             .command_weights = {
                 .r_v = declare_parameter<double>("mpc.follow.command_weights.r_v"),
@@ -535,17 +551,21 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .fddp_lethal_consecutive_threshold = static_cast<int>(declare_parameter<int>("mpc.follow.rollout_safety.fddp_lethal_consecutive_threshold"))
             },
             .phase = {
-                .error_scale = declare_parameter<double>("mpc.follow.phase_tracking.error_scale"),
-                .heading_weight = declare_parameter<double>("mpc.follow.phase_tracking.heading_weight"),
-                .projection_heading_weight = declare_parameter<double>("mpc.follow.phase_tracking.projection_heading_weight"),
-                .projection_velocity_weight = declare_parameter<double>("mpc.follow.phase_tracking.projection_velocity_weight"),
-                .projection_window_backward = declare_parameter<double>("mpc.follow.phase_tracking.projection_window_backward"),
-                .projection_window_forward = declare_parameter<double>("mpc.follow.phase_tracking.projection_window_forward"),
-                .observation_gain = declare_parameter<double>("mpc.follow.phase_tracking.observation_gain"),
-                .max_observation_correction = declare_parameter<double>("mpc.follow.phase_tracking.max_observation_correction"),
-                .rate_accel = declare_parameter<double>("mpc.follow.phase_tracking.rate_accel"),
-                .rate_decel = declare_parameter<double>("mpc.follow.phase_tracking.rate_decel"),
-                .pause_error = declare_parameter<double>("mpc.follow.phase_tracking.pause_error"),
+                .rate_min = declare_parameter<double>("mpc.follow.phase.rate_min"),
+                .rate_max = declare_parameter<double>("mpc.follow.phase.rate_max"),
+                .nominal_rate = declare_parameter<double>("mpc.follow.phase.nominal_rate"),
+                .progress_reward = declare_parameter<double>("mpc.follow.phase.progress_reward"),
+                .rate_tracking_weight = declare_parameter<double>("mpc.follow.phase.rate_tracking_weight"),
+                .rate_smoothness_weight = declare_parameter<double>("mpc.follow.phase.rate_smoothness_weight"),
+                .overshoot_weight = declare_parameter<double>("mpc.follow.phase.overshoot_weight"),
+            },
+            .terminal_weights = {
+                .position = declare_parameter<double>("mpc.follow.terminal_weights.position"),
+                .heading = declare_parameter<double>("mpc.follow.terminal_weights.heading"),
+                .velocity = declare_parameter<double>("mpc.follow.terminal_weights.velocity"),
+                .angular_velocity = declare_parameter<double>("mpc.follow.terminal_weights.angular_velocity"),
+                .remaining_phase = declare_parameter<double>("mpc.follow.terminal_weights.remaining_phase"),
+                .overshoot = declare_parameter<double>("mpc.follow.terminal_weights.overshoot"),
             },
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },
@@ -663,19 +683,33 @@ MPCParams NavExecutorNode::load_mpc_params() {
         }
     };
     const auto& phase = mpc_params.follow.phase;
-    require_parameter(positive_finite(phase.error_scale)
-        && positive_finite(phase.projection_window_backward)
-        && positive_finite(phase.projection_window_forward)
-        && positive_finite(phase.max_observation_correction)
-        && positive_finite(phase.rate_accel)
-        && positive_finite(phase.rate_decel)
-        && positive_finite(phase.pause_error),
-        "mpc.follow.phase_tracking positive parameters are invalid");
-    require_parameter(nonnegative_finite(phase.heading_weight)
-        && nonnegative_finite(phase.projection_heading_weight)
-        && nonnegative_finite(phase.projection_velocity_weight)
-        && phase.observation_gain >= 0.0 && phase.observation_gain <= 1.0,
-        "mpc.follow.phase_tracking weights/gain are invalid");
+    require_parameter(nonnegative_finite(phase.rate_min)
+        && positive_finite(phase.rate_max)
+        && std::isfinite(phase.nominal_rate)
+        && phase.rate_max > phase.rate_min
+        && phase.nominal_rate >= phase.rate_min && phase.nominal_rate <= phase.rate_max,
+        "mpc.follow phase-rate bounds are invalid");
+    require_parameter(nonnegative_finite(phase.progress_reward)
+        && nonnegative_finite(phase.rate_tracking_weight)
+        && nonnegative_finite(phase.rate_smoothness_weight)
+        && positive_finite(phase.overshoot_weight),
+        "mpc.follow phase weights are invalid");
+    const auto& tracking = mpc_params.follow.tracking_weights;
+    require_parameter(nonnegative_finite(tracking.contour)
+        && nonnegative_finite(tracking.lag)
+        && nonnegative_finite(tracking.heading)
+        && nonnegative_finite(tracking.velocity)
+        && nonnegative_finite(tracking.angular_velocity)
+        && positive_finite(tracking.tangent_blend_speed_scale),
+        "mpc.follow tracking weights are invalid");
+    const auto& terminal = mpc_params.follow.terminal_weights;
+    require_parameter(nonnegative_finite(terminal.position)
+        && nonnegative_finite(terminal.heading)
+        && nonnegative_finite(terminal.velocity)
+        && nonnegative_finite(terminal.angular_velocity)
+        && nonnegative_finite(terminal.remaining_phase)
+        && positive_finite(terminal.overshoot),
+        "mpc.follow terminal weights are invalid");
     return mpc_params;
 }
 

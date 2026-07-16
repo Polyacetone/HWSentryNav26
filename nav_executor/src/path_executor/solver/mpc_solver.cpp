@@ -45,7 +45,7 @@ void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
     for (size_t k = 0; k < SolverT::N; ++k) {
         auto& u = solver.us[k];
         double scale = 1.0;
-        for (int i = 0; i < SolverT::NU; ++i) {
+        for (int i = iu::V_CMD; i <= iu::W_CMD; ++i) {
             if (u(i) > u_hi(i) && u_hi(i) != 0.0) {
                 scale = std::min(scale, u_hi(i) / u(i));
             } else if (u(i) < u_lo(i) && u_lo(i) != 0.0) {
@@ -53,7 +53,8 @@ void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
             }
         }
         if (scale < 1.0) {
-            u *= scale;
+            u(iu::V_CMD) *= scale;
+            u(iu::W_CMD) *= scale;
         }
         for (int i = 0; i < SolverT::NU; ++i) {
             u(i) = std::clamp(u(i), u_lo(i), u_hi(i));
@@ -105,19 +106,26 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
     pred.headings.reserve(sz);
     pred.v_pred.reserve(sz);
     pred.w_pred.reserve(sz);
+    pred.phase_time_pred.reserve(sz);
+    pred.phase_rate_pred.reserve(sz);
     for (size_t i = 0; i <= rollout.valid_steps; ++i) {
         const auto& x = rollout.xs[i];
         pred.path_map.emplace_back(x(ix::X), x(ix::Y));
         pred.headings.push_back(x(ix::THETA));
         pred.v_pred.push_back(x(ix::V));
         pred.w_pred.push_back(x(ix::W));
+        pred.phase_time_pred.push_back(x(ix::PHASE_TIME));
+        pred.phase_rate_pred.push_back(x(ix::PHASE_RATE));
     }
     return pred;
 }
 
 // ── MPCSolver 方法 ──
 
-MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger) : params_(params), logger_(std::move(logger)) {}
+MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger)
+    : params_(params),
+      logger_(std::move(logger)),
+      last_phase_rate_(params.follow.phase.nominal_rate) {}
 
 MPCSolver::~MPCSolver() = default;
 
@@ -130,6 +138,7 @@ void MPCSolver::reset_warm_start() {
     stop_warm_ = false;
     hold_warm_ = false;
     fddp_lethal_consecutive_count_ = 0;
+    last_phase_rate_ = params_.follow.phase.nominal_rate;
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
         stop_solver_.us[k].setZero();
@@ -196,7 +205,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
     const double current_phase_time,
-    const double current_phase_rate,
     const CostMap& cost_map,
     const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
@@ -212,7 +220,9 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
 
     const double phase_time0 = std::clamp(current_phase_time, 0.0, global_trajectory.total_time());
-    const double phase_rate0 = std::clamp(current_phase_rate, 0.0, 1.0);
+    const double phase_rate0 = std::clamp(
+        last_phase_rate_, params_.follow.phase.rate_min, params_.follow.phase.rate_max
+    );
 
     const Eigen::Vector2d cmd0(
         clamp_prev_cmd(
@@ -270,7 +280,9 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     if (follow_warm_) {
         shift_warm_start(follow_solver_);
     } else {
-        fill_solver_controls(follow_solver_, ControlVec::Zero());
+        ControlVec initial_control = ControlVec::Zero();
+        initial_control(iu::PHASE_RATE_CMD) = params_.follow.phase.nominal_rate;
+        fill_solver_controls(follow_solver_, initial_control);
     }
     scale_solver_controls(follow_solver_, problem);
 
@@ -286,12 +298,16 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         prediction.headings.reserve(sz);
         prediction.v_pred.reserve(sz);
         prediction.w_pred.reserve(sz);
+        prediction.phase_time_pred.reserve(sz);
+        prediction.phase_rate_pred.reserve(sz);
         for (size_t i = 0; i <= solved_rollout.valid_steps; ++i) {
             const auto& x = solved_rollout.xs[i];
             prediction.path_map.emplace_back(x(ix::X), x(ix::Y));
             prediction.headings.push_back(x(ix::THETA));
             prediction.v_pred.push_back(x(ix::V));
             prediction.w_pred.push_back(x(ix::W));
+            prediction.phase_time_pred.push_back(x(ix::PHASE_TIME));
+            prediction.phase_rate_pred.push_back(x(ix::PHASE_RATE));
         }
     }
 
@@ -323,7 +339,10 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         }
     }
 
-    const Eigen::Vector2d cmd(follow_solver_.us[0](0), follow_solver_.us[0](1));
+    const Eigen::Vector2d cmd(
+        follow_solver_.us[0](iu::V_CMD), follow_solver_.us[0](iu::W_CMD)
+    );
+    last_phase_rate_ = follow_solver_.us[0](iu::PHASE_RATE_CMD);
     last_cmd_ = cmd;
 
     FollowSolveResult out;
@@ -376,7 +395,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     stop_solver_.solve(prob, opts);
     stop_warm_ = true;
 
-    const Eigen::Vector2d cmd(stop_solver_.us[0](0), stop_solver_.us[0](1));
+    const Eigen::Vector2d cmd(
+        stop_solver_.us[0](iu::V_CMD), stop_solver_.us[0](iu::W_CMD)
+    );
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, stop_solver_, x0)};
 }
@@ -425,7 +446,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     hold_solver_.solve(prob, opts);
     hold_warm_ = true;
 
-    const Eigen::Vector2d cmd(hold_solver_.us[0](0), hold_solver_.us[0](1));
+    const Eigen::Vector2d cmd(
+        hold_solver_.us[0](iu::V_CMD), hold_solver_.us[0](iu::W_CMD)
+    );
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, hold_solver_, x0)};
 }

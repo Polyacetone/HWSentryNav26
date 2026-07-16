@@ -26,11 +26,15 @@ void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 }
 
 ControlVec HoldProblem::u_lower() const {
-    return ControlVec(p_.hold.command_bounds.vel_min, p_.hold.command_bounds.omega_min);
+    ControlVec lower;
+    lower << p_.hold.command_bounds.vel_min, p_.hold.command_bounds.omega_min, 0.0;
+    return lower;
 }
 
 ControlVec HoldProblem::u_upper() const {
-    return ControlVec(p_.hold.command_bounds.vel_max, p_.hold.command_bounds.omega_max);
+    ControlVec upper;
+    upper << p_.hold.command_bounds.vel_max, p_.hold.command_bounds.omega_max, 0.0;
+    return upper;
 }
 
 constexpr int HOLD_RESIDUAL_DIM = 11;
@@ -53,7 +57,7 @@ HoldResidualVec hold_residual_impl(
 
     HoldResidualVec r = HoldResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
-    const double v_cmd = u(0), w_cmd = u(1);
+    const double v_cmd = u(iu::V_CMD), w_cmd = u(iu::W_CMD);
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
 

@@ -11,14 +11,8 @@
 
 namespace nav_executor {
 
-// 参数化轨迹跟踪问题（替换旧 SplinePath 版 FollowProblemT）。
-//
-// 参考载体是 MincoTrajectory。PHASE_TIME 是秒制虚拟相位，PHASE_RATE 是相位相对真实时间
-// 的推进率。物理状态始终按 MPC_DT 递推，参考位置按虚拟相位求值。
-//
-// 代价导数走有限差分 Gauss-Newton（与 stop/hold 一致，落地版 Q3 决策 B）：残差函数是
-// 唯一真值源，不再手推雅可比。τ-进度作为状态转移的一部分放进 dynamics，其雅可比行单独
-// 有限差分（物理动力学行仍用解析 mpc_dynamics_jacobians）。
+// MINCO 全状态轨迹上的 MPCC。PHASE_TIME 是秒制轨迹相位，第三控制量直接决定相位推进率；
+// PHASE_RATE 保存上一拍相位率用于平滑。物理状态与虚拟相位在同一个 FDDP 问题内联合优化。
 template<int Horizon>
 class FollowProblemT {
 public:
@@ -62,8 +56,6 @@ public:
     [[nodiscard]] const MincoTrajectory& reference_trajectory() const { return trajectory_; }
     [[nodiscard]] const LPVDiscreteModel& discrete_model() const { return model_; }
 
-    [[nodiscard]] TrajectoryPhaseState advance_phase(const StateVec& x) const;
-
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
 
@@ -76,8 +68,7 @@ private:
     LPVDiscreteModel model_ {};
     CapabilityProfile blended_profile_;
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule_;
-    double total_arc_ = 0.0;  // 参考总弧长，用于进度奖励的量纲缩放
-    double total_time_ = 0.0; // 参考总时长，用于名义时钟速率 1/T
+    double total_time_ = 0.0;
 };
 
 using FollowProblem = FollowProblemT<MPC_HORIZON>;

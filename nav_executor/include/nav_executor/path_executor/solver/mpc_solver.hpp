@@ -42,7 +42,6 @@ public:
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
         double current_phase_time,
-        double current_phase_rate,
         const CostMap& cost_map,
         const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
@@ -85,6 +84,7 @@ private:
     double prev_w_act_ = 0.0;
     double prev_schedule_rho_ = 0.0;
     bool observer_initialized_ = false;
+    double last_phase_rate_ = 1.0;
 
     int fddp_lethal_consecutive_count_ = 0;
     uint64_t follow_sequence_ = 0;

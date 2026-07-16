@@ -80,6 +80,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mpc_path_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_phase_time_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_phase_rate_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;

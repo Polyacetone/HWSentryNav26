@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -290,14 +291,89 @@ bool Solver<P>::solve_box_qp(
         K.row(f).noalias() = -gx.row(f) / hff;
         return true;
     } else {
-        k = clamp_u(k_unc, du_lo, du_hi);
-        K = K_unc;
-        for (int i = 0; i < NU; ++i) {
-            if (k(i) <= du_lo(i) + 1e-12 || k(i) >= du_hi(i) - 1e-12) {
-                K.row(i).setZero();
+        // 枚举每个控制量的 free/lower/upper 状态。MPCC 的 NU=3，仅 27 种组合；
+        // 相比逐元素截断，这会正确计入激活边界与自由变量之间的 Hessian 耦合。
+        constexpr int ACTIVE_SET_COUNT = [] {
+            int count = 1;
+            for (int i = 0; i < NU; ++i) count *= 3;
+            return count;
+        }();
+        double best_objective = std::numeric_limits<double>::infinity();
+        bool found = false;
+        constexpr double FEASIBILITY_EPS = 1e-10;
+
+        for (int encoded = 0; encoded < ACTIVE_SET_COUNT; ++encoded) {
+            int code = encoded;
+            std::array<int, NU> status {};
+            std::array<int, NU> free_indices {};
+            int free_count = 0;
+            VecU candidate = VecU::Zero();
+            MatUX candidate_K = MatUX::Zero();
+
+            for (int i = 0; i < NU; ++i) {
+                status[static_cast<size_t>(i)] = code % 3 - 1;
+                code /= 3;
+                if (status[static_cast<size_t>(i)] < 0) {
+                    candidate(i) = du_lo(i);
+                } else if (status[static_cast<size_t>(i)] > 0) {
+                    candidate(i) = du_hi(i);
+                } else {
+                    free_indices[static_cast<size_t>(free_count++)] = i;
+                }
+            }
+
+            if (free_count > 0) {
+                Eigen::MatrixXd h_free(free_count, free_count);
+                Eigen::VectorXd rhs(free_count);
+                Eigen::MatrixXd rhs_feedback(free_count, NX);
+                for (int r = 0; r < free_count; ++r) {
+                    const int row = free_indices[static_cast<size_t>(r)];
+                    rhs(r) = -g(row);
+                    rhs_feedback.row(r) = -gx.row(row);
+                    for (int active = 0; active < NU; ++active) {
+                        if (status[static_cast<size_t>(active)] != 0) {
+                            rhs(r) -= h(row, active) * candidate(active);
+                        }
+                    }
+                    for (int c = 0; c < free_count; ++c) {
+                        h_free(r, c) = h(row, free_indices[static_cast<size_t>(c)]);
+                    }
+                }
+
+                Eigen::LLT<Eigen::MatrixXd> llt(h_free);
+                if (llt.info() != Eigen::Success) continue;
+                const Eigen::VectorXd free_solution = llt.solve(rhs);
+                const Eigen::MatrixXd free_feedback = llt.solve(rhs_feedback);
+                if (llt.info() != Eigen::Success
+                    || !free_solution.allFinite() || !free_feedback.allFinite()) {
+                    continue;
+                }
+                for (int i = 0; i < free_count; ++i) {
+                    const int index = free_indices[static_cast<size_t>(i)];
+                    candidate(index) = free_solution(i);
+                    candidate_K.row(index) = free_feedback.row(i);
+                }
+            }
+
+            bool feasible = true;
+            for (int i = 0; i < NU; ++i) {
+                if (candidate(i) < du_lo(i) - FEASIBILITY_EPS
+                    || candidate(i) > du_hi(i) + FEASIBILITY_EPS) {
+                    feasible = false;
+                    break;
+                }
+            }
+            if (!feasible) continue;
+
+            const double objective = 0.5 * candidate.dot(h * candidate) + g.dot(candidate);
+            if (objective < best_objective) {
+                best_objective = objective;
+                k = candidate;
+                K = candidate_K;
+                found = true;
             }
         }
-        return true;
+        return found;
     }
 }
 

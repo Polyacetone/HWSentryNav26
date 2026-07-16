@@ -6,18 +6,14 @@
       # ═══════════════════════════════════════════════
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
-        phase_tracking:
-          error_scale: 0.5 # 综合跟踪误差达到该尺度时，相位目标速率约为 0.5
-          heading_weight: 1.0 # 航向误差 rad 到相位调速误差的换算权重
-          projection_heading_weight: 0.5 # 局部相位投影中航向误差的权重 (m/rad)
-          projection_velocity_weight: 0.2 # 局部相位投影中速度误差的权重 (s)
-          projection_window_backward: 0.5 # 相位观测相对预测值向后搜索范围 (s)
-          projection_window_forward: 1.0 # 相位观测相对预测值向前搜索范围 (s)
-          observation_gain: 0.25 # 每帧吸收局部相位观测创新的比例
-          max_observation_correction: 0.05 # 单帧最大相位观测校正 (s)
-          rate_accel: 1.0 # 相位速率恢复上限 (1/s)
-          rate_decel: 4.0 # 相位速率下降上限 (1/s)
-          pause_error: 1.5 # 综合误差达到该值时目标相位速率归零
+        phase:
+          rate_min: 0.0 # MPCC 相位推进率下界；0 允许障碍前暂停
+          rate_max: 1.2 # 相位推进率上界；允许有限追赶名义时序
+          nominal_rate: 1.0 # MINCO 名义时序对应的相位推进率
+          progress_reward: 0.3 # 每步相位推进线性奖励，防止零速局部最优
+          rate_tracking_weight: 2.0 # 相位率偏离名义值的残差权重
+          rate_smoothness_weight: 1.5 # 相邻相位率变化残差权重
+          overshoot_weight: 8.0 # phase_time 超过轨迹总时长的残差权重
         rollout_safety:
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
@@ -35,13 +31,12 @@
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
         tracking_weights:
-          q_y: 0.3 # 横向误差管廊外权重（|ey| > y_tube 时二次拉回）
-          q_lag: 0.5 # 沿轨相位误差权重，防止机器人落后/超前参考点
-          q_theta: 0.15 # 航向误差权重（相对独立 θ_ref）
-          q_v: 1.0 # 纵向速度跟踪权重：v_act 跟随参考带符号速度 v_ref(τ)，驱动折返段反向
-          q_omega: 0.4 # 角速度跟踪权重，原地旋转段尤其重要
-          q_u: 1.2 # 每步进度势权重（基于 τ 的剩余弧长下降）
-          y_tube: 0.3 # 横向误差管廊半宽 (m)：管廊内不惩罚横向偏移，允许主动腾挪对齐/助跑台阶
+          contour: 2.0 # 位置曲线法向误差残差权重
+          lag: 1.2 # 位置曲线切向误差残差权重，阻止相位空跑
+          heading: 1.2 # 独立航向状态误差权重
+          velocity: 0.8 # 时间缩放后的带符号速度参考权重
+          angular_velocity: 0.8 # 时间缩放后的角速度参考权重
+          tangent_blend_speed_scale: 0.05 # 路径轴向车身轴平滑过渡的平动速度尺度 (m/s)
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
@@ -60,6 +55,13 @@
             omega_smooth: 0.5 # 台阶内部角速度指令变化惩罚，避免突变
         environment_weights:
           obstacle: 5.0 # 避障权重（全局+局部融合代价）
+        terminal_weights:
+          position: 3.0 # horizon 末端相对对应参考点的位置权重
+          heading: 2.0 # horizon 末端航向权重
+          velocity: 1.0 # horizon 末端线速度参考权重
+          angular_velocity: 1.0 # horizon 末端角速度参考权重
+          remaining_phase: 0.8 # horizon 末端剩余轨迹时间线性代价
+          overshoot: 12.0 # horizon 末端相位越界残差权重
       # ═══════════════════════════════════════════════
       #  Stop — 停止求解器
       # ═══════════════════════════════════════════════

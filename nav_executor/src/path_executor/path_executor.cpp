@@ -131,7 +131,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
 
     double current_u = 0.0;
     if (has_path) {
-        current_u = input.route->observed_tau;
+        current_u = input.route->tau;
         if (prev_state == MotionState::FOLLOW || prev_state == MotionState::STEPPING) {
             step_controller_.update_active_segment(current_u);
         }
@@ -289,6 +289,8 @@ void assign_hold_output(ExecutorOutput& out, const std::tuple<Eigen::Vector2d, M
     out.mpc_path_map = std::get<1>(result).path_map;
     out.predicted_v = std::get<1>(result).v_pred;
     out.predicted_w = std::get<1>(result).w_pred;
+    out.predicted_phase_time = std::get<1>(result).phase_time_pred;
+    out.predicted_phase_rate = std::get<1>(result).phase_rate_pred;
     out.valid = true;
 }
 
@@ -314,14 +316,14 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     }
 
     if (!input.route || input.route->status != RouteTrackingStatus::TRACKED) return out;
-    const double u0 = input.route->observed_tau;
+    const double u0 = input.route->tau;
     const MincoTrajectory& path = input.intent.active_path->trajectory;
 
     step_controller_.tick_profile_blend();
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_follow(
         path, input.observation.chassis_pose_map, input.observation.chassis_state,
-        input.route->phase_time, input.route->phase_rate,
+        input.route->phase_time,
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         step_controller_.current_blended_profile(),
         input.intent.active_path->step_constraint_schedule,
@@ -367,6 +369,8 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     out.mpc_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
+    out.predicted_phase_time = prediction.phase_time_pred;
+    out.predicted_phase_rate = prediction.phase_rate_pred;
     out.step_dist_cm = step_controller_.compute_step_distance_cm(path, u0);
     out.valid = true;
 

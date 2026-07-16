@@ -5,7 +5,6 @@
 #include <Eigen/Dense>
 #include <nav_executor/common/chassis_defs.hpp>
 #include <nav_executor/common/minco_trajectory.hpp>
-#include <nav_executor/common/trajectory_phase.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 
 namespace nav_executor {
@@ -13,13 +12,17 @@ namespace nav_executor {
 constexpr int MPC_HORIZON = 60;
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 10;
-constexpr int MPC_NU = 2;
+constexpr int MPC_NU = 3;
 
 constexpr double SOLVER_TOL_GRAD = 1e-6;
 constexpr double SOLVER_TOL_COST = 1e-8;
 
 namespace ix {
     enum { X = 0, Y, THETA, XH, V, W, DV, DW, PHASE_TIME, PHASE_RATE };
+}
+
+namespace iu {
+    enum { V_CMD = 0, W_CMD, PHASE_RATE_CMD };
 }
 
 struct MPCStartCommandLimits {
@@ -34,13 +37,31 @@ struct MPCMotionConstraintWeights {
 };
 
 struct MPCFollowTrackingWeights {
-    double q_y;            // 横向误差管廊外权重（tube 外二次惩罚）
-    double q_lag;          // 沿轨相位误差权重
-    double q_theta;        // 航向误差权重（相对独立 θ_ref）
-    double q_v;            // 纵向速度跟踪权重：v_act 跟随参考带符号速度 v_ref(τ)，驱动折返段反向
-    double q_omega;        // 角速度跟踪权重
-    double q_u;            // 逐步进度势权重（基于 τ 剩余弧长的 cost-to-go 梯度）
-    double y_tube;         // 横向误差管廊半宽 (m)：|ey| < y_tube 内不惩罚，允许横向腾挪
+    double contour;
+    double lag;
+    double heading;
+    double velocity;
+    double angular_velocity;
+    double tangent_blend_speed_scale;
+};
+
+struct MPCFollowPhaseParams {
+    double rate_min;
+    double rate_max;
+    double nominal_rate;
+    double progress_reward;
+    double rate_tracking_weight;
+    double rate_smoothness_weight;
+    double overshoot_weight;
+};
+
+struct MPCFollowTerminalWeights {
+    double position;
+    double heading;
+    double velocity;
+    double angular_velocity;
+    double remaining_phase;
+    double overshoot;
 };
 
 struct MPCFollowCommandWeights {
@@ -145,7 +166,8 @@ struct MPCFollowParams {
     MPCFollowTerrainWeights terrain_weights;
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowRolloutSafetyParams rollout_safety;
-    TrajectoryPhaseParams phase;
+    MPCFollowPhaseParams phase;
+    MPCFollowTerminalWeights terminal_weights;
     int max_iters;
 };
 
@@ -267,6 +289,8 @@ struct MPCPrediction {
     std::vector<double> headings;
     std::vector<double> v_pred;
     std::vector<double> w_pred;
+    std::vector<double> phase_time_pred;
+    std::vector<double> phase_rate_pred;
 };
 
 struct MPCParams {

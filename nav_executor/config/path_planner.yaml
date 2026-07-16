@@ -72,6 +72,7 @@
           acceptance_tolerance: 0.10 # 最终接纳上限；0.08m/s 在 1.6m/s 时约为 2.9° 速度方向偏差
         min_segment_time: 0.05 # 段时长下限 (s)
         validation:
+          reject_infeasible: false # 开发期仅 WARN 并接纳约束违规轨迹；非有限值等结构错误仍会拒绝
           samples_per_segment: 32 # 最终验收逐段采样数；每段包含两端点
           velocity_tolerance: 0.1 # 一般带符号速度与入口速度窗容差 (m/s)
           omega_tolerance: 0.1 # 角速度上限容差 (rad/s)

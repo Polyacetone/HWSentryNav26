@@ -24,11 +24,15 @@ void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 }
 
 ControlVec StopProblem::u_lower() const {
-    return ControlVec(p_.stop.command_bounds.vel_min, p_.stop.command_bounds.omega_min);
+    ControlVec lower;
+    lower << p_.stop.command_bounds.vel_min, p_.stop.command_bounds.omega_min, 0.0;
+    return lower;
 }
 
 ControlVec StopProblem::u_upper() const {
-    return ControlVec(p_.stop.command_bounds.vel_max, p_.stop.command_bounds.omega_max);
+    ControlVec upper;
+    upper << p_.stop.command_bounds.vel_max, p_.stop.command_bounds.omega_max, 0.0;
+    return upper;
 }
 
 constexpr int STOP_RESIDUAL_DIM = 8;
@@ -49,7 +53,7 @@ StopResidualVec stop_residual_impl(
 
     StopResidualVec r = StopResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y);
-    const double v_cmd = u(0), w_cmd = u(1);
+    const double v_cmd = u(iu::V_CMD), w_cmd = u(iu::W_CMD);
     const double dv_cmd = v_cmd - x(ix::DV);
     const double dw_cmd = w_cmd - x(ix::DW);
 

@@ -72,7 +72,7 @@ std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, 
     if (samples <= 0) return stats;
 
     auto advance_path_u = [&](const double distance) {
-        double u = std::clamp(in.route.observed_tau, 0.0, 1.0);
+        double u = std::clamp(in.route.tau, 0.0, 1.0);
         double travelled = 0.0;
         while (u < 1.0 && travelled < distance) {
             const Eigen::Vector2d d1 = path.tangent(u);
@@ -174,11 +174,11 @@ std::optional<ReplanReason> check_performance(const RouteMonitorInput& in, rclcp
     if (!path.planning_performance.high_performance || in.current_performance.high_performance) return std::nullopt;
 
     const double lookahead_u = advance_path_u_by_distance(
-        path.trajectory, in.route.observed_tau, in.performance.lookahead_distance
+        path.trajectory, in.route.tau, in.performance.lookahead_distance
     );
     for (const StepPlanSegment& segment : path.step_segments) {
         if (!segment.requires_high_performance) continue;
-        if (segment.prepare_u <= in.route.observed_tau || segment.prepare_u > lookahead_u) continue;
+        if (segment.prepare_u <= in.route.tau || segment.prepare_u > lookahead_u) continue;
         RCLCPP_WARN(logger, "RouteMonitor: high-performance crossing ahead is no longer available");
         return ReplanReason::PERFORMANCE_DEGRADED;
     }

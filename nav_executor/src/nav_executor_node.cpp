@@ -102,10 +102,6 @@ void NavExecutorNode::control_tick() {
 
     previous_motion_feedback_.preemptible = executor_->preemptible();
     previous_motion_feedback_.motion_state = executor_->motion_state();
-    const MotionState tracking_state = previous_motion_feedback_.motion_state;
-    const bool advance_route_clock = (tracking_state == MotionState::FOLLOW || tracking_state == MotionState::STEPPING)
-        && classify_chassis_control_state(chassis_leg_mode_, comp_stage_) == ChassisControlState::NORMAL;
-
     const CostLayers cost_layers {
         .global = global_cost_map_,
         .current_dynamic = current_cost_map_,
@@ -126,9 +122,7 @@ void NavExecutorNode::control_tick() {
     std::optional<RouteEstimate> route_estimate = route_tracker_->update(
         active_path_before_update,
         chassis_pose_map,
-        chassis_state_.velocity,
-        stamp,
-        advance_route_clock
+        chassis_state_.velocity
     );
     RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
@@ -178,9 +172,7 @@ void NavExecutorNode::control_tick() {
         route_estimate = route_tracker_->update(
             task_output.command.active_path,
             chassis_pose_map,
-            chassis_state_.velocity,
-            stamp,
-            false
+            chassis_state_.velocity
         );
     }
 
@@ -233,6 +225,16 @@ void NavExecutorNode::control_tick() {
                 w_msg.data = (*out.predicted_w)[0];
                 debug_v_pred_pub_->publish(v_msg);
                 debug_w_pred_pub_->publish(w_msg);
+            }
+            if (out.predicted_phase_time && !out.predicted_phase_time->empty()) {
+                std_msgs::msg::Float64 msg;
+                msg.data = (*out.predicted_phase_time)[0];
+                debug_phase_time_pub_->publish(msg);
+            }
+            if (out.predicted_phase_rate && !out.predicted_phase_rate->empty()) {
+                std_msgs::msg::Float64 msg;
+                msg.data = (*out.predicted_phase_rate)[0];
+                debug_phase_rate_pub_->publish(msg);
             }
         }
     }

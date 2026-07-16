@@ -153,10 +153,13 @@ bool validate_trajectory(
     const double step_entry_window_fraction,
     const PlannerConfig::TrajectoryValidationParams& validation,
     const std::vector<MincoOptimizer::StepEntrySpeedWindow>& step_entry_speed_windows,
-    std::string& error
+    std::string& error,
+    bool& fatal
 ) {
+    fatal = false;
     const double total_time = trajectory.total_time();
     if (!std::isfinite(total_time) || total_time <= 0.0) {
+        fatal = true;
         error = "trajectory has invalid total time";
         return false;
     }
@@ -170,6 +173,7 @@ bool validate_trajectory(
         const TrajSample s = trajectory.eval(tau);
         if (!s.p.allFinite() || !std::isfinite(s.theta) || !s.dp_dtau.allFinite()
             || !s.ddp_dtau.allFinite() || !std::isfinite(s.dtheta_dtau)) {
+            fatal = true;
             error = "trajectory contains non-finite values at tau=" + std::to_string(tau)
                 + ": p=(" + std::to_string(s.p.x()) + "," + std::to_string(s.p.y()) + ")"
                 + " theta=" + std::to_string(s.theta)
@@ -723,6 +727,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         );
     }
     std::string trajectory_error;
+    bool trajectory_error_is_fatal = false;
     if (!validate_trajectory(
             opt.trajectory,
             planning_cost_map,
@@ -736,9 +741,18 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             minco_params.step_entry_window_fraction,
             config_.trajectory_validation,
             minco_seed.step_entry_speed_windows,
-            trajectory_error
+            trajectory_error,
+            trajectory_error_is_fatal
         )) {
-        return fail("MINCO output rejected: " + trajectory_error);
+        if (trajectory_error_is_fatal || config_.trajectory_validation.reject_infeasible) {
+            return fail("MINCO output rejected: " + trajectory_error);
+        }
+        RCLCPP_WARN(
+            logger_,
+            "MINCO output violates trajectory validation but is accepted because "
+            "validation.reject_infeasible=false: %s",
+            trajectory_error.c_str()
+        );
     }
 
     // ── 构建不可变 AnnotatedPath ──
