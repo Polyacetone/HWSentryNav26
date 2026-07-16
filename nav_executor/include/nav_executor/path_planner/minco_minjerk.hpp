@@ -3,9 +3,9 @@
 #include <vector>
 
 #include <Eigen/Core>
-#include <Eigen/Dense>
 
 #include <nav_executor/common/minco_trajectory.hpp>
+#include <nav_executor/path_planner/banded_system.hpp>
 
 namespace nav_executor {
 
@@ -19,11 +19,12 @@ namespace nav_executor {
 //     - 尾端 (pos,vel,acc) 固定。
 //   写成 M(T) c = b(q)。M 只依赖 T（三维共用），b 每维不同。
 //
-// 决策记录：问题规模小（N≤~6 → 6N≤36），用稠密 LU 而非 GCOPTER 的带状 PLU——
-// O(N³) 但 N 极小，换取实现简洁与低出错面（落地版「smallest complete correct thing」）。
+// M(T) 只有常数带宽（每个内部节点仅耦合相邻两段系数）：下带宽 kl=8（snap 连续行
+// 到左段首系数），上带宽 ku=2（连续性行到右段的 vel/acc/jerk）。用带状部分主元 LU
+// 求解，复杂度 O(N·bw²)，取代原稠密 O((6N)³)——段数 N 达数十时差距显著。
 //
 // 梯度回传（GCOPTER Thm 2 的自适配）：代价 G(c, T)，c=M⁻¹b。
-//   伴随：解 Mᵀλ = ∂G/∂c
+//   伴随：解 Mᵀλ = ∂G/∂c（复用 M 的同一 LU 分解做转置回代，不重复分解）
 //   ∂G/∂q_k = λ 在 q_k 所在行的分量（b 对 q 线性，∂b/∂q_k 是选择子）
 //   ∂G/∂T_i = ∂G/∂T_i|_explicit − λᵀ (∂M/∂T_i) c
 class MincoMinJerk {
@@ -70,11 +71,14 @@ private:
     // β^{(order)}(t) 的 6 维基向量。
     static Eigen::Matrix<double, NCOEF, 1> basis(double t, int order);
 
+    // M 的带宽（与段数无关）。装配顺序：见 generate 中行布局。
+    static constexpr int LOWER_BW = 8; // snap 连续行(node_row0+5) 到左段首系数(6i)
+    static constexpr int UPPER_BW = 2; // 连续性行到右段 jerk(6(i+1)+3)
+
     int segment_count_ = 0;
     std::vector<double> times_;
-    Eigen::MatrixXd m_;              // 6N×6N
-    Eigen::PartialPivLU<Eigen::MatrixXd> lu_;
-    Eigen::MatrixXd b_;             // 6N×3
+    BandedSystem banded_;           // M 的带状 LU（部分主元）
+    Eigen::MatrixXd b_;             // 6N×3（右端项 / 求解后为系数）
     Eigen::MatrixXd coeffs_;        // 6N×3
 };
 

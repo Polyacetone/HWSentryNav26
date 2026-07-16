@@ -33,12 +33,18 @@ Eigen::Matrix<double, MincoMinJerk::NCOEF, 1> MincoMinJerk::basis(const double t
 }
 
 void MincoMinJerk::reset(const int segment_count) {
-    segment_count_ = std::max(segment_count, 1);
-    const int rows = NCOEF * segment_count_;
-    m_ = Eigen::MatrixXd::Zero(rows, rows);
-    b_ = Eigen::MatrixXd::Zero(rows, DIM);
-    coeffs_ = Eigen::MatrixXd::Zero(rows, DIM);
-    times_.assign(static_cast<size_t>(segment_count_), 0.0);
+    const int new_count = std::max(segment_count, 1);
+    const int rows = NCOEF * new_count;
+    if (new_count != segment_count_) {
+        banded_.create(rows, LOWER_BW, UPPER_BW);
+        b_ = Eigen::MatrixXd::Zero(rows, DIM);
+        coeffs_ = Eigen::MatrixXd::Zero(rows, DIM);
+        times_.assign(static_cast<size_t>(new_count), 0.0);
+    } else {
+        banded_.reset();
+        b_.setZero();
+    }
+    segment_count_ = new_count;
 }
 
 void MincoMinJerk::generate(
@@ -51,13 +57,17 @@ void MincoMinJerk::generate(
     reset(n);
     for (int i = 0; i < n; ++i) times_[static_cast<size_t>(i)] = std::max(times[i], MIN_SEG_T);
 
-    m_.setZero();
-    b_.setZero();
+    // 把 NCOEF 长基向量写入 M 第 row 行、列偏移 c_off 处的连续 NCOEF 列。
+    const auto set_row = [this](
+        const int row, const int c_off, const Eigen::Matrix<double, NCOEF, 1>& coef
+    ) {
+        for (int k = 0; k < NCOEF; ++k) banded_.ref(row, c_off + k) = coef(k);
+    };
 
     // ── 首端 3 条：pos/vel/acc（t=0 处 β(0),β'(0),β''(0)）──
-    m_.block(0, 0, 1, NCOEF) = basis(0.0, 0).transpose();
-    m_.block(1, 0, 1, NCOEF) = basis(0.0, 1).transpose();
-    m_.block(2, 0, 1, NCOEF) = basis(0.0, 2).transpose();
+    set_row(0, 0, basis(0.0, 0));
+    set_row(1, 0, basis(0.0, 1));
+    set_row(2, 0, basis(0.0, 2));
     b_.row(0) = head.pos.transpose();
     b_.row(1) = head.vel.transpose();
     b_.row(2) = head.acc.transpose();
@@ -81,45 +91,46 @@ void MincoMinJerk::generate(
         const auto b4_0 = basis(0.0, 4);
 
         // 左段末端到达路点 q_i
-        m_.block(row, c_left, 1, NCOEF) = b0.transpose();
+        set_row(row, c_left, b0);
         b_.row(row) = waypoints.col(i).transpose();
         ++row;
 
         // 右段起点出发路点 q_i
-        m_.block(row, c_right, 1, NCOEF) = b0_0.transpose();
+        set_row(row, c_right, b0_0);
         b_.row(row) = waypoints.col(i).transpose();
         ++row;
 
         // 内部速度由优化自行选择，仅保持 vel/acc/jerk/snap 连续。
-        m_.block(row, c_left, 1, NCOEF) = b1.transpose();
-        m_.block(row, c_right, 1, NCOEF) = -b1_0.transpose();
+        set_row(row, c_left, b1);
+        set_row(row, c_right, -b1_0);
         ++row;
-        m_.block(row, c_left, 1, NCOEF) = b2.transpose();
-        m_.block(row, c_right, 1, NCOEF) = -b2_0.transpose();
+        set_row(row, c_left, b2);
+        set_row(row, c_right, -b2_0);
         ++row;
-        m_.block(row, c_left, 1, NCOEF) = b3.transpose();
-        m_.block(row, c_right, 1, NCOEF) = -b3_0.transpose();
+        set_row(row, c_left, b3);
+        set_row(row, c_right, -b3_0);
         ++row;
-        m_.block(row, c_left, 1, NCOEF) = b4.transpose();
-        m_.block(row, c_right, 1, NCOEF) = -b4_0.transpose();
+        set_row(row, c_left, b4);
+        set_row(row, c_right, -b4_0);
         ++row;
     }
 
     // ── 尾端 3 条：pos/vel/acc（末段 t=T_{n-1}）──
     const double tn = times_[static_cast<size_t>(n - 1)];
     const int c_last = NCOEF * (n - 1);
-    m_.block(row, c_last, 1, NCOEF) = basis(tn, 0).transpose();
+    set_row(row, c_last, basis(tn, 0));
     b_.row(row) = tail.pos.transpose();
     ++row;
-    m_.block(row, c_last, 1, NCOEF) = basis(tn, 1).transpose();
+    set_row(row, c_last, basis(tn, 1));
     b_.row(row) = tail.vel.transpose();
     ++row;
-    m_.block(row, c_last, 1, NCOEF) = basis(tn, 2).transpose();
+    set_row(row, c_last, basis(tn, 2));
     b_.row(row) = tail.acc.transpose();
     ++row;
 
-    lu_ = m_.partialPivLu();
-    coeffs_ = lu_.solve(b_);
+    banded_.factorize_lu();
+    coeffs_ = b_;
+    banded_.solve(coeffs_);
 }
 
 MincoTrajectory MincoMinJerk::to_trajectory() const {
@@ -145,8 +156,9 @@ void MincoMinJerk::propagate_gradient(
 ) const {
     const int n = segment_count_;
 
-    // 伴随：Mᵀ λ = ∂G/∂c（每维独立，共 3 列）。
-    const Eigen::MatrixXd lambda = m_.transpose().partialPivLu().solve(grad_c); // (6N)×3
+    // 伴随：Mᵀ λ = ∂G/∂c（每维独立，共 3 列）。复用 generate 的 LU 分解做转置回代。
+    Eigen::MatrixXd lambda = grad_c; // (6N)×3
+    banded_.solve_transpose(lambda);
 
     // ── ∂G/∂q_k：b 对 q_k 线性，∂b/∂q_k 在「左段到达」「右段出发」两行为单位。
     //    对应 generate 中节点 i 的前两行（q 到达 / q 出发）。
