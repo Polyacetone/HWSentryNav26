@@ -95,14 +95,14 @@ private:
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 
     // ─── 参数 ───
-    bool enable_debug_ = false;
-    double remaining_energy_filter_alpha_ = 1.0;
-    double prediction_dt_ = 0.2;
-    double dynamic_prediction_horizon_seconds_ = 2.0;
-    double dynamic_prediction_weight_decay_ = 1.0;
-    double path_publish_sample_resolution_ = 0.1;
-    double minco_debug_velocity_min_ = 0.0;
-    double minco_debug_velocity_max_ = 0.0;
+    bool enable_debug_{};
+    double remaining_energy_filter_alpha_{};
+    double prediction_dt_{};
+    double dynamic_prediction_horizon_seconds_{};
+    double dynamic_prediction_weight_decay_{};
+    double path_publish_sample_resolution_{};
+    double minco_debug_velocity_min_{};
+    double minco_debug_velocity_max_{};
     FollowProjectionGuardParams proj_guard_params_{};
     RouteTrackerParams route_tracker_params_{};
     StepBlockReplanParams step_block_params_{};

@@ -19,11 +19,7 @@ struct StepRoutingMaskParams {
     int length_num_samples;
 };
 
-// 规划期产出的台阶掩码层。
-//
-// initialize() 由 nav_executor_node 在全局地图到达后调用一次，之后 base
-// 数据不可变。compute() 是 const、无副作用的：对给定样条产出一对新的
-// (step_cost_layer, masked_direction_map)，可在规划 worker 线程安全调用。
+// 初始化后底图保持不变，compute 可在规划线程并发调用。
 class StepRoutingMask {
 public:
     struct Layers {
@@ -37,7 +33,7 @@ public:
 
     [[nodiscard]] bool ready() const { return static_cast<bool>(base_direction_map_); }
 
-    // 对给定路径（nullopt = 无路径经过）产出台阶掩码层。无副作用。
+    // nullopt 表示不保留任何台阶通道。
     [[nodiscard]] Layers compute(const std::optional<MincoTrajectory>& global_path) const;
 
     [[nodiscard]] DirectionMap::ConstPtr base_direction_map() const { return base_direction_map_; }

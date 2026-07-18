@@ -22,7 +22,7 @@ struct ProfileBlendParams {
     double a_lat_step;
 };
 
-// 台阶运行时逻辑：消费 AnnotatedPath.step_segments，负责段跟踪、profile 时间域融合、台阶模式激活判定与距离上报。
+// 台阶运行时：跟踪当前区段，并协调能力档、底盘模式和距离上报。
 class StepController {
 public:
     StepController(
@@ -33,12 +33,9 @@ public:
         rclcpp::Logger logger
     );
 
-    // 路径切换时重置段跟踪状态并绑定新的 step_segments。
     void set_path(AnnotatedPath::ConstPtr path);
-    // 无 path 时清空运行时状态。
     void clear();
 
-    // 每周期沿 u 更新当前持有的台阶段。
     void update_active_segment(double current_u);
 
     [[nodiscard]] std::optional<size_t> find_active_segment_index(double current_u) const;

@@ -69,7 +69,7 @@ struct TaskUpdateOutput {
     TaskDiagnostics diagnostics;
 };
 
-// Owns task commitment: current goal, active route, hold target, and planner dispatch.
+// 管理已提交任务、活动路径、保持目标和规划派发。
 class TaskManager {
 public:
     TaskManager(

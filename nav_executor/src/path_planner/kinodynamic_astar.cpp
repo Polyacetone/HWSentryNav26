@@ -75,7 +75,7 @@ KinodynamicAstar::Result KinodynamicAstar::search(
 
     std::vector<SearchNode> nodes;
     nodes.reserve(4096);
-    std::unordered_map<StateKey, double, StateKeyHash> best_g; // 已知最优 g（去重）
+    std::unordered_map<StateKey, double, StateKeyHash> best_g;
     std::priority_queue<OpenEntry, std::vector<OpenEntry>, std::greater<>> open;
 
     const auto heuristic = [&](const State& s) -> double {
@@ -83,7 +83,6 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         return std::isinf(h) ? DijkstraCostToGoal::UNREACHABLE : params_.heuristic_weight * h;
     };
 
-    // 起点
     SearchNode start_node;
     start_node.state = start;
     start_node.g = 0.0;
@@ -92,7 +91,6 @@ KinodynamicAstar::Result KinodynamicAstar::search(
     best_g[make_key(start, params_)] = 0.0;
     open.push({start_node.f, 0});
 
-    // 原语采样表
     std::vector<double> accels;
     accels.reserve(static_cast<size_t>(std::max(params_.accel_samples, 1)));
     if (params_.accel_samples <= 1) {
@@ -149,7 +147,6 @@ KinodynamicAstar::Result KinodynamicAstar::search(
             break;
         }
 
-        // 展开原语
         for (const double a : accels) {
             for (const double omega : omegas) {
                 // a_lat 剪枝：全程 |v·ω| ≤ a_lat_max（用起点 v 近似判定，逐细步再查）。
@@ -158,7 +155,6 @@ KinodynamicAstar::Result KinodynamicAstar::search(
 
                 for (int k = 0; k < substeps; ++k) {
                     const State previous = s;
-                    // 前向积分（半隐式：先更新 v，再用中点朝向推进位置）。
                     const double v_next = s.v + a * sub_dt;
                     if (v_next < params_.state_limits.velocity.min - EPS
                         || v_next > params_.state_limits.velocity.max + EPS) {
@@ -166,7 +162,6 @@ KinodynamicAstar::Result KinodynamicAstar::search(
                         break;
                     }
                     const double v_mid = 0.5 * (s.v + v_next);
-                    // a_lat 剪枝
                     if (std::abs(v_mid * omega)
                         > params_.state_limits.lateral_acceleration_max + EPS) {
                         feasible_primitive = false;
@@ -190,7 +185,6 @@ KinodynamicAstar::Result KinodynamicAstar::search(
                 const double h = heuristic(s);
                 if (std::isinf(h)) continue;
 
-                // 边代价：时长 + 倒车惩罚。
                 double edge_cost = params_.time_weight * dt;
                 if (s.v < 0.0) edge_cost += params_.reverse_weight * std::abs(s.v) * dt;
                 const double new_g = cur.g + edge_cost;

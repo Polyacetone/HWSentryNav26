@@ -35,7 +35,7 @@ TaskCommandView TaskManager::command_view() const {
     };
 }
 
-// New semantic goals replace the committed task, but the old path may continue until a new route is ready.
+// 新语义目标立即替换已提交任务，但旧路径可继续执行至新路径就绪。
 void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool preemptible) {
     if (!incoming) return;
 
@@ -59,7 +59,7 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
     );
 }
 
-// Recovery replan events keep the semantic goal but may change the execution form.
+// 恢复重规划保留任务语义，但可能改变执行形式。
 void TaskManager::ingest_executor_replan_event(const bool event) {
     if (!event) return;
 
@@ -76,7 +76,7 @@ void TaskManager::ingest_executor_replan_event(const bool event) {
     RCLCPP_INFO(logger_, "executor_replan_event → drop path/hold, replan current goal");
 }
 
-// Planner results are accepted only when they still match the committed goal and current motion phase.
+// 只接纳仍匹配已提交目标和当前运动阶段的规划结果。
 void TaskManager::poll_planner_result(const bool preemptible) {
     auto result = planner_->try_take_result();
     if (!result) return;
@@ -130,7 +130,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
     }
 }
 
-// Planning is dispatched from one gate so event handlers only mark intent.
+// 统一从此处派发规划，事件处理函数只记录意图。
 bool TaskManager::maybe_submit_plan(
     const bool preemptible,
     const PlanRequestSnapshot& snapshot,
@@ -181,7 +181,7 @@ void TaskManager::on_route_invalid(const ReplanReason reason) {
     RCLCPP_INFO(logger_, "Path invalid (%s) → drop path, replan", replan_reason_str(reason));
 }
 
-// A completion event is valid only while its exact immutable path package remains active.
+// 仅当原始不可变路径包仍在执行时，完成事件才有效。
 void TaskManager::ingest_goal_reached(const bool goal_reached, const AnnotatedPath::ConstPtr& reached_path) {
     if (!goal_reached) return;
 

@@ -9,7 +9,7 @@
 
 namespace nav_executor {
 
-constexpr int MPC_HORIZON = 60;
+constexpr int MPC_HORIZON = 40;
 constexpr double MPC_DT = 0.05;
 constexpr int MPC_NX = 10;
 constexpr int MPC_NU = 3;

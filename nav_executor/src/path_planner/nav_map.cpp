@@ -5,10 +5,6 @@
 
 namespace nav_executor {
 
-// ════════════════════════════════════════════════════════════════
-//  CostMap
-// ════════════════════════════════════════════════════════════════
-
 CostMap::CostMap(int width, int height, double resolution, double origin_x, double origin_y, const std::vector<uint8_t>& data):
     width(width), height(height), resolution(resolution), origin_x(origin_x), origin_y(origin_y), data(data) {}
 
@@ -81,10 +77,6 @@ Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
     }
     return sum_grad / samples;
 }
-
-// ════════════════════════════════════════════════════════════════
-//  DirectionMap
-// ════════════════════════════════════════════════════════════════
 
 namespace {
 
@@ -221,9 +213,7 @@ DirectionMap::DirectionSample DirectionMap::interpolate_with_gradient(const Eige
 
     DirectionSample result;
     result.value = (1 - dx) * (1 - dy) * d00 + dx * (1 - dy) * d10 + (1 - dx) * dy * d01 + dx * dy * d11;
-    // d(value)/dx = (1-dy)*(d10-d00) + dy*(d11-d01)
     result.gradient.col(0) = (1 - dy) * (d10 - d00) + dy * (d11 - d01);
-    // d(value)/dy = (1-dx)*(d01-d00) + dx*(d11-d10)
     result.gradient.col(1) = (1 - dx) * (d01 - d00) + dx * (d11 - d10);
     return result;
 }

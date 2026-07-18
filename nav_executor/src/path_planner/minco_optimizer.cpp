@@ -13,16 +13,14 @@ namespace {
 constexpr int DIM = MincoMinJerk::DIM;
 constexpr int NCOEF = MincoMinJerk::NCOEF;
 constexpr double EPS = 1e-9;
-// ω 分母速度正则尺度（与 MincoTrajectory 一致，保证优化目标与跟随参考的 ω 定义相同）。
+// 与轨迹求值使用同一角速度正则，保证优化目标和跟随参考一致。
 constexpr double OMEGA_SPEED_REG = 0.05;
 constexpr double OMEGA_SPEED_REG_SQ = OMEGA_SPEED_REG * OMEGA_SPEED_REG;
 
-// 平滑 relu 及其导数（约束罚：违反量 g>0 时二次惩罚）。
 inline double violation(double g) { return std::max(g, 0.0); }
 inline double violation_grad(double g) { return g > 0.0 ? 1.0 : 0.0; }
 
-// C1 光滑门控 smoothstep：x<lo → 0，x>hi → 1，区间内 3t²−2t³ 过渡。
-// 返回 {值, d值/dx}。用于把方向地形罚在台阶边界连续开关，消除代价断崖。
+// 用 C1 过渡启停地形罚，避免台阶边界出现代价跳变。
 inline std::pair<double, double> smoothstep_gate(double x, double lo, double hi) {
     if (hi <= lo) return {x >= hi ? 1.0 : 0.0, 0.0};
     const double t = (x - lo) / (hi - lo);
@@ -33,8 +31,7 @@ inline std::pair<double, double> smoothstep_gate(double x, double lo, double hi)
     return {value, dvalue};
 }
 
-// 1 on [0, radius], 0 on [radius+transition, +inf), with a C1 transition.
-// Returns {value, dvalue/ddistance}.
+// 在助跑范围外以 C1 过渡衰减。
 inline std::pair<double, double> runup_distance_gate(
     const double distance, const double radius, const double transition
 ) {
@@ -57,13 +54,12 @@ inline double virtual_to_time_grad(double tau_v) {
 }
 inline double time_to_virtual(double t, double min_t) {
     const double sp = std::max(t - min_t, 1e-6);
-    // 反 softplus：ln(e^{sp}-1)
     return sp > 30.0 ? sp : std::log(std::expm1(sp));
 }
 
 } // anonymous namespace
 
-// ── 优化工作区：一次 optimize 内复用，避免反复分配 ──
+// 单次优化复用的工作区。
 struct MincoOptimizer::Workspace {
     int n_segments = 0;
     int n_waypoints = 0; // n_segments - 1
@@ -129,8 +125,7 @@ double MincoOptimizer::accumulate_penalties(
     std::vector<LookaheadSample> lookahead_samples;
     lookahead_samples.reserve(static_cast<size_t>(n * samples_per_segment));
 
-    // Cache the ordered trajectory samples once. Direction magnitude supplies the continuous
-    // terrain strength; bilinear one-hot label weights only select the discrete terrain profile.
+    // 方向场幅值决定连续强度，双线性标签权重只用于选择离散地形配置。
     for (int seg = 0; seg < n; ++seg) {
         const double T = ws.times[static_cast<size_t>(seg)];
         const int c_off = NCOEF * seg;
@@ -272,8 +267,7 @@ double MincoOptimizer::accumulate_penalties(
         );
     }
 
-    // Reverse the non-local lookahead gate to sample positions and arc measures. A range
-    // difference array accumulates dD_ij/d(ds_k) for every k in [i, j) in O(M^2).
+    // 反传前视门控对采样位置和弧长的梯度；差分数组将区间贡献累积到各采样点。
     std::vector<Eigen::Vector2d> lookahead_position_gradient(
         static_cast<size_t>(sample_count), Eigen::Vector2d::Zero()
     );
@@ -375,7 +369,6 @@ double MincoOptimizer::accumulate_penalties(
                 b3[0] = 0.0; b3[1] = 0.0; b3[2] = 0.0; tp = 1.0;
                 for (int k = 3; k < NCOEF; ++k) { b3[k] = k * (k - 1) * (k - 2) * tp; tp *= t; }
             }
-            // 平坦物理量（对真实时间 t）
             double px = 0, py = 0;
             double vx = 0, vy = 0;
             double ax = 0, ay = 0;
@@ -393,10 +386,8 @@ double MincoOptimizer::accumulate_penalties(
 
             const double dt = T / static_cast<double>(S); // 积分测度
 
-            // 密度 ρ 及其对 (px,py,vx,vy,ax,ay) 的梯度。
             double density = 0.0;
             double gpx = 0, gpy = 0, gvx = 0, gvy = 0, gax = 0, gay = 0;
-            // 分项密度（诊断用，terms 非空时按 dt 加权累积到 terms）。
             double d_obstacle = 0, d_velocity = 0, d_lateral_acc = 0;
             double d_omega = 0, d_accel = 0, d_traversal_alignment = 0;
             double d_traversal_velocity = 0, d_prohibited_traversal = 0;
@@ -673,8 +664,7 @@ double MincoOptimizer::accumulate_penalties(
         }
     }
 
-    // Map the non-local lookahead adjoints back to polynomial coefficients and explicit segment
-    // times. arc_measure=dt*|v|; sample local time is T*(s/S).
+    // 将前视门控的非局部梯度回传到多项式系数和显式段时长。
     for (int sample_index = 0; sample_index < sample_count; ++sample_index) {
         const auto& sample = lookahead_samples[static_cast<size_t>(sample_index)];
         const int c_off = NCOEF * sample.segment;
@@ -715,7 +705,6 @@ double MincoOptimizer::evaluate(Workspace& ws, const Eigen::VectorXd& vars, Eige
     const int nw = ws.n_waypoints;
     const int time_offset = DIM * nw;
 
-    // 解包决策变量：[waypoints DIM×nw] + [virtual times n]
     for (int i = 0; i < nw; ++i) {
         ws.waypoints(0, i) = vars(DIM * i + 0);
         ws.waypoints(1, i) = vars(DIM * i + 1);
@@ -784,7 +773,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     }
     ws.waypoints.setZero(DIM, std::max(n - 1, 0));
 
-    // 初值：内部路点取 seed 中间状态位置，虚拟时间由 seed_durations。
     for (int i = 0; i < n - 1; ++i) {
         ws.waypoints.col(i) = seed_states[static_cast<size_t>(i + 1)].pos;
     }
@@ -808,7 +796,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         return evaluate(ws, x, g);
     };
 
-    // 梯度自检：解析 vs 中心差分（诊断用）。
     if (params_.debug_check_gradient) {
         Eigen::VectorXd g_analytic(vars.size());
         evaluate(ws, vars, g_analytic);
@@ -835,12 +822,11 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         result.grad_check_num_time_vars = n;
     }
 
-    // 收敛诊断：记录种子处分项代价、初始梯度范数、自由路点初值位置。
     Eigen::VectorXd seed_vars;
     if (params_.debug_diagnostics) {
         seed_vars = vars;
         Eigen::VectorXd g_seed(vars.size());
-        evaluate(ws, vars, g_seed); // 重建 ws 至种子解
+        evaluate(ws, vars, g_seed);
         Eigen::MatrixXd grad_c_dbg;
         Eigen::VectorXd grad_t_dbg;
         accumulate_penalties(ws, grad_c_dbg, grad_t_dbg, &result.seed_costs);
@@ -857,19 +843,16 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         return result;
     }
 
-    // 最终解：确保 ws 反映最终 vars。
     Eigen::VectorXd scratch_grad(vars.size());
     evaluate(ws, vars, scratch_grad);
     result.trajectory = ws.minco.to_trajectory(ws.gears);
     result.cost = lr.cost;
     result.success = true;
 
-    // 收敛诊断：最终分项代价 + 自由路点位移（相对种子）。
     if (params_.debug_diagnostics) {
         Eigen::MatrixXd grad_c_dbg;
         Eigen::VectorXd grad_t_dbg;
         accumulate_penalties(ws, grad_c_dbg, grad_t_dbg, &result.final_costs);
-        // 最终梯度按类别拆分：前 DIM*nw 为位置变量，其余 n 为时间变量。
         double g_pos = 0.0, g_time = 0.0;
         for (int i = 0; i < time_offset; ++i) g_pos = std::max(g_pos, std::abs(scratch_grad(i)));
         for (int i = time_offset; i < scratch_grad.size(); ++i) g_time = std::max(g_time, std::abs(scratch_grad(i)));

@@ -1,8 +1,6 @@
 #pragma once
 
-/// @file fddp_solver.hpp
-/// @brief Feasibility-driven DDP solver with trust-region, filter line-search,
-///        and control-limited (box-constrained) backward pass.
+// 可行性驱动的 DDP：后向传递处理控制量边界，前向搜索同时受信赖域与滤波准则约束。
 
 #include <algorithm>
 #include <array>
@@ -29,9 +27,9 @@ template<typename P>
 using FuMat = Eigen::Matrix<double, Dims<P>::NX, Dims<P>::NU>;
 
 struct SolverOptions {
-    int max_iters = 30;
-    double tol_grad = 1e-6;
-    double tol_cost = 1e-8;
+    int max_iters = 0;
+    double tol_grad = 0.0;
+    double tol_cost = 0.0;
 
     double mu_init = 1e-6;
     double mu_min = 1e-9;
@@ -291,8 +289,7 @@ bool Solver<P>::solve_box_qp(
         K.row(f).noalias() = -gx.row(f) / hff;
         return true;
     } else {
-        // 枚举每个控制量的 free/lower/upper 状态。MPCC 的 NU=3，仅 27 种组合；
-        // 相比逐元素截断，这会正确计入激活边界与自由变量之间的 Hessian 耦合。
+        // NU=3 时仅有 27 种活跃集。枚举可保留边界变量与自由变量之间的 Hessian 耦合。
         constexpr int ACTIVE_SET_COUNT = [] {
             int count = 1;
             for (int i = 0; i < NU; ++i) count *= 3;

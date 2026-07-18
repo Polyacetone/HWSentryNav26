@@ -67,7 +67,7 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajec
         }
     }
 
-    // 1) 生成台阶额外代价层：乘法软擦除 cost <- cost*(1-alpha)
+    // 路径附近降低台阶代价，使该路径对应的台阶保持可通行。
     std::vector<uint8_t> step_cost_data = base_step_cost_data_;
     for (size_t idx = 0; idx < step_cost_data.size(); ++idx) {
         const double a = std::clamp(max_alpha[idx], 0.0, 1.0);
@@ -85,7 +85,7 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajec
         step_cost_data
     );
 
-    // 2) 生成掩码后的方向场：乘法软保留 dir <- dir*alpha
+    // 仅保留路径附近的方向场，避免控制器误用其他台阶约束。
     std::vector<Eigen::Vector2d> masked_dir_data;
     masked_dir_data.reserve(base_direction_map_->data.size());
     for (size_t idx = 0; idx < base_direction_map_->data.size(); ++idx) {

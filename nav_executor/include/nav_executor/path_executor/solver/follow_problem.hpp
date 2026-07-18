@@ -11,8 +11,7 @@
 
 namespace nav_executor {
 
-// MINCO 全状态轨迹上的 MPCC。PHASE_TIME 是秒制轨迹相位，第三控制量直接决定相位推进率；
-// PHASE_RATE 保存上一拍相位率用于平滑。物理状态与虚拟相位在同一个 FDDP 问题内联合优化。
+// 跟踪问题把物理状态与虚拟相位一并优化。第三控制量直接决定相位推进率，避免参考进度与车辆运动脱节。
 template<int Horizon>
 class FollowProblemT {
 public:

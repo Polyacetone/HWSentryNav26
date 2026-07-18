@@ -6,10 +6,8 @@
 
 namespace nav_executor {
 
-// ── 有限内存 BFGS 无约束最小化器 ──
-//
-// 两段循环递归近似逆 Hessian，配合 Armijo 回溯线搜索。历史对 (s, y) 中曲率
-// sᵀy ≤ 0 时跳过更新以保持正定。
+// 有限内存 BFGS。强 Wolfe 搜索失败时回退到已探测到的最佳 Armijo 下降点；
+// 曲率非正的历史对会被丢弃，以维持逆 Hessian 近似正定。
 class LbfgsMinimizer {
 public:
     struct Options {
@@ -36,12 +34,10 @@ public:
         double grad_inf_norm = 0.0;
     };
 
-    // 目标：填充 grad，返回代价。x 与 grad 同维。
     using CostFunction = std::function<double(const Eigen::VectorXd& x, Eigen::VectorXd& grad)>;
 
     explicit LbfgsMinimizer(Options options) : opt_(options) {}
 
-    // 就地最小化，x 既是初值也是输出。
     Result minimize(const CostFunction& cost_fn, Eigen::VectorXd& x) const;
 
 private:

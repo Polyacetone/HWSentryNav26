@@ -15,10 +15,6 @@ namespace nav_executor {
 class CostMap;
 class DirectionMap;
 
-// ════════════════════════════════════════════════════════════════
-//  地形标签
-// ════════════════════════════════════════════════════════════════
-
 enum class TerrainType : uint8_t {
     FLAT = 0,
     OBSTACLE = 1,
@@ -30,19 +26,11 @@ enum class TerrainType : uint8_t {
 };
 constexpr size_t TERRAIN_LABEL_COUNT = 7;
 
-// ════════════════════════════════════════════════════════════════
-//  地形跨越模式与规划期约束
-// ════════════════════════════════════════════════════════════════
-
 struct TerrainRule {
     bool forward_allowed = true;
     bool backward_allowed = true;
 };
 using TerrainRuleTable = std::array<TerrainRule, TERRAIN_LABEL_COUNT>;
-
-// ════════════════════════════════════════════════════════════════
-//  能力档位 / 地形 profile（供 executor 台阶模式 + MPC 约束）
-// ════════════════════════════════════════════════════════════════
 
 struct SignedVelocityBounds {
     double min;
@@ -85,8 +73,7 @@ inline CapabilityLevel capability_level_from_string(const std::string& s) {
     throw std::invalid_argument("Unknown capability level: \"" + s + "\" (expected low/medium/high)");
 }
 
-// 台阶穿越时对 v_act/v_pred 的共享速度窗口。A* 将其作为可行性条件，MINCO/MPCC
-// 将其作为软目标；该类型本身不隐含 enforcement 方式。
+// 台阶穿越的共享速度窗。A* 将其视为可行性条件，MINCO 和 MPCC 将其作为软目标。
 struct TraversalVelocityWindow {
     double min = 0.0;
     double max = 0.0;
@@ -98,7 +85,7 @@ struct TraversalMode {
     CapabilityLevel capability = CapabilityLevel::LOW;
     TraversalVelocityWindow velocity_window;
     bool requires_high_performance = false;
-    double run_up = 0.0; // 助跑提前量 (m)：约束锚点自物理台阶边缘上游回退该距离（冲量动作填 0）
+    double run_up = 0.0; // 约束锚点距物理边缘的上游距离；冲量动作填 0。
 };
 
 struct DirectionalTraversalModes {
@@ -139,10 +126,6 @@ struct TerrainTraversalConstraints {
     PerformanceState performance
 );
 
-// ════════════════════════════════════════════════════════════════
-//  代价地图
-// ════════════════════════════════════════════════════════════════
-
 class CostMap {
 public:
     using Ptr = std::shared_ptr<CostMap>;
@@ -168,10 +151,6 @@ public:
     const std::vector<uint8_t> data;
 };
 
-// ════════════════════════════════════════════════════════════════
-//  方向场地图（携带方向向量 + 地形标签 + 双份只读配置）
-// ════════════════════════════════════════════════════════════════
-
 class DirectionMap {
 public:
     using Ptr = std::shared_ptr<DirectionMap>;
@@ -179,7 +158,7 @@ public:
 
     struct DirectionSample {
         Eigen::Vector2d value;
-        Eigen::Matrix2d gradient; // d(value)/d(grid_coord)，每列对应 grid_x/grid_y 偏导
+        Eigen::Matrix2d gradient; // 每列分别是对 grid_x、grid_y 的偏导。
     };
 
     explicit DirectionMap(
