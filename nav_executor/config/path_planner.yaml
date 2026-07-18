@@ -50,8 +50,11 @@
           lateral_acc: 100.0 # |v·ω| ≤ a_lat
           omega: 100.0 # |ω| 界
           accel: 100.0 # |a| 界
-          step_alignment: 500.0 # 台阶内车身轴与方向场对齐
+          step_alignment: 1000.0 # 台阶内车身轴与方向场对齐
           step_velocity: 200.0 # 台阶内按所选模式约束速度窗
+          step_prohibited: 1000.0 # 禁止方向的穿越罚
+          runup_accel: 100.0 # 台阶及助跑区内 ‖a‖² 正则，使加减速在助跑区前完成
+          runup_omega: 100.0 # 台阶及助跑区内 ω² 正则，使转向在助跑区前完成
         limits:
           vel_max: 2.0 # 线速度上限 (m/s)
           vel_min: -1.6 # 线速度下限 (m/s)
@@ -62,7 +65,9 @@
           norm_lo: 0.1 # ‖dir‖ 下限：低于则方向地形罚为零
           norm_hi: 0.9 # ‖dir‖ 上限：高于则方向地形罚全强度
         samples_per_segment: 16 # 每段约束采样点数
-        step_entry_window_fraction: 0.25 # 入口前后相邻段施加软速度窗的局部比例
+        runup:
+          saturation_length: 0.05 # 未来方向地形暴露积分的饱和弧长尺度 (m)
+          transition_distance: 0.1 # run_up 边界外侧的平滑弧长过渡带 (m)
         max_iterations: 2000 # L-BFGS 最大迭代
         min_segment_time: 0.05 # 段时长下限 (s)
         validation:

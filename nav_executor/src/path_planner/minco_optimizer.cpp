@@ -1,6 +1,7 @@
 #include <nav_executor/path_planner/minco_optimizer.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include <nav_executor/path_planner/lbfgs_minimizer.hpp>
@@ -30,6 +31,19 @@ inline std::pair<double, double> smoothstep_gate(double x, double lo, double hi)
     const double value = t * t * (3.0 - 2.0 * t);
     const double dvalue = 6.0 * t * (1.0 - t) / (hi - lo);
     return {value, dvalue};
+}
+
+// 1 on [0, radius], 0 on [radius+transition, +inf), with a C1 transition.
+// Returns {value, dvalue/ddistance}.
+inline std::pair<double, double> runup_distance_gate(
+    const double distance, const double radius, const double transition
+) {
+    if (distance <= radius) return {1.0, 0.0};
+    if (transition <= 0.0 || distance >= radius + transition) return {0.0, 0.0};
+    const double x = (radius + transition - distance) / transition;
+    const double value = x * x * (3.0 - 2.0 * x);
+    const double derivative = -6.0 * x * (1.0 - x) / transition;
+    return {value, derivative};
 }
 
 // 虚拟时间正性重参数化：T = softplus(tau_v) = ln(1+e^{tau_v})，保证 T>0 且光滑。
@@ -65,11 +79,6 @@ struct MincoOptimizer::Workspace {
     std::vector<double> gears;          // 每段 ±1
     std::vector<char> cusp;             // 每内部节点是否尖点（size n-1）
 
-    // 硬中间路点：index → 固定 pos（2D）。速度不固定。
-    std::vector<bool> waypoint_is_hard;
-    std::vector<Eigen::Vector2d> hard_pos;
-    std::vector<MincoOptimizer::StepEntrySpeedWindow> step_entry_speed_windows;
-
     // 当前解缓存
     Eigen::Matrix<double, DIM, Eigen::Dynamic> waypoints;
     std::vector<double> times;
@@ -95,6 +104,225 @@ double MincoOptimizer::accumulate_penalties(
     grad_c.setZero(NCOEF * n, DIM);
     grad_t_explicit.setZero(n);
     if (terms) *terms = CostTerms {};
+
+    struct RunupSource {
+        double value = 0.0;
+        double radius = 0.0;
+        Eigen::Vector2d position_gradient = Eigen::Vector2d::Zero();
+    };
+    struct LookaheadSample {
+        int segment = 0;
+        double local_time = 0.0;
+        double dt = 0.0;
+        double sample_time_fraction = 0.0;
+        Eigen::Vector2d position = Eigen::Vector2d::Zero();
+        Eigen::Vector2d velocity = Eigen::Vector2d::Zero();
+        Eigen::Vector2d acceleration = Eigen::Vector2d::Zero();
+        double speed = 0.0;
+        double omega = 0.0;
+        double arc_measure = 0.0;
+        std::array<RunupSource, TERRAIN_LABEL_COUNT - 2> sources;
+        int source_count = 0;
+    };
+
+    const int samples_per_segment = std::max(params_.samples_per_segment, 1);
+    std::vector<LookaheadSample> lookahead_samples;
+    lookahead_samples.reserve(static_cast<size_t>(n * samples_per_segment));
+
+    // Cache the ordered trajectory samples once. Direction magnitude supplies the continuous
+    // terrain strength; bilinear one-hot label weights only select the discrete terrain profile.
+    for (int seg = 0; seg < n; ++seg) {
+        const double T = ws.times[static_cast<size_t>(seg)];
+        const int c_off = NCOEF * seg;
+        for (int sample_index = 0; sample_index < samples_per_segment; ++sample_index) {
+            const double fraction = static_cast<double>(sample_index)
+                / static_cast<double>(samples_per_segment);
+            const double t = T * fraction;
+            double b0[NCOEF], b1[NCOEF], b2[NCOEF];
+            double tp = 1.0;
+            for (int k = 0; k < NCOEF; ++k) { b0[k] = tp; tp *= t; }
+            b1[0] = 0.0;
+            tp = 1.0;
+            for (int k = 1; k < NCOEF; ++k) { b1[k] = k * tp; tp *= t; }
+            b2[0] = 0.0;
+            b2[1] = 0.0;
+            tp = 1.0;
+            for (int k = 2; k < NCOEF; ++k) { b2[k] = k * (k - 1) * tp; tp *= t; }
+
+            LookaheadSample sample;
+            sample.segment = seg;
+            sample.local_time = t;
+            sample.dt = T / static_cast<double>(samples_per_segment);
+            sample.sample_time_fraction = fraction;
+            for (int k = 0; k < NCOEF; ++k) {
+                sample.position.x() += coeffs(c_off + k, 0) * b0[k];
+                sample.position.y() += coeffs(c_off + k, 1) * b0[k];
+                sample.velocity.x() += coeffs(c_off + k, 0) * b1[k];
+                sample.velocity.y() += coeffs(c_off + k, 1) * b1[k];
+                sample.acceleration.x() += coeffs(c_off + k, 0) * b2[k];
+                sample.acceleration.y() += coeffs(c_off + k, 1) * b2[k];
+            }
+            sample.speed = sample.velocity.norm();
+            sample.arc_measure = sample.dt * sample.speed;
+            const double speed2 = sample.velocity.squaredNorm();
+            sample.omega = (
+                sample.velocity.x() * sample.acceleration.y()
+                - sample.velocity.y() * sample.acceleration.x()
+            ) / (speed2 + OMEGA_SPEED_REG_SQ);
+
+            if (ws.direction_map && ws.terrain_constraints && sample.speed > SPEED_EPS) {
+                const Eigen::Vector2d grid = ws.direction_map->map_coord_to_grid(sample.position);
+                if (ws.direction_map->is_valid_coord(grid)) {
+                    const auto direction_sample = ws.direction_map->interpolate_with_gradient(grid);
+                    const double direction_norm = direction_sample.value.norm();
+                    const auto [terrain_gate, dgate_dnorm] = smoothstep_gate(
+                        direction_norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi
+                    );
+                    if (terrain_gate > 0.0 && direction_norm > EPS) {
+                        const Eigen::Vector2d direction = direction_sample.value / direction_norm;
+                        const Eigen::Vector2d dnorm_dpos =
+                            (direction_sample.gradient.transpose() * direction)
+                            / ws.direction_map->resolution;
+                        const Eigen::Vector2d dgate_dpos = dgate_dnorm * dnorm_dpos;
+                        const bool going_up = sample.velocity.dot(direction) >= 0.0;
+
+                        const int x0 = static_cast<int>(std::floor(grid.x()));
+                        const int y0 = static_cast<int>(std::floor(grid.y()));
+                        const double tx = grid.x() - static_cast<double>(x0);
+                        const double ty = grid.y() - static_cast<double>(y0);
+                        struct Corner {
+                            Eigen::Vector2i grid;
+                            double weight;
+                            Eigen::Vector2d gradient_grid;
+                        };
+                        const std::array<Corner, 4> corners {{
+                            {{x0, y0}, (1.0 - tx) * (1.0 - ty), {-(1.0 - ty), -(1.0 - tx)}},
+                            {{x0 + 1, y0}, tx * (1.0 - ty), {1.0 - ty, -tx}},
+                            {{x0, y0 + 1}, (1.0 - tx) * ty, {-ty, 1.0 - tx}},
+                            {{x0 + 1, y0 + 1}, tx * ty, {ty, tx}},
+                        }};
+
+                        std::array<double, TERRAIN_LABEL_COUNT> label_weights {};
+                        std::array<Eigen::Vector2d, TERRAIN_LABEL_COUNT> label_gradients;
+                        label_gradients.fill(Eigen::Vector2d::Zero());
+                        for (const Corner& corner : corners) {
+                            const uint8_t label = ws.direction_map->terrain_at(corner.grid);
+                            if (label >= TERRAIN_LABEL_COUNT) continue;
+                            label_weights[label] += corner.weight;
+                            label_gradients[label] += corner.gradient_grid
+                                / ws.direction_map->resolution;
+                        }
+
+                        for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE);
+                             label < TERRAIN_LABEL_COUNT; ++label) {
+                            const double label_weight = label_weights[label];
+                            if (label_weight <= 0.0) continue;
+                            const TerrainStepRule* rule =
+                                ws.terrain_constraints->selected_mode(label, going_up);
+                            if (!rule) continue;
+                            sample.sources[static_cast<size_t>(sample.source_count++)] = RunupSource {
+                                .value = terrain_gate * label_weight,
+                                .radius = rule->run_up,
+                                .position_gradient = label_weight * dgate_dpos
+                                    + terrain_gate * label_gradients[label],
+                            };
+                        }
+                    }
+                }
+            }
+            lookahead_samples.push_back(std::move(sample));
+        }
+    }
+
+    const int sample_count = static_cast<int>(lookahead_samples.size());
+    double max_runup_radius = 0.0;
+    if (ws.terrain_constraints) {
+        for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE);
+             label < TERRAIN_LABEL_COUNT; ++label) {
+            for (const bool going_up : {false, true}) {
+                if (const TerrainStepRule* rule =
+                        ws.terrain_constraints->selected_mode(label, going_up)) {
+                    max_runup_radius = std::max(max_runup_radius, rule->run_up);
+                }
+            }
+        }
+    }
+    const double lookahead_limit = max_runup_radius + params_.runup_transition_distance;
+    std::vector<double> runup_exposure(static_cast<size_t>(sample_count), 0.0);
+    std::vector<double> runup_gate(static_cast<size_t>(sample_count), 0.0);
+    for (int i = 0; i < sample_count; ++i) {
+        double distance = 0.0;
+        double exposure = 0.0;
+        for (int j = i; j < sample_count; ++j) {
+            const auto& future = lookahead_samples[static_cast<size_t>(j)];
+            for (int source_index = 0; source_index < future.source_count; ++source_index) {
+                const RunupSource& source = future.sources[static_cast<size_t>(source_index)];
+                const auto [distance_gate, unused] = runup_distance_gate(
+                    distance, source.radius, params_.runup_transition_distance
+                );
+                (void)unused;
+                exposure += source.value * distance_gate * future.arc_measure;
+            }
+            distance += future.arc_measure;
+            if (distance > lookahead_limit) break;
+        }
+        runup_exposure[static_cast<size_t>(i)] = exposure;
+        runup_gate[static_cast<size_t>(i)] = 1.0 - std::exp(
+            -exposure / params_.runup_saturation_length
+        );
+    }
+
+    // Reverse the non-local lookahead gate to sample positions and arc measures. A range
+    // difference array accumulates dD_ij/d(ds_k) for every k in [i, j) in O(M^2).
+    std::vector<Eigen::Vector2d> lookahead_position_gradient(
+        static_cast<size_t>(sample_count), Eigen::Vector2d::Zero()
+    );
+    std::vector<double> arc_measure_gradient(static_cast<size_t>(sample_count), 0.0);
+    std::vector<double> arc_range_difference(static_cast<size_t>(sample_count + 1), 0.0);
+    for (int i = 0; i < sample_count; ++i) {
+        const auto& current = lookahead_samples[static_cast<size_t>(i)];
+        const double acceleration_density = 0.5 * w.runup_accel
+            * current.acceleration.squaredNorm();
+        const double omega_density = 0.5 * w.runup_omega * current.omega * current.omega;
+        const double dcost_dexposure = current.dt
+            * (acceleration_density + omega_density)
+            * std::exp(-runup_exposure[static_cast<size_t>(i)]
+                / params_.runup_saturation_length)
+            / params_.runup_saturation_length;
+        if (dcost_dexposure == 0.0) continue;
+
+        double distance = 0.0;
+        for (int j = i; j < sample_count; ++j) {
+            const auto& future = lookahead_samples[static_cast<size_t>(j)];
+            for (int source_index = 0; source_index < future.source_count; ++source_index) {
+                const RunupSource& source = future.sources[static_cast<size_t>(source_index)];
+                const auto [distance_gate, dgate_ddistance] = runup_distance_gate(
+                    distance, source.radius, params_.runup_transition_distance
+                );
+                if (distance_gate <= 0.0 && dgate_ddistance == 0.0) continue;
+                const double source_scale = dcost_dexposure
+                    * distance_gate * future.arc_measure;
+                lookahead_position_gradient[static_cast<size_t>(j)] +=
+                    source_scale * source.position_gradient;
+                arc_measure_gradient[static_cast<size_t>(j)] +=
+                    dcost_dexposure * source.value * distance_gate;
+
+                if (j > i && dgate_ddistance != 0.0) {
+                    const double range_scale = dcost_dexposure * source.value
+                        * future.arc_measure * dgate_ddistance;
+                    arc_range_difference[static_cast<size_t>(i)] += range_scale;
+                    arc_range_difference[static_cast<size_t>(j)] -= range_scale;
+                }
+            }
+            distance += future.arc_measure;
+            if (distance > lookahead_limit) break;
+        }
+    }
+    double accumulated_range_gradient = 0.0;
+    for (int i = 0; i < sample_count; ++i) {
+        accumulated_range_gradient += arc_range_difference[static_cast<size_t>(i)];
+        arc_measure_gradient[static_cast<size_t>(i)] += accumulated_range_gradient;
+    }
 
     for (int seg = 0; seg < n; ++seg) {
         const double T = ws.times[static_cast<size_t>(seg)];
@@ -171,6 +399,8 @@ double MincoOptimizer::accumulate_penalties(
             // 分项密度（诊断用，terms 非空时按 dt 加权累积到 terms）。
             double d_obstacle = 0, d_velocity = 0, d_lateral_acc = 0;
             double d_omega = 0, d_accel = 0, d_step_alignment = 0, d_step_velocity = 0;
+            double d_step_prohibited = 0;
+            double d_runup_accel = 0, d_runup_omega = 0;
 
             const double speed2 = vx * vx + vy * vy;
             const double speed = std::sqrt(speed2);
@@ -239,24 +469,6 @@ double MincoOptimizer::accumulate_penalties(
                 gvy += dv * dvs_dvy;
             }
 
-            // 台阶入口相邻两段的软速度窗（带符号 v）。
-            for (const auto& entry : ws.step_entry_speed_windows) {
-                const double fraction = static_cast<double>(s) / static_cast<double>(S);
-                const bool in_incoming_window = seg == entry.waypoint_index
-                    && fraction >= 1.0 - params_.step_entry_window_fraction;
-                const bool in_outgoing_window = seg == entry.waypoint_index + 1
-                    && fraction <= params_.step_entry_window_fraction;
-                if (!in_incoming_window && !in_outgoing_window) continue;
-                const double over = v_signed - entry.speed_max;
-                const double under = entry.speed_min - v_signed;
-                const double go = violation(over), gu = violation(under);
-                density += w.step_velocity * 0.5 * (go * go + gu * gu);
-                if (terms) d_step_velocity += w.step_velocity * 0.5 * (go * go + gu * gu);
-                const double dv = w.step_velocity * (go - gu);
-                gvx += dv * dvs_dvx;
-                gvy += dv * dvs_dvy;
-            }
-
             // ∂ω/∂(vx,vy,ax,ay)
             const double inv_den = 1.0 / omega_den;
             const double domega_dvx = ay * inv_den - cross * 2.0 * vx * inv_den * inv_den;
@@ -304,11 +516,31 @@ double MincoOptimizer::accumulate_penalties(
                 gay += coeff * ay;
             }
 
-            // 方向地形约束：运动方向与方向场共线（模 π），并满足所选模式速度窗。
-            // 门控 gate=smoothstep(‖dir‖) 连续开关，替代 label/阈值硬开关，保证目标沿采样点
-            // 位移分段光滑（strong Wolfe 前提）。gate 依赖位置，其梯度按乘积法则流回 gpx/gpy。
+            // 台阶及助跑区状态正则。runup gate 由当前轨迹向前的饱和弧长积分给出；
+            // 其非局部位置/弧长梯度在主循环后统一回传，这里只累积局部 a/ω 导数。
+            const int flat_sample_index = seg * S + s;
+            const double approach_gate = runup_gate[static_cast<size_t>(flat_sample_index)];
+            if (approach_gate > 0.0) {
+                const double runup_accel_density = 0.5 * w.runup_accel * (ax * ax + ay * ay);
+                const double runup_omega_density = 0.5 * w.runup_omega * omega * omega;
+                density += approach_gate * (runup_accel_density + runup_omega_density);
+                if (terms) {
+                    d_runup_accel += approach_gate * runup_accel_density;
+                    d_runup_omega += approach_gate * runup_omega_density;
+                }
+                gax += approach_gate * w.runup_accel * ax;
+                gay += approach_gate * w.runup_accel * ay;
+                const double omega_coeff = approach_gate * w.runup_omega * omega;
+                gvx += omega_coeff * domega_dvx;
+                gvy += omega_coeff * domega_dvy;
+                gax += omega_coeff * domega_dax;
+                gay += omega_coeff * domega_day;
+            }
+
+            // 膨胀方向场连续控制对齐强度；离散 terrain label 只选择速度 profile。
             if (ws.direction_map && ws.terrain_constraints && speed_ok
-                && (w.step_alignment > 0.0 || w.step_velocity > 0.0)) {
+                && (w.step_alignment > 0.0 || w.step_velocity > 0.0
+                    || w.step_prohibited > 0.0)) {
                 const Eigen::Vector2d dg = ws.direction_map->map_coord_to_grid({px, py});
                 if (ws.direction_map->is_valid_coord(dg)) {
                     const uint8_t label = ws.direction_map->terrain_at(dg);
@@ -316,12 +548,9 @@ double MincoOptimizer::accumulate_penalties(
                         ws.direction_map->interpolate_with_gradient(dg);
                     const Eigen::Vector2d& raw_dir = direction_sample.value;
                     const double dir_norm = raw_dir.norm();
-                    // 门控只在有方向语义（label>=SLOPE）的地形上开启；标签本身离散，但其切换发生在
-                    // ‖dir‖→0 的区域（gate 已连续压到 0），故不引入代价跳变。
-                    const bool directional = label >= static_cast<uint8_t>(TerrainType::SLOPE);
-                    const auto [gate, dgate_dnorm] = directional
-                        ? smoothstep_gate(dir_norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi)
-                        : std::pair<double, double> {0.0, 0.0};
+                    const auto [gate, dgate_dnorm] = smoothstep_gate(
+                        dir_norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi
+                    );
                     if (gate > 0.0 && dir_norm > EPS) {
                         const Eigen::Vector2d dir = raw_dir / dir_norm;
                         const Eigen::Matrix2d dir_jacobian_map = (
@@ -338,6 +567,7 @@ double MincoOptimizer::accumulate_penalties(
                         // (1) 对齐罚：运动方向单位向量 u=(vx,vy)/speed；e = u×dir。
                         const double ux = vx / speed, uy = vy / speed;
                         const double e = ux * dir.y() - uy * dir.x();
+                        const double alignment = ux * dir.x() + uy * dir.y();
                         const double align_density = w.step_alignment * 0.5 * e * e;
                         terrain_density += align_density;
                         density += gate * align_density;
@@ -358,7 +588,11 @@ double MincoOptimizer::accumulate_penalties(
                         gpy += de * de_dpos.y();
 
                         // (2) 速度窗罚（所选模式）。
-                        const TerrainStepRule* rule = ws.terrain_constraints->selected_mode(label, gear >= 0.0);
+                        const TerrainStepRule* up_rule =
+                            ws.terrain_constraints->selected_mode(label, true);
+                        const TerrainStepRule* down_rule =
+                            ws.terrain_constraints->selected_mode(label, false);
+                        const TerrainStepRule* rule = alignment >= 0.0 ? up_rule : down_rule;
                         if (rule) {
                             const double over = v_signed - rule->speed.max;
                             const double under = rule->speed.min - v_signed;
@@ -371,6 +605,31 @@ double MincoOptimizer::accumulate_penalties(
                             gvx += dv * dvs_dvx;
                             gvy += dv * dvs_dvy;
                         }
+
+                        // (3) 单向禁止罚。对禁止侧的 signed alignment 做单边二次罚；
+                        // 与模 π 对齐项共同作用时，唯一低代价极小值位于允许方向。
+                        const bool directional_label =
+                            label >= static_cast<uint8_t>(TerrainType::SLOPE);
+                        const double prohibited_up = directional_label && !up_rule
+                            ? violation(alignment)
+                            : 0.0;
+                        const double prohibited_down = directional_label && !down_rule
+                            ? violation(-alignment)
+                            : 0.0;
+                        const double prohibited_density = 0.5 * w.step_prohibited
+                            * (prohibited_up * prohibited_up + prohibited_down * prohibited_down);
+                        terrain_density += prohibited_density;
+                        density += gate * prohibited_density;
+                        if (terms) d_step_prohibited += gate * prohibited_density;
+                        const double dalignment = gate * w.step_prohibited
+                            * (prohibited_up - prohibited_down);
+                        gvx += dalignment * (dir.x() * dux_dvx + dir.y() * duy_dvx);
+                        gvy += dalignment * (dir.x() * dux_dvy + dir.y() * duy_dvy);
+                        const Eigen::Vector2d alignment_dir_gradient(ux, uy);
+                        const Eigen::Vector2d alignment_position_gradient =
+                            dir_jacobian_map.transpose() * alignment_dir_gradient;
+                        gpx += dalignment * alignment_position_gradient.x();
+                        gpy += dalignment * alignment_position_gradient.y();
 
                         // gate 对位置的梯度（乘积法则）：∂(gate·terrain_density)/∂pos ⊃ terrain_density·∂gate/∂pos。
                         gpx += terrain_density * dgate_dpos.x();
@@ -388,6 +647,9 @@ double MincoOptimizer::accumulate_penalties(
                 terms->accel += dt * d_accel;
                 terms->step_alignment += dt * d_step_alignment;
                 terms->step_velocity += dt * d_step_velocity;
+                terms->step_prohibited += dt * d_step_prohibited;
+                terms->runup_accel += dt * d_runup_accel;
+                terms->runup_omega += dt * d_runup_omega;
             }
 
             // 物理量梯度（含 dt）经 β 映射回 grad_c。
@@ -407,6 +669,40 @@ double MincoOptimizer::accumulate_penalties(
         }
     }
 
+    // Map the non-local lookahead adjoints back to polynomial coefficients and explicit segment
+    // times. arc_measure=dt*|v|; sample local time is T*(s/S).
+    for (int sample_index = 0; sample_index < sample_count; ++sample_index) {
+        const auto& sample = lookahead_samples[static_cast<size_t>(sample_index)];
+        const int c_off = NCOEF * sample.segment;
+        const double arc_adjoint = arc_measure_gradient[static_cast<size_t>(sample_index)];
+        Eigen::Vector2d velocity_adjoint = Eigen::Vector2d::Zero();
+        if (sample.speed > SPEED_EPS) {
+            velocity_adjoint = arc_adjoint * sample.dt * sample.velocity / sample.speed;
+        }
+        const Eigen::Vector2d& position_adjoint =
+            lookahead_position_gradient[static_cast<size_t>(sample_index)];
+
+        double b0[NCOEF], b1[NCOEF];
+        double tp = 1.0;
+        for (int k = 0; k < NCOEF; ++k) { b0[k] = tp; tp *= sample.local_time; }
+        b1[0] = 0.0;
+        tp = 1.0;
+        for (int k = 1; k < NCOEF; ++k) { b1[k] = k * tp; tp *= sample.local_time; }
+        for (int k = 0; k < NCOEF; ++k) {
+            grad_c(c_off + k, 0) += position_adjoint.x() * b0[k]
+                + velocity_adjoint.x() * b1[k];
+            grad_c(c_off + k, 1) += position_adjoint.y() * b0[k]
+                + velocity_adjoint.y() * b1[k];
+        }
+
+        grad_t_explicit(sample.segment) += arc_adjoint * sample.speed
+            / static_cast<double>(samples_per_segment);
+        grad_t_explicit(sample.segment) += sample.sample_time_fraction * (
+            position_adjoint.dot(sample.velocity)
+            + velocity_adjoint.dot(sample.acceleration)
+        );
+    }
+
     return cost;
 }
 
@@ -417,12 +713,8 @@ double MincoOptimizer::evaluate(Workspace& ws, const Eigen::VectorXd& vars, Eige
 
     // 解包决策变量：[waypoints DIM×nw] + [virtual times n]
     for (int i = 0; i < nw; ++i) {
-        if (ws.waypoint_is_hard[static_cast<size_t>(i)]) {
-            ws.waypoints.col(i) = ws.hard_pos[static_cast<size_t>(i)];
-        } else {
-            ws.waypoints(0, i) = vars(DIM * i + 0);
-            ws.waypoints(1, i) = vars(DIM * i + 1);
-        }
+        ws.waypoints(0, i) = vars(DIM * i + 0);
+        ws.waypoints(1, i) = vars(DIM * i + 1);
     }
     for (int i = 0; i < n; ++i) {
         ws.times[static_cast<size_t>(i)] = virtual_to_time(vars(time_offset + i), params_.min_segment_time);
@@ -440,7 +732,6 @@ double MincoOptimizer::evaluate(Workspace& ws, const Eigen::VectorXd& vars, Eige
 
     grad.setZero(vars.size());
     for (int i = 0; i < nw; ++i) {
-        if (ws.waypoint_is_hard[static_cast<size_t>(i)]) continue;
         grad(DIM * i + 0) = grad_q(0, i);
         grad(DIM * i + 1) = grad_q(1, i);
     }
@@ -458,9 +749,7 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     const std::vector<char>& cusp_waypoints,
     const CostMap& cost_map,
     const DirectionMap& direction_map,
-    const TerrainTraversalConstraints& terrain_constraints,
-    const std::vector<HardWaypoint>& hard_waypoints,
-    const std::vector<StepEntrySpeedWindow>& step_entry_speed_windows
+    const TerrainTraversalConstraints& terrain_constraints
 ) const {
     Result result;
     const int n = static_cast<int>(seed_durations.size());
@@ -483,7 +772,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     ws.cost_map = &cost_map;
     ws.direction_map = &direction_map;
     ws.terrain_constraints = &terrain_constraints;
-    ws.step_entry_speed_windows = step_entry_speed_windows;
     ws.times = seed_durations;
     ws.gears = seed_gears;
     ws.cusp.assign(static_cast<size_t>(std::max(n - 1, 0)), 0);
@@ -492,22 +780,9 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     }
     ws.waypoints.setZero(DIM, std::max(n - 1, 0));
 
-    // 硬路点表（仅固定 2D 位置）。
-    ws.waypoint_is_hard.assign(static_cast<size_t>(std::max(n - 1, 0)), false);
-    ws.hard_pos.assign(static_cast<size_t>(std::max(n - 1, 0)), Eigen::Vector2d::Zero());
-    for (const auto& hw : hard_waypoints) {
-        if (hw.waypoint_index >= 0 && hw.waypoint_index < n - 1) {
-            ws.waypoint_is_hard[static_cast<size_t>(hw.waypoint_index)] = true;
-            ws.hard_pos[static_cast<size_t>(hw.waypoint_index)] = hw.position;
-        }
-    }
-
     // 初值：内部路点取 seed 中间状态位置，虚拟时间由 seed_durations。
     for (int i = 0; i < n - 1; ++i) {
         ws.waypoints.col(i) = seed_states[static_cast<size_t>(i + 1)].pos;
-        if (ws.waypoint_is_hard[static_cast<size_t>(i)]) {
-            ws.waypoints.col(i) = ws.hard_pos[static_cast<size_t>(i)];
-        }
     }
 
     const int nw = n - 1;
@@ -601,7 +876,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         double disp_max = 0.0;
         int free_count = 0;
         for (int i = 0; i < nw; ++i) {
-            if (ws.waypoint_is_hard[static_cast<size_t>(i)]) continue;
             const double dx = vars(DIM * i + 0) - seed_vars(DIM * i + 0);
             const double dy = vars(DIM * i + 1) - seed_vars(DIM * i + 1);
             const double d = std::hypot(dx, dy);

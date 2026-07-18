@@ -390,6 +390,9 @@ PlannerConfig NavExecutorNode::load_planner_config() {
             .accel = declare_parameter<double>("path_planner.minco.weights.accel"),
             .step_alignment = declare_parameter<double>("path_planner.minco.weights.step_alignment"),
             .step_velocity = declare_parameter<double>("path_planner.minco.weights.step_velocity"),
+            .step_prohibited = declare_parameter<double>("path_planner.minco.weights.step_prohibited"),
+            .runup_accel = declare_parameter<double>("path_planner.minco.weights.runup_accel"),
+            .runup_omega = declare_parameter<double>("path_planner.minco.weights.runup_omega"),
         },
         .limits = {
             .vel_max = declare_parameter<double>("path_planner.minco.limits.vel_max"),
@@ -405,7 +408,8 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.samples_per_segment")),
         .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.minco.max_iterations")),
         .min_segment_time = declare_parameter<double>("path_planner.minco.min_segment_time"),
-        .step_entry_window_fraction = declare_parameter<double>("path_planner.minco.step_entry_window_fraction"),
+        .runup_saturation_length = declare_parameter<double>("path_planner.minco.runup.saturation_length"),
+        .runup_transition_distance = declare_parameter<double>("path_planner.minco.runup.transition_distance"),
         .debug_check_gradient = enable_debug_,
         .debug_diagnostics = enable_debug_,
     };
@@ -453,9 +457,9 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         "MINCO limits and min_segment_time must be finite and positive");
     require_parameter(c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0,
         "MINCO sample and iteration counts must be positive");
-    require_parameter(c.minco.step_entry_window_fraction > 0.0
-        && c.minco.step_entry_window_fraction <= 0.5,
-        "MINCO step_entry_window_fraction must be in (0, 0.5]");
+    require_parameter(positive_finite(c.minco.runup_saturation_length)
+        && nonnegative_finite(c.minco.runup_transition_distance),
+        "MINCO runup saturation length must be positive and transition distance nonnegative");
     require_parameter(c.minco.terrain_gate.norm_lo >= 0.0
         && c.minco.terrain_gate.norm_hi > c.minco.terrain_gate.norm_lo,
         "MINCO terrain_gate requires 0 <= norm_lo < norm_hi");

@@ -21,8 +21,6 @@ struct MincoSeed {
     std::vector<double> durations;
     std::vector<double> gears;                     // 每段 ±1
     std::vector<char> cusp_waypoints;              // 每内部节点是否换向尖点
-    std::vector<MincoOptimizer::HardWaypoint> hard_waypoints;
-    std::vector<MincoOptimizer::StepEntrySpeedWindow> step_entry_speed_windows;
 };
 
 // 把 kinodynamic (x,y,θ,v) 序列重采样后转成 MINCO 平坦边界状态 + 换向拓扑。
@@ -34,28 +32,10 @@ struct MincoSeed {
 MincoSeed build_minco_seed(
     const std::vector<KinodynamicAstar::State>& raw,
     const double resample_distance,
-    const double state_interval,
-    const DirectionMap& direction_map,
-    const TerrainTraversalConstraints& terrain_constraints,
-    const double step_norm_threshold
+    const double state_interval
 ) {
     MincoSeed seed;
     if (raw.size() < 2) return seed;
-
-    std::vector<bool> is_step_entry(raw.size(), false);
-    for (size_t i = 1; i < raw.size(); ++i) {
-        const Eigen::Vector2d prev_grid = direction_map.map_coord_to_grid({raw[i - 1].x, raw[i - 1].y});
-        const Eigen::Vector2d grid = direction_map.map_coord_to_grid({raw[i].x, raw[i].y});
-        if (!direction_map.is_valid_coord(grid)) continue;
-        const uint8_t label = direction_map.terrain_at(grid);
-        const Eigen::Vector2d dir = direction_map.interpolate(grid);
-        const bool on_step = label >= static_cast<uint8_t>(TerrainType::SLOPE)
-            && dir.norm() >= step_norm_threshold;
-        const bool prev_on_same_step = direction_map.is_valid_coord(prev_grid)
-            && direction_map.terrain_at(prev_grid) == label
-            && direction_map.interpolate(prev_grid).norm() >= step_norm_threshold;
-        is_step_entry[i] = on_step && !prev_on_same_step;
-    }
 
     std::vector<size_t> selected {0};
     const double distance_threshold = std::max(resample_distance, 0.05);
@@ -67,8 +47,7 @@ MincoSeed build_minco_seed(
         const double heading_change = std::abs(wrap_angle(raw[i].theta - raw[last].theta));
         const bool gear_change = (raw[i - 1].v < -VELOCITY_EPS && raw[i + 1].v > VELOCITY_EPS)
             || (raw[i - 1].v > VELOCITY_EPS && raw[i + 1].v < -VELOCITY_EPS);
-        if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD || gear_change
-            || is_step_entry[i]) {
+        if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD || gear_change) {
             selected.push_back(i);
         }
     }
@@ -116,31 +95,6 @@ MincoSeed build_minco_seed(
     seed.states.back().vel.setZero();
     seed.states.back().acc.setZero();
 
-    for (size_t i = 1; i + 1 < n; ++i) {
-        const size_t raw_index = selected[i];
-        if (!is_step_entry[raw_index]) continue;
-        const auto& state = raw[raw_index];
-        const Eigen::Vector2d grid = direction_map.map_coord_to_grid({state.x, state.y});
-        const uint8_t label = direction_map.terrain_at(grid);
-        const Eigen::Vector2d displacement(
-            state.x - raw[selected[i - 1]].x,
-            state.y - raw[selected[i - 1]].y
-        );
-        const Eigen::Vector2d dir = direction_map.interpolate(grid);
-        const bool positive_direction = displacement.dot(dir) >= 0.0;
-        const TerrainStepRule* rule = terrain_constraints.selected_mode(label, positive_direction);
-        if (!rule) continue;
-        // 台阶入口硬约束位置；朝向由平坦运动方向自动导出（穿越方向即运动方向）。
-        seed.hard_waypoints.push_back(MincoOptimizer::HardWaypoint{
-            .waypoint_index = static_cast<int>(i - 1),
-            .position = {state.x, state.y},
-        });
-        seed.step_entry_speed_windows.push_back(MincoOptimizer::StepEntrySpeedWindow{
-            .waypoint_index = static_cast<int>(i - 1),
-            .speed_min = rule->speed.min,
-            .speed_max = rule->speed.max,
-        });
-    }
     return seed;
 }
 
@@ -153,9 +107,7 @@ bool validate_trajectory(
     const double step_norm_threshold,
     const double step_alignment_threshold,
     const MincoOptimizer::Limits& limits,
-    const double step_entry_window_fraction,
     const PlannerConfig::TrajectoryValidationParams& validation,
-    const std::vector<MincoOptimizer::StepEntrySpeedWindow>& step_entry_speed_windows,
     std::string& error,
     bool& fatal
 ) {
@@ -269,24 +221,6 @@ bool validate_trajectory(
                     + std::to_string(rule->speed.min) + "," + std::to_string(rule->speed.max)
                     + "], accepted=[" + std::to_string(rule->speed.min - validation.step_velocity_tolerance)
                     + "," + std::to_string(rule->speed.max + validation.step_velocity_tolerance) + "]";
-                return false;
-            }
-        }
-
-        for (const auto& entry : step_entry_speed_windows) {
-            const bool in_incoming_window = segment == entry.waypoint_index
-                && fraction >= 1.0 - step_entry_window_fraction;
-            const bool in_outgoing_window = segment == entry.waypoint_index + 1
-                && fraction <= step_entry_window_fraction;
-            if (!in_incoming_window && !in_outgoing_window) continue;
-            if (longitudinal_velocity < entry.speed_min - validation.velocity_tolerance
-                || longitudinal_velocity > entry.speed_max + validation.velocity_tolerance) {
-                error = "trajectory violates step-entry velocity window at tau=" + std::to_string(tau)
-                    + " (waypoint " + std::to_string(entry.waypoint_index) + ")"
-                    + ": v=" + std::to_string(longitudinal_velocity)
-                    + " (required=[" + std::to_string(entry.speed_min)
-                    + "," + std::to_string(entry.speed_max)
-                    + "], tolerance=" + std::to_string(validation.velocity_tolerance) + ")";
                 return false;
             }
         }
@@ -688,14 +622,22 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto minco_seed = build_minco_seed(
         seed_states_raw,
         config_.seed_resample_distance,
-        kinodynamic_params.primitive_duration / std::max(kinodynamic_params.collision_substeps, 1),
-        *req.direction_map,
-        req.terrain_constraints,
-        config_.step_detection.detect_norm_threshold
+        kinodynamic_params.primitive_duration / std::max(kinodynamic_params.collision_substeps, 1)
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
-    for (const auto& entry : minco_seed.step_entry_speed_windows) {
-        minco_params.limits.vel_max = std::max(minco_params.limits.vel_max, entry.speed_max);
+    for (const auto& state : seed_states_raw) {
+        const Eigen::Vector2d grid = req.direction_map->map_coord_to_grid({state.x, state.y});
+        if (!req.direction_map->is_valid_coord(grid)) continue;
+        const uint8_t label = req.direction_map->terrain_at(grid);
+        const Eigen::Vector2d direction = req.direction_map->interpolate(grid);
+        if (label < static_cast<uint8_t>(TerrainType::SLOPE) || direction.squaredNorm() <= 1e-12) continue;
+        const Eigen::Vector2d motion(
+            state.v * std::cos(state.theta), state.v * std::sin(state.theta)
+        );
+        if (const TerrainStepRule* rule =
+                req.terrain_constraints.selected_mode(label, motion.dot(direction) >= 0.0)) {
+            minco_params.limits.vel_max = std::max(minco_params.limits.vel_max, rule->speed.max);
+        }
     }
 
     // ── [3] MINCO 时空优化 ──
@@ -708,9 +650,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         minco_seed.cusp_waypoints,
         planning_cost_map,
         *req.direction_map,
-        req.terrain_constraints,
-        minco_seed.hard_waypoints,
-        minco_seed.step_entry_speed_windows
+        req.terrain_constraints
     );
     if (!opt.success) return fail("MINCO optimization failed: " + opt.error);
     const auto minco_done = std::chrono::steady_clock::now();
@@ -724,15 +664,17 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             logger_,
             "MINCO diag: status=%s iters=%d |grad|_inf %.3g -> %.3g (pos=%.3g, time=%.3g) | "
             "cost %.3g -> %.3g | waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
-            "seed[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g] "
-            "final[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g]",
+            "seed[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g] "
+            "final[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g]",
             LBFGS_STATUS[status_index], opt.iterations,
             opt.initial_grad_inf_norm, opt.final_grad_inf_norm,
             opt.final_grad_pos_inf_norm, opt.final_grad_time_inf_norm,
             s.total(), f.total(),
             opt.free_waypoint_count, opt.waypoint_total_displacement, opt.waypoint_max_displacement,
-            s.energy, s.time, s.obstacle, s.velocity, s.lateral_acc, s.omega, s.accel, s.step_alignment, s.step_velocity,
-            f.energy, f.time, f.obstacle, f.velocity, f.lateral_acc, f.omega, f.accel, f.step_alignment, f.step_velocity
+            s.energy, s.time, s.obstacle, s.velocity, s.lateral_acc, s.omega, s.accel,
+            s.step_alignment, s.step_velocity, s.step_prohibited, s.runup_accel, s.runup_omega,
+            f.energy, f.time, f.obstacle, f.velocity, f.lateral_acc, f.omega, f.accel,
+            f.step_alignment, f.step_velocity, f.step_prohibited, f.runup_accel, f.runup_omega
         );
         if (opt.grad_check_max_rel_err >= 0.0) {
             RCLCPP_INFO(
@@ -755,9 +697,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             config_.step_detection.detect_norm_threshold,
             config_.step_detection.detect_dot_threshold,
             minco_params.limits,
-            minco_params.step_entry_window_fraction,
             config_.trajectory_validation,
-            minco_seed.step_entry_speed_windows,
             trajectory_error,
             trajectory_error_is_fatal
         )) {

@@ -22,7 +22,7 @@ namespace nav_executor {
 // 目标：
 //   J = w_energy·∫‖jerk‖² + w_time·ΣT
 //     + Σ_采样点 [ 障碍 + 带符号速度窗 + |v·ω|≤a_lat + |ω|界 + |a|界
-//                 + 方向地形对齐 + 台阶速度窗 ]
+//                 + 膨胀方向场对齐 + 离散地形速度窗 + 助跑区 ‖a‖²/ω² ]
 class MincoOptimizer {
 public:
     struct Weights {
@@ -35,6 +35,9 @@ public:
         double accel = 100.0;        // |dv/dt| ≤ acc_max
         double step_alignment = 200.0; // 方向地形内车身轴与穿越方向对齐
         double step_velocity = 200.0;  // 方向地形内所选模式的速度窗
+        double step_prohibited = 1000.0; // 禁止方向的穿越罚
+        double runup_accel = 100.0;    // 台阶及其助跑区内的 ‖a‖² 正则
+        double runup_omega = 100.0;    // 台阶及其助跑区内的 ω² 正则
     };
 
     struct Limits {
@@ -61,7 +64,8 @@ public:
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;
         double min_segment_time = 0.05;
-        double step_entry_window_fraction = 0.25;
+        double runup_saturation_length = 0.05; // 前向地形暴露积分达到该弧长后基本饱和
+        double runup_transition_distance = 0.1; // run_up 外侧的平滑弧长过渡带
         bool debug_check_gradient = false;    // 若开：optimize 起始处对比解析梯度 vs 有限差分并记录
         bool debug_diagnostics = false;       // 若开：记录 seed/final 分项代价、路点位移、收敛状态
     };
@@ -77,22 +81,14 @@ public:
         double accel = 0.0;
         double step_alignment = 0.0;
         double step_velocity = 0.0;
+        double step_prohibited = 0.0;
+        double runup_accel = 0.0;
+        double runup_omega = 0.0;
         double total() const {
             return energy + time + obstacle + velocity + lateral_acc
-                + omega + accel + step_alignment + step_velocity;
+                + omega + accel + step_alignment + step_velocity + step_prohibited
+                + runup_accel + runup_omega;
         }
-    };
-
-    // 台阶入口硬约束位置（朝向由平坦输出的运动方向导出，无需单独固定）。
-    struct HardWaypoint {
-        int waypoint_index = -1;
-        Eigen::Vector2d position = Eigen::Vector2d::Zero();
-    };
-
-    struct StepEntrySpeedWindow {
-        int waypoint_index = -1;
-        double speed_min = 0.0;
-        double speed_max = 0.0;
     };
 
     struct Result {
@@ -140,9 +136,7 @@ public:
         const std::vector<char>& cusp_waypoints,
         const CostMap& cost_map,
         const DirectionMap& direction_map,
-        const TerrainTraversalConstraints& terrain_constraints,
-        const std::vector<HardWaypoint>& hard_waypoints,
-        const std::vector<StepEntrySpeedWindow>& step_entry_speed_windows
+        const TerrainTraversalConstraints& terrain_constraints
     ) const;
 
 private:
