@@ -6,33 +6,33 @@
           up: [mid_leg]
           down: [mid_leg]
           modes:
-            mid_leg: { chassis_mode: 7, capability: medium, velocity_target: { min: 1.6, max: 2.0 }, requires_high_perf: false, run_up: 0.0 }
+            mid_leg: { chassis_mode: 7, capability: medium, velocity_target: { min: 1.6, max: 2.4 }, requires_high_perf: false, run_up: 0.2 }
         step_l1:
           up: [high_leg_l1]
           down: [mid_leg]
           modes:
-            high_leg_l1: { chassis_mode: 3, capability: low, velocity_target: { min: 1.2, max: 1.5 }, requires_high_perf: false, run_up: 0.0 }
+            high_leg_l1: { chassis_mode: 3, capability: low, velocity_target: { min: 1.2, max: 1.8 }, requires_high_perf: false, run_up: 0.2 }
             jump_up_l1: { chassis_mode: 5, capability: medium, velocity_target: { min: 1.6, max: 2.0 }, requires_high_perf: true, run_up: 1.0 }
-            mid_leg: { chassis_mode: 7, capability: medium, velocity_target: { min: 1.6, max: 2.0 }, requires_high_perf: false, run_up: 0.0 }
+            mid_leg: { chassis_mode: 7, capability: medium, velocity_target: { min: 1.6, max: 2.4 }, requires_high_perf: false, run_up: 0.2 }
         step_l2:
           up: [high_leg_l2]
           down: [high_leg_down]
           modes:
-            high_leg_l2: { chassis_mode: 4, capability: low, velocity_target: { min: 1.2, max: 1.5 }, requires_high_perf: false, run_up: 0.0 }
-            high_leg_down: { chassis_mode: 8, capability: low, velocity_target: { min: 1.2, max: 1.6 }, requires_high_perf: false, run_up: 0.0 }
-            jump_down: { chassis_mode: 9, capability: medium, velocity_target: { min: 1.2, max: 1.6 }, requires_high_perf: true, run_up: 1.0 }
+            high_leg_l2: { chassis_mode: 4, capability: low, velocity_target: { min: 1.2, max: 1.8 }, requires_high_perf: false, run_up: 0.2 }
+            high_leg_down: { chassis_mode: 8, capability: medium, velocity_target: { min: 1.6, max: 2.0 }, requires_high_perf: false, run_up: 0.2 }
+            jump_down: { chassis_mode: 9, capability: medium, velocity_target: { min: 1.6, max: 2.0 }, requires_high_perf: true, run_up: 1.0 }
         fly_slope:
           up: [fly_slope]
           down: [fly_slope_rev]
           modes:
-            fly_slope: { chassis_mode: 10, capability: high, velocity_target: { min: 2.8, max: 3.2 }, requires_high_perf: true, run_up: 0.0 }
-            fly_slope_rev: { chassis_mode: 11, capability: high, velocity_target: { min: 2.6, max: 3.0 }, requires_high_perf: true, run_up: 1.0 }
+            fly_slope: { chassis_mode: 10, capability: high, velocity_target: { min: 2.6, max: 3.2 }, requires_high_perf: true, run_up: 0.2 }
+            fly_slope_rev: { chassis_mode: 11, capability: high, velocity_target: { min: 2.6, max: 3.2 }, requires_high_perf: true, run_up: 1.0 }
         step_high:
           up: [jump_up_high]
           down: [disabled]
           modes:
-            jump_up_high: { chassis_mode: 6, capability: medium, velocity_target: { min: 2.2, max: 2.6 }, requires_high_perf: true, run_up: 1.0 }
-            jump_down: { chassis_mode: 9, capability: medium, velocity_target: { min: 1.2, max: 1.6 }, requires_high_perf: true, run_up: 1.0 }
+            jump_up_high: { chassis_mode: 6, capability: medium, velocity_target: { min: 2.0, max: 2.4 }, requires_high_perf: true, run_up: 1.0 }
+            jump_down: { chassis_mode: 9, capability: medium, velocity_target: { min: 1.6, max: 2.0 }, requires_high_perf: true, run_up: 1.0 }
 
       high_performance_available:
         buffercap_threshold: 1000.0

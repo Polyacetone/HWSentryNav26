@@ -12,8 +12,7 @@ namespace nav_executor {
 // ── 2D Dijkstra cost-to-goal 场 ──
 //
 // 在 cost_map（含 blocked 层融合）上从 goal 反向扩散，产出稠密 cost-to-goal 数组。
-// 用途 A：kinodynamic A* 弹节点时 O(1) 查启发 h（质点最短路下界）。
-// 用途 B：开阔段几何 seed（沿场梯度下降回溯，替代旧几何 A*）。
+// 用途：kinodynamic A* 弹节点时 O(1) 查启发 h（质点最短路下界）。
 //
 // 代价 = 欧氏步长（8 邻域，对角 √2）+ 障碍代价（cost_map 值 · 权重）。
 // 质点最短路：不含朝向/非完整，开阔区精确，窄口/台阶口偏差可接受（MINCO 精修）。

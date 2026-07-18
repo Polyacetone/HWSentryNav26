@@ -24,7 +24,6 @@ void BandedSystem::factorize_lu() {
         const int km = std::min(kl_, n_ - 1 - j);       // 列 j 的次对角元个数
         const int ju = std::min(n_ - 1, j + kl_ + ku_); // U 填充后受影响的末列
 
-        // 部分主元：列 j 在行 [j, j+km] 内取最大绝对值。
         int pivot_row = j;
         double pivot_mag = std::abs(at(j, j));
         for (int i = j + 1; i <= j + km; ++i) {
@@ -36,7 +35,7 @@ void BandedSystem::factorize_lu() {
         }
         pivots_[static_cast<size_t>(j)] = pivot_row;
 
-        if (pivot_mag == 0.0) continue; // 奇异列：主元为 0，跳过（保持行为可预测）。
+        if (pivot_mag == 0.0) continue;
 
         // 行交换：跨列 [j, ju] 交换 j 与 pivot_row。
         if (pivot_row != j) {
@@ -51,7 +50,6 @@ void BandedSystem::factorize_lu() {
             ref(i, j) /= diag;
         }
 
-        // 秩一更新：A(i,jj) -= L(i,j) · U(j,jj)。
         for (int jj = j + 1; jj <= ju; ++jj) {
             const double ujj = at(j, jj);
             if (ujj == 0.0) continue;
@@ -63,7 +61,6 @@ void BandedSystem::factorize_lu() {
 }
 
 void BandedSystem::solve(Eigen::Ref<Eigen::MatrixXd> b) const {
-    // 前代：应用主元置换与单位下三角 L。
     for (int j = 0; j < n_; ++j) {
         const int jp = pivots_[static_cast<size_t>(j)];
         if (jp != j) b.row(j).swap(b.row(jp));
@@ -73,7 +70,6 @@ void BandedSystem::solve(Eigen::Ref<Eigen::MatrixXd> b) const {
         }
     }
 
-    // 回代：求解上三角 U（上带宽 kl + ku）。
     for (int j = n_ - 1; j >= 0; --j) {
         b.row(j) /= at(j, j);
         const int i_begin = std::max(0, j - kl_ - ku_);

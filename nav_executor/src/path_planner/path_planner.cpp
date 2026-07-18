@@ -642,7 +642,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         const auto& f = opt.final_costs;
         static constexpr const char* LBFGS_STATUS[] = {"CONVERGED", "MAX_ITER", "LS_FAILED"};
         const int status_index = std::clamp(opt.lbfgs_status, 0, 2);
-        RCLCPP_INFO(
+        RCLCPP_DEBUG(
             logger_,
             "MINCO diag: status=%s iters=%d |grad|_inf %.3g -> %.3g (pos=%.3g, time=%.3g) | "
             "cost %.3g -> %.3g | waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
@@ -661,7 +661,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             f.prohibited_traversal, f.runup_accel, f.runup_omega
         );
         if (opt.grad_check_max_rel_err >= 0.0) {
-            RCLCPP_INFO(
+            RCLCPP_DEBUG(
                 logger_,
                 "MINCO grad check (seed): max_abs_err=%.3g max_rel_err=%.3g worst_var=%d",
                 opt.grad_check_max_abs_err, opt.grad_check_max_rel_err,

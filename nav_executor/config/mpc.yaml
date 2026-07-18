@@ -7,13 +7,13 @@
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
         phase:
-          rate_min: 0.0 # MPCC 相位推进率下界；0 允许障碍前暂停
+          rate_min: 0.1 # MPCC 相位推进率下界；0 允许障碍前暂停
           rate_max: 1.2 # 相位推进率上界；允许有限追赶名义时序
           nominal_rate: 1.0 # MINCO 名义时序对应的相位推进率
-          progress_reward: 0.3 # 每步相位推进线性奖励，防止零速局部最优
+          progress_reward: 0.5 # 每步相位推进线性奖励，防止零速局部最优
           rate_tracking_weight: 2.0 # 相位率偏离名义值的残差权重
           rate_smoothness_weight: 1.5 # 相邻相位率变化残差权重
-          overshoot_weight: 8.0 # phase_time 超过轨迹总时长的残差权重
+          overshoot_weight: 2.0 # phase_time 超过轨迹总时长的残差权重
         rollout_safety:
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
@@ -32,27 +32,27 @@
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
-          r_dv: 0.2 # 线速度平滑
-          r_domega: 0.1 # 角速度平滑
+          r_dv: 0.8 # 线速度平滑
+          r_domega: 0.2 # 角速度平滑
         command_dynamics_weights:
-          velocity_rate: 12.0 # 速度指令变化率超限惩罚
-          angular_velocity_rate: 12.0 # 角速度指令变化率超限惩罚
-          lateral_acceleration: 12.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
+          velocity_rate: 18.0 # 速度指令变化率超限惩罚
+          angular_velocity_rate: 18.0 # 角速度指令变化率超限惩罚
+          lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         traversal_target_weights:
           velocity: 2.0 # v_actual 对共享台阶速度窗口的软目标
           direction: 2.4 # 台阶内部穿越方向对齐软目标
-          angular_velocity: 0.6 # 台阶内部角速度软目标
-          velocity_smoothness: 0.6 # 台阶内部线速度指令平滑
-          angular_velocity_smoothness: 0.5 # 台阶内部角速度指令平滑
+          angular_velocity: 0.8 # 台阶内部角速度指令惩罚
+          velocity_smoothness: 0.8 # 台阶内部线速度指令平滑
+          angular_velocity_smoothness: 0.8 # 台阶内部角速度指令平滑
         environment_weights:
-          obstacle: 5.0 # 避障权重（全局+局部融合代价）
+          obstacle: 3.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
-          position: 3.0 # horizon 末端相对对应参考点的位置权重
-          heading: 2.0 # horizon 末端航向权重
-          velocity: 1.0 # horizon 末端线速度参考权重
-          angular_velocity: 1.0 # horizon 末端角速度参考权重
-          remaining_phase: 0.8 # horizon 末端剩余轨迹时间线性代价
-          overshoot: 12.0 # horizon 末端相位越界残差权重
+          position: 0.6 # horizon 末端相对对应参考点的位置权重
+          heading: 0.6 # horizon 末端航向权重
+          velocity: 0.6 # horizon 末端线速度参考权重
+          angular_velocity: 0.6 # horizon 末端角速度参考权重
+          remaining_phase: 0.6 # horizon 末端剩余轨迹时间线性代价
+          overshoot: 1.2 # horizon 末端相位越界残差权重
 
       # ═══════════════════════════════════════════════
       #  Stop — 停止求解器
@@ -69,9 +69,9 @@
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
         command_dynamics_weights:
-          velocity_rate: 12.0 # 速度指令变化率超限惩罚
-          angular_velocity_rate: 12.0 # 角速度指令变化率超限惩罚
-          lateral_acceleration: 12.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
+          velocity_rate: 18.0 # 速度指令变化率超限惩罚
+          angular_velocity_rate: 18.0 # 角速度指令变化率超限惩罚
+          lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
           obstacle: 3.0 # 避障惩罚（台阶区域已转为障碍物）
         terminal_weights:
@@ -96,9 +96,9 @@
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
         command_dynamics_weights:
-          velocity_rate: 12.0 # 速度指令变化率超限惩罚
-          angular_velocity_rate: 12.0 # 角速度指令变化率超限惩罚
-          lateral_acceleration: 12.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
+          velocity_rate: 18.0 # 速度指令变化率超限惩罚
+          angular_velocity_rate: 18.0 # 角速度指令变化率超限惩罚
+          lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
           obstacle: 3.0 # 全程避障惩罚
         terminal_weights:

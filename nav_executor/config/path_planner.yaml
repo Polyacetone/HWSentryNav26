@@ -2,7 +2,7 @@
   ros__parameters:
     path_planner:
       traversability:
-        occupied_threshold: 50 # 格子代价值超过该值就认为不可通行（0~255）
+        occupied_threshold: 100 # 格子代价值超过该值就认为不可通行（0~255）
         on_step_threshold: 0.1 # 方向场模长超过该值就认为机器人在台阶上，此时不允许作为路径起点
 
       nudge:
@@ -97,6 +97,6 @@
 
       step_mask:
         path_align_dot_threshold: 0.6 # 路径方向与台阶方向点积 ≥ 此值就认为路径经过了该台阶
-        full_effect_radius: 0.4 # 台阶掩码施加满强度的半径（米）
-        cutoff_radius: 0.6 # 台阶掩码截止半径（米），超过此范围完全不受影响
+        full_effect_radius: 0.6 # 台阶掩码施加满强度的半径（米）
+        cutoff_radius: 1.0 # 台阶掩码截止半径（米），超过此范围完全不受影响
         length_num_samples: 100 # 估算路径弧长时的采样点数

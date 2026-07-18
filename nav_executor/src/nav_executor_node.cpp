@@ -111,7 +111,7 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
     }
 }
 
-// ROS callbacks update cached facts; task and motion state changes happen here.
+// ROS 回调只写缓存；任务/运动状态转移在 control_tick 中完成。
 
 void NavExecutorNode::control_tick() {
     if (!global_cost_map_ || !global_direction_map_ || !step_mask_ready_) return;
