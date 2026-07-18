@@ -110,12 +110,15 @@ void NavExecutorNode::control_tick() {
     };
     const DirectionLayers direction_layers { .global = global_direction_map_ };
     const PerformanceState performance {
-        .high_performance = remaining_energy_buffercap_filtered_ >= terrain_profiles_.high_performance_buffercap_threshold
-            && remaining_energy_supercap_filtered_ >= terrain_profiles_.high_performance_supercap_threshold
-            && rfr_pwr_limit_ >= terrain_profiles_.high_performance_rfr_pwr_limit_threshold
+        .high_performance = remaining_energy_buffercap_filtered_
+                >= traversal_configuration_.high_performance_buffercap_threshold
+            && remaining_energy_supercap_filtered_
+                >= traversal_configuration_.high_performance_supercap_threshold
+            && rfr_pwr_limit_
+                >= traversal_configuration_.high_performance_rfr_pwr_limit_threshold
     };
     const TerrainTraversalConstraints terrain_constraints = build_terrain_traversal_constraints(
-        *global_direction_map_, terrain_profiles_, performance
+        *global_direction_map_, traversal_configuration_, performance
     );
 
     const AnnotatedPath::ConstPtr active_path_before_update = task_->active_path();

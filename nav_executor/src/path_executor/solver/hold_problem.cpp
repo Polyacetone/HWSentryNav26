@@ -27,13 +27,15 @@ void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 
 ControlVec HoldProblem::u_lower() const {
     ControlVec lower;
-    lower << p_.hold.command_bounds.vel_min, p_.hold.command_bounds.omega_min, 0.0;
+    lower << p_.hold.profile.command_envelope.velocity.min,
+        p_.hold.profile.command_envelope.angular_velocity.min, 0.0;
     return lower;
 }
 
 ControlVec HoldProblem::u_upper() const {
     ControlVec upper;
-    upper << p_.hold.command_bounds.vel_max, p_.hold.command_bounds.omega_max, 0.0;
+    upper << p_.hold.profile.command_envelope.velocity.max,
+        p_.hold.profile.command_envelope.angular_velocity.max, 0.0;
     return upper;
 }
 
@@ -51,9 +53,9 @@ HoldResidualVec hold_residual_impl(
     const auto& hold = p.hold;
     const auto& goal_w = hold.goal_weights;
     const auto& command_w = hold.command_weights;
-    const auto& motion_w = hold.motion_constraint_weights;
+    const auto& dynamics_w = hold.command_dynamics_weights;
     const auto& env_w = hold.environment_weights;
-    const auto& motion_lim = hold.motion_constraints;
+    const auto& motion_lim = hold.profile.command_dynamics;
 
     HoldResidualVec r = HoldResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
@@ -71,8 +73,8 @@ HoldResidualVec hold_residual_impl(
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
 
-    const double dv_lim = motion_lim.acc_max * MPC_DT;
-    const double dw_lim = motion_lim.alpha_max * MPC_DT;
+    const double dv_lim = motion_lim.velocity_rate_max * MPC_DT;
+    const double dw_lim = motion_lim.angular_velocity_rate_max * MPC_DT;
     const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = goal_w.q_goal_xy * ddx;
     r(1) = goal_w.q_goal_xy * ddy;
@@ -81,9 +83,11 @@ HoldResidualVec hold_residual_impl(
     r(4) = command_w.r_omega * w_cmd;
     r(5) = command_w.r_dv * dv_cmd;
     r(6) = command_w.r_domega * dw_cmd;
-    r(7) = motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim);
-    r(8) = motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim);
-    r(9) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
+    r(7) = dynamics_w.velocity_rate * positive_part(std::abs(dv_cmd) - dv_lim);
+    r(8) = dynamics_w.angular_velocity_rate
+        * positive_part(std::abs(dw_cmd) - dw_lim);
+    r(9) = dynamics_w.lateral_acceleration
+        * positive_part(a_lat - motion_lim.lateral_acceleration_max);
     r(10) = env_w.obstacle * cs.value / 255.0;
 
     return r;

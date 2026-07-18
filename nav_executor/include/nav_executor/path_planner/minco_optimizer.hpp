@@ -29,23 +29,22 @@ public:
         double energy = 1.0;         // min-jerk 能量
         double time = 16.0;          // 总时长
         double obstacle = 1000.0;    // 障碍罚
-        double velocity = 100.0;     // |v| ≤ v_max（带符号，倒车用 v_min）
+        double trajectory_velocity = 100.0; // 通用轨迹速度界
         double lateral_acc = 100.0;  // |v·ω| ≤ a_lat_max
         double omega = 100.0;        // |ω| ≤ omega_max
         double accel = 100.0;        // |dv/dt| ≤ acc_max
-        double step_alignment = 200.0; // 方向地形内车身轴与穿越方向对齐
-        double step_velocity = 200.0;  // 方向地形内所选模式的速度窗
-        double step_prohibited = 1000.0; // 禁止方向的穿越罚
+        double traversal_alignment = 200.0;
+        double traversal_velocity_target = 200.0; // 台阶区域共享速度窗口的软目标
+        double prohibited_traversal = 1000.0;
         double runup_accel = 100.0;    // 台阶及其助跑区内的 ‖a‖² 正则
         double runup_omega = 100.0;    // 台阶及其助跑区内的 ω² 正则
     };
 
-    struct Limits {
-        double vel_max = 2.0;
-        double vel_min = -1.6;
-        double omega_max = 6.0;
-        double acc_max = 1.8;
-        double a_lat_max = 2.0;
+    struct TrajectoryLimits {
+        SignedVelocityBounds velocity {-1.6, 3.2};
+        double angular_velocity_max = 6.0;
+        double acceleration_max = 1.8;
+        double lateral_acceleration_max = 2.0;
     };
 
     // 方向地形罚的平滑门控（连续 smoothstep，替代离散 label/阈值硬开关）。
@@ -59,7 +58,7 @@ public:
 
     struct Params {
         Weights weights;
-        Limits limits;
+        TrajectoryLimits trajectory_limits;
         TerrainGate terrain_gate;
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;
@@ -75,18 +74,19 @@ public:
         double energy = 0.0;
         double time = 0.0;
         double obstacle = 0.0;
-        double velocity = 0.0;
+        double trajectory_velocity = 0.0;
         double lateral_acc = 0.0;
         double omega = 0.0;
         double accel = 0.0;
-        double step_alignment = 0.0;
-        double step_velocity = 0.0;
-        double step_prohibited = 0.0;
+        double traversal_alignment = 0.0;
+        double traversal_velocity_target = 0.0;
+        double prohibited_traversal = 0.0;
         double runup_accel = 0.0;
         double runup_omega = 0.0;
         double total() const {
-            return energy + time + obstacle + velocity + lateral_acc
-                + omega + accel + step_alignment + step_velocity + step_prohibited
+            return energy + time + obstacle + trajectory_velocity + lateral_acc
+                + omega + accel + traversal_alignment + traversal_velocity_target
+                + prohibited_traversal
                 + runup_accel + runup_omega;
         }
     };

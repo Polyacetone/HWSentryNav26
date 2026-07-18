@@ -24,7 +24,7 @@ public:
         const CostMapGridView& masked_global_grid,
         double prediction_dt,
         double schedule_rho,
-        const CapabilityProfile& blended_profile,
+        const CapabilityProfile& effective_capability,
         std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule
     );
 
@@ -52,7 +52,9 @@ public:
 
     [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
     [[nodiscard]] const MPCParams& params() const { return p_; }
-    [[nodiscard]] const CapabilityProfile& capability_profile() const { return blended_profile_; }
+    [[nodiscard]] const CapabilityProfile& effective_capability() const {
+        return effective_capability_;
+    }
     [[nodiscard]] const MincoTrajectory& reference_trajectory() const { return trajectory_; }
     [[nodiscard]] const LPVDiscreteModel& discrete_model() const { return model_; }
 
@@ -66,7 +68,7 @@ private:
     const CostMapGridView& masked_global_grid_;
     double prediction_dt_;
     LPVDiscreteModel model_ {};
-    CapabilityProfile blended_profile_;
+    CapabilityProfile effective_capability_;
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule_;
     double total_time_ = 0.0;
 };

@@ -106,15 +106,13 @@ bool validate_trajectory(
     const int occupied_threshold,
     const double step_norm_threshold,
     const double step_alignment_threshold,
-    const MincoOptimizer::Limits& limits,
+    const MincoOptimizer::TrajectoryLimits& limits,
     const PlannerConfig::TrajectoryValidationParams& validation,
     std::string& error,
-    bool& fatal
+    std::string& soft_diagnostic
 ) {
-    fatal = false;
     const double total_time = trajectory.total_time();
     if (!std::isfinite(total_time) || total_time <= 0.0) {
-        fatal = true;
         error = "trajectory has invalid total time";
         return false;
     }
@@ -128,7 +126,6 @@ bool validate_trajectory(
         const TrajSample s = trajectory.eval(tau);
         if (!s.p.allFinite() || !std::isfinite(s.theta) || !s.dp_dtau.allFinite()
             || !s.ddp_dtau.allFinite() || !std::isfinite(s.dtheta_dtau)) {
-            fatal = true;
             error = "trajectory contains non-finite values at tau=" + std::to_string(tau)
                 + ": p=(" + std::to_string(s.p.x()) + "," + std::to_string(s.p.y()) + ")"
                 + " theta=" + std::to_string(s.theta)
@@ -141,38 +138,50 @@ bool validate_trajectory(
         const double longitudinal_velocity = trajectory.longitudinal_velocity(s);
         const double omega = trajectory.angular_velocity(s);
         // 非完整约束在平坦表示下恒等满足（θ=atan2(gear·ṗ)），无需校验。
-        if (longitudinal_velocity < limits.vel_min - validation.velocity_tolerance
-            || longitudinal_velocity > limits.vel_max + validation.velocity_tolerance) {
+        if (longitudinal_velocity < limits.velocity.min - validation.velocity_tolerance
+            || longitudinal_velocity > limits.velocity.max + validation.velocity_tolerance) {
             error = "trajectory violates velocity limit at tau=" + std::to_string(tau)
                 + ": v=" + std::to_string(longitudinal_velocity)
-                + " (allowed=[" + std::to_string(limits.vel_min)
-                + "," + std::to_string(limits.vel_max)
+                + " (allowed=[" + std::to_string(limits.velocity.min)
+                + "," + std::to_string(limits.velocity.max)
                 + "], tolerance=" + std::to_string(validation.velocity_tolerance) + ")";
             return false;
         }
-        if (std::abs(omega) > limits.omega_max + validation.omega_tolerance) {
+        if (std::abs(omega)
+            > limits.angular_velocity_max + validation.omega_tolerance) {
             error = "trajectory violates angular velocity limit at tau=" + std::to_string(tau)
                 + ": |omega|=" + std::to_string(std::abs(omega))
-                + " > omega_max=" + std::to_string(limits.omega_max)
+                + " > angular_velocity_max="
+                + std::to_string(limits.angular_velocity_max)
                 + " + tolerance=" + std::to_string(validation.omega_tolerance)
-                + " = " + std::to_string(limits.omega_max + validation.omega_tolerance);
+                + " = " + std::to_string(
+                    limits.angular_velocity_max + validation.omega_tolerance
+                );
             return false;
         }
-        if (acceleration.norm() > limits.acc_max + validation.acceleration_tolerance) {
+        if (acceleration.norm()
+            > limits.acceleration_max + validation.acceleration_tolerance) {
             error = "trajectory violates acceleration limit at tau=" + std::to_string(tau)
                 + ": |acc|=" + std::to_string(acceleration.norm())
-                + " > acc_max=" + std::to_string(limits.acc_max)
+                + " > acceleration_max=" + std::to_string(limits.acceleration_max)
                 + " + tolerance=" + std::to_string(validation.acceleration_tolerance)
-                + " = " + std::to_string(limits.acc_max + validation.acceleration_tolerance);
+                + " = " + std::to_string(
+                    limits.acceleration_max + validation.acceleration_tolerance
+                );
             return false;
         }
         if (std::abs(longitudinal_velocity * omega)
-            > limits.a_lat_max + validation.lateral_acceleration_tolerance) {
+            > limits.lateral_acceleration_max
+                + validation.lateral_acceleration_tolerance) {
             error = "trajectory violates lateral acceleration limit at tau=" + std::to_string(tau)
                 + ": |v*omega|=" + std::to_string(std::abs(longitudinal_velocity * omega))
-                + " > a_lat_max=" + std::to_string(limits.a_lat_max)
+                + " > lateral_acceleration_max="
+                + std::to_string(limits.lateral_acceleration_max)
                 + " + tolerance=" + std::to_string(validation.lateral_acceleration_tolerance)
-                + " = " + std::to_string(limits.a_lat_max + validation.lateral_acceleration_tolerance);
+                + " = " + std::to_string(
+                    limits.lateral_acceleration_max
+                    + validation.lateral_acceleration_tolerance
+                );
             return false;
         }
         const Eigen::Vector2d grid = cost_map.map_coord_to_grid(s.p);
@@ -206,7 +215,7 @@ bool validate_trajectory(
                 return false;
             }
             const bool going_up = alignment >= 0.0;
-            const TerrainStepRule* rule = terrain_constraints.selected_mode(label, going_up);
+            const TraversalMode* rule = terrain_constraints.selected_mode(label, going_up);
             if (!rule) {
                 error = "trajectory uses prohibited directional terrain at tau=" + std::to_string(tau)
                     + ": label=" + std::to_string(static_cast<int>(label))
@@ -214,14 +223,17 @@ bool validate_trajectory(
                     + ", |dir|=" + std::to_string(raw_dir.norm());
                 return false;
             }
-            if (longitudinal_velocity < rule->speed.min - validation.step_velocity_tolerance
-                || longitudinal_velocity > rule->speed.max + validation.step_velocity_tolerance) {
-                error = "trajectory violates step velocity window at tau=" + std::to_string(tau)
+            const auto& target = rule->velocity_window;
+            if (soft_diagnostic.empty()
+                && (longitudinal_velocity
+                        < target.min - validation.traversal_velocity_target_tolerance
+                    || longitudinal_velocity
+                        > target.max + validation.traversal_velocity_target_tolerance)) {
+                soft_diagnostic = "trajectory misses traversal velocity target at tau="
+                    + std::to_string(tau)
                     + ": v=" + std::to_string(longitudinal_velocity) + ", required=["
-                    + std::to_string(rule->speed.min) + "," + std::to_string(rule->speed.max)
-                    + "], accepted=[" + std::to_string(rule->speed.min - validation.step_velocity_tolerance)
-                    + "," + std::to_string(rule->speed.max + validation.step_velocity_tolerance) + "]";
-                return false;
+                    + std::to_string(target.min) + "," + std::to_string(target.max)
+                    + "]";
             }
         }
         }
@@ -512,11 +524,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         const Eigen::Vector2d dir = raw_dir.normalized();
         const double travel_alignment = displacement.normalized().dot(dir);
         if (std::abs(travel_alignment) < config.step_detection.detect_dot_threshold) return false;
-        const TerrainStepRule* rule = terrain.selected_mode(label, travel_alignment >= 0.0);
+        const TraversalMode* rule = terrain.selected_mode(label, travel_alignment >= 0.0);
         if (!rule) return false;
 
         // 台阶模式速度窗定义为车身正向速度；倒车只用于台阶外的拓扑机动。
-        return to.v >= rule->speed.min - 1e-6 && to.v <= rule->speed.max + 1e-6;
+        return to.v >= rule->velocity_window.min - 1e-6
+            && to.v <= rule->velocity_window.max + 1e-6;
     };
 
     // 位置容差内仍需证明可由 MINCO 在一条短、平坦、无碰撞连接段上精确接到目标。
@@ -557,23 +570,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     kino_start.theta = req.current_yaw;
     kino_start.v = req.current_velocity;
 
-    // 本次规划速度上限至少覆盖所有已选地形模式的最低入口速度。选择最低可行速度，
-    // 避免生成超过对应 capability profile 必要范围的参考。
-    double required_vel_max = config_.kinodynamic.vel_max;
-    std::array<bool, TERRAIN_LABEL_COUNT> terrain_present {};
-    for (const uint8_t label : req.direction_map->terrain) {
-        if (label < TERRAIN_LABEL_COUNT) terrain_present[label] = true;
-    }
-    for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE); label < TERRAIN_LABEL_COUNT; ++label) {
-        if (!terrain_present[label]) continue;
-        for (const bool is_up : {false, true}) {
-            if (const TerrainStepRule* rule = req.terrain_constraints.selected_mode(label, is_up)) {
-                required_vel_max = std::max(required_vel_max, rule->speed.min);
-            }
-        }
-    }
     KinodynamicAstar::Params kinodynamic_params = config_.kinodynamic;
-    kinodynamic_params.vel_max = required_vel_max;
     MincoOptimizer::Params minco_params = config_.minco;
 
     std::vector<KinodynamicAstar::State> seed_states_raw;
@@ -625,21 +622,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         kinodynamic_params.primitive_duration / std::max(kinodynamic_params.collision_substeps, 1)
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
-    for (const auto& state : seed_states_raw) {
-        const Eigen::Vector2d grid = req.direction_map->map_coord_to_grid({state.x, state.y});
-        if (!req.direction_map->is_valid_coord(grid)) continue;
-        const uint8_t label = req.direction_map->terrain_at(grid);
-        const Eigen::Vector2d direction = req.direction_map->interpolate(grid);
-        if (label < static_cast<uint8_t>(TerrainType::SLOPE) || direction.squaredNorm() <= 1e-12) continue;
-        const Eigen::Vector2d motion(
-            state.v * std::cos(state.theta), state.v * std::sin(state.theta)
-        );
-        if (const TerrainStepRule* rule =
-                req.terrain_constraints.selected_mode(label, motion.dot(direction) >= 0.0)) {
-            minco_params.limits.vel_max = std::max(minco_params.limits.vel_max, rule->speed.max);
-        }
-    }
-
     // ── [3] MINCO 时空优化 ──
     MincoOptimizer optimizer(minco_params);
     const auto minco_start = std::chrono::steady_clock::now();
@@ -671,10 +653,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             opt.final_grad_pos_inf_norm, opt.final_grad_time_inf_norm,
             s.total(), f.total(),
             opt.free_waypoint_count, opt.waypoint_total_displacement, opt.waypoint_max_displacement,
-            s.energy, s.time, s.obstacle, s.velocity, s.lateral_acc, s.omega, s.accel,
-            s.step_alignment, s.step_velocity, s.step_prohibited, s.runup_accel, s.runup_omega,
-            f.energy, f.time, f.obstacle, f.velocity, f.lateral_acc, f.omega, f.accel,
-            f.step_alignment, f.step_velocity, f.step_prohibited, f.runup_accel, f.runup_omega
+            s.energy, s.time, s.obstacle, s.trajectory_velocity, s.lateral_acc,
+            s.omega, s.accel, s.traversal_alignment, s.traversal_velocity_target,
+            s.prohibited_traversal, s.runup_accel, s.runup_omega,
+            f.energy, f.time, f.obstacle, f.trajectory_velocity, f.lateral_acc,
+            f.omega, f.accel, f.traversal_alignment, f.traversal_velocity_target,
+            f.prohibited_traversal, f.runup_accel, f.runup_omega
         );
         if (opt.grad_check_max_rel_err >= 0.0) {
             RCLCPP_INFO(
@@ -687,7 +671,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     }
     if (opt.trajectory.empty()) return fail("MINCO produced empty trajectory");
     std::string trajectory_error;
-    bool trajectory_error_is_fatal = false;
+    std::string trajectory_soft_diagnostic;
     if (!validate_trajectory(
             opt.trajectory,
             planning_cost_map,
@@ -696,20 +680,15 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             config_.occupied_threshold,
             config_.step_detection.detect_norm_threshold,
             config_.step_detection.detect_dot_threshold,
-            minco_params.limits,
+            minco_params.trajectory_limits,
             config_.trajectory_validation,
             trajectory_error,
-            trajectory_error_is_fatal
+            trajectory_soft_diagnostic
         )) {
-        if (trajectory_error_is_fatal || config_.trajectory_validation.reject_infeasible) {
-            return fail("MINCO output rejected: " + trajectory_error);
-        }
-        RCLCPP_WARN(
-            logger_,
-            "MINCO output violates trajectory validation but is accepted because "
-            "validation.reject_infeasible=false: %s",
-            trajectory_error.c_str()
-        );
+        return fail("MINCO output rejected: " + trajectory_error);
+    }
+    if (!trajectory_soft_diagnostic.empty()) {
+        RCLCPP_WARN(logger_, "MINCO soft target diagnostic: %s", trajectory_soft_diagnostic.c_str());
     }
 
     // ── 构建不可变 AnnotatedPath ──

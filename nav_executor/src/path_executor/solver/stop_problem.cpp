@@ -25,13 +25,15 @@ void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 
 ControlVec StopProblem::u_lower() const {
     ControlVec lower;
-    lower << p_.stop.command_bounds.vel_min, p_.stop.command_bounds.omega_min, 0.0;
+    lower << p_.stop.profile.command_envelope.velocity.min,
+        p_.stop.profile.command_envelope.angular_velocity.min, 0.0;
     return lower;
 }
 
 ControlVec StopProblem::u_upper() const {
     ControlVec upper;
-    upper << p_.stop.command_bounds.vel_max, p_.stop.command_bounds.omega_max, 0.0;
+    upper << p_.stop.profile.command_envelope.velocity.max,
+        p_.stop.profile.command_envelope.angular_velocity.max, 0.0;
     return upper;
 }
 
@@ -46,9 +48,9 @@ StopResidualVec stop_residual_impl(
     const GridInfo& ci
 ) {
     const auto& stop = p.stop;
-    const auto& motion_lim = stop.motion_constraints;
+    const auto& motion_lim = stop.profile.command_dynamics;
     const auto& command_w = stop.command_weights;
-    const auto& motion_w = stop.motion_constraint_weights;
+    const auto& dynamics_w = stop.command_dynamics_weights;
     const auto& env_w = stop.environment_weights;
 
     StopResidualVec r = StopResidualVec::Zero();
@@ -59,16 +61,18 @@ StopResidualVec stop_residual_impl(
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
 
-    const double dv_lim = motion_lim.acc_max * MPC_DT;
-    const double dw_lim = motion_lim.alpha_max * MPC_DT;
+    const double dv_lim = motion_lim.velocity_rate_max * MPC_DT;
+    const double dw_lim = motion_lim.angular_velocity_rate_max * MPC_DT;
     const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = command_w.r_v * v_cmd;
     r(1) = command_w.r_omega * w_cmd;
     r(2) = command_w.r_dv * dv_cmd;
     r(3) = command_w.r_domega * dw_cmd;
-    r(4) = motion_w.acc_limit * positive_part(std::abs(dv_cmd) - dv_lim);
-    r(5) = motion_w.alpha_limit * positive_part(std::abs(dw_cmd) - dw_lim);
-    r(6) = motion_w.lat_acc * positive_part(a_lat - motion_lim.a_lat_max);
+    r(4) = dynamics_w.velocity_rate * positive_part(std::abs(dv_cmd) - dv_lim);
+    r(5) = dynamics_w.angular_velocity_rate
+        * positive_part(std::abs(dw_cmd) - dw_lim);
+    r(6) = dynamics_w.lateral_acceleration
+        * positive_part(a_lat - motion_lim.lateral_acceleration_max);
     r(7) = env_w.obstacle * cs.value / 255.0;
 
     return r;

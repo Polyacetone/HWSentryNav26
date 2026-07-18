@@ -30,10 +30,10 @@ struct MPCStartCommandLimits {
     double omega_cmd_act_gap_max;
 };
 
-struct MPCMotionConstraintWeights {
-    double acc_limit;
-    double alpha_limit;
-    double lat_acc;
+struct MPCCommandDynamicsWeights {
+    double velocity_rate;
+    double angular_velocity_rate;
+    double lateral_acceleration;
 };
 
 struct MPCFollowTrackingWeights {
@@ -71,12 +71,12 @@ struct MPCFollowCommandWeights {
     double r_domega;
 };
 
-struct MPCFollowTerrainWeights {
-    double step_vel_weight; // 速度窗
-    double direction;       // 朝向 ⊥ 台阶对齐
-    double step_omega;      // 台阶内 ω 抑制
-    double step_dv;         // 台阶内 dv 平滑
-    double step_domega;     // 台阶内 dω 平滑
+struct MPCTraversalTargetWeights {
+    double velocity;
+    double direction;
+    double angular_velocity;
+    double velocity_smoothness;
+    double angular_velocity_smoothness;
 };
 
 struct MPCFollowEnvironmentWeights {
@@ -162,8 +162,8 @@ struct MPCFollowParams {
     std::array<CapabilityProfile, 3> capability_profiles;
     MPCFollowTrackingWeights tracking_weights;
     MPCFollowCommandWeights command_weights;
-    MPCMotionConstraintWeights motion_constraint_weights;
-    MPCFollowTerrainWeights terrain_weights;
+    MPCCommandDynamicsWeights command_dynamics_weights;
+    MPCTraversalTargetWeights traversal_target_weights;
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowRolloutSafetyParams rollout_safety;
     MPCFollowPhaseParams phase;
@@ -187,11 +187,10 @@ struct MPCStopTerminalWeights {
 };
 
 struct MPCStopParams {
-    MPCCommandBounds command_bounds;
+    CapabilityProfile profile;
     MPCStartCommandLimits start_command;
-    MPCMotionConstraints motion_constraints;
     MPCStopCommandWeights command_weights;
-    MPCMotionConstraintWeights motion_constraint_weights;
+    MPCCommandDynamicsWeights command_dynamics_weights;
     MPCStopEnvironmentWeights environment_weights;
     MPCStopTerminalWeights terminal_weights;
     int max_iters;
@@ -220,12 +219,11 @@ struct MPCHoldTerminalWeights {
 };
 
 struct MPCHoldParams {
-    MPCCommandBounds command_bounds;
+    CapabilityProfile profile;
     MPCStartCommandLimits start_command;
-    MPCMotionConstraints motion_constraints;
     MPCHoldGoalWeights goal_weights;
     MPCHoldCommandWeights command_weights;
-    MPCMotionConstraintWeights motion_constraint_weights;
+    MPCCommandDynamicsWeights command_dynamics_weights;
     MPCHoldEnvironmentWeights environment_weights;
     MPCHoldTerminalWeights terminal_weights;
     int max_iters;
@@ -240,8 +238,7 @@ struct MPCHoldParams {
 //   - step_enter_u：物理台阶边缘（真实起跳点）。这是“助跑是否还来得及”的物理截止点，
 //     可达包络/入口速度地板以此为参考终点，可行性因子 f 也以此判定。
 struct StepTraversalConstraint {
-    double speed_min = 0.0;
-    double speed_max = 0.0;
+    TraversalVelocityWindow velocity_window;
     double commit_u = 0.0;
     double step_enter_u = 0.0;
     double exit_u = 1.0;

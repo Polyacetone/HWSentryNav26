@@ -30,12 +30,12 @@ public:
     };
 
     struct Params {
-        // 运动学界
-        double vel_max = 2.0;
-        double vel_min = -1.6;
-        double omega_max = 6.0;
-        double accel_max = 1.8;
-        double a_lat_max = 2.0;
+        struct StateLimits {
+            SignedVelocityBounds velocity {-1.6, 3.2};
+            double angular_velocity_max = 6.0;
+            double acceleration_max = 1.8;
+            double lateral_acceleration_max = 2.0;
+        } state_limits;
 
         // 原语采样
         int accel_samples = 5;      // [-accel_max, accel_max] 均匀采样

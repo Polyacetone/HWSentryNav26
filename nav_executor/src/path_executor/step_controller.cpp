@@ -1,10 +1,17 @@
 #include <nav_executor/path_executor/step_controller.hpp>
+
+#include <algorithm>
+
 #include <rclcpp/logging.hpp>
 
 namespace nav_executor {
 
 namespace {
 constexpr double U_EPSILON = 1e-6;
+
+double approach(const double current, const double target, const double max_step) {
+    return current + std::clamp(target - current, -max_step, max_step);
+}
 } // anonymous namespace
 
 StepController::StepController(
@@ -127,31 +134,38 @@ void StepController::tick_profile_blend() {
     const auto& tgt = target_profile_;
 
     {
-        auto& c = cur.command_bounds;
-        const auto& t = tgt.command_bounds;
+        auto& c = cur.command_envelope;
+        const auto& t = tgt.command_envelope;
         const double v_step = blend_params_.v_step;
         const double w_step = blend_params_.w_step;
 
-        if (t.vel_max >= c.vel_max) c.vel_max = t.vel_max;
-        else c.vel_max = std::max(t.vel_max, c.vel_max - v_step);
-        if (t.vel_min >= c.vel_min) c.vel_min = t.vel_min;
-        else c.vel_min = std::max(t.vel_min, c.vel_min - v_step);
-        if (t.omega_max >= c.omega_max) c.omega_max = t.omega_max;
-        else c.omega_max = std::max(t.omega_max, c.omega_max - w_step);
-        if (t.omega_min >= c.omega_min) c.omega_min = t.omega_min;
-        else c.omega_min = std::max(t.omega_min, c.omega_min - w_step);
+        c.velocity.min = approach(c.velocity.min, t.velocity.min, v_step);
+        c.velocity.max = approach(c.velocity.max, t.velocity.max, v_step);
+        c.angular_velocity.min = approach(
+            c.angular_velocity.min, t.angular_velocity.min, w_step
+        );
+        c.angular_velocity.max = approach(
+            c.angular_velocity.max, t.angular_velocity.max, w_step
+        );
     }
 
     {
-        auto& c = cur.motion_constraints;
-        const auto& t = tgt.motion_constraints;
+        auto& c = cur.command_dynamics;
+        const auto& t = tgt.command_dynamics;
 
-        if (t.acc_max >= c.acc_max) c.acc_max = t.acc_max;
-        else c.acc_max = std::max(t.acc_max, c.acc_max - blend_params_.acc_step);
-        if (t.alpha_max >= c.alpha_max) c.alpha_max = t.alpha_max;
-        else c.alpha_max = std::max(t.alpha_max, c.alpha_max - blend_params_.alpha_step);
-        if (t.a_lat_max >= c.a_lat_max) c.a_lat_max = t.a_lat_max;
-        else c.a_lat_max = std::max(t.a_lat_max, c.a_lat_max - blend_params_.a_lat_step);
+        c.velocity_rate_max = approach(
+            c.velocity_rate_max, t.velocity_rate_max, blend_params_.acc_step
+        );
+        c.angular_velocity_rate_max = approach(
+            c.angular_velocity_rate_max,
+            t.angular_velocity_rate_max,
+            blend_params_.alpha_step
+        );
+        c.lateral_acceleration_max = approach(
+            c.lateral_acceleration_max,
+            t.lateral_acceleration_max,
+            blend_params_.a_lat_step
+        );
     }
 }
 

@@ -59,7 +59,7 @@ double retreat_path_u_by_distance(const StepDetectionParams& p, const MincoTraje
     return u;
 }
 
-const TerrainStepRule* lookup_step_rule(
+const TraversalMode* lookup_step_rule(
     const StepDirection direction,
     const Eigen::Vector2d& step_enter_pos_map,
     const DirectionMap& direction_map,
@@ -67,7 +67,9 @@ const TerrainStepRule* lookup_step_rule(
 ) {
     const Eigen::Vector2d g = direction_map.map_coord_to_grid(step_enter_pos_map);
     const uint8_t label = direction_map.terrain_at(g);
-    const TerrainStepRule* rule = terrain_constraints.selected_mode(label, direction == StepDirection::UP);
+    const TraversalMode* rule = terrain_constraints.selected_mode(
+        label, direction == StepDirection::UP
+    );
     if (!rule || rule->chassis_mode == 0) return nullptr;
     return rule;
 }
@@ -123,7 +125,7 @@ std::vector<StepPlanSegment> build_step_plan(
         const Eigen::Vector2d step_exit_pos = path.position(step_exit_u);
         const double step_enter_u = static_cast<double>(active->start_index) * u_step;
 
-        const TerrainStepRule* rule = lookup_step_rule(
+        const TraversalMode* rule = lookup_step_rule(
             active->direction, active->step_enter_pos_map, direction_map, terrain_constraints
         );
         if (rule) {
@@ -142,8 +144,7 @@ std::vector<StepPlanSegment> build_step_plan(
                 .mode = rule->chassis_mode,
                 .capability = rule->capability,
             };
-            seg.traversal_constraint.speed_min = rule->speed.min;
-            seg.traversal_constraint.speed_max = rule->speed.max;
+            seg.traversal_constraint.velocity_window = rule->velocity_window;
             seg.traversal_constraint.commit_u = commit_u;
             seg.traversal_constraint.step_enter_u = step_enter_u;
             seg.traversal_constraint.exit_u = step_exit_u;

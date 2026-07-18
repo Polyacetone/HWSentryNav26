@@ -97,7 +97,7 @@ double MincoOptimizer::accumulate_penalties(
     const auto& coeffs = ws.minco.coefficients();
     const int n = ws.n_segments;
     const auto& w = params_.weights;
-    const auto& lim = params_.limits;
+    const auto& lim = params_.trajectory_limits;
     constexpr double SPEED_EPS = 1e-4;
 
     double cost = 0.0;
@@ -217,7 +217,7 @@ double MincoOptimizer::accumulate_penalties(
                              label < TERRAIN_LABEL_COUNT; ++label) {
                             const double label_weight = label_weights[label];
                             if (label_weight <= 0.0) continue;
-                            const TerrainStepRule* rule =
+                            const TraversalMode* rule =
                                 ws.terrain_constraints->selected_mode(label, going_up);
                             if (!rule) continue;
                             sample.sources[static_cast<size_t>(sample.source_count++)] = RunupSource {
@@ -240,7 +240,7 @@ double MincoOptimizer::accumulate_penalties(
         for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE);
              label < TERRAIN_LABEL_COUNT; ++label) {
             for (const bool going_up : {false, true}) {
-                if (const TerrainStepRule* rule =
+                if (const TraversalMode* rule =
                         ws.terrain_constraints->selected_mode(label, going_up)) {
                     max_runup_radius = std::max(max_runup_radius, rule->run_up);
                 }
@@ -398,8 +398,8 @@ double MincoOptimizer::accumulate_penalties(
             double gpx = 0, gpy = 0, gvx = 0, gvy = 0, gax = 0, gay = 0;
             // 分项密度（诊断用，terms 非空时按 dt 加权累积到 terms）。
             double d_obstacle = 0, d_velocity = 0, d_lateral_acc = 0;
-            double d_omega = 0, d_accel = 0, d_step_alignment = 0, d_step_velocity = 0;
-            double d_step_prohibited = 0;
+            double d_omega = 0, d_accel = 0, d_traversal_alignment = 0;
+            double d_traversal_velocity = 0, d_prohibited_traversal = 0;
             double d_runup_accel = 0, d_runup_omega = 0;
 
             const double speed2 = vx * vx + vy * vy;
@@ -459,12 +459,14 @@ double MincoOptimizer::accumulate_penalties(
 
             // (b) 带符号速度窗：v ≤ vel_max, v ≥ vel_min
             {
-                const double over = v_signed - lim.vel_max;
-                const double under = lim.vel_min - v_signed;
+                const double over = v_signed - lim.velocity.max;
+                const double under = lim.velocity.min - v_signed;
                 const double go = violation(over), gu = violation(under);
-                density += w.velocity * 0.5 * (go * go + gu * gu);
-                if (terms) d_velocity += w.velocity * 0.5 * (go * go + gu * gu);
-                const double dv = w.velocity * (go - gu); // dρ/dv_signed
+                density += w.trajectory_velocity * 0.5 * (go * go + gu * gu);
+                if (terms) {
+                    d_velocity += w.trajectory_velocity * 0.5 * (go * go + gu * gu);
+                }
+                const double dv = w.trajectory_velocity * (go - gu); // dρ/dv_signed
                 gvx += dv * dvs_dvx;
                 gvy += dv * dvs_dvy;
             }
@@ -479,7 +481,7 @@ double MincoOptimizer::accumulate_penalties(
             // (c) 侧向加速度 |v·ω| ≤ a_lat
             {
                 const double a_lat = v_signed * omega;
-                const double mag = std::abs(a_lat) - lim.a_lat_max;
+                const double mag = std::abs(a_lat) - lim.lateral_acceleration_max;
                 const double gm = violation(mag);
                 density += w.lateral_acc * 0.5 * gm * gm;
                 if (terms) d_lateral_acc += w.lateral_acc * 0.5 * gm * gm;
@@ -493,7 +495,7 @@ double MincoOptimizer::accumulate_penalties(
 
             // (d) ω 界 |ω| ≤ omega_max
             {
-                const double mag = std::abs(omega) - lim.omega_max;
+                const double mag = std::abs(omega) - lim.angular_velocity_max;
                 const double gm = violation(mag);
                 density += w.omega * 0.5 * gm * gm;
                 if (terms) d_omega += w.omega * 0.5 * gm * gm;
@@ -507,7 +509,7 @@ double MincoOptimizer::accumulate_penalties(
             // (e) 加速度界 |a| ≤ acc_max
             {
                 const double amag = std::sqrt(ax * ax + ay * ay + EPS);
-                const double mag = amag - lim.acc_max;
+                const double mag = amag - lim.acceleration_max;
                 const double gm = violation(mag);
                 density += w.accel * 0.5 * gm * gm;
                 if (terms) d_accel += w.accel * 0.5 * gm * gm;
@@ -539,8 +541,9 @@ double MincoOptimizer::accumulate_penalties(
 
             // 膨胀方向场连续控制对齐强度；离散 terrain label 只选择速度 profile。
             if (ws.direction_map && ws.terrain_constraints && speed_ok
-                && (w.step_alignment > 0.0 || w.step_velocity > 0.0
-                    || w.step_prohibited > 0.0)) {
+                && (w.traversal_alignment > 0.0
+                    || w.traversal_velocity_target > 0.0
+                    || w.prohibited_traversal > 0.0)) {
                 const Eigen::Vector2d dg = ws.direction_map->map_coord_to_grid({px, py});
                 if (ws.direction_map->is_valid_coord(dg)) {
                     const uint8_t label = ws.direction_map->terrain_at(dg);
@@ -568,11 +571,11 @@ double MincoOptimizer::accumulate_penalties(
                         const double ux = vx / speed, uy = vy / speed;
                         const double e = ux * dir.y() - uy * dir.x();
                         const double alignment = ux * dir.x() + uy * dir.y();
-                        const double align_density = w.step_alignment * 0.5 * e * e;
+                        const double align_density = w.traversal_alignment * 0.5 * e * e;
                         terrain_density += align_density;
                         density += gate * align_density;
-                        if (terms) d_step_alignment += gate * align_density;
-                        const double de = gate * w.step_alignment * e;
+                        if (terms) d_traversal_alignment += gate * align_density;
+                        const double de = gate * w.traversal_alignment * e;
                         const double inv_s = 1.0 / speed;
                         const double inv_s3 = inv_s * inv_s * inv_s;
                         const double dux_dvx = (speed2 - vx * vx) * inv_s3;
@@ -588,20 +591,21 @@ double MincoOptimizer::accumulate_penalties(
                         gpy += de * de_dpos.y();
 
                         // (2) 速度窗罚（所选模式）。
-                        const TerrainStepRule* up_rule =
+                        const TraversalMode* up_rule =
                             ws.terrain_constraints->selected_mode(label, true);
-                        const TerrainStepRule* down_rule =
+                        const TraversalMode* down_rule =
                             ws.terrain_constraints->selected_mode(label, false);
-                        const TerrainStepRule* rule = alignment >= 0.0 ? up_rule : down_rule;
+                        const TraversalMode* rule = alignment >= 0.0 ? up_rule : down_rule;
                         if (rule) {
-                            const double over = v_signed - rule->speed.max;
-                            const double under = rule->speed.min - v_signed;
+                            const double over = v_signed - rule->velocity_window.max;
+                            const double under = rule->velocity_window.min - v_signed;
                             const double go = violation(over), gu = violation(under);
-                            const double vel_density = w.step_velocity * 0.5 * (go * go + gu * gu);
+                            const double vel_density = w.traversal_velocity_target
+                                * 0.5 * (go * go + gu * gu);
                             terrain_density += vel_density;
                             density += gate * vel_density;
-                            if (terms) d_step_velocity += gate * vel_density;
-                            const double dv = gate * w.step_velocity * (go - gu);
+                            if (terms) d_traversal_velocity += gate * vel_density;
+                            const double dv = gate * w.traversal_velocity_target * (go - gu);
                             gvx += dv * dvs_dvx;
                             gvy += dv * dvs_dvy;
                         }
@@ -616,12 +620,12 @@ double MincoOptimizer::accumulate_penalties(
                         const double prohibited_down = directional_label && !down_rule
                             ? violation(-alignment)
                             : 0.0;
-                        const double prohibited_density = 0.5 * w.step_prohibited
+                        const double prohibited_density = 0.5 * w.prohibited_traversal
                             * (prohibited_up * prohibited_up + prohibited_down * prohibited_down);
                         terrain_density += prohibited_density;
                         density += gate * prohibited_density;
-                        if (terms) d_step_prohibited += gate * prohibited_density;
-                        const double dalignment = gate * w.step_prohibited
+                        if (terms) d_prohibited_traversal += gate * prohibited_density;
+                        const double dalignment = gate * w.prohibited_traversal
                             * (prohibited_up - prohibited_down);
                         gvx += dalignment * (dir.x() * dux_dvx + dir.y() * duy_dvx);
                         gvy += dalignment * (dir.x() * dux_dvy + dir.y() * duy_dvy);
@@ -641,13 +645,13 @@ double MincoOptimizer::accumulate_penalties(
             cost += dt * density;
             if (terms) {
                 terms->obstacle += dt * d_obstacle;
-                terms->velocity += dt * d_velocity;
+                terms->trajectory_velocity += dt * d_velocity;
                 terms->lateral_acc += dt * d_lateral_acc;
                 terms->omega += dt * d_omega;
                 terms->accel += dt * d_accel;
-                terms->step_alignment += dt * d_step_alignment;
-                terms->step_velocity += dt * d_step_velocity;
-                terms->step_prohibited += dt * d_step_prohibited;
+                terms->traversal_alignment += dt * d_traversal_alignment;
+                terms->traversal_velocity_target += dt * d_traversal_velocity;
+                terms->prohibited_traversal += dt * d_prohibited_traversal;
                 terms->runup_accel += dt * d_runup_accel;
                 terms->runup_omega += dt * d_runup_omega;
             }

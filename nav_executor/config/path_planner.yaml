@@ -1,30 +1,35 @@
 /**:
   ros__parameters:
     path_planner:
-      # ═══════════════════════════════════════════════
-      #  Planner — 规划器配置
-      # ═══════════════════════════════════════════════
+      traversability:
+        occupied_threshold: 50 # 格子代价 > 该值则不可通行 (0~255)
+        on_step_threshold: 0.1 # 方向场模长 > 该值则视为在台阶上不可规划起点
+
+      nudge:
+        max_distance: 1.0 # merged 上搜索 free 格子的最大 BFS 半径 (m)
+
+      start_prediction:
+        enable: true # 是否启用起点前推预测
+        max_accel: 2.0 # 最大减速度 (m/s²)，用于估算制动距离
+        planning_delay: 0.2 # Dijkstra + Kinodynamic A* + MINCO 期望耗时 (s)
+        min_speed: 0.3 # 低于该速度不做起点前推 (m/s)
+        collision_check_step: 0.05 # 预测起点直线可达性采样间隔 (m)
+
       planner:
         goal_reached_distance: 0.5 # robot-to-goal 近距离短路阈值 (m)：< 此值则 COMPLETE / USE_AS_FIXED
         skip_distance: 0.5 # 起终点距离 < 此值时跳过 kinodynamic 直接直连种子 (m)
-        seed_resample_distance: 0.5 # kinodynamic 种子重采样间隔 (m)，决定 MINCO 段数（预留）
+        seed_resample_distance: 0.5 # kinodynamic 种子重采样间隔 (m)，决定 MINCO 段数
 
-      # ═══════════════════════════════════════════════
-      #  Dijkstra — cost-to-goal 场（kinodynamic 启发 + 开阔 seed）
-      # ═══════════════════════════════════════════════
       dijkstra:
         obstacle_weight: 0.02 # 障碍代价系数（cost∈[0,255] 与步长同量级缩放）
         feasible_threshold: 200 # cost >= 此值不扩散 (0~255)
 
-      # ═══════════════════════════════════════════════
-      #  Kinodynamic A* — 最简差速车拓扑发现
-      # ═══════════════════════════════════════════════
       kinodynamic:
-        vel_max: 2.0 # 线速度上限 (m/s)
-        vel_min: -1.6 # 线速度下限（倒车）(m/s)
-        omega_max: 6.0 # 角速度上限 (rad/s)
-        accel_max: 1.8 # 线加速度上限 (m/s²)
-        a_lat_max: 2.0 # 侧向加速度上限 |v·ω| (m/s²)
+        state_limits:
+          velocity: { min: -1.6, max: 3.0 } # 速度限制 (m/s)
+          angular_velocity_max: 6.0 # 角速度限制 (rad/s)
+          acceleration_max: 1.8 # 加速度限制 (m/s²)
+          lateral_acceleration_max: 2.0 # 侧向加速度（|v·omega|）限制 (m/s²)
         accel_samples: 5 # [-accel_max, accel_max] 采样数
         omega_samples: 7 # [-omega_max, omega_max] 采样数
         primitive_duration: 0.3 # 每原语积分时长 (s)
@@ -38,29 +43,25 @@
         goal_tolerance: 0.3 # 到 goal 位置容差 (m)
         max_expansions: 200000 # 展开节点上限（内存/时间护栏）
 
-      # ═══════════════════════════════════════════════
-      #  MINCO — 时空优化（自研 GCOPTER 思路）
-      # ═══════════════════════════════════════════════
       minco:
-        weights:
+        penalty_weights:
           energy: 1.0 # min-jerk 能量
           time: 16.0 # 总时长
           obstacle: 1000.0 # 障碍罚
-          velocity: 100.0 # 带符号速度界
-          lateral_acc: 100.0 # |v·ω| ≤ a_lat
-          omega: 100.0 # |ω| 界
-          accel: 100.0 # |a| 界
-          step_alignment: 1000.0 # 台阶内车身轴与方向场对齐
-          step_velocity: 200.0 # 台阶内按所选模式约束速度窗
-          step_prohibited: 1000.0 # 禁止方向的穿越罚
-          runup_accel: 100.0 # 台阶及助跑区内 ‖a‖² 正则，使加减速在助跑区前完成
-          runup_omega: 100.0 # 台阶及助跑区内 ω² 正则，使转向在助跑区前完成
-        limits:
-          vel_max: 2.0 # 线速度上限 (m/s)
-          vel_min: -1.6 # 线速度下限 (m/s)
-          omega_max: 6.0 # 角速度上限 (rad/s)
-          acc_max: 1.8 # 平动加速度上限 (m/s²)
-          a_lat_max: 2.0 # 侧向加速度上限 |v·ω| (m/s²)
+          trajectory_velocity: 100.0 # 通用轨迹速度界 penalty
+          lateral_acceleration: 100.0 # |v·omega| 轨迹界 penalty
+          angular_velocity: 100.0 # 轨迹角速度界 penalty
+          acceleration: 100.0 # 轨迹平动加速度界 penalty
+          traversal_alignment: 1000.0 # 台阶内车身轴与方向场对齐
+          traversal_velocity_target: 200.0 # 共享台阶实际速度窗口的软目标
+          prohibited_traversal: 1000.0 # 禁止方向的穿越罚
+          runup_acceleration: 100.0 # 台阶及助跑区内加速度正则
+          runup_angular_velocity: 100.0 # 台阶及助跑区内角速度正则
+        trajectory_limits:
+          velocity: { min: -1.6, max: 3.0 } # 速度限制 (m/s)
+          angular_velocity_max: 6.0 # 角速度限制 (rad/s)
+          acceleration_max: 1.8 # 加速度限制 (m/s²)
+          lateral_acceleration_max: 2.0 # 侧向加速度（|v·omega|）限制 (m/s²)
         terrain_gate: # 方向地形罚的平滑门控（消除台阶边界代价断崖，保证 strong Wolfe 线搜索连续性）
           norm_lo: 0.1 # ‖dir‖ 下限：低于则方向地形罚为零
           norm_hi: 0.9 # ‖dir‖ 上限：高于则方向地形罚全强度
@@ -70,50 +71,14 @@
           transition_distance: 0.1 # run_up 边界外侧的平滑弧长过渡带 (m)
         max_iterations: 2000 # L-BFGS 最大迭代
         min_segment_time: 0.05 # 段时长下限 (s)
-        validation:
-          reject_infeasible: false # 开发期仅 WARN 并接纳约束违规轨迹；非有限值等结构错误仍会拒绝
-          samples_per_segment: 32 # 最终验收逐段采样数；每段包含两端点
-          velocity_tolerance: 0.1 # 一般带符号速度与入口速度窗容差 (m/s)
-          omega_tolerance: 0.1 # 角速度上限容差 (rad/s)
+        output_validation:
+          samples_per_segment: 20 # 最终验收逐段采样数；每段包含两端点
+          trajectory_velocity_tolerance: 0.1 # 通用轨迹速度硬界容差 (m/s)
+          angular_velocity_tolerance: 0.1 # 角速度硬界容差 (rad/s)
           acceleration_tolerance: 0.1 # 平动加速度上限容差 (m/s²)
           lateral_acceleration_tolerance: 0.1 # |v*omega| 上限容差 (m/s²)
-          step_velocity_tolerance: 0.1 # 台阶内部速度窗容差 (m/s)
+          traversal_velocity_target_tolerance: 0.1 # 仅用于台阶软目标诊断 (m/s)
 
-      # ═══════════════════════════════════════════════
-      #  Traversability — 通行性规则（planner 可行性判定）
-      # ═══════════════════════════════════════════════
-      traversability:
-        occupied_threshold: 50 # 格子代价 > 该值则不可通行 (0~255)
-        on_step_threshold: 0.1 # 方向场模长 > 该值则视为在台阶上不可规划起点
-
-      # ═══════════════════════════════════════════════
-      #  Nudge — 起点/终点 nudging
-      # ═══════════════════════════════════════════════
-      nudge:
-        max_distance: 1.0 # merged 上搜索 free 格子的最大 BFS 半径 (m)
-
-      # ═══════════════════════════════════════════════
-      #  StartPrediction — 起点前推预测
-      # ═══════════════════════════════════════════════
-      start_prediction:
-        enable: true # 是否启用起点前推预测
-        max_accel: 2.0 # 最大减速度 (m/s²)，用于估算制动距离
-        planning_delay: 0.2 # Dijkstra + Kinodynamic A* + MINCO 期望耗时 (s)
-        min_speed: 0.3 # 低于该速度不做起点前推 (m/s)
-        collision_check_step: 0.05 # 预测起点直线可达性采样间隔 (m)
-
-      # ═══════════════════════════════════════════════
-      #  StepMask — 台阶掩码（AnnotatedPath 产出）
-      # ═══════════════════════════════════════════════
-      step_mask:
-        path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积 >= 该值则认为路径经过台阶
-        full_effect_radius: 0.6 # 掩码满强度半径 (m)
-        cutoff_radius: 1.0 # 掩码截止半径 (m)
-        length_num_samples: 100 # 路径弧长估计采样数
-
-      # ═══════════════════════════════════════════════
-      #  Step — 台阶检测（规划期 step_annotator 使用）
-      # ═══════════════════════════════════════════════
       step:
         detection:
           detect_norm_threshold: 0.9 # 方向场模长阈值，用于检测台阶 enter/exit
@@ -125,3 +90,9 @@
           fsm_release_distance: 0.3 # STEPPING 退出点相对物理台阶出口的额外推进距离 (m)
         mpc_constraints:
           gate_transition_distance: 0.3 # 台阶内部 MPC 约束窗两侧软门控过渡带宽度 (m)
+
+      step_mask:
+        path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积 >= 该值则认为路径经过台阶
+        full_effect_radius: 0.6 # 掩码满强度半径 (m)
+        cutoff_radius: 1.0 # 掩码截止半径 (m)
+        length_num_samples: 100 # 路径弧长估计采样数

@@ -18,15 +18,7 @@
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
           fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
-        command_bounds:
-          vel_max: 2.0 # 线速度上限 (m/s)
-          vel_min: -1.6 # 线速度下限 (m/s)
-          omega_max: 6.0 # 角速度上限 (rad/s)
-          omega_min: -6.0 # 角速度下限 (rad/s)
-        motion_constraints:
-          acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-          a_lat_max: 2.0 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
+        capability: "medium" # 预设的能力配置，决定了下位机指令限幅
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
@@ -42,17 +34,16 @@
           r_omega: 0.01 # 角速度正则
           r_dv: 0.2 # 线速度平滑
           r_domega: 0.1 # 角速度平滑
-        motion_constraint_weights:
-          acc_limit: 12.0 # 速度指令变化率超限惩罚
-          alpha_limit: 12.0 # 角速度指令变化率超限惩罚
-          lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
-        terrain_weights:
-          internal:
-            velocity_window: 2.0 # 台阶内部速度窗惩罚
-            direction: 2.4 # 台阶内部穿越方向对齐惩罚
-            omega: 0.6 # 台阶内部角速度惩罚，避免转向
-            velocity_smooth: 0.6 # 台阶内部线速度指令变化惩罚，避免加减速
-            omega_smooth: 0.5 # 台阶内部角速度指令变化惩罚，避免突变
+        command_dynamics_weights:
+          velocity_rate: 12.0 # 速度指令变化率超限惩罚
+          angular_velocity_rate: 12.0 # 角速度指令变化率超限惩罚
+          lateral_acceleration: 12.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
+        traversal_target_weights:
+          velocity: 2.0 # v_actual 对共享台阶速度窗口的软目标
+          direction: 2.4 # 台阶内部穿越方向对齐软目标
+          angular_velocity: 0.6 # 台阶内部角速度软目标
+          velocity_smoothness: 0.6 # 台阶内部线速度指令平滑
+          angular_velocity_smoothness: 0.5 # 台阶内部角速度指令平滑
         environment_weights:
           obstacle: 5.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
@@ -68,27 +59,19 @@
       # ═══════════════════════════════════════════════
       stop:
         max_iters: 20 # FDDP 求解器最大迭代次数
-        command_bounds:
-          vel_max: 2.8 # 线速度上限 (m/s)
-          vel_min: 0.0 # 线速度下限 (m/s）
-          omega_max: 12.5 # 角速度上限 (rad/s)
-          omega_min: -12.5 # 角速度下限 (rad/s)
+        capability: "medium" # 预设的能力配置，决定了下位机指令限幅
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
-        motion_constraints:
-          acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-          a_lat_max: 2.4 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
         command_weights:
           r_v: 2.0 # 线速度正则
           r_omega: 0.2 # 角速度正则
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
-        motion_constraint_weights:
-          acc_limit: 12.0 # 速度指令变化率超限惩罚
-          alpha_limit: 12.0 # 角速度指令变化率超限惩罚
-          lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
+        command_dynamics_weights:
+          velocity_rate: 12.0 # 速度指令变化率超限惩罚
+          angular_velocity_rate: 12.0 # 角速度指令变化率超限惩罚
+          lateral_acceleration: 12.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
           obstacle: 3.0 # 避障惩罚（台阶区域已转为障碍物）
         terminal_weights:
@@ -99,18 +82,10 @@
       # ═══════════════════════════════════════════════
       hold:
         max_iters: 20 # FDDP 求解器最大迭代次数
-        command_bounds:
-          vel_max: 1.2 # 线速度上限 (m/s)
-          vel_min: -1.2 # 线速度下限 (m/s）
-          omega_max: 1.6 # 角速度上限 (rad/s)
-          omega_min: -1.6 # 角速度下限 (rad/s)
+        capability: "medium" # 预设的能力配置，决定了下位机指令限幅
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
-        motion_constraints:
-          acc_max: 1.8 # 最大 dv_cmd/dt (m/s²)
-          alpha_max: 7.0 # 最大 domega_cmd/dt (rad/s²)
-          a_lat_max: 2.4 # 最大侧向加速度 |v_cmd*omega_cmd| (m/s²)
         goal_weights:
           q_goal_xy: 0.3 # 每步目标点吸引（x/y误差）
           q_goal_theta: 0.2 # 朝向目标点
@@ -120,10 +95,10 @@
           r_omega: 0.01 # 角速度正则
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
-        motion_constraint_weights:
-          acc_limit: 12.0 # 速度指令变化率超限惩罚
-          alpha_limit: 12.0 # 角速度指令变化率超限惩罚
-          lat_acc: 12.0 # 侧向稳定性惩罚（|v_cmd*omega_cmd| 超限）
+        command_dynamics_weights:
+          velocity_rate: 12.0 # 速度指令变化率超限惩罚
+          angular_velocity_rate: 12.0 # 角速度指令变化率超限惩罚
+          lateral_acceleration: 12.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
           obstacle: 3.0 # 全程避障惩罚
         terminal_weights:

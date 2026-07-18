@@ -51,7 +51,9 @@ public:
     [[nodiscard]] uint8_t compute_step_distance_cm(const MincoTrajectory& path, double current_u) const;
 
     void tick_profile_blend();
-    [[nodiscard]] const CapabilityProfile& current_blended_profile() const { return current_profile_; }
+    [[nodiscard]] const CapabilityProfile& effective_capability() const {
+        return current_profile_;
+    }
 
 private:
     double step_dist_offset_;

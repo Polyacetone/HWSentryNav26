@@ -325,7 +325,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
         path, input.observation.chassis_pose_map, input.observation.chassis_state,
         input.route->phase_time,
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
-        step_controller_.current_blended_profile(),
+        step_controller_.effective_capability(),
         input.intent.active_path->step_constraint_schedule,
         check_lethal_status
     );

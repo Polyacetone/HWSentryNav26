@@ -100,7 +100,10 @@ KinodynamicAstar::Result KinodynamicAstar::search(
     } else {
         for (int i = 0; i < params_.accel_samples; ++i) {
             const double t = static_cast<double>(i) / static_cast<double>(params_.accel_samples - 1);
-            accels.push_back(-params_.accel_max + 2.0 * params_.accel_max * t);
+            accels.push_back(
+                -params_.state_limits.acceleration_max
+                + 2.0 * params_.state_limits.acceleration_max * t
+            );
         }
     }
     std::vector<double> omegas;
@@ -110,7 +113,10 @@ KinodynamicAstar::Result KinodynamicAstar::search(
     } else {
         for (int i = 0; i < params_.omega_samples; ++i) {
             const double t = static_cast<double>(i) / static_cast<double>(params_.omega_samples - 1);
-            omegas.push_back(-params_.omega_max + 2.0 * params_.omega_max * t);
+            omegas.push_back(
+                -params_.state_limits.angular_velocity_max
+                + 2.0 * params_.state_limits.angular_velocity_max * t
+            );
         }
     }
 
@@ -153,10 +159,16 @@ KinodynamicAstar::Result KinodynamicAstar::search(
                 for (int k = 0; k < substeps; ++k) {
                     const State previous = s;
                     // 前向积分（半隐式：先更新 v，再用中点朝向推进位置）。
-                    const double v_next = std::clamp(s.v + a * sub_dt, params_.vel_min, params_.vel_max);
+                    const double v_next = s.v + a * sub_dt;
+                    if (v_next < params_.state_limits.velocity.min - EPS
+                        || v_next > params_.state_limits.velocity.max + EPS) {
+                        feasible_primitive = false;
+                        break;
+                    }
                     const double v_mid = 0.5 * (s.v + v_next);
                     // a_lat 剪枝
-                    if (std::abs(v_mid * omega) > params_.a_lat_max + EPS) {
+                    if (std::abs(v_mid * omega)
+                        > params_.state_limits.lateral_acceleration_max + EPS) {
                         feasible_primitive = false;
                         break;
                     }
@@ -222,9 +234,7 @@ KinodynamicAstar::Result KinodynamicAstar::search(
     for (size_t i = 1; i < reversed_indices.size(); ++i) {
         const SearchNode& node = nodes[static_cast<size_t>(reversed_indices[i])];
         for (int k = 0; k < substeps; ++k) {
-            const double v_next = std::clamp(
-                replay.v + node.applied_accel * sub_dt, params_.vel_min, params_.vel_max
-            );
+            const double v_next = replay.v + node.applied_accel * sub_dt;
             const double v_mid = 0.5 * (replay.v + v_next);
             const double theta_mid = replay.theta + 0.5 * node.applied_omega * sub_dt;
             replay.x += v_mid * std::cos(theta_mid) * sub_dt;

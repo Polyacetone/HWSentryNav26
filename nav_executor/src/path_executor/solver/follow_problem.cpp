@@ -74,7 +74,7 @@ FollowResidualVec follow_residual_impl(
     const MPCParams& params,
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
-    const MPCMotionConstraints& motion_limits,
+    const CommandDynamicsLimits& motion_limits,
     const std::shared_ptr<const StepConstraintSchedule>& step_schedule,
     const FrozenStepGate* frozen_step_gate = nullptr
 ) {
@@ -82,8 +82,8 @@ FollowResidualVec follow_residual_impl(
     const auto& tracking = follow.tracking_weights;
     const auto& phase = follow.phase;
     const auto& command = follow.command_weights;
-    const auto& motion = follow.motion_constraint_weights;
-    const auto& terrain = follow.terrain_weights;
+    const auto& dynamics_weights = follow.command_dynamics_weights;
+    const auto& traversal_weights = follow.traversal_target_weights;
     const auto& environment = follow.environment_weights;
 
     FollowResidualVec residual = FollowResidualVec::Zero();
@@ -122,12 +122,16 @@ FollowResidualVec follow_residual_impl(
     residual(10) = command.r_dv * dv_cmd;
     residual(11) = command.r_domega * domega_cmd;
 
-    const double dv_limit = motion_limits.acc_max * MPC_DT;
-    const double domega_limit = motion_limits.alpha_max * MPC_DT;
-    residual(12) = motion.acc_limit * positive_part(std::abs(dv_cmd) - dv_limit);
-    residual(13) = motion.alpha_limit * positive_part(std::abs(domega_cmd) - domega_limit);
-    residual(14) = motion.lat_acc
-        * positive_part(std::abs(v_cmd * omega_cmd) - motion_limits.a_lat_max);
+    const double dv_limit = motion_limits.velocity_rate_max * MPC_DT;
+    const double domega_limit = motion_limits.angular_velocity_rate_max * MPC_DT;
+    residual(12) = dynamics_weights.velocity_rate
+        * positive_part(std::abs(dv_cmd) - dv_limit);
+    residual(13) = dynamics_weights.angular_velocity_rate
+        * positive_part(std::abs(domega_cmd) - domega_limit);
+    residual(14) = dynamics_weights.lateral_acceleration
+        * positive_part(
+            std::abs(v_cmd * omega_cmd) - motion_limits.lateral_acceleration_max
+        );
 
     const auto cost_sample = eval_cost_bilinear(cost_grid, cost_info, px, py);
     residual(15) = environment.obstacle * cost_sample.value / 255.0;
@@ -142,15 +146,17 @@ FollowResidualVec follow_residual_impl(
         if (gate > 0.0) {
             const Eigen::Vector2d& direction = step->dir_map;
             const double cross = std::cos(theta) * direction.y() - std::sin(theta) * direction.x();
-            residual(16) = terrain.direction * gate * std::abs(cross);
+            residual(16) = traversal_weights.direction * gate * std::abs(cross);
 
-            const double velocity_error = v_actual < step->speed_min
-                ? step->speed_min - v_actual
-                : (v_actual > step->speed_max ? v_actual - step->speed_max : 0.0);
-            residual(17) = terrain.step_vel_weight * gate * velocity_error;
-            residual(18) = terrain.step_omega * gate * omega_cmd;
-            residual(19) = terrain.step_dv * gate * dv_cmd;
-            residual(20) = terrain.step_domega * gate * domega_cmd;
+            const auto& target = step->velocity_window;
+            const double velocity_error = v_actual < target.min
+                ? target.min - v_actual
+                : (v_actual > target.max ? v_actual - target.max : 0.0);
+            residual(17) = traversal_weights.velocity * gate * velocity_error;
+            residual(18) = traversal_weights.angular_velocity * gate * omega_cmd;
+            residual(19) = traversal_weights.velocity_smoothness * gate * dv_cmd;
+            residual(20) = traversal_weights.angular_velocity_smoothness
+                * gate * domega_cmd;
         }
     }
 
@@ -198,7 +204,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     const CostMapGridView& masked_global_grid,
     const double prediction_dt,
     const double schedule_rho,
-    const CapabilityProfile& blended_profile,
+    const CapabilityProfile& effective_capability,
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule
 ):
     trajectory_(std::move(trajectory)),
@@ -208,7 +214,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     masked_global_grid_(masked_global_grid),
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-    blended_profile_(blended_profile),
+    effective_capability_(effective_capability),
     step_constraint_schedule_(std::move(step_constraint_schedule)),
     total_time_(trajectory_.total_time()) {}
 
@@ -242,8 +248,8 @@ void FollowProblemT<Horizon>::dynamics_jacobians(
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_lower() const {
     ControlVec lower;
-    lower << blended_profile_.command_bounds.vel_min,
-        blended_profile_.command_bounds.omega_min,
+    lower << effective_capability_.command_envelope.velocity.min,
+        effective_capability_.command_envelope.angular_velocity.min,
         p_.follow.phase.rate_min;
     return lower;
 }
@@ -251,8 +257,8 @@ ControlVec FollowProblemT<Horizon>::u_lower() const {
 template<int Horizon>
 ControlVec FollowProblemT<Horizon>::u_upper() const {
     ControlVec upper;
-    upper << blended_profile_.command_bounds.vel_max,
-        blended_profile_.command_bounds.omega_max,
+    upper << effective_capability_.command_envelope.velocity.max,
+        effective_capability_.command_envelope.angular_velocity.max,
         p_.follow.phase.rate_max;
     return upper;
 }
@@ -280,7 +286,7 @@ double FollowProblemT<Horizon>::running_cost_value_only(
 ) const {
     const FollowResidualVec residual = follow_residual_impl(
         x, u, trajectory_, p_, cost_grid_for_step(k), cost_info_,
-        blended_profile_.motion_constraints, step_constraint_schedule_
+        effective_capability_.command_dynamics, step_constraint_schedule_
     );
     double cost = residual_cost(residual);
     const double remaining_phase = positive_part(total_time_ - x(ix::PHASE_TIME));
@@ -316,7 +322,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     auto residual_fn = [&](const StateVec& state, const ControlVec& control) {
         return follow_residual_impl(
             state, control, trajectory_, p_, cost_grid, cost_info_,
-            blended_profile_.motion_constraints, step_constraint_schedule_, &frozen_step_gate
+            effective_capability_.command_dynamics, step_constraint_schedule_, &frozen_step_gate
         );
     };
     gauss_newton_running_derivatives<FOLLOW_RESIDUAL_DIM>(

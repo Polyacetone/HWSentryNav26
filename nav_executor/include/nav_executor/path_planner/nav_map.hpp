@@ -2,6 +2,7 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,22 +44,32 @@ using TerrainRuleTable = std::array<TerrainRule, TERRAIN_LABEL_COUNT>;
 //  能力档位 / 地形 profile（供 executor 台阶模式 + MPC 约束）
 // ════════════════════════════════════════════════════════════════
 
-struct MPCCommandBounds {
-    double vel_max;
-    double vel_min;
-    double omega_max;
-    double omega_min;
+struct SignedVelocityBounds {
+    double min;
+    double max;
 };
 
-struct MPCMotionConstraints {
-    double acc_max;
-    double alpha_max;
-    double a_lat_max;
+struct SignedAngularVelocityBounds {
+    double min;
+    double max;
+};
+
+// 下位机对控制指令实施的硬限幅。它约束 command，而不是规划轨迹或预测状态。
+struct CommandEnvelope {
+    SignedVelocityBounds velocity;
+    SignedAngularVelocityBounds angular_velocity;
+};
+
+// 控制器内部用于惩罚指令变化和侧向加速度的动态尺度，不是 box constraint。
+struct CommandDynamicsLimits {
+    double velocity_rate_max;
+    double angular_velocity_rate_max;
+    double lateral_acceleration_max;
 };
 
 struct CapabilityProfile {
-    MPCCommandBounds command_bounds;
-    MPCMotionConstraints motion_constraints;
+    CommandEnvelope command_envelope;
+    CommandDynamicsLimits command_dynamics;
 };
 
 enum class CapabilityLevel : uint8_t {
@@ -74,28 +85,35 @@ inline CapabilityLevel capability_level_from_string(const std::string& s) {
     throw std::invalid_argument("Unknown capability level: \"" + s + "\" (expected low/medium/high)");
 }
 
-struct TerrainSpeedRange {
+// 台阶穿越时对 v_act/v_pred 的共享速度窗口。A* 将其作为可行性条件，MINCO/MPCC
+// 将其作为软目标；该类型本身不隐含 enforcement 方式。
+struct TraversalVelocityWindow {
     double min = 0.0;
     double max = 0.0;
 };
 
-struct TerrainStepRule {
+struct TraversalMode {
     std::string name;
     uint8_t chassis_mode = 0;
     CapabilityLevel capability = CapabilityLevel::LOW;
-    TerrainSpeedRange speed;
+    TraversalVelocityWindow velocity_window;
     bool requires_high_performance = false;
     double run_up = 0.0; // 助跑提前量 (m)：约束锚点自物理台阶边缘上游回退该距离（冲量动作填 0）
 };
 
-struct TerrainLabelRule {
-    std::vector<TerrainStepRule> up;
-    std::vector<TerrainStepRule> down;
+struct DirectionalTraversalModes {
+    std::vector<TraversalMode> up;
+    std::vector<TraversalMode> down;
 };
 
-struct TerrainProfiles {
+struct SelectedTerrainModes {
+    std::optional<TraversalMode> up;
+    std::optional<TraversalMode> down;
+};
+
+struct TraversalConfiguration {
     std::array<CapabilityProfile, 3> capability_profiles;
-    std::array<TerrainLabelRule, 5> directional_labels;
+    std::array<DirectionalTraversalModes, 5> directional_labels;
     double high_performance_buffercap_threshold = 0.0;
     double high_performance_supercap_threshold = 0.0;
     double high_performance_rfr_pwr_limit_threshold = 0.0;
@@ -107,17 +125,17 @@ struct PerformanceState {
 
 struct TerrainTraversalConstraints {
     TerrainRuleTable rules{};
-    std::array<TerrainLabelRule, 5> selected_modes{};
+    std::array<SelectedTerrainModes, 5> selected_modes{};
     std::shared_ptr<const CostMap> blocked_cost_layer;
 
     [[nodiscard]] bool has_blocked_corner(const DirectionMap& direction_map, const Eigen::Vector2d& grid_coord) const;
     [[nodiscard]] bool is_direction_prohibited(const DirectionMap& direction_map, const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
-    [[nodiscard]] const TerrainStepRule* selected_mode(uint8_t label, bool is_up) const;
+    [[nodiscard]] const TraversalMode* selected_mode(uint8_t label, bool is_up) const;
 };
 
 [[nodiscard]] TerrainTraversalConstraints build_terrain_traversal_constraints(
     const DirectionMap& direction_map,
-    const TerrainProfiles& profiles,
+    const TraversalConfiguration& configuration,
     PerformanceState performance
 );
 

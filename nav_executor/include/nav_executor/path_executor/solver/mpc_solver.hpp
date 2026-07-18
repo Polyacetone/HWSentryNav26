@@ -46,7 +46,7 @@ public:
         const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
         double prediction_dt,
-        const CapabilityProfile& blended_profile,
+        const CapabilityProfile& effective_capability,
         std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
         bool check_lethal_status
     );

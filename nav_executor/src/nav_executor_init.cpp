@@ -3,6 +3,7 @@
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/core.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
@@ -197,29 +198,33 @@ void NavExecutorNode::try_init_step_mask() {
 
 CapabilityProfile NavExecutorNode::load_capability_profile(const std::string& prefix) {
     return CapabilityProfile {
-        .command_bounds = {
-            .vel_max = declare_parameter<double>(prefix + ".command_bounds.vel_max"),
-            .vel_min = declare_parameter<double>(prefix + ".command_bounds.vel_min"),
-            .omega_max = declare_parameter<double>(prefix + ".command_bounds.omega_max"),
-            .omega_min = declare_parameter<double>(prefix + ".command_bounds.omega_min"),
+        .command_envelope = {
+            .velocity = {
+                .min = declare_parameter<double>(prefix + ".command_envelope.velocity.min"),
+                .max = declare_parameter<double>(prefix + ".command_envelope.velocity.max"),
+            },
+            .angular_velocity = {
+                .min = declare_parameter<double>(prefix + ".command_envelope.angular_velocity.min"),
+                .max = declare_parameter<double>(prefix + ".command_envelope.angular_velocity.max"),
+            },
         },
-        .motion_constraints = {
-            .acc_max = declare_parameter<double>(prefix + ".motion_constraints.acc_max"),
-            .alpha_max = declare_parameter<double>(prefix + ".motion_constraints.alpha_max"),
-            .a_lat_max = declare_parameter<double>(prefix + ".motion_constraints.a_lat_max"),
+        .command_dynamics = {
+            .velocity_rate_max = declare_parameter<double>(prefix + ".command_dynamics.velocity_rate_max"),
+            .angular_velocity_rate_max = declare_parameter<double>(prefix + ".command_dynamics.angular_velocity_rate_max"),
+            .lateral_acceleration_max = declare_parameter<double>(prefix + ".command_dynamics.lateral_acceleration_max"),
         },
     };
 }
 
 void NavExecutorNode::load_terrain_config() {
     using enum CapabilityLevel;
-    terrain_profiles_.capability_profiles[static_cast<size_t>(LOW)] = load_capability_profile("terrain_profiles.capability_profiles.low");
-    terrain_profiles_.capability_profiles[static_cast<size_t>(MEDIUM)] = load_capability_profile("terrain_profiles.capability_profiles.medium");
-    terrain_profiles_.capability_profiles[static_cast<size_t>(HIGH)] = load_capability_profile("terrain_profiles.capability_profiles.high");
+    traversal_configuration_.capability_profiles[static_cast<size_t>(LOW)] = load_capability_profile("capability_management.profiles.low");
+    traversal_configuration_.capability_profiles[static_cast<size_t>(MEDIUM)] = load_capability_profile("capability_management.profiles.medium");
+    traversal_configuration_.capability_profiles[static_cast<size_t>(HIGH)] = load_capability_profile("capability_management.profiles.high");
 
-    terrain_profiles_.high_performance_buffercap_threshold = declare_parameter<double>("terrain_profiles.high_performance.buffercap_threshold");
-    terrain_profiles_.high_performance_supercap_threshold = declare_parameter<double>("terrain_profiles.high_performance.supercap_threshold");
-    terrain_profiles_.high_performance_rfr_pwr_limit_threshold = declare_parameter<double>("terrain_profiles.high_performance.rfr_pwr_limit_threshold");
+    traversal_configuration_.high_performance_buffercap_threshold = declare_parameter<double>("terrain_traversal.high_performance_available.buffercap_threshold");
+    traversal_configuration_.high_performance_supercap_threshold = declare_parameter<double>("terrain_traversal.high_performance_available.supercap_threshold");
+    traversal_configuration_.high_performance_rfr_pwr_limit_threshold = declare_parameter<double>("terrain_traversal.high_performance_available.rfr_pwr_limit_threshold");
 
     // directional_labels — 有方向语义的标签 (SLOPE..STEP_HIGH)
     struct DirEntry { const char* name; uint8_t label; };
@@ -228,13 +233,13 @@ void NavExecutorNode::load_terrain_config() {
     };
     for (const auto& [entry_name, label] : dir_entries) {
         const size_t idx = label - 2;
-        auto& dir_modes = terrain_profiles_.directional_labels[idx];
+        auto& dir_modes = traversal_configuration_.directional_labels[idx];
 
         // modes 段在 YAML 中是 entry 级别的共享字典，同一个 mode_name 只 declare 一次
-        std::unordered_map<std::string, TerrainStepRule> mode_map;
+        std::unordered_map<std::string, TraversalMode> mode_map;
 
         for (const auto& dir : {"up", "down"}) {
-            const auto prefix = std::string("terrain_profiles.directional_labels.") + entry_name + "." + dir;
+            const auto prefix = std::string("terrain_traversal.directional_labels.") + entry_name + "." + dir;
             const auto names = declare_parameter<std::vector<std::string>>(prefix, std::vector<std::string>{});
 
             auto& target = (dir == std::string("up")) ? dir_modes.up : dir_modes.down;
@@ -246,12 +251,15 @@ void NavExecutorNode::load_terrain_config() {
 
                 // mode 参数只 declare 一次，缓存到 mode_map 后复用
                 if (mode_map.find(mode_name) == mode_map.end()) {
-                    const std::string mode_prefix = std::string("terrain_profiles.directional_labels.") + entry_name + ".modes." + mode_name;
-                    mode_map[mode_name] = TerrainStepRule{
+                    const std::string mode_prefix = std::string("terrain_traversal.directional_labels.") + entry_name + ".modes." + mode_name;
+                    mode_map[mode_name] = TraversalMode{
                         .name = mode_name,
                         .chassis_mode = static_cast<uint8_t>(declare_parameter<int>(mode_prefix + ".chassis_mode")),
                         .capability = capability_level_from_string(declare_parameter<std::string>(mode_prefix + ".capability")),
-                        .speed = {.min = declare_parameter<double>(mode_prefix + ".speed.min"), .max = declare_parameter<double>(mode_prefix + ".speed.max")},
+                        .velocity_window = {
+                            .min = declare_parameter<double>(mode_prefix + ".velocity_target.min"),
+                            .max = declare_parameter<double>(mode_prefix + ".velocity_target.max"),
+                        },
                         .requires_high_performance = declare_parameter<bool>(mode_prefix + ".requires_high_perf"),
                         .run_up = declare_parameter<double>(mode_prefix + ".run_up"),
                     };
@@ -260,16 +268,53 @@ void NavExecutorNode::load_terrain_config() {
             }
         }
     }
+
+    const auto valid_capability = [](const CapabilityProfile& profile) {
+        const auto& command = profile.command_envelope;
+        const auto& dynamics = profile.command_dynamics;
+        return std::isfinite(command.velocity.min)
+            && std::isfinite(command.velocity.max)
+            && command.velocity.min < command.velocity.max
+            && std::isfinite(command.angular_velocity.min)
+            && std::isfinite(command.angular_velocity.max)
+            && command.angular_velocity.min < command.angular_velocity.max
+            && positive_finite(dynamics.velocity_rate_max)
+            && positive_finite(dynamics.angular_velocity_rate_max)
+            && positive_finite(dynamics.lateral_acceleration_max);
+    };
+    for (const CapabilityProfile& profile : traversal_configuration_.capability_profiles) {
+        require_parameter(valid_capability(profile), "capability profile is invalid");
+    }
+    for (const DirectionalTraversalModes& label : traversal_configuration_.directional_labels) {
+        for (const auto* modes : {&label.up, &label.down}) {
+            for (const TraversalMode& mode : *modes) {
+                require_parameter(
+                    nonnegative_finite(mode.velocity_window.min)
+                        && std::isfinite(mode.velocity_window.max)
+                        && mode.velocity_window.min <= mode.velocity_window.max
+                        && nonnegative_finite(mode.run_up),
+                    "terrain traversal mode has an invalid velocity target or run-up"
+                );
+            }
+        }
+    }
 }
 
 ProfileBlendParams NavExecutorNode::load_blend_params() {
-    return {
-        .v_step = declare_parameter<double>("terrain_profiles.profile_blend.v_step"),
-        .w_step = declare_parameter<double>("terrain_profiles.profile_blend.w_step"),
-        .acc_step = declare_parameter<double>("terrain_profiles.profile_blend.acc_step"),
-        .alpha_step = declare_parameter<double>("terrain_profiles.profile_blend.alpha_step"),
-        .a_lat_step = declare_parameter<double>("terrain_profiles.profile_blend.a_lat_step"),
+    const ProfileBlendParams params {
+        .v_step = declare_parameter<double>("capability_management.transition_per_tick.velocity"),
+        .w_step = declare_parameter<double>("capability_management.transition_per_tick.angular_velocity"),
+        .acc_step = declare_parameter<double>("capability_management.transition_per_tick.velocity_rate"),
+        .alpha_step = declare_parameter<double>("capability_management.transition_per_tick.angular_velocity_rate"),
+        .a_lat_step = declare_parameter<double>("capability_management.transition_per_tick.lateral_acceleration"),
     };
+    require_parameter(
+        positive_finite(params.v_step) && positive_finite(params.w_step)
+            && positive_finite(params.acc_step) && positive_finite(params.alpha_step)
+            && positive_finite(params.a_lat_step),
+        "capability transition_per_tick values must be finite and positive"
+    );
+    return params;
 }
 
 // ═══════════════════════ FSM 参数 ════════════════════════════
@@ -361,11 +406,15 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .feasible_threshold = static_cast<int>(declare_parameter<int>("path_planner.dijkstra.feasible_threshold")),
     };
     c.kinodynamic = {
-        .vel_max = declare_parameter<double>("path_planner.kinodynamic.vel_max"),
-        .vel_min = declare_parameter<double>("path_planner.kinodynamic.vel_min"),
-        .omega_max = declare_parameter<double>("path_planner.kinodynamic.omega_max"),
-        .accel_max = declare_parameter<double>("path_planner.kinodynamic.accel_max"),
-        .a_lat_max = declare_parameter<double>("path_planner.kinodynamic.a_lat_max"),
+        .state_limits = {
+            .velocity = {
+                .min = declare_parameter<double>("path_planner.kinodynamic.state_limits.velocity.min"),
+                .max = declare_parameter<double>("path_planner.kinodynamic.state_limits.velocity.max"),
+            },
+            .angular_velocity_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.angular_velocity_max"),
+            .acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.acceleration_max"),
+            .lateral_acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.lateral_acceleration_max"),
+        },
         .accel_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.accel_samples")),
         .omega_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.omega_samples")),
         .primitive_duration = declare_parameter<double>("path_planner.kinodynamic.primitive_duration"),
@@ -381,25 +430,27 @@ PlannerConfig NavExecutorNode::load_planner_config() {
     };
     c.minco = {
         .weights = {
-            .energy = declare_parameter<double>("path_planner.minco.weights.energy"),
-            .time = declare_parameter<double>("path_planner.minco.weights.time"),
-            .obstacle = declare_parameter<double>("path_planner.minco.weights.obstacle"),
-            .velocity = declare_parameter<double>("path_planner.minco.weights.velocity"),
-            .lateral_acc = declare_parameter<double>("path_planner.minco.weights.lateral_acc"),
-            .omega = declare_parameter<double>("path_planner.minco.weights.omega"),
-            .accel = declare_parameter<double>("path_planner.minco.weights.accel"),
-            .step_alignment = declare_parameter<double>("path_planner.minco.weights.step_alignment"),
-            .step_velocity = declare_parameter<double>("path_planner.minco.weights.step_velocity"),
-            .step_prohibited = declare_parameter<double>("path_planner.minco.weights.step_prohibited"),
-            .runup_accel = declare_parameter<double>("path_planner.minco.weights.runup_accel"),
-            .runup_omega = declare_parameter<double>("path_planner.minco.weights.runup_omega"),
+            .energy = declare_parameter<double>("path_planner.minco.penalty_weights.energy"),
+            .time = declare_parameter<double>("path_planner.minco.penalty_weights.time"),
+            .obstacle = declare_parameter<double>("path_planner.minco.penalty_weights.obstacle"),
+            .trajectory_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.trajectory_velocity"),
+            .lateral_acc = declare_parameter<double>("path_planner.minco.penalty_weights.lateral_acceleration"),
+            .omega = declare_parameter<double>("path_planner.minco.penalty_weights.angular_velocity"),
+            .accel = declare_parameter<double>("path_planner.minco.penalty_weights.acceleration"),
+            .traversal_alignment = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_alignment"),
+            .traversal_velocity_target = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_velocity_target"),
+            .prohibited_traversal = declare_parameter<double>("path_planner.minco.penalty_weights.prohibited_traversal"),
+            .runup_accel = declare_parameter<double>("path_planner.minco.penalty_weights.runup_acceleration"),
+            .runup_omega = declare_parameter<double>("path_planner.minco.penalty_weights.runup_angular_velocity"),
         },
-        .limits = {
-            .vel_max = declare_parameter<double>("path_planner.minco.limits.vel_max"),
-            .vel_min = declare_parameter<double>("path_planner.minco.limits.vel_min"),
-            .omega_max = declare_parameter<double>("path_planner.minco.limits.omega_max"),
-            .acc_max = declare_parameter<double>("path_planner.minco.limits.acc_max"),
-            .a_lat_max = declare_parameter<double>("path_planner.minco.limits.a_lat_max"),
+        .trajectory_limits = {
+            .velocity = {
+                .min = declare_parameter<double>("path_planner.minco.trajectory_limits.velocity.min"),
+                .max = declare_parameter<double>("path_planner.minco.trajectory_limits.velocity.max"),
+            },
+            .angular_velocity_max = declare_parameter<double>("path_planner.minco.trajectory_limits.angular_velocity_max"),
+            .acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.acceleration_max"),
+            .lateral_acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.lateral_acceleration_max"),
         },
         .terrain_gate = {
             .norm_lo = declare_parameter<double>("path_planner.minco.terrain_gate.norm_lo"),
@@ -424,22 +475,22 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .gate_transition_distance = declare_parameter<double>("path_planner.step.mpc_constraints.gate_transition_distance"),
     };
     c.trajectory_validation = {
-        .reject_infeasible = declare_parameter<bool>("path_planner.minco.validation.reject_infeasible"),
-        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.validation.samples_per_segment")),
-        .velocity_tolerance = declare_parameter<double>("path_planner.minco.validation.velocity_tolerance"),
-        .omega_tolerance = declare_parameter<double>("path_planner.minco.validation.omega_tolerance"),
-        .acceleration_tolerance = declare_parameter<double>("path_planner.minco.validation.acceleration_tolerance"),
-        .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.minco.validation.lateral_acceleration_tolerance"),
-        .step_velocity_tolerance = declare_parameter<double>("path_planner.minco.validation.step_velocity_tolerance"),
+        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.output_validation.samples_per_segment")),
+        .velocity_tolerance = declare_parameter<double>("path_planner.minco.output_validation.trajectory_velocity_tolerance"),
+        .omega_tolerance = declare_parameter<double>("path_planner.minco.output_validation.angular_velocity_tolerance"),
+        .acceleration_tolerance = declare_parameter<double>("path_planner.minco.output_validation.acceleration_tolerance"),
+        .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.minco.output_validation.lateral_acceleration_tolerance"),
+        .traversal_velocity_target_tolerance = declare_parameter<double>("path_planner.minco.output_validation.traversal_velocity_target_tolerance"),
     };
     require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255,
         "path_planner occupied_threshold must be in [0, 255]");
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
-    require_parameter(c.kinodynamic.vel_min < c.kinodynamic.vel_max,
+    require_parameter(c.kinodynamic.state_limits.velocity.min
+            < c.kinodynamic.state_limits.velocity.max,
         "kinodynamic vel_min must be smaller than vel_max");
-    require_parameter(positive_finite(c.kinodynamic.omega_max)
-        && positive_finite(c.kinodynamic.accel_max)
-        && positive_finite(c.kinodynamic.a_lat_max)
+    require_parameter(positive_finite(c.kinodynamic.state_limits.angular_velocity_max)
+        && positive_finite(c.kinodynamic.state_limits.acceleration_max)
+        && positive_finite(c.kinodynamic.state_limits.lateral_acceleration_max)
         && positive_finite(c.kinodynamic.primitive_duration)
         && positive_finite(c.kinodynamic.dedup_xy)
         && positive_finite(c.kinodynamic.dedup_theta)
@@ -448,11 +499,12 @@ PlannerConfig NavExecutorNode::load_planner_config() {
     require_parameter(c.kinodynamic.accel_samples > 0 && c.kinodynamic.omega_samples > 0
         && c.kinodynamic.collision_substeps > 0 && c.kinodynamic.max_expansions > 0,
         "kinodynamic sample counts and max_expansions must be positive");
-    require_parameter(c.minco.limits.vel_min < c.minco.limits.vel_max,
+    require_parameter(c.minco.trajectory_limits.velocity.min
+            < c.minco.trajectory_limits.velocity.max,
         "MINCO vel_min must be smaller than vel_max");
-    require_parameter(positive_finite(c.minco.limits.omega_max)
-        && positive_finite(c.minco.limits.acc_max)
-        && positive_finite(c.minco.limits.a_lat_max)
+    require_parameter(positive_finite(c.minco.trajectory_limits.angular_velocity_max)
+        && positive_finite(c.minco.trajectory_limits.acceleration_max)
+        && positive_finite(c.minco.trajectory_limits.lateral_acceleration_max)
         && positive_finite(c.minco.min_segment_time),
         "MINCO limits and min_segment_time must be finite and positive");
     require_parameter(c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0,
@@ -469,8 +521,31 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         && nonnegative_finite(c.trajectory_validation.omega_tolerance)
         && nonnegative_finite(c.trajectory_validation.acceleration_tolerance)
         && nonnegative_finite(c.trajectory_validation.lateral_acceleration_tolerance)
-        && nonnegative_finite(c.trajectory_validation.step_velocity_tolerance),
+        && nonnegative_finite(c.trajectory_validation.traversal_velocity_target_tolerance),
         "trajectory validation tolerances must be finite and non-negative");
+
+    const auto overlaps = [](const SignedVelocityBounds& bounds,
+                             const TraversalVelocityWindow& window) {
+        return std::max(bounds.min, window.min) <= std::min(bounds.max, window.max);
+    };
+    for (const DirectionalTraversalModes& label : traversal_configuration_.directional_labels) {
+        for (const auto* modes : {&label.up, &label.down}) {
+            for (const TraversalMode& mode : *modes) {
+                if (!overlaps(c.kinodynamic.state_limits.velocity, mode.velocity_window)) {
+                    throw std::invalid_argument(
+                        "kinodynamic state velocity limits cannot satisfy traversal mode \""
+                        + mode.name + "\""
+                    );
+                }
+                if (!overlaps(c.minco.trajectory_limits.velocity, mode.velocity_window)) {
+                    throw std::invalid_argument(
+                        "MINCO trajectory velocity limits cannot represent traversal target \""
+                        + mode.name + "\""
+                    );
+                }
+            }
+        }
+    }
     c.enable_debug = enable_debug_;
     return c;
 }
@@ -488,29 +563,24 @@ TaskManagerParams NavExecutorNode::load_task_params() {
 
 MPCParams NavExecutorNode::load_mpc_params() {
     using enum CapabilityLevel;
+
+    // lambda: resolve a capability string from YAML to a pre-validated profile
+    const auto resolve_profile = [&](const std::string& param_key) -> CapabilityProfile {
+        const auto level = capability_level_from_string(declare_parameter<std::string>(param_key));
+        return traversal_configuration_.capability_profiles[static_cast<size_t>(level)];
+    };
+
     MPCParams mpc_params = {
         .follow = {
             .start_command = {
                 .vel_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.vel_cmd_act_gap_max"),
                 .omega_cmd_act_gap_max = declare_parameter<double>("mpc.follow.start_command.omega_cmd_act_gap_max")
             },
-            .normal_profile = {
-                .command_bounds = {
-                    .vel_max = declare_parameter<double>("mpc.follow.command_bounds.vel_max"),
-                    .vel_min = declare_parameter<double>("mpc.follow.command_bounds.vel_min"),
-                    .omega_max = declare_parameter<double>("mpc.follow.command_bounds.omega_max"),
-                    .omega_min = declare_parameter<double>("mpc.follow.command_bounds.omega_min"),
-                },
-                .motion_constraints = {
-                    .acc_max = declare_parameter<double>("mpc.follow.motion_constraints.acc_max"),
-                    .alpha_max = declare_parameter<double>("mpc.follow.motion_constraints.alpha_max"),
-                    .a_lat_max = declare_parameter<double>("mpc.follow.motion_constraints.a_lat_max"),
-                },
-            },
+            .normal_profile = resolve_profile("mpc.follow.capability"),
             .capability_profiles = {
-                terrain_profiles_.capability_profiles[static_cast<size_t>(LOW)],
-                terrain_profiles_.capability_profiles[static_cast<size_t>(MEDIUM)],
-                terrain_profiles_.capability_profiles[static_cast<size_t>(HIGH)],
+                traversal_configuration_.capability_profiles[static_cast<size_t>(LOW)],
+                traversal_configuration_.capability_profiles[static_cast<size_t>(MEDIUM)],
+                traversal_configuration_.capability_profiles[static_cast<size_t>(HIGH)],
             },
             .tracking_weights = {
                 .contour = declare_parameter<double>("mpc.follow.tracking_weights.contour"),
@@ -526,17 +596,17 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_dv = declare_parameter<double>("mpc.follow.command_weights.r_dv"),
                 .r_domega = declare_parameter<double>("mpc.follow.command_weights.r_domega")
             },
-            .motion_constraint_weights = {
-                .acc_limit = declare_parameter<double>("mpc.follow.motion_constraint_weights.acc_limit"),
-                .alpha_limit = declare_parameter<double>("mpc.follow.motion_constraint_weights.alpha_limit"),
-                .lat_acc = declare_parameter<double>("mpc.follow.motion_constraint_weights.lat_acc")
+            .command_dynamics_weights = {
+                .velocity_rate = declare_parameter<double>("mpc.follow.command_dynamics_weights.velocity_rate"),
+                .angular_velocity_rate = declare_parameter<double>("mpc.follow.command_dynamics_weights.angular_velocity_rate"),
+                .lateral_acceleration = declare_parameter<double>("mpc.follow.command_dynamics_weights.lateral_acceleration")
             },
-            .terrain_weights = {
-                .step_vel_weight = declare_parameter<double>("mpc.follow.terrain_weights.internal.velocity_window"),
-                .direction = declare_parameter<double>("mpc.follow.terrain_weights.internal.direction"),
-                .step_omega = declare_parameter<double>("mpc.follow.terrain_weights.internal.omega"),
-                .step_dv = declare_parameter<double>("mpc.follow.terrain_weights.internal.velocity_smooth"),
-                .step_domega = declare_parameter<double>("mpc.follow.terrain_weights.internal.omega_smooth"),
+            .traversal_target_weights = {
+                .velocity = declare_parameter<double>("mpc.follow.traversal_target_weights.velocity"),
+                .direction = declare_parameter<double>("mpc.follow.traversal_target_weights.direction"),
+                .angular_velocity = declare_parameter<double>("mpc.follow.traversal_target_weights.angular_velocity"),
+                .velocity_smoothness = declare_parameter<double>("mpc.follow.traversal_target_weights.velocity_smoothness"),
+                .angular_velocity_smoothness = declare_parameter<double>("mpc.follow.traversal_target_weights.angular_velocity_smoothness"),
             },
             .environment_weights = {
                 .obstacle = declare_parameter<double>("mpc.follow.environment_weights.obstacle")
@@ -566,20 +636,10 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },
         .stop = {
-            .command_bounds = {
-                .vel_max = declare_parameter<double>("mpc.stop.command_bounds.vel_max"),
-                .vel_min = declare_parameter<double>("mpc.stop.command_bounds.vel_min"),
-                .omega_max = declare_parameter<double>("mpc.stop.command_bounds.omega_max"),
-                .omega_min = declare_parameter<double>("mpc.stop.command_bounds.omega_min")
-            },
+            .profile = resolve_profile("mpc.stop.capability"),
             .start_command = {
                 .vel_cmd_act_gap_max = declare_parameter<double>("mpc.stop.start_command.vel_cmd_act_gap_max"),
                 .omega_cmd_act_gap_max = declare_parameter<double>("mpc.stop.start_command.omega_cmd_act_gap_max")
-            },
-            .motion_constraints = {
-                .acc_max = declare_parameter<double>("mpc.stop.motion_constraints.acc_max"),
-                .alpha_max = declare_parameter<double>("mpc.stop.motion_constraints.alpha_max"),
-                .a_lat_max = declare_parameter<double>("mpc.stop.motion_constraints.a_lat_max")
             },
             .command_weights = {
                 .r_v = declare_parameter<double>("mpc.stop.command_weights.r_v"),
@@ -587,10 +647,10 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_dv = declare_parameter<double>("mpc.stop.command_weights.r_dv"),
                 .r_domega = declare_parameter<double>("mpc.stop.command_weights.r_domega")
             },
-            .motion_constraint_weights = {
-                .acc_limit = declare_parameter<double>("mpc.stop.motion_constraint_weights.acc_limit"),
-                .alpha_limit = declare_parameter<double>("mpc.stop.motion_constraint_weights.alpha_limit"),
-                .lat_acc = declare_parameter<double>("mpc.stop.motion_constraint_weights.lat_acc")
+            .command_dynamics_weights = {
+                .velocity_rate = declare_parameter<double>("mpc.stop.command_dynamics_weights.velocity_rate"),
+                .angular_velocity_rate = declare_parameter<double>("mpc.stop.command_dynamics_weights.angular_velocity_rate"),
+                .lateral_acceleration = declare_parameter<double>("mpc.stop.command_dynamics_weights.lateral_acceleration")
             },
             .environment_weights = {
                 .obstacle = declare_parameter<double>("mpc.stop.environment_weights.obstacle")
@@ -601,20 +661,10 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.stop.max_iters"))
         },
         .hold = {
-            .command_bounds = {
-                .vel_max = declare_parameter<double>("mpc.hold.command_bounds.vel_max"),
-                .vel_min = declare_parameter<double>("mpc.hold.command_bounds.vel_min"),
-                .omega_max = declare_parameter<double>("mpc.hold.command_bounds.omega_max"),
-                .omega_min = declare_parameter<double>("mpc.hold.command_bounds.omega_min")
-            },
+            .profile = resolve_profile("mpc.hold.capability"),
             .start_command = {
                 .vel_cmd_act_gap_max = declare_parameter<double>("mpc.hold.start_command.vel_cmd_act_gap_max"),
                 .omega_cmd_act_gap_max = declare_parameter<double>("mpc.hold.start_command.omega_cmd_act_gap_max")
-            },
-            .motion_constraints = {
-                .acc_max = declare_parameter<double>("mpc.hold.motion_constraints.acc_max"),
-                .alpha_max = declare_parameter<double>("mpc.hold.motion_constraints.alpha_max"),
-                .a_lat_max = declare_parameter<double>("mpc.hold.motion_constraints.a_lat_max")
             },
             .goal_weights = {
                 .q_goal_xy = declare_parameter<double>("mpc.hold.goal_weights.q_goal_xy"),
@@ -627,10 +677,10 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_dv = declare_parameter<double>("mpc.hold.command_weights.r_dv"),
                 .r_domega = declare_parameter<double>("mpc.hold.command_weights.r_domega")
             },
-            .motion_constraint_weights = {
-                .acc_limit = declare_parameter<double>("mpc.hold.motion_constraint_weights.acc_limit"),
-                .alpha_limit = declare_parameter<double>("mpc.hold.motion_constraint_weights.alpha_limit"),
-                .lat_acc = declare_parameter<double>("mpc.hold.motion_constraint_weights.lat_acc")
+            .command_dynamics_weights = {
+                .velocity_rate = declare_parameter<double>("mpc.hold.command_dynamics_weights.velocity_rate"),
+                .angular_velocity_rate = declare_parameter<double>("mpc.hold.command_dynamics_weights.angular_velocity_rate"),
+                .lateral_acceleration = declare_parameter<double>("mpc.hold.command_dynamics_weights.lateral_acceleration")
             },
             .environment_weights = {
                 .obstacle = declare_parameter<double>("mpc.hold.environment_weights.obstacle")
@@ -706,6 +756,26 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && nonnegative_finite(terminal.remaining_phase)
         && positive_finite(terminal.overshoot),
         "mpc.follow terminal weights are invalid");
+
+    const auto valid_capability = [](const CapabilityProfile& profile) {
+        const auto& command = profile.command_envelope;
+        const auto& dynamics = profile.command_dynamics;
+        return std::isfinite(command.velocity.min)
+            && std::isfinite(command.velocity.max)
+            && command.velocity.min < command.velocity.max
+            && std::isfinite(command.angular_velocity.min)
+            && std::isfinite(command.angular_velocity.max)
+            && command.angular_velocity.min < command.angular_velocity.max
+            && positive_finite(dynamics.velocity_rate_max)
+            && positive_finite(dynamics.angular_velocity_rate_max)
+            && positive_finite(dynamics.lateral_acceleration_max);
+    };
+    require_parameter(valid_capability(mpc_params.follow.normal_profile),
+        "mpc.follow capability profile is invalid");
+    require_parameter(valid_capability(mpc_params.stop.profile),
+        "mpc.stop capability profile is invalid");
+    require_parameter(valid_capability(mpc_params.hold.profile),
+        "mpc.hold capability profile is invalid");
     return mpc_params;
 }
 

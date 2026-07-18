@@ -209,7 +209,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
     double prediction_dt,
-    const CapabilityProfile& blended_profile,
+    const CapabilityProfile& effective_capability,
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule,
     bool check_lethal_status
 ) {
@@ -229,14 +229,14 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             last_cmd_.x(),
             chassis_state.velocity,
             params_.follow.start_command.vel_cmd_act_gap_max,
-            blended_profile.motion_constraints.acc_max,
+            effective_capability.command_dynamics.velocity_rate_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_state.omega,
             params_.follow.start_command.omega_cmd_act_gap_max,
-            blended_profile.motion_constraints.alpha_max,
+            effective_capability.command_dynamics.angular_velocity_rate_max,
             MPC_DT
         )
     );
@@ -268,7 +268,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const FollowProblem problem(
         global_trajectory, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
-        blended_profile, step_constraint_schedule
+        effective_capability, step_constraint_schedule
     );
 
     fddp::SolverOptions opts;
@@ -362,14 +362,14 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             last_cmd_.x(),
             chassis_state.velocity,
             params_.stop.start_command.vel_cmd_act_gap_max,
-            params_.stop.motion_constraints.acc_max,
+            params_.stop.profile.command_dynamics.velocity_rate_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_state.omega,
             params_.stop.start_command.omega_cmd_act_gap_max,
-            params_.stop.motion_constraints.alpha_max,
+            params_.stop.profile.command_dynamics.angular_velocity_rate_max,
             MPC_DT
         )
     );
@@ -413,14 +413,14 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
             last_cmd_.x(),
             chassis_state.velocity,
             params_.hold.start_command.vel_cmd_act_gap_max,
-            params_.hold.motion_constraints.acc_max,
+            params_.hold.profile.command_dynamics.velocity_rate_max,
             MPC_DT
         ),
         clamp_prev_cmd(
             last_cmd_.y(),
             chassis_state.omega,
             params_.hold.start_command.omega_cmd_act_gap_max,
-            params_.hold.motion_constraints.alpha_max,
+            params_.hold.profile.command_dynamics.angular_velocity_rate_max,
             MPC_DT
         )
     );

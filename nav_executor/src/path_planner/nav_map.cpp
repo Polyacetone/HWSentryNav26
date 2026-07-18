@@ -240,10 +240,10 @@ uint8_t DirectionMap::terrain_at(const Eigen::Vector2d& grid_coord) const {
     return terrain_at(Eigen::Vector2i(floored.x(), floored.y()));
 }
 
-const TerrainStepRule* TerrainTraversalConstraints::selected_mode(const uint8_t label, const bool is_up) const {
+const TraversalMode* TerrainTraversalConstraints::selected_mode(const uint8_t label, const bool is_up) const {
     if (label < static_cast<uint8_t>(TerrainType::SLOPE) || label >= TERRAIN_LABEL_COUNT) return nullptr;
-    const auto& modes = is_up ? selected_modes[label - 2].up : selected_modes[label - 2].down;
-    return modes.empty() ? nullptr : &modes.front();
+    const auto& mode = is_up ? selected_modes[label - 2].up : selected_modes[label - 2].down;
+    return mode ? &*mode : nullptr;
 }
 
 bool TerrainTraversalConstraints::has_blocked_corner(const DirectionMap& direction_map, const Eigen::Vector2d& grid_coord) const {
@@ -262,25 +262,29 @@ bool TerrainTraversalConstraints::is_direction_prohibited(const DirectionMap& di
 }
 
 TerrainTraversalConstraints build_terrain_traversal_constraints(
-    const DirectionMap& direction_map, const TerrainProfiles& profiles, const PerformanceState performance
+    const DirectionMap& direction_map,
+    const TraversalConfiguration& configuration,
+    const PerformanceState performance
 ) {
     TerrainTraversalConstraints constraints;
     std::vector<uint8_t> blocked(direction_map.data.size(), 0);
     for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE); label < TERRAIN_LABEL_COUNT; ++label) {
-        const auto select = [&](const std::vector<TerrainStepRule>& modes) {
-            std::vector<TerrainStepRule> selected;
-            for (const TerrainStepRule& mode : modes) {
+        const auto select = [&](const std::vector<TraversalMode>& modes)
+            -> std::optional<TraversalMode> {
+            for (const TraversalMode& mode : modes) {
                 if (!mode.requires_high_performance || performance.high_performance) {
-                    selected.push_back(mode);
-                    break;
+                    return mode;
                 }
             }
-            return selected;
+            return std::nullopt;
         };
         auto& selected = constraints.selected_modes[label - 2];
-        selected.up = select(profiles.directional_labels[label - 2].up);
-        selected.down = select(profiles.directional_labels[label - 2].down);
-        constraints.rules[label] = {.forward_allowed = !selected.up.empty(), .backward_allowed = !selected.down.empty()};
+        selected.up = select(configuration.directional_labels[label - 2].up);
+        selected.down = select(configuration.directional_labels[label - 2].down);
+        constraints.rules[label] = {
+            .forward_allowed = selected.up.has_value(),
+            .backward_allowed = selected.down.has_value(),
+        };
     }
     for (size_t i = 0; i < blocked.size(); ++i) {
         const TerrainRule& rule = constraints.rules[direction_map.terrain[i]];

@@ -104,7 +104,7 @@ private:
     std::unique_ptr<RouteTracker> route_tracker_;
 
     // 只读配置（跨线程共享）
-    TerrainProfiles terrain_profiles_;
+    TraversalConfiguration traversal_configuration_;
     std::shared_ptr<StepRoutingMask> step_routing_mask_;
     bool step_mask_ready_ = false;
 

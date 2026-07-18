@@ -65,13 +65,12 @@ struct PlanResult {
 
 struct PlannerConfig {
     struct TrajectoryValidationParams {
-        bool reject_infeasible;
         int samples_per_segment;
         double velocity_tolerance;
         double omega_tolerance;
         double acceleration_tolerance;
         double lateral_acceleration_tolerance;
-        double step_velocity_tolerance;
+        double traversal_velocity_target_tolerance;
     };
 
     // 可行性判定
