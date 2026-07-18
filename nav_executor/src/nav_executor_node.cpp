@@ -3,6 +3,27 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <common_utils/convert.hpp>
 
+#include <algorithm>
+#include <cmath>
+
+namespace {
+
+std_msgs::msg::ColorRGBA velocity_color(const double velocity, const double velocity_min, const double velocity_max) {
+    const double range = velocity_max - velocity_min;
+    const double normalized_velocity = range > 1e-6 && std::isfinite(velocity)
+        ? std::clamp((velocity - velocity_min) / range, 0.0, 1.0)
+        : 0.0;
+
+    std_msgs::msg::ColorRGBA color;
+    color.r = static_cast<float>(std::clamp(1.5 - std::abs(4.0 * normalized_velocity - 3.0), 0.0, 1.0));
+    color.g = static_cast<float>(std::clamp(1.5 - std::abs(4.0 * normalized_velocity - 2.0), 0.0, 1.0));
+    color.b = static_cast<float>(std::clamp(1.5 - std::abs(4.0 * normalized_velocity - 1.0), 0.0, 1.0));
+    color.a = 1.0F;
+    return color;
+}
+
+} // anonymous namespace
+
 namespace nav_executor {
 
 void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
@@ -52,15 +73,15 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
 
     // planner 用：global + 时域融合动态
     CostMap::ConstPtr fused_dynamic;
-    if (prediction_horizon_seconds_ <= 0.0 || msg->maps.size() <= 1 || msg->prediction_dt <= 0.0) {
+    if (dynamic_prediction_horizon_seconds_ <= 0.0 || msg->maps.size() <= 1 || msg->prediction_dt <= 0.0) {
         fused_dynamic = current_cost_map_;
     } else {
-        const size_t n = std::min(msg->maps.size(), static_cast<size_t>(std::ceil(prediction_horizon_seconds_ / msg->prediction_dt)) + 1);
+        const size_t n = std::min(msg->maps.size(), static_cast<size_t>(std::ceil(dynamic_prediction_horizon_seconds_ / msg->prediction_dt)) + 1);
         const double inv_denom = n > 1 ? 1.0 / static_cast<double>(n - 1) : 0.0;
         std::vector<double> frame_weights(n);
         double total_weight = 0.0;
         for (size_t i = 0; i < n; i++) {
-            frame_weights[i] = std::max(0.0, 1.0 - prediction_weight_decay_ * static_cast<double>(i) * inv_denom);
+            frame_weights[i] = std::max(0.0, 1.0 - dynamic_prediction_weight_decay_ * static_cast<double>(i) * inv_denom);
             total_weight += frame_weights[i];
         }
         if (total_weight <= 0.0) {
@@ -110,12 +131,9 @@ void NavExecutorNode::control_tick() {
     };
     const DirectionLayers direction_layers { .global = global_direction_map_ };
     const PerformanceState performance {
-        .high_performance = remaining_energy_buffercap_filtered_
-                >= traversal_configuration_.high_performance_buffercap_threshold
-            && remaining_energy_supercap_filtered_
-                >= traversal_configuration_.high_performance_supercap_threshold
-            && rfr_pwr_limit_
-                >= traversal_configuration_.high_performance_rfr_pwr_limit_threshold
+        .high_performance = remaining_energy_buffercap_filtered_ >= traversal_configuration_.high_performance_buffercap_threshold
+            && remaining_energy_supercap_filtered_ >= traversal_configuration_.high_performance_supercap_threshold
+            && rfr_pwr_limit_ >= traversal_configuration_.high_performance_rfr_pwr_limit_threshold
     };
     const TerrainTraversalConstraints terrain_constraints = build_terrain_traversal_constraints(
         *global_direction_map_, traversal_configuration_, performance
@@ -164,8 +182,7 @@ void NavExecutorNode::control_tick() {
         rm.step_block = step_block_params_;
         rm.performance = performance_replan_params_;
         rm.current_performance = performance;
-        rm.mpc_lethal = previous_motion_feedback_.mpc_lethal
-            && previous_motion_feedback_.lethal_path == active_path_before_update;
+        rm.mpc_lethal = previous_motion_feedback_.mpc_lethal && previous_motion_feedback_.lethal_path == active_path_before_update;
         task_input.route_monitor = std::move(rm);
     }
 
@@ -242,7 +259,7 @@ void NavExecutorNode::control_tick() {
         }
     }
 
-    publish_diagnostics(task_output.diagnostics, out.motion_state);
+    publish_diagnostics(task_output.diagnostics, out.motion_state, task_output.command.active_path);
 
     if (enable_debug_ && debug_final_cost_map_pub_) {
         nav_msgs::msg::OccupancyGrid grid_msg;
@@ -282,7 +299,11 @@ bool NavExecutorNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
     return true;
 }
 
-void NavExecutorNode::publish_diagnostics(const TaskDiagnostics& diag, const MotionState motion_state) {
+void NavExecutorNode::publish_diagnostics(
+    const TaskDiagnostics& diag,
+    const MotionState motion_state,
+    const AnnotatedPath::ConstPtr& active_path
+) {
     interfaces::msg::NavExecutorState msg;
     msg.motion_state = static_cast<uint8_t>(motion_state);
     msg.has_goal = diag.has_goal;
@@ -290,12 +311,12 @@ void NavExecutorNode::publish_diagnostics(const TaskDiagnostics& diag, const Mot
     msg.has_hold_goal = diag.has_hold_goal;
     msg.planner_state = static_cast<uint8_t>(diag.planner_state);
     msg.last_replan_reason = static_cast<uint8_t>(diag.last_replan_reason);
-    global_path_pub_->publish(path_to_nav_msg(diag.global_path));
+    if (active_path) global_path_pub_->publish(trajectory_to_nav_msg(active_path->trajectory));
     state_pub_->publish(msg);
 
     if (enable_debug_) {
         if (!diag.debug_rough_path.empty()) debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
-        if (!diag.debug_warmup_path.empty()) debug_warmup_path_pub_->publish(path_to_nav_msg(diag.debug_warmup_path));
+        if (active_path) debug_minco_trajectory_pub_->publish(trajectory_to_marker(active_path->trajectory));
     }
 }
 
@@ -311,6 +332,58 @@ nav_msgs::msg::Path NavExecutorNode::path_to_nav_msg(const std::vector<Eigen::Ve
         ps.pose.position.z = 0.0;
         msg.poses.push_back(ps);
     }
+    return msg;
+}
+
+nav_msgs::msg::Path NavExecutorNode::trajectory_to_nav_msg(const MincoTrajectory& trajectory) const {
+    nav_msgs::msg::Path msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = "map";
+    for (double arc_length = 0.0; arc_length < trajectory.total_arc_length(); arc_length += path_publish_sample_resolution_) {
+        const TrajSample sample = trajectory.eval(trajectory.tau_at_arc_length(arc_length));
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header = msg.header;
+        pose.pose.position.x = sample.p.x();
+        pose.pose.position.y = sample.p.y();
+        pose.pose.position.z = 0.0;
+        pose.pose.orientation = tf2::toMsg(tf2::Quaternion(0.0, 0.0, std::sin(sample.theta / 2.0), std::cos(sample.theta / 2.0)));
+        msg.poses.push_back(pose);
+    }
+    const TrajSample final_sample = trajectory.eval(1.0);
+    geometry_msgs::msg::PoseStamped final_pose;
+    final_pose.header = msg.header;
+    final_pose.pose.position.x = final_sample.p.x();
+    final_pose.pose.position.y = final_sample.p.y();
+    final_pose.pose.position.z = 0.0;
+    final_pose.pose.orientation = tf2::toMsg(tf2::Quaternion(0.0, 0.0, std::sin(final_sample.theta / 2.0), std::cos(final_sample.theta / 2.0)));
+    msg.poses.push_back(final_pose);
+    return msg;
+}
+
+visualization_msgs::msg::Marker NavExecutorNode::trajectory_to_marker(const MincoTrajectory& trajectory) const {
+    visualization_msgs::msg::Marker msg;
+    msg.header.frame_id = "map";
+    msg.header.stamp = now();
+    msg.ns = "minco_trajectory";
+    msg.id = 0;
+    msg.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    msg.action = visualization_msgs::msg::Marker::ADD;
+    msg.pose.orientation.w = 1.0;
+    msg.scale.x = 0.15;
+
+    const auto append_sample = [&](const TrajSample& sample) {
+        geometry_msgs::msg::Point point;
+        point.x = sample.p.x();
+        point.y = sample.p.y();
+        msg.points.push_back(point);
+        msg.colors.push_back(velocity_color(
+            trajectory.longitudinal_velocity(sample), minco_debug_velocity_min_, minco_debug_velocity_max_
+        ));
+    };
+    for (double arc_length = 0.0; arc_length < trajectory.total_arc_length(); arc_length += path_publish_sample_resolution_) {
+        append_sample(trajectory.eval(trajectory.tau_at_arc_length(arc_length)));
+    }
+    append_sample(trajectory.eval(1.0));
     return msg;
 }
 

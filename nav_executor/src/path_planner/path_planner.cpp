@@ -721,12 +721,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         seed_pts.reserve(seed_states_raw.size());
         for (const auto& s : seed_states_raw) seed_pts.emplace_back(s.x, s.y);
         result.debug_rough_path = std::move(seed_pts);
-        std::vector<Eigen::Vector2d> traj_pts;
-        constexpr int TRAJ_SAMPLES = 100;
-        for (int i = 0; i <= TRAJ_SAMPLES; ++i) {
-            traj_pts.push_back(path->trajectory.position(static_cast<double>(i) / TRAJ_SAMPLES));
-        }
-        result.global_path = std::move(traj_pts);
     }
 
     result.path = std::move(path);

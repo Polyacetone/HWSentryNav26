@@ -99,8 +99,6 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             in_cooldown_ = false;
             // 缓存调试路径（即便 enable_debug=false 也是空 vector，无开销）
             last_debug_rough_path_ = std::move(result->debug_rough_path);
-            last_debug_warmup_path_ = std::move(result->debug_warmup_path);
-            last_global_path_ = std::move(result->global_path);
             RCLCPP_INFO(logger_, "Accepted new path for goal #%lu", static_cast<unsigned long>(result->goal_id));
             break;
 
@@ -227,8 +225,6 @@ TaskDiagnostics TaskManager::diagnostics() const {
     d.planner_state = planner_->busy() ? PlannerState::PLANNING : (in_cooldown_ ? PlannerState::COOLDOWN : PlannerState::IDLE);
     d.last_replan_reason = last_replan_reason_;
     d.debug_rough_path = last_debug_rough_path_;
-    d.debug_warmup_path = last_debug_warmup_path_;
-    d.global_path = last_global_path_;
     return d;
 }
 

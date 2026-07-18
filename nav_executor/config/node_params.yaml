@@ -2,8 +2,7 @@
   ros__parameters:
     node:
       remaining_energy_filter_alpha: 0.5 # 对 remaining_energy_supercap 和 remaining_energy_buffercap 进行低通滤波的指数衰减系数 [0,1]
-      prediction_horizon_seconds: 2.0 # 代价地图时域融合的预测时间窗口 (0=仅用当前帧)，用于 planner
-      prediction_weight_decay: 1.0 # 代价地图时域融合中时域帧权重的线性衰减因子 [0,1]，用于 planner
+      path_publish_sample_resolution: 0.05 # 发布路径 global_path 和 minco_trajectory 的采样间距 (m)
 
       topics:
         goal_sub: "/decision/nav_goal"
@@ -23,6 +22,7 @@
         rough_path_pub_topic: "/nav_executor/debug/rough_path"
         warmup_path_pub_topic: "/nav_executor/debug/warmup_path"
         mpc_path_pub_topic: "/nav_executor/debug/mpc_path"
+        minco_trajectory_pub_topic: "/nav_executor/debug/minco_trajectory"
         v_pred_pub_topic: "/nav_executor/debug/v_pred"
         w_pred_pub_topic: "/nav_executor/debug/w_pred"
         phase_time_pub_topic: "/nav_executor/debug/phase_time"

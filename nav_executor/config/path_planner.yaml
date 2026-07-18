@@ -15,6 +15,10 @@
         min_speed: 0.3 # 低于该速度不做起点前推 (m/s)
         collision_check_step: 0.05 # 预测起点直线可达性采样间隔 (m)
 
+      dynamic_prediction:
+        horizon_seconds: 2.0 # 融合局部代价地图预测帧的时间窗口 (0=仅当前帧)
+        weight_decay: 1.0 # 窗口内预测帧权重的线性衰减 [0,1]
+
       planner:
         goal_reached_distance: 0.5 # robot-to-goal 近距离短路阈值 (m)：< 此值则 COMPLETE / USE_AS_FIXED
         skip_distance: 0.5 # 起终点距离 < 此值时跳过 kinodynamic 直接直连种子 (m)
@@ -93,6 +97,6 @@
 
       step_mask:
         path_align_dot_threshold: 0.6 # 路径切向与台阶方向点积 >= 该值则认为路径经过台阶
-        full_effect_radius: 0.6 # 掩码满强度半径 (m)
-        cutoff_radius: 1.0 # 掩码截止半径 (m)
+        full_effect_radius: 0.4 # 掩码满强度半径 (m)
+        cutoff_radius: 0.6 # 掩码截止半径 (m)
         length_num_samples: 100 # 路径弧长估计采样数

@@ -14,6 +14,7 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <visualization_msgs/msg/marker.hpp>
 #include <interfaces/msg/nav_goal.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
 #include <interfaces/msg/cost_maps.hpp>
@@ -61,7 +62,13 @@ private:
     bool get_chassis_pose(Eigen::Vector3d& chassis_pose) const;
     void try_init_step_mask();
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
-    void publish_diagnostics(const TaskDiagnostics& diag, MotionState motion_state);
+    nav_msgs::msg::Path trajectory_to_nav_msg(const MincoTrajectory& trajectory) const;
+    visualization_msgs::msg::Marker trajectory_to_marker(const MincoTrajectory& trajectory) const;
+    void publish_diagnostics(
+        const TaskDiagnostics& diag,
+        MotionState motion_state,
+        const AnnotatedPath::ConstPtr& active_path
+    );
 
     // ─── ROS 通信 ───
     rclcpp::Subscription<interfaces::msg::NavGoal>::SharedPtr goal_sub_;
@@ -78,6 +85,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_warmup_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mpc_path_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr debug_minco_trajectory_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_phase_time_pub_;
@@ -90,8 +98,11 @@ private:
     bool enable_debug_ = false;
     double remaining_energy_filter_alpha_ = 1.0;
     double prediction_dt_ = 0.2;
-    double prediction_horizon_seconds_ = 2.0;
-    double prediction_weight_decay_ = 1.0;
+    double dynamic_prediction_horizon_seconds_ = 2.0;
+    double dynamic_prediction_weight_decay_ = 1.0;
+    double path_publish_sample_resolution_ = 0.1;
+    double minco_debug_velocity_min_ = 0.0;
+    double minco_debug_velocity_max_ = 0.0;
     FollowProjectionGuardParams proj_guard_params_{};
     RouteTrackerParams route_tracker_params_{};
     StepBlockReplanParams step_block_params_{};

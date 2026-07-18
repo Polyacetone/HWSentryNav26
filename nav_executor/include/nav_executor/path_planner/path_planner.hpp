@@ -59,8 +59,6 @@ struct PlanResult {
     Eigen::Vector2d goal_pos = Eigen::Vector2d::Zero(); // fixed 短路时的保持点
 
     std::vector<Eigen::Vector2d> debug_rough_path;
-    std::vector<Eigen::Vector2d> debug_warmup_path;
-    std::vector<Eigen::Vector2d> global_path;
 };
 
 struct PlannerConfig {

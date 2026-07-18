@@ -27,8 +27,6 @@ struct TaskDiagnostics {
     PlannerState planner_state = PlannerState::IDLE;
     ReplanReason last_replan_reason = ReplanReason::NONE;
     std::vector<Eigen::Vector2d> debug_rough_path;
-    std::vector<Eigen::Vector2d> debug_warmup_path;
-    std::vector<Eigen::Vector2d> global_path;
 };
 
 struct PlanRequestSnapshot {
@@ -122,7 +120,6 @@ private:
     // 缓存最新一次成功规划的调试路径（供 node 发布用）
     std::vector<Eigen::Vector2d> last_debug_rough_path_;
     std::vector<Eigen::Vector2d> last_debug_warmup_path_;
-    std::vector<Eigen::Vector2d> last_global_path_;
 };
 
 } // namespace nav_executor

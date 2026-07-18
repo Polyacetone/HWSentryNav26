@@ -34,6 +34,9 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     if (enable_debug_) {
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         debug_mpc_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.mpc_path_pub_topic"), 1);
+        debug_minco_trajectory_pub_ = create_publisher<visualization_msgs::msg::Marker>(
+            declare_parameter<std::string>("node.debug.minco_trajectory_pub_topic"), 1
+        );
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.rough_path_pub_topic"), 1);
         debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.warmup_path_pub_topic"), 1);
         debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.v_pred_pub_topic"), 1);
@@ -61,9 +64,10 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     step_params.length_num_samples = static_cast<int>(declare_parameter<int>("path_planner.step_mask.length_num_samples"));
     step_routing_mask_ = std::make_shared<StepRoutingMask>(step_params);
 
-    planner_ = std::make_unique<PathPlanner>(
-        load_planner_config(), step_routing_mask_, get_logger()
-    );
+    const PlannerConfig planner_config = load_planner_config();
+    minco_debug_velocity_min_ = planner_config.minco.trajectory_limits.velocity.min;
+    minco_debug_velocity_max_ = planner_config.minco.trajectory_limits.velocity.max;
+    planner_ = std::make_unique<PathPlanner>(planner_config, step_routing_mask_, get_logger());
     planner_->start();
 
     task_ = std::make_unique<TaskManager>(load_task_params(), planner_.get(), get_logger());
@@ -107,8 +111,12 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     };
 
     remaining_energy_filter_alpha_ = declare_parameter<double>("node.remaining_energy_filter_alpha");
-    prediction_horizon_seconds_ = declare_parameter<double>("node.prediction_horizon_seconds");
-    prediction_weight_decay_ = declare_parameter<double>("node.prediction_weight_decay");
+    path_publish_sample_resolution_ = declare_parameter<double>("node.path_publish_sample_resolution");
+    dynamic_prediction_horizon_seconds_ = declare_parameter<double>("path_planner.dynamic_prediction.horizon_seconds");
+    dynamic_prediction_weight_decay_ = declare_parameter<double>("path_planner.dynamic_prediction.weight_decay");
+    require_parameter(positive_finite(path_publish_sample_resolution_), "path publish sample_resolution must be finite and positive");
+    require_parameter(nonnegative_finite(dynamic_prediction_horizon_seconds_), "dynamic prediction horizon_seconds must be finite and non-negative");
+    require_parameter(dynamic_prediction_weight_decay_ >= 0.0 && dynamic_prediction_weight_decay_ <= 1.0, "dynamic prediction weight_decay must be in [0, 1]");
 
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("node.topics.global_cost_map_sub"), 1,
@@ -373,15 +381,21 @@ PathExecutorParams NavExecutorNode::load_executor_params() {
         .tau_landmark_spacing = declare_parameter<double>("path_executor.no_progress_guard.stepping.tau_landmark_spacing"),
         .timeout = declare_parameter<double>("path_executor.no_progress_guard.stepping.timeout"),
     };
-    require_parameter(p.follow_no_progress_guard.tau_landmark_spacing > 0.0
+    require_parameter(
+        p.follow_no_progress_guard.tau_landmark_spacing > 0.0
         && p.follow_no_progress_guard.tau_landmark_spacing <= 1.0,
-        "follow tau_landmark_spacing must be in (0, 1]");
-    require_parameter(p.stepping_no_progress_guard.tau_landmark_spacing > 0.0
+        "follow tau_landmark_spacing must be in (0, 1]"
+    );
+    require_parameter(
+        p.stepping_no_progress_guard.tau_landmark_spacing > 0.0
         && p.stepping_no_progress_guard.tau_landmark_spacing <= 1.0,
-        "stepping tau_landmark_spacing must be in (0, 1]");
-    require_parameter(positive_finite(p.follow_no_progress_guard.timeout)
+        "stepping tau_landmark_spacing must be in (0, 1]"
+    );
+    require_parameter(
+        positive_finite(p.follow_no_progress_guard.timeout)
         && positive_finite(p.stepping_no_progress_guard.timeout),
-        "no-progress timeouts must be finite and positive");
+        "no-progress timeouts must be finite and positive"
+    );
     return p;
 }
 
@@ -482,47 +496,61 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.minco.output_validation.lateral_acceleration_tolerance"),
         .traversal_velocity_target_tolerance = declare_parameter<double>("path_planner.minco.output_validation.traversal_velocity_target_tolerance"),
     };
-    require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255,
-        "path_planner occupied_threshold must be in [0, 255]");
+    require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in [0, 255]");
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
-    require_parameter(c.kinodynamic.state_limits.velocity.min
-            < c.kinodynamic.state_limits.velocity.max,
-        "kinodynamic vel_min must be smaller than vel_max");
-    require_parameter(positive_finite(c.kinodynamic.state_limits.angular_velocity_max)
+    require_parameter(c.kinodynamic.state_limits.velocity.min < c.kinodynamic.state_limits.velocity.max, "kinodynamic vel_min must be smaller than vel_max");
+    require_parameter(
+        positive_finite(c.kinodynamic.state_limits.angular_velocity_max)
         && positive_finite(c.kinodynamic.state_limits.acceleration_max)
         && positive_finite(c.kinodynamic.state_limits.lateral_acceleration_max)
         && positive_finite(c.kinodynamic.primitive_duration)
         && positive_finite(c.kinodynamic.dedup_xy)
         && positive_finite(c.kinodynamic.dedup_theta)
         && positive_finite(c.kinodynamic.dedup_v),
-        "kinodynamic limits, duration, and dedup resolutions must be finite and positive");
-    require_parameter(c.kinodynamic.accel_samples > 0 && c.kinodynamic.omega_samples > 0
+        "kinodynamic limits, duration, and dedup resolutions must be finite and positive"
+    );
+    require_parameter(
+        c.kinodynamic.accel_samples > 0 && c.kinodynamic.omega_samples > 0
         && c.kinodynamic.collision_substeps > 0 && c.kinodynamic.max_expansions > 0,
-        "kinodynamic sample counts and max_expansions must be positive");
-    require_parameter(c.minco.trajectory_limits.velocity.min
-            < c.minco.trajectory_limits.velocity.max,
-        "MINCO vel_min must be smaller than vel_max");
-    require_parameter(positive_finite(c.minco.trajectory_limits.angular_velocity_max)
+        "kinodynamic sample counts and max_expansions must be positive"
+    );
+    require_parameter(
+        c.minco.trajectory_limits.velocity.min < c.minco.trajectory_limits.velocity.max,
+        "MINCO vel_min must be smaller than vel_max"
+    );
+    require_parameter(
+        positive_finite(c.minco.trajectory_limits.angular_velocity_max)
         && positive_finite(c.minco.trajectory_limits.acceleration_max)
         && positive_finite(c.minco.trajectory_limits.lateral_acceleration_max)
         && positive_finite(c.minco.min_segment_time),
-        "MINCO limits and min_segment_time must be finite and positive");
-    require_parameter(c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0,
-        "MINCO sample and iteration counts must be positive");
-    require_parameter(positive_finite(c.minco.runup_saturation_length)
+        "MINCO limits and min_segment_time must be finite and positive"
+    );
+    require_parameter(
+        c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0,
+        "MINCO sample and iteration counts must be positive"
+    );
+    require_parameter(
+        positive_finite(c.minco.runup_saturation_length)
         && nonnegative_finite(c.minco.runup_transition_distance),
-        "MINCO runup saturation length must be positive and transition distance nonnegative");
-    require_parameter(c.minco.terrain_gate.norm_lo >= 0.0
+        "MINCO runup saturation length must be positive and transition distance nonnegative"
+    );
+    require_parameter(
+        c.minco.terrain_gate.norm_lo >= 0.0
         && c.minco.terrain_gate.norm_hi > c.minco.terrain_gate.norm_lo,
-        "MINCO terrain_gate requires 0 <= norm_lo < norm_hi");
-    require_parameter(c.trajectory_validation.samples_per_segment > 0,
-        "trajectory validation samples_per_segment must be positive");
-    require_parameter(nonnegative_finite(c.trajectory_validation.velocity_tolerance)
+        "MINCO terrain_gate requires 0 <= norm_lo < norm_hi"
+    );
+    require_parameter(
+        c.trajectory_validation.samples_per_segment > 0,
+        "trajectory validation samples_per_segment must be positive"
+    );
+    require_parameter(
+        nonnegative_finite(c.trajectory_validation.velocity_tolerance)
         && nonnegative_finite(c.trajectory_validation.omega_tolerance)
         && nonnegative_finite(c.trajectory_validation.acceleration_tolerance)
         && nonnegative_finite(c.trajectory_validation.lateral_acceleration_tolerance)
         && nonnegative_finite(c.trajectory_validation.traversal_velocity_target_tolerance),
-        "trajectory validation tolerances must be finite and non-negative");
+        "trajectory validation tolerances must be finite and non-negative"
+    );
 
     const auto overlaps = [](const SignedVelocityBounds& bounds,
                              const TraversalVelocityWindow& window) {
@@ -729,33 +757,41 @@ MPCParams NavExecutorNode::load_mpc_params() {
         }
     };
     const auto& phase = mpc_params.follow.phase;
-    require_parameter(nonnegative_finite(phase.rate_min)
+    require_parameter(
+        nonnegative_finite(phase.rate_min)
         && positive_finite(phase.rate_max)
         && std::isfinite(phase.nominal_rate)
         && phase.rate_max > phase.rate_min
         && phase.nominal_rate >= phase.rate_min && phase.nominal_rate <= phase.rate_max,
-        "mpc.follow phase-rate bounds are invalid");
-    require_parameter(nonnegative_finite(phase.progress_reward)
+        "mpc.follow phase-rate bounds are invalid"
+    );
+    require_parameter(
+        nonnegative_finite(phase.progress_reward)
         && nonnegative_finite(phase.rate_tracking_weight)
         && nonnegative_finite(phase.rate_smoothness_weight)
         && positive_finite(phase.overshoot_weight),
-        "mpc.follow phase weights are invalid");
+        "mpc.follow phase weights are invalid"
+    );
     const auto& tracking = mpc_params.follow.tracking_weights;
-    require_parameter(nonnegative_finite(tracking.contour)
+    require_parameter(
+        nonnegative_finite(tracking.contour)
         && nonnegative_finite(tracking.lag)
         && nonnegative_finite(tracking.heading)
         && nonnegative_finite(tracking.velocity)
         && nonnegative_finite(tracking.angular_velocity)
         && positive_finite(tracking.tangent_blend_speed_scale),
-        "mpc.follow tracking weights are invalid");
+        "mpc.follow tracking weights are invalid"
+    );
     const auto& terminal = mpc_params.follow.terminal_weights;
-    require_parameter(nonnegative_finite(terminal.position)
+    require_parameter(
+        nonnegative_finite(terminal.position)
         && nonnegative_finite(terminal.heading)
         && nonnegative_finite(terminal.velocity)
         && nonnegative_finite(terminal.angular_velocity)
         && nonnegative_finite(terminal.remaining_phase)
         && positive_finite(terminal.overshoot),
-        "mpc.follow terminal weights are invalid");
+        "mpc.follow terminal weights are invalid"
+    );
 
     const auto valid_capability = [](const CapabilityProfile& profile) {
         const auto& command = profile.command_envelope;
@@ -770,12 +806,18 @@ MPCParams NavExecutorNode::load_mpc_params() {
             && positive_finite(dynamics.angular_velocity_rate_max)
             && positive_finite(dynamics.lateral_acceleration_max);
     };
-    require_parameter(valid_capability(mpc_params.follow.normal_profile),
-        "mpc.follow capability profile is invalid");
-    require_parameter(valid_capability(mpc_params.stop.profile),
-        "mpc.stop capability profile is invalid");
-    require_parameter(valid_capability(mpc_params.hold.profile),
-        "mpc.hold capability profile is invalid");
+    require_parameter(
+        valid_capability(mpc_params.follow.normal_profile),
+        "mpc.follow capability profile is invalid"
+    );
+    require_parameter(
+        valid_capability(mpc_params.stop.profile),
+        "mpc.stop capability profile is invalid"
+    );
+    require_parameter(
+        valid_capability(mpc_params.hold.profile),
+        "mpc.hold capability profile is invalid"
+    );
     return mpc_params;
 }
 
