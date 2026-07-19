@@ -371,6 +371,13 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     out.predicted_w = prediction.w_pred;
     out.predicted_phase_time = prediction.phase_time_pred;
     out.predicted_phase_rate = prediction.phase_rate_pred;
+    // MINCO 参考速度（当前跟随相位处的期望值）
+    if (input.route) {
+        const TrajSample ref_sample = path.eval_time(input.route->phase_time);
+        out.ref_velocity = path.longitudinal_velocity(ref_sample);
+        out.ref_angular_velocity = path.angular_velocity(ref_sample);
+    }
+
     out.step_dist_cm = step_controller_.compute_step_distance_cm(path, u0);
     out.valid = true;
 

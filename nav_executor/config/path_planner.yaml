@@ -76,12 +76,13 @@
         max_iterations: 1000 # L-BFGS 优化器的最大迭代次数
         min_segment_time: 0.05 # 每段轨迹最短时长（秒），防止时长归零导致数值问题
         output_validation:
-          samples_per_segment: 20 # 最终验收时每段采多少个点做硬约束检查
+          samples_per_segment: 20 # 最终验收时每段采多少个点做约束检查
           trajectory_velocity_tolerance: 0.2 # 轨迹速度硬约束的允许超限容差（m/s）
           angular_velocity_tolerance: 0.8 # 角速度硬约束的允许超限容差（rad/s）
           acceleration_tolerance: 0.4 # 加速度硬约束的允许超限容差（m/s²）
           lateral_acceleration_tolerance: 0.4 # 侧向加速度硬约束的允许超限容差（m/s²）
           traversal_velocity_target_tolerance: 0.2 # 台阶速度目标的允许超限容差，只打印日志不进行拒绝（m/s）
+          traversal_angle_tolerance: 0.4 # 台阶方向角的允许偏差，只打印日志不进行拒绝（rad）
 
       step:
         detection:

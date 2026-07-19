@@ -69,6 +69,7 @@ struct PlannerConfig {
         double acceleration_tolerance;
         double lateral_acceleration_tolerance;
         double traversal_velocity_target_tolerance;
+        double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只打印日志不进行拒绝
     };
 
     // 可行性判定

@@ -239,23 +239,15 @@ void NavExecutorNode::control_tick() {
 
         if (enable_debug_) {
             if (out.mpc_path_map) debug_mpc_path_pub_->publish(path_to_nav_msg(*out.mpc_path_map));
-            if (out.predicted_v && out.predicted_w && !out.predicted_v->empty() && !out.predicted_w->empty()) {
-                std_msgs::msg::Float64 v_msg, w_msg;
-                v_msg.data = (*out.predicted_v)[0];
-                w_msg.data = (*out.predicted_w)[0];
-                debug_v_pred_pub_->publish(v_msg);
-                debug_w_pred_pub_->publish(w_msg);
-            }
-            if (out.predicted_phase_time && !out.predicted_phase_time->empty()) {
-                std_msgs::msg::Float64 msg;
-                msg.data = (*out.predicted_phase_time)[0];
-                debug_phase_time_pub_->publish(msg);
-            }
-            if (out.predicted_phase_rate && !out.predicted_phase_rate->empty()) {
-                std_msgs::msg::Float64 msg;
-                msg.data = (*out.predicted_phase_rate)[0];
-                debug_phase_rate_pub_->publish(msg);
-            }
+
+            interfaces::msg::MPCDiag mpc_debug_msg;
+            if (out.predicted_v) mpc_debug_msg.v_pred = *out.predicted_v;
+            if (out.predicted_w) mpc_debug_msg.w_pred = *out.predicted_w;
+            if (out.predicted_phase_time) mpc_debug_msg.phase_time = *out.predicted_phase_time;
+            if (out.predicted_phase_rate) mpc_debug_msg.phase_rate = *out.predicted_phase_rate;
+            if (out.ref_velocity) mpc_debug_msg.ref_velocity = *out.ref_velocity;
+            if (out.ref_angular_velocity) mpc_debug_msg.ref_angular_velocity = *out.ref_angular_velocity;
+            debug_mpc_diag_pub_->publish(mpc_debug_msg);
         }
     }
 

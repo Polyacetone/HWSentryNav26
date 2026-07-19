@@ -81,6 +81,10 @@ struct ExecutorOutput {
     std::optional<std::vector<double>> predicted_w;
     std::optional<std::vector<double>> predicted_phase_time;
     std::optional<std::vector<double>> predicted_phase_rate;
+
+    // MINCO 参考（当前跟随相位处的期望值）
+    std::optional<double> ref_velocity;
+    std::optional<double> ref_angular_velocity;
 };
 
 // 运动控制编排：持有 FSM / MPC / 台阶运行时 / stuck 检测与恢复链，消费顶层每周期传入的 active_path 与 hold_goal。

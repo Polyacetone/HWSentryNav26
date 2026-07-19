@@ -39,10 +39,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         );
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.rough_path_pub_topic"), 1);
         debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.warmup_path_pub_topic"), 1);
-        debug_v_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.v_pred_pub_topic"), 1);
-        debug_w_pred_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.w_pred_pub_topic"), 1);
-        debug_phase_time_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.phase_time_pub_topic"), 1);
-        debug_phase_rate_pub_ = create_publisher<std_msgs::msg::Float64>(declare_parameter<std::string>("node.debug.phase_rate_pub_topic"), 1);
+        debug_mpc_diag_pub_ = create_publisher<interfaces::msg::MPCDiag>(declare_parameter<std::string>("node.debug.mpc_diag_pub_topic"), 1);
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("node.debug.final_cost_map_pub_topic"), 1);
     }
 
@@ -495,6 +492,7 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .acceleration_tolerance = declare_parameter<double>("path_planner.minco.output_validation.acceleration_tolerance"),
         .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.minco.output_validation.lateral_acceleration_tolerance"),
         .traversal_velocity_target_tolerance = declare_parameter<double>("path_planner.minco.output_validation.traversal_velocity_target_tolerance"),
+        .traversal_angle_tolerance = declare_parameter<double>("path_planner.minco.output_validation.traversal_angle_tolerance"),
     };
     require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in [0, 255]");
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
@@ -548,7 +546,8 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         && nonnegative_finite(c.trajectory_validation.omega_tolerance)
         && nonnegative_finite(c.trajectory_validation.acceleration_tolerance)
         && nonnegative_finite(c.trajectory_validation.lateral_acceleration_tolerance)
-        && nonnegative_finite(c.trajectory_validation.traversal_velocity_target_tolerance),
+        && nonnegative_finite(c.trajectory_validation.traversal_velocity_target_tolerance)
+        && nonnegative_finite(c.trajectory_validation.traversal_angle_tolerance),
         "trajectory validation tolerances must be finite and non-negative"
     );
 

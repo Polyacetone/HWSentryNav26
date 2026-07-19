@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <queue>
 
 #include <rclcpp/logging.hpp>
@@ -234,6 +235,18 @@ bool validate_trajectory(
                     + ": v=" + std::to_string(longitudinal_velocity) + ", required=["
                     + std::to_string(target.min) + "," + std::to_string(target.max)
                     + "]";
+            }
+            if (soft_diagnostic.empty()) {
+                const double angle_rad = std::acos(
+                    std::clamp(std::abs(alignment), 0.0, 1.0)
+                );
+                if (angle_rad > validation.traversal_angle_tolerance) {
+                    soft_diagnostic = "trajectory deviates from stair direction at tau="
+                        + std::to_string(tau)
+                        + ": angle=" + std::to_string(angle_rad)
+                        + " rad, tolerance=" + std::to_string(validation.traversal_angle_tolerance)
+                        + " rad";
+                }
             }
         }
         }

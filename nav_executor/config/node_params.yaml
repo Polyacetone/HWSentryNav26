@@ -23,7 +23,4 @@
         warmup_path_pub_topic: "/nav_executor/debug/warmup_path"
         mpc_path_pub_topic: "/nav_executor/debug/mpc_path"
         minco_trajectory_pub_topic: "/nav_executor/debug/minco_trajectory"
-        v_pred_pub_topic: "/nav_executor/debug/v_pred"
-        w_pred_pub_topic: "/nav_executor/debug/w_pred"
-        phase_time_pub_topic: "/nav_executor/debug/phase_time"
-        phase_rate_pub_topic: "/nav_executor/debug/phase_rate"
+        mpc_diag_pub_topic: "/nav_executor/debug/mpc_diag"

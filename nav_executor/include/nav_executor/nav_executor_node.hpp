@@ -13,7 +13,6 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <std_msgs/msg/float64.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <interfaces/msg/nav_goal.hpp>
 #include <interfaces/msg/spin_cmd.hpp>
@@ -22,6 +21,7 @@
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/comp_stage.hpp>
 #include <interfaces/msg/nav_executor_state.hpp>
+#include <interfaces/msg/mpc_diag.hpp>
 
 #include <nav_executor/common/world_context.hpp>
 #include <nav_executor/common/route_tracker.hpp>
@@ -86,10 +86,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_warmup_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mpc_path_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr debug_minco_trajectory_pub_;
-    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_v_pred_pub_;
-    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_w_pred_pub_;
-    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_phase_time_pub_;
-    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr debug_phase_rate_pub_;
+    rclcpp::Publisher<interfaces::msg::MPCDiag>::SharedPtr debug_mpc_diag_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
