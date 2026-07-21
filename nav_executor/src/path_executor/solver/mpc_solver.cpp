@@ -23,42 +23,10 @@ void shift_warm_start(SolverT& solver) {
     solver.xs[SolverT::N] = xs_prev[SolverT::N];
 }
 
-template<typename SolverT, typename ProblemT>
-void rollout_solver_states(SolverT& solver, const ProblemT& prob, const StateVec& x0) {
-    solver.xs[0] = x0;
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        solver.xs[k + 1] = prob.dynamics(static_cast<int>(k), solver.xs[k], solver.us[k]);
-    }
-}
-
 template<typename SolverT>
 void fill_solver_controls(SolverT& solver, const ControlVec& u) {
     for (size_t k = 0; k < SolverT::N; ++k) {
         solver.us[k] = u;
-    }
-}
-
-template<typename SolverT, typename ProblemT>
-void scale_solver_controls(SolverT& solver, const ProblemT& prob) {
-    const auto u_lo = prob.u_lower();
-    const auto u_hi = prob.u_upper();
-    for (size_t k = 0; k < SolverT::N; ++k) {
-        auto& u = solver.us[k];
-        double scale = 1.0;
-        for (int i = iu::V_CMD; i <= iu::W_CMD; ++i) {
-            if (u(i) > u_hi(i) && u_hi(i) != 0.0) {
-                scale = std::min(scale, u_hi(i) / u(i));
-            } else if (u(i) < u_lo(i) && u_lo(i) != 0.0) {
-                scale = std::min(scale, u_lo(i) / u(i));
-            }
-        }
-        if (scale < 1.0) {
-            u(iu::V_CMD) *= scale;
-            u(iu::W_CMD) *= scale;
-        }
-        for (int i = 0; i < SolverT::NU; ++i) {
-            u(i) = std::clamp(u(i), u_lo(i), u_hi(i));
-        }
     }
 }
 
@@ -182,7 +150,7 @@ void MPCSolver::reset_observer() {
 StateVec MPCSolver::make_initial_state(
     const Eigen::Vector3d& pose,
     const ChassisMotionState& chassis_state,
-    const Eigen::Vector2d& cmd_clamped,
+    const Eigen::Vector2d& current_command,
     const double phase_time,
     const double phase_rate
 ) const {
@@ -193,8 +161,8 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::XH) = x_h_hat_;
     x0(ix::V) = chassis_state.velocity;
     x0(ix::W) = chassis_state.omega;
-    x0(ix::DV) = cmd_clamped.x();
-    x0(ix::DW) = cmd_clamped.y();
+    x0(ix::V_CMD) = current_command.x();
+    x0(ix::W_CMD) = current_command.y();
     x0(ix::PHASE_TIME) = phase_time;
     x0(ix::PHASE_RATE) = phase_rate;
     return x0;
@@ -224,22 +192,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         last_phase_rate_, params_.follow.phase.rate_min, params_.follow.phase.rate_max
     );
 
-    const Eigen::Vector2d cmd0(
-        clamp_prev_cmd(
-            last_cmd_.x(),
-            chassis_state.velocity,
-            params_.follow.start_command.vel_cmd_act_gap_max,
-            effective_capability.command_dynamics.velocity_rate_max,
-            MPC_DT
-        ),
-        clamp_prev_cmd(
-            last_cmd_.y(),
-            chassis_state.omega,
-            params_.follow.start_command.omega_cmd_act_gap_max,
-            effective_capability.command_dynamics.angular_velocity_rate_max,
-            MPC_DT
-        )
-    );
     const double schedule_rho = select_follow_schedule_rho(
         chassis_state,
         params_.kinematic_model
@@ -263,7 +215,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const GridInfo ci = make_grid_info(cost_map);
     const CostMapGridView masked_global_grid(masked_global_map);
     const StateVec x0 = make_initial_state(
-        chassis_pose_map, chassis_state, cmd0, phase_time0, phase_rate0
+        chassis_pose_map, chassis_state, last_cmd_, phase_time0, phase_rate0
     );
 
     const FollowProblem problem(
@@ -274,7 +226,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     fddp::SolverOptions opts;
     opts.max_iters = params_.follow.max_iters;
     opts.tol_grad = SOLVER_TOL_GRAD;
-    opts.tol_cost = SOLVER_TOL_COST;
 
     ++follow_sequence_;
     if (follow_warm_) {
@@ -284,10 +235,13 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         initial_control(iu::PHASE_RATE_CMD) = params_.follow.phase.nominal_rate;
         fill_solver_controls(follow_solver_, initial_control);
     }
-    scale_solver_controls(follow_solver_, problem);
-
-    rollout_solver_states(follow_solver_, problem, x0);
-    follow_solver_.solve(problem, opts);
+    follow_solver_.xs[0] = x0;
+    const auto solver_result = follow_solver_.solve(problem, opts);
+    if (!solver_result.feasible) {
+        return std::unexpected(
+            "Follow MPC hard command bounds are infeasible from the current command"
+        );
+    }
     follow_warm_ = true;
 
     const auto solved_rollout = rollout_states(problem, follow_solver_, x0);
@@ -339,9 +293,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         }
     }
 
-    const Eigen::Vector2d cmd(
-        follow_solver_.us[0](iu::V_CMD), follow_solver_.us[0](iu::W_CMD)
-    );
+    const Eigen::Vector2d cmd = command_after_control(x0, follow_solver_.us[0]);
     last_phase_rate_ = follow_solver_.us[0](iu::PHASE_RATE_CMD);
     last_cmd_ = cmd;
 
@@ -357,27 +309,11 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const ChassisMotionState& chassis_state,
     const CostMap& cost_map
 ) {
-    const Eigen::Vector2d cmd0(
-        clamp_prev_cmd(
-            last_cmd_.x(),
-            chassis_state.velocity,
-            params_.stop.start_command.vel_cmd_act_gap_max,
-            params_.stop.profile.command_dynamics.velocity_rate_max,
-            MPC_DT
-        ),
-        clamp_prev_cmd(
-            last_cmd_.y(),
-            chassis_state.omega,
-            params_.stop.start_command.omega_cmd_act_gap_max,
-            params_.stop.profile.command_dynamics.angular_velocity_rate_max,
-            MPC_DT
-        )
-    );
     const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0, 0.0);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, last_cmd_, 0.0, 0.0);
 
     StopProblem prob(params_, cg, ci, schedule_rho);
     if (stop_warm_) {
@@ -385,19 +321,19 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     } else {
         fill_solver_controls(stop_solver_, ControlVec::Zero());
     }
-    scale_solver_controls(stop_solver_, prob);
-    rollout_solver_states(stop_solver_, prob, x0);
-
     fddp::SolverOptions opts;
     opts.max_iters = params_.stop.max_iters;
     opts.tol_grad = SOLVER_TOL_GRAD;
-    opts.tol_cost = SOLVER_TOL_COST;
-    stop_solver_.solve(prob, opts);
+    stop_solver_.xs[0] = x0;
+    const auto solver_result = stop_solver_.solve(prob, opts);
+    if (!solver_result.feasible) {
+        return std::unexpected(
+            "Stop MPC hard command bounds are infeasible from the current command"
+        );
+    }
     stop_warm_ = true;
 
-    const Eigen::Vector2d cmd(
-        stop_solver_.us[0](iu::V_CMD), stop_solver_.us[0](iu::W_CMD)
-    );
+    const Eigen::Vector2d cmd = command_after_control(x0, stop_solver_.us[0]);
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, stop_solver_, x0)};
 }
@@ -408,27 +344,11 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     const ChassisMotionState& chassis_state,
     const CostMap& cost_map
 ) {
-    const Eigen::Vector2d cmd0(
-        clamp_prev_cmd(
-            last_cmd_.x(),
-            chassis_state.velocity,
-            params_.hold.start_command.vel_cmd_act_gap_max,
-            params_.hold.profile.command_dynamics.velocity_rate_max,
-            MPC_DT
-        ),
-        clamp_prev_cmd(
-            last_cmd_.y(),
-            chassis_state.omega,
-            params_.hold.start_command.omega_cmd_act_gap_max,
-            params_.hold.profile.command_dynamics.angular_velocity_rate_max,
-            MPC_DT
-        )
-    );
     const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, cmd0, 0.0, 0.0);
+    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, last_cmd_, 0.0, 0.0);
 
     HoldProblem prob(goal_map, params_, cg, ci, schedule_rho);
     if (hold_warm_) {
@@ -436,19 +356,19 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     } else {
         fill_solver_controls(hold_solver_, ControlVec::Zero());
     }
-    scale_solver_controls(hold_solver_, prob);
-    rollout_solver_states(hold_solver_, prob, x0);
-
     fddp::SolverOptions opts;
     opts.max_iters = params_.hold.max_iters;
     opts.tol_grad = SOLVER_TOL_GRAD;
-    opts.tol_cost = SOLVER_TOL_COST;
-    hold_solver_.solve(prob, opts);
+    hold_solver_.xs[0] = x0;
+    const auto solver_result = hold_solver_.solve(prob, opts);
+    if (!solver_result.feasible) {
+        return std::unexpected(
+            "Hold MPC hard command bounds are infeasible from the current command"
+        );
+    }
     hold_warm_ = true;
 
-    const Eigen::Vector2d cmd(
-        hold_solver_.us[0](iu::V_CMD), hold_solver_.us[0](iu::W_CMD)
-    );
+    const Eigen::Vector2d cmd = command_after_control(x0, hold_solver_.us[0]);
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, hold_solver_, x0)};
 }

@@ -46,8 +46,7 @@ public:
     double terminal_cost(const StateVec& x) const;
     void terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const;
 
-    ControlVec u_lower() const;
-    ControlVec u_upper() const;
+    MPCControlBounds control_bounds(int k, const StateVec& x) const;
 
     [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
     [[nodiscard]] const MPCParams& params() const { return p_; }

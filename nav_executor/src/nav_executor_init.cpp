@@ -624,8 +624,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_domega = declare_parameter<double>("mpc.follow.command_weights.r_domega")
             },
             .command_dynamics_weights = {
-                .velocity_rate = declare_parameter<double>("mpc.follow.command_dynamics_weights.velocity_rate"),
-                .angular_velocity_rate = declare_parameter<double>("mpc.follow.command_dynamics_weights.angular_velocity_rate"),
                 .lateral_acceleration = declare_parameter<double>("mpc.follow.command_dynamics_weights.lateral_acceleration")
             },
             .traversal_target_weights = {
@@ -675,8 +673,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_domega = declare_parameter<double>("mpc.stop.command_weights.r_domega")
             },
             .command_dynamics_weights = {
-                .velocity_rate = declare_parameter<double>("mpc.stop.command_dynamics_weights.velocity_rate"),
-                .angular_velocity_rate = declare_parameter<double>("mpc.stop.command_dynamics_weights.angular_velocity_rate"),
                 .lateral_acceleration = declare_parameter<double>("mpc.stop.command_dynamics_weights.lateral_acceleration")
             },
             .environment_weights = {
@@ -705,8 +701,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_domega = declare_parameter<double>("mpc.hold.command_weights.r_domega")
             },
             .command_dynamics_weights = {
-                .velocity_rate = declare_parameter<double>("mpc.hold.command_dynamics_weights.velocity_rate"),
-                .angular_velocity_rate = declare_parameter<double>("mpc.hold.command_dynamics_weights.angular_velocity_rate"),
                 .lateral_acceleration = declare_parameter<double>("mpc.hold.command_dynamics_weights.lateral_acceleration")
             },
             .environment_weights = {

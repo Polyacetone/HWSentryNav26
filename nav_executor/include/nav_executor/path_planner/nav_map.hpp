@@ -48,7 +48,7 @@ struct CommandEnvelope {
     SignedAngularVelocityBounds angular_velocity;
 };
 
-// 控制器内部用于惩罚指令变化和侧向加速度的动态尺度，不是 box constraint。
+// 速度指令变化率是 MPC 的硬约束；侧向加速度当前仍作为软约束使用。
 struct CommandDynamicsLimits {
     double velocity_rate_max;
     double angular_velocity_rate_max;

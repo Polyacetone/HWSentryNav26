@@ -58,11 +58,11 @@ inline double lpv_schedule_z(double leg_h, double leg_psi) {
     return leg_h * std::cos(leg_psi);
 }
 
-inline double clamp_prev_cmd(double cmd_prev, double status, double cmd_act_diff_max, double rate_max, double dt) {
-    return std::max(
-        std::min(cmd_prev, status + cmd_act_diff_max - rate_max * dt),
-        status - cmd_act_diff_max + rate_max * dt
-    );
+inline Eigen::Vector2d command_after_control(const StateVec& x, const ControlVec& u) {
+    return {
+        x(ix::V_CMD) + MPC_DT * u(iu::V_CMD_RATE),
+        x(ix::W_CMD) + MPC_DT * u(iu::W_CMD_RATE),
+    };
 }
 
 // ─── 中等大小工具函数（定义在 mpc_utils.cpp）───
@@ -91,6 +91,14 @@ void zoh_v_matrices(
 );
 
 LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params, double rho);
+
+MPCControlBounds command_rate_control_bounds(
+    const StateVec& x,
+    const CapabilityProfile& capability,
+    double phase_rate_min,
+    double phase_rate_max,
+    const MPCStartCommandLimits* start_command = nullptr
+);
 
 double schedule_rho_from_state(const ChassisMotionState& chassis_state, const LPVKinematicModelParams& model_params);
 double select_follow_schedule_rho(const ChassisMotionState& chassis_state, const LPVKinematicModelParams& model_params);

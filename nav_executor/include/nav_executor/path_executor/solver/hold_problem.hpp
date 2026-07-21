@@ -35,8 +35,7 @@ public:
     double terminal_cost(const StateVec& x) const;
     void terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const;
 
-    ControlVec u_lower() const;
-    ControlVec u_upper() const;
+    MPCControlBounds control_bounds(int k, const StateVec& x) const;
 
 private:
     Eigen::Vector2d goal_;

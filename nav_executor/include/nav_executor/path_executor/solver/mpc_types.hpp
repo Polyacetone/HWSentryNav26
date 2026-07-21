@@ -15,14 +15,14 @@ constexpr int MPC_NX = 10;
 constexpr int MPC_NU = 3;
 
 constexpr double SOLVER_TOL_GRAD = 1e-6;
-constexpr double SOLVER_TOL_COST = 1e-8;
 
 namespace ix {
-    enum { X = 0, Y, THETA, XH, V, W, DV, DW, PHASE_TIME, PHASE_RATE };
+    enum { X = 0, Y, THETA, XH, V, W, V_CMD, W_CMD, PHASE_TIME, PHASE_RATE };
 }
 
 namespace iu {
-    enum { V_CMD = 0, W_CMD, PHASE_RATE_CMD };
+    // 前两项是下位机速度指令的变化率，不是底盘实测物理加速度。
+    enum { V_CMD_RATE = 0, W_CMD_RATE, PHASE_RATE_CMD };
 }
 
 struct MPCStartCommandLimits {
@@ -31,8 +31,6 @@ struct MPCStartCommandLimits {
 };
 
 struct MPCCommandDynamicsWeights {
-    double velocity_rate;
-    double angular_velocity_rate;
     double lateral_acceleration;
 };
 
@@ -329,5 +327,14 @@ using StateVec = Eigen::Matrix<double, MPC_NX, 1>;
 using ControlVec = Eigen::Matrix<double, MPC_NU, 1>;
 using MatXX = Eigen::Matrix<double, MPC_NX, MPC_NX>;
 using MatXU = Eigen::Matrix<double, MPC_NX, MPC_NU>;
+
+struct MPCControlBounds {
+    ControlVec lower;
+    ControlVec upper;
+    Eigen::Matrix<double, MPC_NU, MPC_NX> lower_state_jacobian =
+        Eigen::Matrix<double, MPC_NU, MPC_NX>::Zero();
+    Eigen::Matrix<double, MPC_NU, MPC_NX> upper_state_jacobian =
+        Eigen::Matrix<double, MPC_NU, MPC_NX>::Zero();
+};
 
 } // namespace nav_executor

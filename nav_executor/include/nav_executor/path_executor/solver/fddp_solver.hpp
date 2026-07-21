@@ -29,7 +29,6 @@ using FuMat = Eigen::Matrix<double, Dims<P>::NX, Dims<P>::NU>;
 struct SolverOptions {
     int max_iters = 0;
     double tol_grad = 0.0;
-    double tol_cost = 0.0;
 
     double mu_init = 1e-6;
     double mu_min = 1e-9;
@@ -52,6 +51,7 @@ struct SolverResult {
     double cost = 0.0;
     int iters = 0;
     bool converged = false;
+    bool feasible = true;
 };
 
 struct FilterEntry {
@@ -110,6 +110,7 @@ private:
     double dV1_ = 0.0;
     double dV2_ = 0.0;
     double fs_old_norm_ = 0.0;
+    double projected_gradient_max_ = 0.0;
     VecU tr_radii_;
 
     std::vector<FilterEntry> filter_;
@@ -117,14 +118,19 @@ private:
     double rollout_cost(const Problem& prob) const;
     void compute_gaps(const Problem& prob);
     double gap_norm() const;
-    bool backward_pass(const Problem& prob, double mu, const VecU& tr_lo, const VecU& tr_hi, const VecU& u_lo, const VecU& u_hi);
-    ForwardPassResult forward_pass(const Problem& prob, double alpha, double state_tr, const VecU& tr_lo, const VecU& tr_hi, const VecU& u_lo, const VecU& u_hi);
+    bool project_controls_and_rollout(const Problem& prob);
+    bool backward_pass(const Problem& prob, double mu, const VecU& tr_lo, const VecU& tr_hi);
+    ForwardPassResult forward_pass(const Problem& prob, double alpha, double state_tr, const VecU& tr_lo, const VecU& tr_hi);
 
     bool filter_accepts(double cost, double cv) const;
     void filter_add(double cost, double cv);
 
     static VecU clamp_u(const VecU& u, const VecU& lo, const VecU& hi) {
         return u.cwiseMax(lo).cwiseMin(hi);
+    }
+
+    static bool valid_bounds(const VecU& lo, const VecU& hi) {
+        return lo.allFinite() && hi.allFinite() && (lo.array() <= hi.array()).all();
     }
 
     static bool solve_spd(const MatUU& h, const VecU& b, VecU& x);
@@ -135,6 +141,8 @@ private:
         const MatUX& gx,
         const VecU& du_lo,
         const VecU& du_hi,
+        const MatUX& du_lo_x,
+        const MatUX& du_hi_x,
         VecU& k,
         MatUX& K
     );
@@ -165,6 +173,19 @@ double Solver<P>::gap_norm() const {
         s += fs_[k].squaredNorm();
     }
     return std::sqrt(s);
+}
+
+template<typename P>
+bool Solver<P>::project_controls_and_rollout(const P& prob) {
+    if (!xs[0].allFinite()) return false;
+    for (int k = 0; k < N; ++k) {
+        const auto bounds = prob.control_bounds(k, xs[k]);
+        if (!valid_bounds(bounds.lower, bounds.upper)) return false;
+        us[k] = clamp_u(us[k], bounds.lower, bounds.upper);
+        xs[k + 1] = prob.dynamics(k, xs[k], us[k]);
+        if (!xs[k + 1].allFinite()) return false;
+    }
+    return true;
 }
 
 template<typename P>
@@ -234,6 +255,8 @@ bool Solver<P>::solve_box_qp(
     const MatUX& gx,
     const VecU& du_lo,
     const VecU& du_hi,
+    const MatUX& du_lo_x,
+    const MatUX& du_hi_x,
     VecU& k,
     MatUX& K
 ) {
@@ -251,9 +274,11 @@ bool Solver<P>::solve_box_qp(
         for (int i = 0; i < 2; ++i) {
             if (k(i) < du_lo(i)) {
                 k(i) = du_lo(i);
+                K.row(i) = du_lo_x.row(i);
                 active[static_cast<size_t>(i)] = true;
             } else if (k(i) > du_hi(i)) {
                 k(i) = du_hi(i);
+                K.row(i) = du_hi_x.row(i);
                 active[static_cast<size_t>(i)] = true;
             }
         }
@@ -263,13 +288,11 @@ bool Solver<P>::solve_box_qp(
             return true;
         }
         if (active_cnt == 2) {
-            K.setZero();
             return true;
         }
 
         const int a = active[0] ? 0 : 1;
         const int f = 1 - a;
-        K.row(a).setZero();
 
         const double hff = h(f, f);
         if (!(hff > 1e-12)) {
@@ -279,14 +302,19 @@ bool Solver<P>::solve_box_qp(
         const double hfa = h(f, a);
         const double kf = -(g(f) + hfa * k(a)) / hff;
         constexpr double BOX_DZ = 1e-10;
-        if (kf <= du_lo(f) + BOX_DZ || kf >= du_hi(f) - BOX_DZ) {
-            k(f) = std::clamp(kf, du_lo(f), du_hi(f));
-            K.row(f).setZero();
+        if (kf <= du_lo(f) + BOX_DZ) {
+            k(f) = du_lo(f);
+            K.row(f) = du_lo_x.row(f);
+            return true;
+        }
+        if (kf >= du_hi(f) - BOX_DZ) {
+            k(f) = du_hi(f);
+            K.row(f) = du_hi_x.row(f);
             return true;
         }
 
         k(f) = kf;
-        K.row(f).noalias() = -gx.row(f) / hff;
+        K.row(f).noalias() = -(gx.row(f) + hfa * K.row(a)) / hff;
         return true;
     } else {
         // NU=3 时仅有 27 种活跃集。枚举可保留边界变量与自由变量之间的 Hessian 耦合。
@@ -312,8 +340,10 @@ bool Solver<P>::solve_box_qp(
                 code /= 3;
                 if (status[static_cast<size_t>(i)] < 0) {
                     candidate(i) = du_lo(i);
+                    candidate_K.row(i) = du_lo_x.row(i);
                 } else if (status[static_cast<size_t>(i)] > 0) {
                     candidate(i) = du_hi(i);
+                    candidate_K.row(i) = du_hi_x.row(i);
                 } else {
                     free_indices[static_cast<size_t>(free_count++)] = i;
                 }
@@ -330,6 +360,8 @@ bool Solver<P>::solve_box_qp(
                     for (int active = 0; active < NU; ++active) {
                         if (status[static_cast<size_t>(active)] != 0) {
                             rhs(r) -= h(row, active) * candidate(active);
+                            rhs_feedback.row(r) -=
+                                h(row, active) * candidate_K.row(active);
                         }
                     }
                     for (int c = 0; c < free_count; ++c) {
@@ -391,12 +423,13 @@ void Solver<P>::filter_add(double cost, double cv) {
 }
 
 template<typename P>
-bool Solver<P>::backward_pass(const P& prob, double mu, const VecU& tr_lo, const VecU& tr_hi, const VecU& u_lo, const VecU& u_hi) {
+bool Solver<P>::backward_pass(const P& prob, double mu, const VecU& tr_lo, const VecU& tr_hi) {
     prob.terminal_cost_derivatives(xs[N], Vx_[N], Vxx_[N]);
     Vx_[N] -= Vxx_[N] * fs_[N];
 
     dV1_ = 0.0;
     dV2_ = 0.0;
+    projected_gradient_max_ = 0.0;
 
     for (int k = N - 1; k >= 0; --k) {
         prob.dynamics_jacobians(k, xs[k], us[k], fx_[k], fu_[k]);
@@ -465,9 +498,47 @@ bool Solver<P>::backward_pass(const P& prob, double mu, const VecU& tr_lo, const
 
         VecU k_ff;
         MatUX K_fb;
-        const VecU du_lo = (u_lo - us[k]).cwiseMax(tr_lo);
-        const VecU du_hi = (u_hi - us[k]).cwiseMin(tr_hi);
-        if (!solve_box_qp(Quu_reg, Qu, Qux, du_lo, du_hi, k_ff, K_fb)) {
+        const auto bounds = prob.control_bounds(k, xs[k]);
+        if (!valid_bounds(bounds.lower, bounds.upper)) return false;
+        constexpr double ACTIVE_EPS = 1e-9;
+        for (int i = 0; i < NU; ++i) {
+            double projected_gradient = Qu(i);
+            if (bounds.upper(i) - bounds.lower(i) <= ACTIVE_EPS) {
+                projected_gradient = 0.0;
+            } else if (us[k](i) <= bounds.lower(i) + ACTIVE_EPS) {
+                projected_gradient = std::min(Qu(i), 0.0);
+            } else if (us[k](i) >= bounds.upper(i) - ACTIVE_EPS) {
+                projected_gradient = std::max(Qu(i), 0.0);
+            }
+            projected_gradient_max_ = std::max(
+                projected_gradient_max_, std::abs(projected_gradient)
+            );
+        }
+        const VecU physical_du_lo = bounds.lower - us[k];
+        const VecU physical_du_hi = bounds.upper - us[k];
+        const VecU du_lo = physical_du_lo.cwiseMax(tr_lo);
+        const VecU du_hi = physical_du_hi.cwiseMin(tr_hi);
+        MatUX du_lo_x = MatUX::Zero();
+        MatUX du_hi_x = MatUX::Zero();
+        for (int i = 0; i < NU; ++i) {
+            if (physical_du_lo(i) >= tr_lo(i)) {
+                du_lo_x.row(i) = bounds.lower_state_jacobian.row(i);
+            }
+            if (physical_du_hi(i) <= tr_hi(i)) {
+                du_hi_x.row(i) = bounds.upper_state_jacobian.row(i);
+            }
+        }
+        if (!solve_box_qp(
+                Quu_reg,
+                Qu,
+                Qux,
+                du_lo,
+                du_hi,
+                du_lo_x,
+                du_hi_x,
+                k_ff,
+                K_fb
+            )) {
             return false;
         }
 
@@ -493,9 +564,7 @@ typename Solver<P>::ForwardPassResult Solver<P>::forward_pass(
     double alpha,
     double state_tr,
     const VecU& tr_lo,
-    const VecU& tr_hi,
-    const VecU& u_lo,
-    const VecU& u_hi
+    const VecU& tr_hi
 ) {
     ForwardPassResult result;
     xs_try_[0] = xs[0];
@@ -508,7 +577,16 @@ typename Solver<P>::ForwardPassResult Solver<P>::forward_pass(
             return result;
         }
 
-        us_try_[k] = clamp_u(us[k] + alpha * gains_[k].k + gains_[k].K * dx, u_lo, u_hi);
+        const auto bounds = prob.control_bounds(k, xs_try_[k]);
+        if (!valid_bounds(bounds.lower, bounds.upper)) {
+            result.within_trust_region = false;
+            return result;
+        }
+        us_try_[k] = clamp_u(
+            us[k] + alpha * gains_[k].k + gains_[k].K * dx,
+            bounds.lower,
+            bounds.upper
+        );
         const VecU du = us_try_[k] - us[k];
         for (int i = 0; i < NU; ++i) {
             if (du(i) < tr_lo(i) - 1e-12 || du(i) > tr_hi(i) + 1e-12) {
@@ -543,14 +621,18 @@ typename Solver<P>::ForwardPassResult Solver<P>::forward_pass(
 
 template<typename P>
 SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
-    const VecU u_lo = prob.u_lower();
-    const VecU u_hi = prob.u_upper();
-
-    for (int k = 0; k < N; ++k) {
-        us[k] = clamp_u(us[k], u_lo, u_hi);
+    SolverResult result;
+    if (!project_controls_and_rollout(prob)) {
+        result.feasible = false;
+        result.cost = std::numeric_limits<double>::infinity();
+        return result;
     }
 
-    const VecU ctrl_span = (u_hi - u_lo).cwiseMax(1.0);
+    VecU ctrl_span = VecU::Ones();
+    for (int k = 0; k < N; ++k) {
+        const auto bounds = prob.control_bounds(k, xs[k]);
+        ctrl_span = ctrl_span.cwiseMax(bounds.upper - bounds.lower);
+    }
     const double mean_span = ctrl_span.mean();
     const double norm_tr = std::max(opts.trust_region_radius, 1e-6) / std::max(mean_span, 1.0);
     tr_radii_ = norm_tr * ctrl_span;
@@ -565,7 +647,6 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
     double tr_radius = tr_radii_.maxCoeff();
     double mu = opts.mu_init;
 
-    SolverResult result;
     result.cost = cost;
 
     for (int iter = 0; iter < opts.max_iters; ++iter) {
@@ -579,7 +660,7 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
 
         bool bp_ok = false;
         for (int retry = 0; retry < 20; ++retry) {
-            bp_ok = backward_pass(prob, mu, tr_vec_lo, tr_vec_hi, u_lo, u_hi);
+            bp_ok = backward_pass(prob, mu, tr_vec_lo, tr_vec_hi);
             if (bp_ok) {
                 break;
             }
@@ -589,15 +670,7 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
             break;
         }
 
-        double grad_max = 0.0;
-        for (int k = 0; k < N; ++k) {
-            for (int i = 0; i < NU; ++i) {
-                if (us[k](i) > u_lo(i) + 1e-8 && us[k](i) < u_hi(i) - 1e-8) {
-                    grad_max = std::max(grad_max, std::abs(gains_[k].k(i)));
-                }
-            }
-        }
-        if (grad_max < opts.tol_grad && gnorm < opts.gap_threshold) {
+        if (projected_gradient_max_ < opts.tol_grad && gnorm < opts.gap_threshold) {
             result.converged = true;
             break;
         }
@@ -616,7 +689,7 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
             us = us_old_;
 
             const ForwardPassResult fp = forward_pass(
-                prob, alpha, tr_radius, tr_vec_lo, tr_vec_hi, u_lo, u_hi
+                prob, alpha, tr_radius, tr_vec_lo, tr_vec_hi
             );
             if (!fp.within_trust_region) {
                 alpha *= 0.5;
@@ -671,18 +744,18 @@ SolverResult Solver<P>::solve(const P& prob, const SolverOptions& opts) {
 
         result.cost = cost;
 
-        const double denom = std::max(std::abs(cost_old), 1.0);
-        if (std::abs(cost_old - cost) < opts.tol_cost * denom && gnorm < opts.gap_threshold) {
-            result.converged = true;
-            break;
-        }
+        // Cost stagnation alone is not a constrained-stationarity certificate.
+        // The next backward pass evaluates the unregularized projected gradient;
+        // max_iters remains the fallback for a non-stationary stalled solve.
     }
 
-    for (int k = 0; k < N; ++k) {
-        us[k] = clamp_u(us[k], u_lo, u_hi);
+    if (!project_controls_and_rollout(prob)) {
+        result.feasible = false;
+        result.cost = std::numeric_limits<double>::infinity();
+        return result;
     }
 
-    result.cost = cost;
+    result.cost = rollout_cost(prob);
     return result;
 }
 

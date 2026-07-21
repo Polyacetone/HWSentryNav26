@@ -92,7 +92,7 @@ private:
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,
         const ChassisMotionState& chassis_state,
-        const Eigen::Vector2d& cmd_clamped,
+        const Eigen::Vector2d& current_command,
         double phase_time,
         double phase_rate
     ) const;

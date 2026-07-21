@@ -23,21 +23,13 @@ void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
     mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
 }
 
-ControlVec StopProblem::u_lower() const {
-    ControlVec lower;
-    lower << p_.stop.profile.command_envelope.velocity.min,
-        p_.stop.profile.command_envelope.angular_velocity.min, 0.0;
-    return lower;
+MPCControlBounds StopProblem::control_bounds(const int k, const StateVec& x) const {
+    return command_rate_control_bounds(
+        x, p_.stop.profile, 0.0, 0.0, k == 0 ? &p_.stop.start_command : nullptr
+    );
 }
 
-ControlVec StopProblem::u_upper() const {
-    ControlVec upper;
-    upper << p_.stop.profile.command_envelope.velocity.max,
-        p_.stop.profile.command_envelope.angular_velocity.max, 0.0;
-    return upper;
-}
-
-constexpr int STOP_RESIDUAL_DIM = 8;
+constexpr int STOP_RESIDUAL_DIM = 6;
 using StopResidualVec = Eigen::Matrix<double, STOP_RESIDUAL_DIM, 1>;
 
 StopResidualVec stop_residual_impl(
@@ -55,25 +47,21 @@ StopResidualVec stop_residual_impl(
 
     StopResidualVec r = StopResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y);
-    const double v_cmd = u(iu::V_CMD), w_cmd = u(iu::W_CMD);
-    const double dv_cmd = v_cmd - x(ix::DV);
-    const double dw_cmd = w_cmd - x(ix::DW);
+    const Eigen::Vector2d next_command = command_after_control(x, u);
+    const double v_cmd = next_command.x(), w_cmd = next_command.y();
+    const double dv_cmd = MPC_DT * u(iu::V_CMD_RATE);
+    const double dw_cmd = MPC_DT * u(iu::W_CMD_RATE);
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
 
-    const double dv_lim = motion_lim.velocity_rate_max * MPC_DT;
-    const double dw_lim = motion_lim.angular_velocity_rate_max * MPC_DT;
     const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = command_w.r_v * v_cmd;
     r(1) = command_w.r_omega * w_cmd;
     r(2) = command_w.r_dv * dv_cmd;
     r(3) = command_w.r_domega * dw_cmd;
-    r(4) = dynamics_w.velocity_rate * positive_part(std::abs(dv_cmd) - dv_lim);
-    r(5) = dynamics_w.angular_velocity_rate
-        * positive_part(std::abs(dw_cmd) - dw_lim);
-    r(6) = dynamics_w.lateral_acceleration
+    r(4) = dynamics_w.lateral_acceleration
         * positive_part(a_lat - motion_lim.lateral_acceleration_max);
-    r(7) = env_w.obstacle * cs.value / 255.0;
+    r(5) = env_w.obstacle * cs.value / 255.0;
 
     return r;
 }

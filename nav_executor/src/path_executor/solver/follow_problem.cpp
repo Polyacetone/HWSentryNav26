@@ -10,7 +10,7 @@ namespace nav_executor {
 namespace {
 
 constexpr double COST_EPS = 1e-9;
-constexpr int FOLLOW_RESIDUAL_DIM = 21;
+constexpr int FOLLOW_RESIDUAL_DIM = 19;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct ReferenceFrame {
@@ -93,11 +93,12 @@ FollowResidualVec follow_residual_impl(
     const double theta = x(ix::THETA);
     const double v_actual = x(ix::V);
     const double omega_actual = x(ix::W);
-    const double v_cmd = u(iu::V_CMD);
-    const double omega_cmd = u(iu::W_CMD);
+    const Eigen::Vector2d next_command = command_after_control(x, u);
+    const double v_cmd = next_command.x();
+    const double omega_cmd = next_command.y();
     const double phase_rate_cmd = u(iu::PHASE_RATE_CMD);
-    const double dv_cmd = v_cmd - x(ix::DV);
-    const double domega_cmd = omega_cmd - x(ix::DW);
+    const double dv_cmd = MPC_DT * u(iu::V_CMD_RATE);
+    const double domega_cmd = MPC_DT * u(iu::W_CMD_RATE);
 
     const ReferenceFrame reference = reference_frame(
         trajectory, x(ix::PHASE_TIME), tracking.tangent_blend_speed_scale
@@ -122,19 +123,13 @@ FollowResidualVec follow_residual_impl(
     residual(10) = command.r_dv * dv_cmd;
     residual(11) = command.r_domega * domega_cmd;
 
-    const double dv_limit = motion_limits.velocity_rate_max * MPC_DT;
-    const double domega_limit = motion_limits.angular_velocity_rate_max * MPC_DT;
-    residual(12) = dynamics_weights.velocity_rate
-        * positive_part(std::abs(dv_cmd) - dv_limit);
-    residual(13) = dynamics_weights.angular_velocity_rate
-        * positive_part(std::abs(domega_cmd) - domega_limit);
-    residual(14) = dynamics_weights.lateral_acceleration
+    residual(12) = dynamics_weights.lateral_acceleration
         * positive_part(
             std::abs(v_cmd * omega_cmd) - motion_limits.lateral_acceleration_max
         );
 
     const auto cost_sample = eval_cost_bilinear(cost_grid, cost_info, px, py);
-    residual(15) = environment.obstacle * cost_sample.value / 255.0;
+    residual(13) = environment.obstacle * cost_sample.value / 255.0;
 
     const StepTraversalConstraint* const step = frozen_step_gate
         ? frozen_step_gate->constraint
@@ -146,16 +141,16 @@ FollowResidualVec follow_residual_impl(
         if (gate > 0.0) {
             const Eigen::Vector2d& direction = step->dir_map;
             const double cross = std::cos(theta) * direction.y() - std::sin(theta) * direction.x();
-            residual(16) = traversal_weights.direction * gate * std::abs(cross);
+            residual(14) = traversal_weights.direction * gate * std::abs(cross);
 
             const auto& target = step->velocity_window;
             const double velocity_error = v_actual < target.min
                 ? target.min - v_actual
                 : (v_actual > target.max ? v_actual - target.max : 0.0);
-            residual(17) = traversal_weights.velocity * gate * velocity_error;
-            residual(18) = traversal_weights.angular_velocity * gate * omega_cmd;
-            residual(19) = traversal_weights.velocity_smoothness * gate * dv_cmd;
-            residual(20) = traversal_weights.angular_velocity_smoothness
+            residual(15) = traversal_weights.velocity * gate * velocity_error;
+            residual(16) = traversal_weights.angular_velocity * gate * omega_cmd;
+            residual(17) = traversal_weights.velocity_smoothness * gate * dv_cmd;
+            residual(18) = traversal_weights.angular_velocity_smoothness
                 * gate * domega_cmd;
         }
     }
@@ -246,21 +241,14 @@ void FollowProblemT<Horizon>::dynamics_jacobians(
 }
 
 template<int Horizon>
-ControlVec FollowProblemT<Horizon>::u_lower() const {
-    ControlVec lower;
-    lower << effective_capability_.command_envelope.velocity.min,
-        effective_capability_.command_envelope.angular_velocity.min,
-        p_.follow.phase.rate_min;
-    return lower;
-}
-
-template<int Horizon>
-ControlVec FollowProblemT<Horizon>::u_upper() const {
-    ControlVec upper;
-    upper << effective_capability_.command_envelope.velocity.max,
-        effective_capability_.command_envelope.angular_velocity.max,
-        p_.follow.phase.rate_max;
-    return upper;
+MPCControlBounds FollowProblemT<Horizon>::control_bounds(const int k, const StateVec& x) const {
+    return command_rate_control_bounds(
+        x,
+        effective_capability_,
+        p_.follow.phase.rate_min,
+        p_.follow.phase.rate_max,
+        k == 0 ? &p_.follow.start_command : nullptr
+    );
 }
 
 template<int Horizon>

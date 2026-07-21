@@ -25,21 +25,13 @@ void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
     mpc_dynamics_jacobians(x, u, model_, dfx, dfu);
 }
 
-ControlVec HoldProblem::u_lower() const {
-    ControlVec lower;
-    lower << p_.hold.profile.command_envelope.velocity.min,
-        p_.hold.profile.command_envelope.angular_velocity.min, 0.0;
-    return lower;
+MPCControlBounds HoldProblem::control_bounds(const int k, const StateVec& x) const {
+    return command_rate_control_bounds(
+        x, p_.hold.profile, 0.0, 0.0, k == 0 ? &p_.hold.start_command : nullptr
+    );
 }
 
-ControlVec HoldProblem::u_upper() const {
-    ControlVec upper;
-    upper << p_.hold.profile.command_envelope.velocity.max,
-        p_.hold.profile.command_envelope.angular_velocity.max, 0.0;
-    return upper;
-}
-
-constexpr int HOLD_RESIDUAL_DIM = 11;
+constexpr int HOLD_RESIDUAL_DIM = 9;
 using HoldResidualVec = Eigen::Matrix<double, HOLD_RESIDUAL_DIM, 1>;
 
 HoldResidualVec hold_residual_impl(
@@ -59,9 +51,10 @@ HoldResidualVec hold_residual_impl(
 
     HoldResidualVec r = HoldResidualVec::Zero();
     const double px = x(ix::X), py = x(ix::Y), theta = x(ix::THETA);
-    const double v_cmd = u(iu::V_CMD), w_cmd = u(iu::W_CMD);
-    const double dv_cmd = v_cmd - x(ix::DV);
-    const double dw_cmd = w_cmd - x(ix::DW);
+    const Eigen::Vector2d next_command = command_after_control(x, u);
+    const double v_cmd = next_command.x(), w_cmd = next_command.y();
+    const double dv_cmd = MPC_DT * u(iu::V_CMD_RATE);
+    const double dw_cmd = MPC_DT * u(iu::W_CMD_RATE);
 
     const Eigen::Vector2d goal_delta = apply_goal_deadzone(
         Eigen::Vector2d(px - goal.x(), py - goal.y()),
@@ -73,8 +66,6 @@ HoldResidualVec hold_residual_impl(
 
     const auto cs = eval_cost_bilinear(cg, ci, px, py);
 
-    const double dv_lim = motion_lim.velocity_rate_max * MPC_DT;
-    const double dw_lim = motion_lim.angular_velocity_rate_max * MPC_DT;
     const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = goal_w.q_goal_xy * ddx;
     r(1) = goal_w.q_goal_xy * ddy;
@@ -83,12 +74,9 @@ HoldResidualVec hold_residual_impl(
     r(4) = command_w.r_omega * w_cmd;
     r(5) = command_w.r_dv * dv_cmd;
     r(6) = command_w.r_domega * dw_cmd;
-    r(7) = dynamics_w.velocity_rate * positive_part(std::abs(dv_cmd) - dv_lim);
-    r(8) = dynamics_w.angular_velocity_rate
-        * positive_part(std::abs(dw_cmd) - dw_lim);
-    r(9) = dynamics_w.lateral_acceleration
+    r(7) = dynamics_w.lateral_acceleration
         * positive_part(a_lat - motion_lim.lateral_acceleration_max);
-    r(10) = env_w.obstacle * cs.value / 255.0;
+    r(8) = env_w.obstacle * cs.value / 255.0;
 
     return r;
 }

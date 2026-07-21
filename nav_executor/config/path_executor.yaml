@@ -98,8 +98,6 @@
           r_dv: 0.8 # 线速度平滑
           r_domega: 0.2 # 角速度平滑
         command_dynamics_weights:
-          velocity_rate: 18.0 # 速度指令变化率超限惩罚
-          angular_velocity_rate: 18.0 # 角速度指令变化率超限惩罚
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         traversal_target_weights:
           velocity: 2.0 # v_actual 对共享台阶速度窗口的软目标
@@ -132,8 +130,6 @@
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
         command_dynamics_weights:
-          velocity_rate: 18.0 # 速度指令变化率超限惩罚
-          angular_velocity_rate: 18.0 # 角速度指令变化率超限惩罚
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
           obstacle: 3.0 # 避障惩罚（台阶区域已转为障碍物）
@@ -159,8 +155,6 @@
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
         command_dynamics_weights:
-          velocity_rate: 18.0 # 速度指令变化率超限惩罚
-          angular_velocity_rate: 18.0 # 角速度指令变化率超限惩罚
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
           obstacle: 3.0 # 全程避障惩罚
