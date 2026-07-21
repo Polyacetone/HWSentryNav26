@@ -11,13 +11,26 @@ namespace nav_executor {
 
 constexpr int MPC_HORIZON = 40;
 constexpr double MPC_DT = 0.05;
-constexpr int MPC_NX = 10;
+constexpr int MPC_NX = 12;
 constexpr int MPC_NU = 3;
 
 constexpr double SOLVER_TOL_GRAD = 1e-6;
 
 namespace ix {
-    enum { X = 0, Y, THETA, XH, V, W, V_CMD, W_CMD, PHASE_TIME, PHASE_RATE };
+    enum {
+        X = 0,
+        Y,
+        THETA,
+        XH,
+        V,
+        W,
+        V_CMD,
+        W_CMD,
+        V_CMD_RATE,
+        W_CMD_RATE,
+        PHASE_TIME,
+        PHASE_RATE,
+    };
 }
 
 namespace iu {
@@ -67,6 +80,8 @@ struct MPCFollowCommandWeights {
     double r_omega;
     double r_dv;
     double r_domega;
+    double r_jerk_v;
+    double r_jerk_omega;
 };
 
 struct MPCTraversalTargetWeights {
@@ -174,6 +189,8 @@ struct MPCStopCommandWeights {
     double r_omega;
     double r_dv;
     double r_domega;
+    double r_jerk_v;
+    double r_jerk_omega;
 };
 
 struct MPCStopEnvironmentWeights {
@@ -205,6 +222,8 @@ struct MPCHoldCommandWeights {
     double r_omega;
     double r_dv;
     double r_domega;
+    double r_jerk_v;
+    double r_jerk_omega;
 };
 
 struct MPCHoldEnvironmentWeights {

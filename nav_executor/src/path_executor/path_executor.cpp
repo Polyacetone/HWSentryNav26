@@ -28,7 +28,7 @@ PathExecutor::PathExecutor(
 // ═══════════════════════ 辅助 ════════════════════════════════
 
 void PathExecutor::sync_mpc_context(const ExecutorInput& input, const bool allow_observer_update) {
-    mpc_controller_->set_last_cmd(last_cmd_);
+    mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
     if (allow_observer_update) {
         mpc_controller_->update_observer(input.observation.chassis_state);
     }
@@ -61,6 +61,14 @@ void PathExecutor::remember_command_output(const ExecutorOutput& output) {
 // ═══════════════════════ 主更新接口 ══════════════════════════
 
 ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
+    if (last_update_stamp_) {
+        const double interval = std::chrono::duration<double>(
+            input.observation.stamp - *last_update_stamp_
+        ).count();
+        if (interval > 1.5 * MPC_DT) last_cmd_rate_.setZero();
+    }
+    last_update_stamp_ = input.observation.stamp;
+
     uint8_t leg_mode = input.observation.chassis_leg_mode;
     if (leg_mode > static_cast<uint8_t>(LegMode::ABNORMAL)) {
         RCLCPP_ERROR(logger_, "Invalid chassis_leg_mode=%hhu (expected 0~6), treating as DEAD", leg_mode);
@@ -86,6 +94,8 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         out.valid = true;
 
         last_cmd_ = Eigen::Vector2d::Zero();
+        last_cmd_rate_ = Eigen::Vector2d::Zero();
+        mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
         mpc_controller_->reset_warm_start();
         mpc_controller_->reset_observer();
         safety_monitor_.reset_stuck();
@@ -217,14 +227,19 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     mpc_lethal_pending_ = false;
 
     if (output.valid) {
-        last_cmd_ = Eigen::Vector2d(output.velocity, output.omega);
-        mpc_controller_->set_last_cmd(last_cmd_);
+        const Eigen::Vector2d command(output.velocity, output.omega);
+        last_cmd_rate_ = (command - last_cmd_) / MPC_DT;
+        last_cmd_ = command;
+        mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
         remember_command_output(output);
         const bool reset_warm_start = !command_blocked
             && (state == MotionState::IDLE || state == MotionState::SPIN || state == MotionState::STUCK_REVERSE);
         if (reset_warm_start) {
             mpc_controller_->reset_warm_start();
         }
+    } else {
+        last_cmd_rate_.setZero();
+        mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
     }
 
     return output;

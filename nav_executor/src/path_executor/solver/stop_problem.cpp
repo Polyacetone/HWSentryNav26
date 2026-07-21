@@ -29,7 +29,7 @@ MPCControlBounds StopProblem::control_bounds(const int k, const StateVec& x) con
     );
 }
 
-constexpr int STOP_RESIDUAL_DIM = 6;
+constexpr int STOP_RESIDUAL_DIM = 8;
 using StopResidualVec = Eigen::Matrix<double, STOP_RESIDUAL_DIM, 1>;
 
 StopResidualVec stop_residual_impl(
@@ -59,9 +59,13 @@ StopResidualVec stop_residual_impl(
     r(1) = command_w.r_omega * w_cmd;
     r(2) = command_w.r_dv * dv_cmd;
     r(3) = command_w.r_domega * dw_cmd;
-    r(4) = dynamics_w.lateral_acceleration
+    r(4) = command_w.r_jerk_v
+        * (u(iu::V_CMD_RATE) - x(ix::V_CMD_RATE)) / MPC_DT;
+    r(5) = command_w.r_jerk_omega
+        * (u(iu::W_CMD_RATE) - x(ix::W_CMD_RATE)) / MPC_DT;
+    r(6) = dynamics_w.lateral_acceleration
         * positive_part(a_lat - motion_lim.lateral_acceleration_max);
-    r(5) = env_w.obstacle * cs.value / 255.0;
+    r(7) = env_w.obstacle * cs.value / 255.0;
 
     return r;
 }

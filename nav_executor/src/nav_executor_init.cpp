@@ -621,7 +621,9 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_v = declare_parameter<double>("mpc.follow.command_weights.r_v"),
                 .r_omega = declare_parameter<double>("mpc.follow.command_weights.r_omega"),
                 .r_dv = declare_parameter<double>("mpc.follow.command_weights.r_dv"),
-                .r_domega = declare_parameter<double>("mpc.follow.command_weights.r_domega")
+                .r_domega = declare_parameter<double>("mpc.follow.command_weights.r_domega"),
+                .r_jerk_v = declare_parameter<double>("mpc.follow.command_weights.r_jerk_v"),
+                .r_jerk_omega = declare_parameter<double>("mpc.follow.command_weights.r_jerk_omega")
             },
             .command_dynamics_weights = {
                 .lateral_acceleration = declare_parameter<double>("mpc.follow.command_dynamics_weights.lateral_acceleration")
@@ -670,7 +672,9 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_v = declare_parameter<double>("mpc.stop.command_weights.r_v"),
                 .r_omega = declare_parameter<double>("mpc.stop.command_weights.r_omega"),
                 .r_dv = declare_parameter<double>("mpc.stop.command_weights.r_dv"),
-                .r_domega = declare_parameter<double>("mpc.stop.command_weights.r_domega")
+                .r_domega = declare_parameter<double>("mpc.stop.command_weights.r_domega"),
+                .r_jerk_v = declare_parameter<double>("mpc.stop.command_weights.r_jerk_v"),
+                .r_jerk_omega = declare_parameter<double>("mpc.stop.command_weights.r_jerk_omega")
             },
             .command_dynamics_weights = {
                 .lateral_acceleration = declare_parameter<double>("mpc.stop.command_dynamics_weights.lateral_acceleration")
@@ -698,7 +702,9 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .r_v = declare_parameter<double>("mpc.hold.command_weights.r_v"),
                 .r_omega = declare_parameter<double>("mpc.hold.command_weights.r_omega"),
                 .r_dv = declare_parameter<double>("mpc.hold.command_weights.r_dv"),
-                .r_domega = declare_parameter<double>("mpc.hold.command_weights.r_domega")
+                .r_domega = declare_parameter<double>("mpc.hold.command_weights.r_domega"),
+                .r_jerk_v = declare_parameter<double>("mpc.hold.command_weights.r_jerk_v"),
+                .r_jerk_omega = declare_parameter<double>("mpc.hold.command_weights.r_jerk_omega")
             },
             .command_dynamics_weights = {
                 .lateral_acceleration = declare_parameter<double>("mpc.hold.command_dynamics_weights.lateral_acceleration")
@@ -784,6 +790,30 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && nonnegative_finite(terminal.remaining_phase)
         && positive_finite(terminal.overshoot),
         "mpc.follow terminal weights are invalid"
+    );
+    const auto valid_command_cost = [](const auto& command, const MPCCommandDynamicsWeights& dynamics) {
+        return nonnegative_finite(command.r_v)
+            && nonnegative_finite(command.r_omega)
+            && nonnegative_finite(command.r_dv)
+            && nonnegative_finite(command.r_domega)
+            && nonnegative_finite(command.r_jerk_v)
+            && nonnegative_finite(command.r_jerk_omega)
+            && nonnegative_finite(dynamics.lateral_acceleration);
+    };
+    require_parameter(
+        valid_command_cost(
+            mpc_params.follow.command_weights,
+            mpc_params.follow.command_dynamics_weights
+        )
+        && valid_command_cost(
+            mpc_params.stop.command_weights,
+            mpc_params.stop.command_dynamics_weights
+        )
+        && valid_command_cost(
+            mpc_params.hold.command_weights,
+            mpc_params.hold.command_dynamics_weights
+        ),
+        "mpc command weights are invalid"
     );
 
     const auto valid_capability = [](const CapabilityProfile& profile) {

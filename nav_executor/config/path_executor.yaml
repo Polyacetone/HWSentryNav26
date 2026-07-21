@@ -97,6 +97,9 @@
           r_omega: 0.01 # 角速度正则
           r_dv: 0.8 # 线速度平滑
           r_domega: 0.2 # 角速度平滑
+          # jerk 残差使用相邻指令变化率之差除以 MPC_DT，抑制逐拍加速度反向。
+          r_jerk_v: 0.02
+          r_jerk_omega: 0.005
         command_dynamics_weights:
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         traversal_target_weights:
@@ -129,6 +132,8 @@
           r_omega: 0.2 # 角速度正则
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
+          r_jerk_v: 0.02
+          r_jerk_omega: 0.005
         command_dynamics_weights:
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
@@ -154,6 +159,8 @@
           r_omega: 0.01 # 角速度正则
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
+          r_jerk_v: 0.02
+          r_jerk_omega: 0.005
         command_dynamics_weights:
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:

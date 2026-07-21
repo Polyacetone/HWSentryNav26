@@ -10,7 +10,7 @@ namespace nav_executor {
 namespace {
 
 constexpr double COST_EPS = 1e-9;
-constexpr int FOLLOW_RESIDUAL_DIM = 19;
+constexpr int FOLLOW_RESIDUAL_DIM = 21;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct ReferenceFrame {
@@ -122,14 +122,18 @@ FollowResidualVec follow_residual_impl(
     residual(9) = command.r_omega * omega_cmd;
     residual(10) = command.r_dv * dv_cmd;
     residual(11) = command.r_domega * domega_cmd;
+    residual(12) = command.r_jerk_v
+        * (u(iu::V_CMD_RATE) - x(ix::V_CMD_RATE)) / MPC_DT;
+    residual(13) = command.r_jerk_omega
+        * (u(iu::W_CMD_RATE) - x(ix::W_CMD_RATE)) / MPC_DT;
 
-    residual(12) = dynamics_weights.lateral_acceleration
+    residual(14) = dynamics_weights.lateral_acceleration
         * positive_part(
             std::abs(v_cmd * omega_cmd) - motion_limits.lateral_acceleration_max
         );
 
     const auto cost_sample = eval_cost_bilinear(cost_grid, cost_info, px, py);
-    residual(13) = environment.obstacle * cost_sample.value / 255.0;
+    residual(15) = environment.obstacle * cost_sample.value / 255.0;
 
     const StepTraversalConstraint* const step = frozen_step_gate
         ? frozen_step_gate->constraint
@@ -141,16 +145,16 @@ FollowResidualVec follow_residual_impl(
         if (gate > 0.0) {
             const Eigen::Vector2d& direction = step->dir_map;
             const double cross = std::cos(theta) * direction.y() - std::sin(theta) * direction.x();
-            residual(14) = traversal_weights.direction * gate * std::abs(cross);
+            residual(16) = traversal_weights.direction * gate * std::abs(cross);
 
             const auto& target = step->velocity_window;
             const double velocity_error = v_actual < target.min
                 ? target.min - v_actual
                 : (v_actual > target.max ? v_actual - target.max : 0.0);
-            residual(15) = traversal_weights.velocity * gate * velocity_error;
-            residual(16) = traversal_weights.angular_velocity * gate * omega_cmd;
-            residual(17) = traversal_weights.velocity_smoothness * gate * dv_cmd;
-            residual(18) = traversal_weights.angular_velocity_smoothness
+            residual(17) = traversal_weights.velocity * gate * velocity_error;
+            residual(18) = traversal_weights.angular_velocity * gate * omega_cmd;
+            residual(19) = traversal_weights.velocity_smoothness * gate * dv_cmd;
+            residual(20) = traversal_weights.angular_velocity_smoothness
                 * gate * domega_cmd;
         }
     }

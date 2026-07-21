@@ -149,6 +149,8 @@ private:
     bool last_spin_high_priority_ = false;
     MotionState last_motion_state_ = MotionState::IDLE;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
+    Eigen::Vector2d last_cmd_rate_ = Eigen::Vector2d::Zero();
+    std::optional<std::chrono::steady_clock::time_point> last_update_stamp_;
 
     ExecutorOutput last_command_output_;
     bool has_last_command_output_ = false;

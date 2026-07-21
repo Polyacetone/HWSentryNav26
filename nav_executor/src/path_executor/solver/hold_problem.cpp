@@ -31,7 +31,7 @@ MPCControlBounds HoldProblem::control_bounds(const int k, const StateVec& x) con
     );
 }
 
-constexpr int HOLD_RESIDUAL_DIM = 9;
+constexpr int HOLD_RESIDUAL_DIM = 11;
 using HoldResidualVec = Eigen::Matrix<double, HOLD_RESIDUAL_DIM, 1>;
 
 HoldResidualVec hold_residual_impl(
@@ -74,9 +74,13 @@ HoldResidualVec hold_residual_impl(
     r(4) = command_w.r_omega * w_cmd;
     r(5) = command_w.r_dv * dv_cmd;
     r(6) = command_w.r_domega * dw_cmd;
-    r(7) = dynamics_w.lateral_acceleration
+    r(7) = command_w.r_jerk_v
+        * (u(iu::V_CMD_RATE) - x(ix::V_CMD_RATE)) / MPC_DT;
+    r(8) = command_w.r_jerk_omega
+        * (u(iu::W_CMD_RATE) - x(ix::W_CMD_RATE)) / MPC_DT;
+    r(9) = dynamics_w.lateral_acceleration
         * positive_part(a_lat - motion_lim.lateral_acceleration_max);
-    r(8) = env_w.obstacle * cs.value / 255.0;
+    r(10) = env_w.obstacle * cs.value / 255.0;
 
     return r;
 }

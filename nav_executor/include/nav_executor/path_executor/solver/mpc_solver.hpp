@@ -27,7 +27,10 @@ public:
     MPCSolver(const MPCParams& params, rclcpp::Logger logger);
     ~MPCSolver();
 
-    void set_last_cmd(const Eigen::Vector2d& cmd);
+    void set_command_state(
+        const Eigen::Vector2d& command,
+        const Eigen::Vector2d& command_rate
+    );
     void reset_warm_start();
 
     void update_observer(const ChassisMotionState& chassis_state);
@@ -72,6 +75,7 @@ private:
     MPCParams params_;
     rclcpp::Logger logger_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
+    Eigen::Vector2d last_cmd_rate_ = Eigen::Vector2d::Zero();
     fddp::Solver<FollowProblem> follow_solver_;
     fddp::Solver<StopProblem> stop_solver_;
     fddp::Solver<HoldProblem> hold_solver_;
@@ -93,6 +97,7 @@ private:
         const Eigen::Vector3d& pose,
         const ChassisMotionState& chassis_state,
         const Eigen::Vector2d& current_command,
+        const Eigen::Vector2d& current_command_rate,
         double phase_time,
         double phase_rate
     ) const;

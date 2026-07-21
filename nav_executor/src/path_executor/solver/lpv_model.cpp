@@ -28,6 +28,8 @@ StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const LPVDiscreteM
     xn(ix::W) = w1;
     xn(ix::V_CMD) = v_cmd + dt * u(iu::V_CMD_RATE);
     xn(ix::W_CMD) = w_cmd + dt * u(iu::W_CMD_RATE);
+    xn(ix::V_CMD_RATE) = u(iu::V_CMD_RATE);
+    xn(ix::W_CMD_RATE) = u(iu::W_CMD_RATE);
     xn(ix::PHASE_TIME) = x(ix::PHASE_TIME);
     xn(ix::PHASE_RATE) = x(ix::PHASE_RATE);
     return xn;
@@ -104,6 +106,8 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const LP
 
     fu(ix::V_CMD, iu::V_CMD_RATE) = dt;
     fu(ix::W_CMD, iu::W_CMD_RATE) = dt;
+    fu(ix::V_CMD_RATE, iu::V_CMD_RATE) = 1.0;
+    fu(ix::W_CMD_RATE, iu::W_CMD_RATE) = 1.0;
 }
 
 } // namespace nav_executor

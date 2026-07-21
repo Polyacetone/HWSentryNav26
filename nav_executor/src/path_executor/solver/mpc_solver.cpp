@@ -97,8 +97,12 @@ MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger)
 
 MPCSolver::~MPCSolver() = default;
 
-void MPCSolver::set_last_cmd(const Eigen::Vector2d& cmd) {
-    last_cmd_ = cmd;
+void MPCSolver::set_command_state(
+    const Eigen::Vector2d& command,
+    const Eigen::Vector2d& command_rate
+) {
+    last_cmd_ = command;
+    last_cmd_rate_ = command_rate;
 }
 
 void MPCSolver::reset_warm_start() {
@@ -151,6 +155,7 @@ StateVec MPCSolver::make_initial_state(
     const Eigen::Vector3d& pose,
     const ChassisMotionState& chassis_state,
     const Eigen::Vector2d& current_command,
+    const Eigen::Vector2d& current_command_rate,
     const double phase_time,
     const double phase_rate
 ) const {
@@ -163,6 +168,8 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::W) = chassis_state.omega;
     x0(ix::V_CMD) = current_command.x();
     x0(ix::W_CMD) = current_command.y();
+    x0(ix::V_CMD_RATE) = current_command_rate.x();
+    x0(ix::W_CMD_RATE) = current_command_rate.y();
     x0(ix::PHASE_TIME) = phase_time;
     x0(ix::PHASE_RATE) = phase_rate;
     return x0;
@@ -215,7 +222,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const GridInfo ci = make_grid_info(cost_map);
     const CostMapGridView masked_global_grid(masked_global_map);
     const StateVec x0 = make_initial_state(
-        chassis_pose_map, chassis_state, last_cmd_, phase_time0, phase_rate0
+        chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, phase_time0, phase_rate0
     );
 
     const FollowProblem problem(
@@ -295,6 +302,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const Eigen::Vector2d cmd = command_after_control(x0, follow_solver_.us[0]);
     last_phase_rate_ = follow_solver_.us[0](iu::PHASE_RATE_CMD);
+    last_cmd_rate_.x() = follow_solver_.us[0](iu::V_CMD_RATE);
+    last_cmd_rate_.y() = follow_solver_.us[0](iu::W_CMD_RATE);
     last_cmd_ = cmd;
 
     FollowSolveResult out;
@@ -313,7 +322,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, last_cmd_, 0.0, 0.0);
+    const StateVec x0 = make_initial_state(
+        chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, 0.0, 0.0
+    );
 
     StopProblem prob(params_, cg, ci, schedule_rho);
     if (stop_warm_) {
@@ -334,6 +345,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     stop_warm_ = true;
 
     const Eigen::Vector2d cmd = command_after_control(x0, stop_solver_.us[0]);
+    last_cmd_rate_.x() = stop_solver_.us[0](iu::V_CMD_RATE);
+    last_cmd_rate_.y() = stop_solver_.us[0](iu::W_CMD_RATE);
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, stop_solver_, x0)};
 }
@@ -348,7 +361,9 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
 
     const CostMapGridView cg(cost_map);
     const GridInfo ci = make_grid_info(cost_map);
-    const StateVec x0 = make_initial_state(chassis_pose_map, chassis_state, last_cmd_, 0.0, 0.0);
+    const StateVec x0 = make_initial_state(
+        chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, 0.0, 0.0
+    );
 
     HoldProblem prob(goal_map, params_, cg, ci, schedule_rho);
     if (hold_warm_) {
@@ -369,6 +384,8 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     hold_warm_ = true;
 
     const Eigen::Vector2d cmd = command_after_control(x0, hold_solver_.us[0]);
+    last_cmd_rate_.x() = hold_solver_.us[0](iu::V_CMD_RATE);
+    last_cmd_rate_.y() = hold_solver_.us[0](iu::W_CMD_RATE);
     last_cmd_ = cmd;
     return std::tuple {cmd, rollout_prediction(prob, hold_solver_, x0)};
 }
