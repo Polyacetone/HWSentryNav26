@@ -914,7 +914,14 @@ def format_matrix(mat: np.ndarray) -> str:
     return "\n".join("  [" + ", ".join(f"{v: .10e}" for v in row) + "]" for row in mat)
 
 
-def generate_kinematic_model_yaml(params: np.ndarray, sched: Dict[str, float]) -> str:
+def generate_kinematic_model_yaml(
+    params: np.ndarray,
+    sched: Dict[str, float],
+    *,
+    obs_v_innovation_max: float = 0.25,
+    obs_omega_innovation_max: float = 2.5,
+    obs_psi_innovation_max: float = 0.35,
+) -> str:
     obs = observer_gains(params)
     lines = [
         "/**:",
@@ -957,6 +964,13 @@ def generate_kinematic_model_yaml(params: np.ndarray, sched: Dict[str, float]) -
         lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
     lines.append(f"      obs_lv: {float(obs['L_v'])}")
     lines.append(f"      obs_lpsi: {float(obs['L_psi'])}")
+    lines.extend([
+        "",
+        "      # Preliminary one-step innovation gates; validate on representative Mature/NORMAL logs.",
+        f"      obs_v_innovation_max: {obs_v_innovation_max}",
+        f"      obs_omega_innovation_max: {obs_omega_innovation_max}",
+        f"      obs_psi_innovation_max: {obs_psi_innovation_max}",
+    ])
     return "\n".join(lines)
 
 
@@ -1208,12 +1222,22 @@ def main() -> int:
     ap.add_argument("--w-yaw", type=float, default=0.2, help="weight for heading integral error")
     ap.add_argument("--w-transient", type=float, default=0.8, help="extra v error weight around v_cmd edges")
     ap.add_argument("--w-psi", type=float, default=0.2, help="weak auxiliary leg_psi proxy loss for x_h observability")
+    ap.add_argument("--obs-v-innovation-max", type=float, default=0.25, help="preliminary observer velocity innovation gate in m/s")
+    ap.add_argument("--obs-omega-innovation-max", type=float, default=2.5, help="preliminary observer yaw-rate innovation gate in rad/s")
+    ap.add_argument("--obs-psi-innovation-max", type=float, default=0.35, help="preliminary observer leg-angle proxy innovation gate in rad")
     ap.add_argument("--de-maxiter", type=int, default=100, help="differential evolution iterations; 0 skips global search")
     ap.add_argument("--de-popsize", type=int, default=32, help="differential evolution population size")
     ap.add_argument("--local-maxiter", type=int, default=800, help="local optimization iterations for each random start")
     ap.add_argument("--random-starts", type=int, default=4, help="number of random jittered starts around the best DE result for local refinement")
     ap.add_argument("--seed", type=int, default=42, help="random seed for reproducibility of global search and random starts")
     args = ap.parse_args()
+    innovation_gates = (
+        args.obs_v_innovation_max,
+        args.obs_omega_innovation_max,
+        args.obs_psi_innovation_max,
+    )
+    if not all(math.isfinite(value) and value > 0.0 for value in innovation_gates):
+        ap.error("observer innovation gates must be finite and positive")
 
     data_dir = Path(args.data_dir)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1235,7 +1259,13 @@ def main() -> int:
     save_model_txt(out_dir / f"model_lpv_{MPC_RATE_HZ}hz.txt", params, loss_value, sched, agg, results)
     save_metrics_csv(out_dir / "per_file_metrics.csv", results)
     save_npz(out_dir / f"model_lpv_{MPC_RATE_HZ}hz.npz", params, sched, agg)
-    yaml_str = generate_kinematic_model_yaml(params, sched)
+    yaml_str = generate_kinematic_model_yaml(
+        params,
+        sched,
+        obs_v_innovation_max=args.obs_v_innovation_max,
+        obs_omega_innovation_max=args.obs_omega_innovation_max,
+        obs_psi_innovation_max=args.obs_psi_innovation_max,
+    )
     (out_dir / "kinematic_model.yaml").write_text(yaml_str + "\n", encoding="utf-8")
     generate_plots(series, results, plots_dir)
 

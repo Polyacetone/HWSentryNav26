@@ -82,16 +82,19 @@ private:
     bool follow_warm_ = false;
     bool stop_warm_ = false;
     bool hold_warm_ = false;
+    std::optional<StateVec> follow_nominal_longitudinal_state_;
 
     double x_h_hat_ = 0.0;
     double prev_v_act_ = 0.0;
     double prev_w_act_ = 0.0;
     double prev_schedule_rho_ = 0.0;
+    Eigen::Vector2d observer_input_command_ = Eigen::Vector2d::Zero();
     bool observer_initialized_ = false;
+    bool observer_validated_ = false;
+    bool observer_rejection_active_ = false;
     double last_phase_rate_ = 1.0;
 
     int fddp_lethal_consecutive_count_ = 0;
-    uint64_t follow_sequence_ = 0;
 
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,

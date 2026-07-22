@@ -73,7 +73,7 @@
         runup:
           saturation_length: 0.05 # 往前看台阶暴露量时的饱和弧长（米），暴露量超过此尺度后助跑惩罚不再增加
           transition_distance: 0.1 # 助跑区边界往外平滑过渡的弧长宽度（米），让助跑效果逐渐消失而非突然截断
-        max_iterations: 1000 # L-BFGS 优化器的最大迭代次数
+        max_iterations: 2000 # L-BFGS 优化器的最大迭代次数
         min_segment_time: 0.05 # 每段轨迹最短时长（秒），防止时长归零导致数值问题
         output_validation:
           samples_per_segment: 20 # 最终验收时每段采多少个点做约束检查

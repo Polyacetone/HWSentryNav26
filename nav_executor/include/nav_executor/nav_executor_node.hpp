@@ -127,6 +127,9 @@ private:
     std::optional<Goal> pending_goal_;
 
     ChassisMotionState chassis_state_{};
+    uint64_t chassis_state_sequence_ = 0;
+    uint64_t last_control_chassis_state_sequence_ = 0;
+    bool chassis_state_valid_ = false;
     uint8_t chassis_leg_mode_ = 4;
     uint8_t comp_stage_ = 4;
     double rfr_pwr_limit_ = 90.0;

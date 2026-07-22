@@ -8,6 +8,7 @@
         stop_threshold_dist: 0.5 # 到达目标判定距离 (m)
         stop_threshold_remaining_distance: 0.5 # 到达目标判定的路径剩余弧长 (m)，须与终点距离同时满足
         step_dist_offset: 0.1 # 补偿代价地图膨胀的台阶距离偏移量 (m)，正值增加报告距离
+        command_history_timeout: 0.4 # 超时后按实测运动状态重建 MPC 指令状态 (s)
 
       # ═══════════════════════════════════════════════
       #  NoProgressGuard — 无进展检测守卫
@@ -81,6 +82,13 @@
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
           fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
+        ancillary_feedback:
+          enable: true # 是否启用辅助反馈环；在 MPC 预测模型与实际运动状态存在偏差时，使用实测状态修正 MPC 指令
+          velocity_error_gain: 0.05 # 实测−名义速度误差到指令变化率修正的增益 (1/s)
+          command_error_gain: 6.0 # 实际发送−名义速度指令误差的回正增益 (1/s)
+          velocity_error_reanchor_threshold: 0.22 # 超出已验证误差管时重锚到实测状态 (m/s)
+          velocity_command_margin: 0.0025 # 名义 MPC 预留给实际反馈的速度指令余量 (m/s)；最终命令仍使用完整 capability 硬边界。
+          velocity_command_rate_margin: 0.02 # 名义 MPC 预留给实际反馈的速度指令变化率余量 (m/s²)；最终命令仍使用完整 capability 硬边界。
         capability: "medium" # 预设的能力配置，决定了下位机指令限幅
         start_command:
           vel_cmd_act_gap_max: 1.5 # 线速度指令与实际允许差值上限 (m/s)

@@ -143,6 +143,9 @@ struct LPVKinematicModelParams {
     double psi_v;
     double obs_lv;
     double obs_lpsi;
+    double obs_v_innovation_max;
+    double obs_omega_innovation_max;
+    double obs_psi_innovation_max;
 };
 
 struct LPVDiscreteModel {
@@ -169,6 +172,15 @@ struct MPCFollowRolloutSafetyParams {
     int fddp_lethal_consecutive_threshold;
 };
 
+struct MPCFollowAncillaryFeedbackParams {
+    bool enable;
+    double velocity_error_gain;
+    double command_error_gain;
+    double velocity_error_reanchor_threshold;
+    double velocity_command_margin;
+    double velocity_command_rate_margin;
+};
+
 struct MPCFollowParams {
     MPCStartCommandLimits start_command;
     CapabilityProfile normal_profile;
@@ -179,6 +191,7 @@ struct MPCFollowParams {
     MPCTraversalTargetWeights traversal_target_weights;
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowRolloutSafetyParams rollout_safety;
+    MPCFollowAncillaryFeedbackParams ancillary_feedback;
     MPCFollowPhaseParams phase;
     MPCFollowTerminalWeights terminal_weights;
     int max_iters;

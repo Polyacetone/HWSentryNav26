@@ -370,6 +370,7 @@ PathExecutorParams NavExecutorNode::load_executor_params() {
     p.stop_threshold_dist = declare_parameter<double>("path_executor.misc.stop_threshold_dist");
     p.stop_threshold_remaining_distance = declare_parameter<double>("path_executor.misc.stop_threshold_remaining_distance");
     p.step_dist_offset = declare_parameter<double>("path_executor.misc.step_dist_offset");
+    p.command_history_timeout = declare_parameter<double>("path_executor.misc.command_history_timeout");
     p.follow_no_progress_guard = {
         .tau_landmark_spacing = declare_parameter<double>("path_executor.no_progress_guard.follow.tau_landmark_spacing"),
         .timeout = declare_parameter<double>("path_executor.no_progress_guard.follow.timeout"),
@@ -392,6 +393,11 @@ PathExecutorParams NavExecutorNode::load_executor_params() {
         positive_finite(p.follow_no_progress_guard.timeout)
         && positive_finite(p.stepping_no_progress_guard.timeout),
         "no-progress timeouts must be finite and positive"
+    );
+    require_parameter(
+        std::isfinite(p.command_history_timeout)
+        && p.command_history_timeout >= MPC_DT,
+        "command_history_timeout must be finite and at least one MPC period"
     );
     return p;
 }
@@ -643,6 +649,14 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold"),
                 .fddp_lethal_consecutive_threshold = static_cast<int>(declare_parameter<int>("mpc.follow.rollout_safety.fddp_lethal_consecutive_threshold"))
             },
+            .ancillary_feedback = {
+                .enable = declare_parameter<bool>("mpc.follow.ancillary_feedback.enable"),
+                .velocity_error_gain = declare_parameter<double>("mpc.follow.ancillary_feedback.velocity_error_gain"),
+                .command_error_gain = declare_parameter<double>("mpc.follow.ancillary_feedback.command_error_gain"),
+                .velocity_error_reanchor_threshold = declare_parameter<double>("mpc.follow.ancillary_feedback.velocity_error_reanchor_threshold"),
+                .velocity_command_margin = declare_parameter<double>("mpc.follow.ancillary_feedback.velocity_command_margin"),
+                .velocity_command_rate_margin = declare_parameter<double>("mpc.follow.ancillary_feedback.velocity_command_rate_margin")
+            },
             .phase = {
                 .rate_min = declare_parameter<double>("mpc.follow.phase.rate_min"),
                 .rate_max = declare_parameter<double>("mpc.follow.phase.rate_max"),
@@ -752,7 +766,10 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .psi_gain = declare_parameter<double>("kinematic_model.psi_gain"),
             .psi_v = declare_parameter<double>("kinematic_model.psi_v"),
             .obs_lv = declare_parameter<double>("kinematic_model.obs_lv"),
-            .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi")
+            .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi"),
+            .obs_v_innovation_max = declare_parameter<double>("kinematic_model.obs_v_innovation_max"),
+            .obs_omega_innovation_max = declare_parameter<double>("kinematic_model.obs_omega_innovation_max"),
+            .obs_psi_innovation_max = declare_parameter<double>("kinematic_model.obs_psi_innovation_max")
         }
     };
     const auto& phase = mpc_params.follow.phase;
@@ -790,6 +807,15 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && nonnegative_finite(terminal.remaining_phase)
         && positive_finite(terminal.overshoot),
         "mpc.follow terminal weights are invalid"
+    );
+    const auto& feedback = mpc_params.follow.ancillary_feedback;
+    require_parameter(
+        nonnegative_finite(feedback.velocity_error_gain)
+        && nonnegative_finite(feedback.command_error_gain)
+        && nonnegative_finite(feedback.velocity_error_reanchor_threshold)
+        && nonnegative_finite(feedback.velocity_command_margin)
+        && nonnegative_finite(feedback.velocity_command_rate_margin),
+        "mpc.follow ancillary feedback parameters are invalid"
     );
     const auto valid_command_cost = [](const auto& command, const MPCCommandDynamicsWeights& dynamics) {
         return nonnegative_finite(command.r_v)
@@ -833,6 +859,32 @@ MPCParams NavExecutorNode::load_mpc_params() {
         valid_capability(mpc_params.follow.normal_profile),
         "mpc.follow capability profile is invalid"
     );
+    if (feedback.enable) {
+        require_parameter(
+            feedback.velocity_error_gain > 0.0
+            && feedback.command_error_gain > 0.0
+            && feedback.velocity_error_reanchor_threshold > 0.0
+            && feedback.velocity_command_margin > 0.0
+            && feedback.velocity_command_rate_margin > 0.0,
+            "mpc.follow ancillary feedback requires positive gains and margins"
+        );
+        const double worst_velocity_correction = feedback.velocity_error_gain
+            * feedback.velocity_error_reanchor_threshold;
+        require_parameter(
+            feedback.command_error_gain * feedback.velocity_command_margin
+                > worst_velocity_correction
+            && feedback.velocity_command_rate_margin >= worst_velocity_correction,
+            "mpc.follow ancillary feedback lacks authority over its error tube"
+        );
+        for (const CapabilityProfile& profile : mpc_params.follow.capability_profiles) {
+            require_parameter(
+                2.0 * feedback.velocity_command_margin
+                    < profile.command_envelope.velocity.max - profile.command_envelope.velocity.min
+                && feedback.velocity_command_rate_margin < profile.command_dynamics.velocity_rate_max,
+                "mpc.follow ancillary feedback margins exceed a capability profile"
+            );
+        }
+    }
     require_parameter(
         valid_capability(mpc_params.stop.profile),
         "mpc.stop capability profile is invalid"
@@ -840,6 +892,47 @@ MPCParams NavExecutorNode::load_mpc_params() {
     require_parameter(
         valid_capability(mpc_params.hold.profile),
         "mpc.hold capability profile is invalid"
+    );
+    const auto& model = mpc_params.kinematic_model;
+    require_parameter(
+        std::isfinite(model.z_ref)
+        && positive_finite(model.z_scale)
+        && positive_finite(model.rho_clip)
+        && positive_finite(model.sgn_eps)
+        && std::isfinite(model.ca00)
+        && std::isfinite(model.ca01)
+        && std::isfinite(model.ca10)
+        && std::isfinite(model.ca11)
+        && std::isfinite(model.cb0)
+        && std::isfinite(model.cb1)
+        && std::isfinite(model.dca00)
+        && std::isfinite(model.dca01)
+        && std::isfinite(model.dca10)
+        && std::isfinite(model.dca11)
+        && std::isfinite(model.dcb0)
+        && std::isfinite(model.dcb1)
+        && std::isfinite(model.gxh)
+        && std::isfinite(model.gv)
+        && std::isfinite(model.cf1)
+        && std::isfinite(model.cf2)
+        && std::isfinite(model.w_lam0)
+        && std::isfinite(model.w_k0)
+        && std::isfinite(model.w_cf0)
+        && std::isfinite(model.w_lam1)
+        && std::isfinite(model.w_k1)
+        && std::isfinite(model.w_cf1)
+        && std::isfinite(model.xh0_bias)
+        && std::isfinite(model.xh0_psi)
+        && std::isfinite(model.xh0_v)
+        && std::isfinite(model.psi_bias)
+        && std::isfinite(model.psi_gain)
+        && std::isfinite(model.psi_v)
+        && std::isfinite(model.obs_lv)
+        && std::isfinite(model.obs_lpsi)
+        && positive_finite(model.obs_v_innovation_max)
+        && positive_finite(model.obs_omega_innovation_max)
+        && positive_finite(model.obs_psi_innovation_max),
+        "kinematic model or observer parameters are invalid"
     );
     return mpc_params;
 }

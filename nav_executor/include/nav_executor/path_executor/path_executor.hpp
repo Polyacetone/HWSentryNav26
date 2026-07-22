@@ -23,6 +23,7 @@ struct PathExecutorParams {
     double stop_threshold_dist;
     double stop_threshold_remaining_distance;
     double step_dist_offset;
+    double command_history_timeout;
     NoProgressGuardParams follow_no_progress_guard;
     NoProgressGuardParams stepping_no_progress_guard;
 };
@@ -38,6 +39,7 @@ struct MotionIntent {
 struct MotionObservation {
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();
     ChassisMotionState chassis_state;
+    uint64_t chassis_state_sequence = 0;
     uint8_t chassis_leg_mode = 4;
     uint8_t comp_stage = 4;
     std::chrono::steady_clock::time_point stamp;
@@ -129,8 +131,13 @@ private:
     ExecutorOutput execute_fixed(const ExecutorInput& input);
 
     void sync_mpc_context(const ExecutorInput& input, bool allow_observer_update);
+    void reset_mpc_observer();
+    void resynchronize_command_state(const ChassisMotionState& chassis_state);
     void apply_held_command(ExecutorOutput& output) const;
-    void remember_command_output(const ExecutorOutput& output);
+    void remember_command_output(
+        const ExecutorOutput& output,
+        std::chrono::steady_clock::time_point stamp
+    );
     void on_state_transition(MotionState prev, MotionState next, bool allow_warm_start_reset);
 
     std::unique_ptr<StateMachine> control_fsm_;
@@ -151,6 +158,8 @@ private:
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     Eigen::Vector2d last_cmd_rate_ = Eigen::Vector2d::Zero();
     std::optional<std::chrono::steady_clock::time_point> last_update_stamp_;
+    std::optional<std::chrono::steady_clock::time_point> last_command_output_stamp_;
+    std::optional<uint64_t> last_observer_state_sequence_;
 
     ExecutorOutput last_command_output_;
     bool has_last_command_output_ = false;

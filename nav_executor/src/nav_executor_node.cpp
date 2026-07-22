@@ -27,6 +27,13 @@ std_msgs::msg::ColorRGBA velocity_color(const double velocity, const double velo
 namespace nav_executor {
 
 void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
+    ++chassis_state_sequence_;
+    if (!std::isfinite(msg->velocity) || !std::isfinite(msg->omega)
+        || !std::isfinite(msg->leg_h) || !std::isfinite(msg->leg_psi)) {
+        RCLCPP_ERROR(get_logger(), "Ignoring non-finite chassis status");
+        chassis_state_valid_ = false;
+        return;
+    }
     chassis_state_.velocity = msg->velocity;
     chassis_state_.omega = msg->omega;
     chassis_state_.leg_h = msg->leg_h;
@@ -37,6 +44,7 @@ void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStat
         + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_supercap_filtered_;
     remaining_energy_buffercap_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_buffercap)
         + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_buffercap_filtered_;
+    chassis_state_valid_ = true;
 }
 
 void NavExecutorNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -114,7 +122,10 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
 // ROS 回调只写缓存；任务/运动状态转移在 control_tick 中完成。
 
 void NavExecutorNode::control_tick() {
-    if (!global_cost_map_ || !global_direction_map_ || !step_mask_ready_) return;
+    if (!global_cost_map_ || !global_direction_map_ || !step_mask_ready_
+        || !chassis_state_valid_
+        || chassis_state_sequence_ == 0
+        || chassis_state_sequence_ == last_control_chassis_state_sequence_) return;
 
     Eigen::Vector3d chassis_pose_map;
     if (!get_chassis_pose(chassis_pose_map)) return;
@@ -208,6 +219,7 @@ void NavExecutorNode::control_tick() {
     ein.route = route_estimate;
     ein.observation.chassis_pose_map = chassis_pose_map;
     ein.observation.chassis_state = chassis_state_;
+    ein.observation.chassis_state_sequence = chassis_state_sequence_;
     ein.observation.chassis_leg_mode = chassis_leg_mode_;
     ein.observation.comp_stage = comp_stage_;
     ein.observation.stamp = stamp;
@@ -220,6 +232,7 @@ void NavExecutorNode::control_tick() {
     ein.environment.per_step_dynamic_cost_maps = std::move(route_context.prediction_dynamic_ptrs);
     ein.environment.prediction_dt = prediction_dt_;
 
+    last_control_chassis_state_sequence_ = chassis_state_sequence_;
     const ExecutorOutput out = executor_->update(ein);
 
     previous_motion_feedback_.goal_reached = out.goal_reached;
