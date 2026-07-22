@@ -15,10 +15,10 @@
       # ═══════════════════════════════════════════════
       no_progress_guard:
         follow:
-          tau_landmark_spacing: 0.02 # 归一轨迹参数 tau 的进度分箱宽度
+          arc_length_landmark_spacing: 0.1 # 累计路径弧长的进度分箱宽度 (m)
           timeout: 6.0 # 无进度超时 (s)
         stepping:
-          tau_landmark_spacing: 0.01 # 台阶状态使用更细的 tau 进度分箱
+          arc_length_landmark_spacing: 0.05 # 台阶状态使用更细的弧长进度分箱 (m)
           timeout: 6.0 # 无进度超时 (s)
 
       # ═══════════════════════════════════════════════
@@ -70,14 +70,13 @@
       # ═══════════════════════════════════════════════
       follow:
         max_iters: 20 # FDDP 求解器最大迭代次数
-        phase:
-          rate_min: 0.1 # MPCC 相位推进率下界；0 允许障碍前暂停
-          rate_max: 1.2 # 相位推进率上界；允许有限追赶名义时序
-          nominal_rate: 1.0 # MINCO 名义时序对应的相位推进率
-          progress_reward: 0.5 # 每步相位推进线性奖励，防止零速局部最优
-          rate_tracking_weight: 2.0 # 相位率偏离名义值的残差权重
-          rate_smoothness_weight: 1.5 # 相邻相位率变化残差权重
-          overshoot_weight: 2.0 # phase_time 超过轨迹总时长的残差权重
+        progress:
+          speed_min: 0.0 # 路径推进速度下界；允许障碍前或换向尖点暂停 (m/s)
+          speed_max: 3.0 # 路径推进速度上界 (m/s)
+          progress_reward: 0.5 # 每米路径推进线性奖励，防止零速局部最优
+          speed_tracking_weight: 2.0 # 路径速度偏离 MINCO 名义速度的残差权重
+          speed_smoothness_weight: 1.5 # 相邻路径速度变化残差权重
+          overshoot_weight: 2.0 # 路径进度超过总弧长的残差权重
         rollout_safety:
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
@@ -95,10 +94,10 @@
           omega_cmd_act_gap_max: 3.0 # 角速度指令与实际允许差值上限 (rad/s)
         tracking_weights:
           contour: 2.0 # 位置曲线法向误差残差权重
-          lag: 1.2 # 位置曲线切向误差残差权重，阻止相位空跑
+          lag: 1.2 # 位置曲线切向误差残差权重，阻止路径进度空跑
           heading: 1.2 # 独立航向状态误差权重
-          velocity: 0.8 # 时间缩放后的带符号速度参考权重
-          angular_velocity: 0.8 # 时间缩放后的角速度参考权重
+          velocity: 0.8 # 路径速度映射后的带符号车身速度参考权重
+          angular_velocity: 0.8 # 路径速度映射后的角速度参考权重
           tangent_blend_speed_scale: 0.05 # 路径轴向车身轴平滑过渡的平动速度尺度 (m/s)
         command_weights:
           r_v: 0.01 # 线速度正则
@@ -123,8 +122,8 @@
           heading: 0.6 # horizon 末端航向权重
           velocity: 0.6 # horizon 末端线速度参考权重
           angular_velocity: 0.6 # horizon 末端角速度参考权重
-          remaining_phase: 0.6 # horizon 末端剩余轨迹时间线性代价
-          overshoot: 1.2 # horizon 末端相位越界残差权重
+          remaining_progress: 0.6 # horizon 末端剩余路径弧长线性代价
+          overshoot: 1.2 # horizon 末端路径进度越界残差权重
 
       # ═══════════════════════════════════════════════
       #  Stop — 停止求解器

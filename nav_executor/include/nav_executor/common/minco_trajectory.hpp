@@ -22,10 +22,11 @@ struct TrajSample {
     double cos_phi = 0.0;
     double ds_dtau = 0.0;   // |dp_dtau|，弧长对 τ 的变化率（原地旋转处→0）
     double kappa = 0.0;     // 位置曲线曲率
+    double gear = 1.0;      // 当前段换向符号：+1 前进，−1 倒车
 };
 
 // 逐段五次多项式轨迹。普通节点保持 C2 连续；换向尖点强制两侧速度为零。
-// tau 与绝对时间线性对应，但跟随层将其作为路径相位而非强制时钟。
+// tau 与绝对时间线性对应，仅用于 MINCO 轨迹求值；跟随层统一使用累计弧长。
 class MincoTrajectory {
 public:
     static constexpr int DIM = 2;               // x, y（平坦输出）
@@ -34,6 +35,7 @@ public:
 
     // 单段系数：行 k = t^k 的系数，列 = (x, y)。段内 p(t)=Σ_k coef.row(k)·t^k，t∈[0,T]。
     using CoefBlock = Eigen::Matrix<double, NCOEF, DIM>;
+    using ControlPointBlock = Eigen::Matrix<double, NCOEF, DIM>;
 
     MincoTrajectory() = default;
     // gears：每段换向符号（+1 前进，−1 倒车），size 须等于 durations.size()；
@@ -55,22 +57,27 @@ public:
 
     [[nodiscard]] double arc_length_at_tau(double tau) const;
     [[nodiscard]] double tau_at_arc_length(double arc_length) const;
+    [[nodiscard]] double segment_boundary_arc_length(int boundary_index) const;
+    [[nodiscard]] int segment_index_at_arc_length(double arc_length) const;
     // |弧长(tau1) − 弧长(tau0)|。
     [[nodiscard]] double arc_length_between(double tau0, double tau1) const;
 
     [[nodiscard]] Eigen::Vector2d position(double tau) const { return eval(tau).p; }
     [[nodiscard]] Eigen::Vector2d tangent(double tau) const { return eval(tau).dp_dtau; }
 
-    // 按归一化相位求值；超出 [0, 1] 时线性外推。
+    // 按归一化 MINCO 参数求值；超出 [0, 1] 时线性外推。
     [[nodiscard]] TrajSample eval(double tau) const;
     // 按绝对时间 t∈[0,total_time] 求值。
     [[nodiscard]] TrajSample eval_time(double t) const;
-
-    // 投影范围必须限制在局部窗口内，避免折返或自交时选到另一支曲线。
-    [[nodiscard]] double project(const Eigen::Vector2d& pos, double tau_lo, double tau_hi) const;
+    // 按累计弧长 s∈[0,total_arc_length] 求值；弧长是跟随层唯一的路径进度坐标。
+    [[nodiscard]] TrajSample eval_arc_length(double arc_length) const;
 
     [[nodiscard]] double longitudinal_velocity(const TrajSample& s) const;
     [[nodiscard]] double angular_velocity(const TrajSample& s) const;
+    [[nodiscard]] double nominal_path_speed(const TrajSample& s) const;
+    [[nodiscard]] double heading_rate_per_arc_length(const TrajSample& s) const;
+    [[nodiscard]] double segment_gear(int segment_index) const;
+    [[nodiscard]] ControlPointBlock segment_bezier_control_points(int segment_index) const;
 
     [[nodiscard]] bool operator==(const MincoTrajectory& other) const;
     [[nodiscard]] bool operator!=(const MincoTrajectory& other) const { return !(*this == other); }
@@ -91,7 +98,8 @@ private:
     std::vector<double> gears_;             // 每段换向符号 ±1
     double total_time_ = 0.0;
     double total_arc_length_ = 0.0;
-    std::vector<double> arc_samples_;       // 均匀 τ 采样处的累计弧长，size = ARC_SAMPLES+1
+    std::vector<double> arc_taus_;          // 每段均匀细分的 τ 节点，显式包含所有段边界
+    std::vector<double> arc_samples_;       // arc_taus_ 对应的累计弧长
 };
 
 } // namespace nav_executor

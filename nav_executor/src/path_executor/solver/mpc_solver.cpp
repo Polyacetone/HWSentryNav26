@@ -118,8 +118,8 @@ AncillaryRollout<SolverT> rollout_ancillary_feedback(
     const CapabilityProfile& effective_capability,
     const MPCStartCommandLimits& start_command,
     const MPCFollowAncillaryFeedbackParams& feedback,
-    const double phase_rate_min,
-    const double phase_rate_max
+    const double path_speed_min,
+    const double path_speed_max
 ) {
     AncillaryRollout<SolverT> result;
     result.rollout.xs[0] = actual_x0;
@@ -128,8 +128,8 @@ AncillaryRollout<SolverT> rollout_ancillary_feedback(
         const MPCControlBounds applied_bounds = command_rate_control_bounds(
             result.rollout.xs[k],
             effective_capability,
-            phase_rate_min,
-            phase_rate_max,
+            path_speed_min,
+            path_speed_max,
             k == 0 ? &start_command : nullptr
         );
         const AncillaryControlResult ancillary = ancillary_velocity_command_rate(
@@ -218,16 +218,16 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
     pred.headings.reserve(sz);
     pred.v_pred.reserve(sz);
     pred.w_pred.reserve(sz);
-    pred.phase_time_pred.reserve(sz);
-    pred.phase_rate_pred.reserve(sz);
+    pred.path_progress_pred.reserve(sz);
+    pred.path_speed_pred.reserve(sz);
     for (size_t i = 0; i <= rollout.valid_steps; ++i) {
         const auto& x = rollout.xs[i];
         pred.path_map.emplace_back(x(ix::X), x(ix::Y));
         pred.headings.push_back(x(ix::THETA));
         pred.v_pred.push_back(x(ix::V));
         pred.w_pred.push_back(x(ix::W));
-        pred.phase_time_pred.push_back(x(ix::PHASE_TIME));
-        pred.phase_rate_pred.push_back(x(ix::PHASE_RATE));
+        pred.path_progress_pred.push_back(x(ix::PATH_PROGRESS));
+        pred.path_speed_pred.push_back(x(ix::PATH_SPEED));
     }
     return pred;
 }
@@ -236,8 +236,7 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
 
 MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger)
     : params_(params),
-      logger_(std::move(logger)),
-      last_phase_rate_(params.follow.phase.nominal_rate) {}
+      logger_(std::move(logger)) {}
 
 MPCSolver::~MPCSolver() = default;
 
@@ -255,7 +254,6 @@ void MPCSolver::reset_warm_start() {
     hold_warm_ = false;
     follow_nominal_longitudinal_state_.reset();
     fddp_lethal_consecutive_count_ = 0;
-    last_phase_rate_ = params_.follow.phase.nominal_rate;
     for (size_t k = 0; k < MPC_HORIZON; ++k) {
         follow_solver_.us[k].setZero();
         stop_solver_.us[k].setZero();
@@ -353,8 +351,8 @@ StateVec MPCSolver::make_initial_state(
     const ChassisMotionState& chassis_state,
     const Eigen::Vector2d& current_command,
     const Eigen::Vector2d& current_command_rate,
-    const double phase_time,
-    const double phase_rate
+    const double path_progress,
+    const double path_speed
 ) const {
     StateVec x0;
     x0(ix::X) = pose.x();
@@ -367,8 +365,8 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::W_CMD) = current_command.y();
     x0(ix::V_CMD_RATE) = current_command_rate.x();
     x0(ix::W_CMD_RATE) = current_command_rate.y();
-    x0(ix::PHASE_TIME) = phase_time;
-    x0(ix::PHASE_RATE) = phase_rate;
+    x0(ix::PATH_PROGRESS) = path_progress;
+    x0(ix::PATH_SPEED) = path_speed;
     return x0;
 }
 
@@ -376,7 +374,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const MincoTrajectory& global_trajectory,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
-    const double current_phase_time,
+    const double current_path_progress,
+    const double current_path_speed,
     const CostMap& cost_map,
     const CostMap& masked_global_map,
     const std::vector<const CostMap*>& per_step_cost_maps,
@@ -391,9 +390,13 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         );
     }
 
-    const double phase_time0 = std::clamp(current_phase_time, 0.0, global_trajectory.total_time());
-    const double phase_rate0 = std::clamp(
-        last_phase_rate_, params_.follow.phase.rate_min, params_.follow.phase.rate_max
+    const double path_progress0 = std::clamp(
+        current_path_progress, 0.0, global_trajectory.total_arc_length()
+    );
+    const double path_speed0 = std::clamp(
+        current_path_speed,
+        params_.follow.progress.speed_min,
+        params_.follow.progress.speed_max
     );
 
     const double schedule_rho = select_follow_schedule_rho(
@@ -419,7 +422,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     const GridInfo ci = make_grid_info(cost_map);
     const CostMapGridView masked_global_grid(masked_global_map);
     const StateVec measured_x0 = make_initial_state(
-        chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, phase_time0, phase_rate0
+        chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, path_progress0, path_speed0
     );
     if (!measured_x0.allFinite()) {
         follow_nominal_longitudinal_state_.reset();
@@ -454,7 +457,13 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         shift_warm_start(follow_solver_);
     } else {
         ControlVec initial_control = ControlVec::Zero();
-        initial_control(iu::PHASE_RATE_CMD) = params_.follow.phase.nominal_rate;
+        initial_control(iu::PATH_SPEED_CMD) = std::clamp(
+            global_trajectory.nominal_path_speed(
+                global_trajectory.eval_arc_length(path_progress0)
+            ),
+            params_.follow.progress.speed_min,
+            params_.follow.progress.speed_max
+        );
         fill_solver_controls(follow_solver_, initial_control);
     }
     follow_solver_.xs[0] = x0;
@@ -486,8 +495,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             effective_capability,
             params_.follow.start_command,
             feedback,
-            params_.follow.phase.rate_min,
-            params_.follow.phase.rate_max
+            params_.follow.progress.speed_min,
+            params_.follow.progress.speed_max
         );
         applied_control = ancillary_rollout.first_control;
         first_command_tube_feasible = ancillary_rollout.first_command_tube_feasible;
@@ -506,16 +515,16 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         prediction.headings.reserve(sz);
         prediction.v_pred.reserve(sz);
         prediction.w_pred.reserve(sz);
-        prediction.phase_time_pred.reserve(sz);
-        prediction.phase_rate_pred.reserve(sz);
+        prediction.path_progress_pred.reserve(sz);
+        prediction.path_speed_pred.reserve(sz);
         for (size_t i = 0; i <= applied_rollout.valid_steps; ++i) {
             const auto& x = applied_rollout.xs[i];
             prediction.path_map.emplace_back(x(ix::X), x(ix::Y));
             prediction.headings.push_back(x(ix::THETA));
             prediction.v_pred.push_back(x(ix::V));
             prediction.w_pred.push_back(x(ix::W));
-            prediction.phase_time_pred.push_back(x(ix::PHASE_TIME));
-            prediction.phase_rate_pred.push_back(x(ix::PHASE_RATE));
+            prediction.path_progress_pred.push_back(x(ix::PATH_PROGRESS));
+            prediction.path_speed_pred.push_back(x(ix::PATH_SPEED));
         }
     }
 
@@ -563,7 +572,6 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         follow_warm_ = false;
         return std::unexpected("Follow MPC produced a non-finite command");
     }
-    last_phase_rate_ = follow_solver_.us[0](iu::PHASE_RATE_CMD);
     last_cmd_rate_.x() = applied_control(iu::V_CMD_RATE);
     last_cmd_rate_.y() = applied_control(iu::W_CMD_RATE);
     last_cmd_ = cmd;

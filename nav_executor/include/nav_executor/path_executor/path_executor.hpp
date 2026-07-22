@@ -81,10 +81,10 @@ struct ExecutorOutput {
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
     std::optional<std::vector<double>> predicted_v;
     std::optional<std::vector<double>> predicted_w;
-    std::optional<std::vector<double>> predicted_phase_time;
-    std::optional<std::vector<double>> predicted_phase_rate;
+    std::optional<std::vector<double>> predicted_path_progress;
+    std::optional<std::vector<double>> predicted_path_speed;
 
-    // MINCO 参考（当前跟随相位处的期望值）
+    // MINCO 参考（当前路径进度处的期望值）
     std::optional<double> ref_velocity;
     std::optional<double> ref_angular_velocity;
 };

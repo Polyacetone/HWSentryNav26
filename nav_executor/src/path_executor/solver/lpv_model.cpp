@@ -30,8 +30,8 @@ StateVec mpc_dynamics(const StateVec& x, const ControlVec& u, const LPVDiscreteM
     xn(ix::W_CMD) = w_cmd + dt * u(iu::W_CMD_RATE);
     xn(ix::V_CMD_RATE) = u(iu::V_CMD_RATE);
     xn(ix::W_CMD_RATE) = u(iu::W_CMD_RATE);
-    xn(ix::PHASE_TIME) = x(ix::PHASE_TIME);
-    xn(ix::PHASE_RATE) = x(ix::PHASE_RATE);
+    xn(ix::PATH_PROGRESS) = x(ix::PATH_PROGRESS);
+    xn(ix::PATH_SPEED) = x(ix::PATH_SPEED);
     return xn;
 }
 
@@ -101,8 +101,8 @@ void mpc_dynamics_jacobians(const StateVec& x, const ControlVec& /*u*/, const LP
     fx(ix::V_CMD, ix::V_CMD) = 1.0;
     fx(ix::W_CMD, ix::W_CMD) = 1.0;
 
-    fx(ix::PHASE_TIME, ix::PHASE_TIME) = 1.0;
-    fx(ix::PHASE_RATE, ix::PHASE_RATE) = 1.0;
+    fx(ix::PATH_PROGRESS, ix::PATH_PROGRESS) = 1.0;
+    fx(ix::PATH_SPEED, ix::PATH_SPEED) = 1.0;
 
     fu(ix::V_CMD, iu::V_CMD_RATE) = dt;
     fu(ix::W_CMD, iu::W_CMD_RATE) = dt;

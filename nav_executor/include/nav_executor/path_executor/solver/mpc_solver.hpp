@@ -44,7 +44,8 @@ public:
         const MincoTrajectory& global_trajectory,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
-        double current_phase_time,
+        double current_path_progress,
+        double current_path_speed,
         const CostMap& cost_map,
         const CostMap& masked_global_map,
         const std::vector<const CostMap*>& per_step_cost_maps,
@@ -92,8 +93,6 @@ private:
     bool observer_initialized_ = false;
     bool observer_validated_ = false;
     bool observer_rejection_active_ = false;
-    double last_phase_rate_ = 1.0;
-
     int fddp_lethal_consecutive_count_ = 0;
 
     StateVec make_initial_state(
@@ -101,8 +100,8 @@ private:
         const ChassisMotionState& chassis_state,
         const Eigen::Vector2d& current_command,
         const Eigen::Vector2d& current_command_rate,
-        double phase_time,
-        double phase_rate
+        double path_progress,
+        double path_speed
     ) const;
 };
 

@@ -11,7 +11,7 @@
 
 namespace nav_executor {
 
-// 跟踪问题把物理状态与虚拟相位一并优化。第三控制量直接决定相位推进率，避免参考进度与车辆运动脱节。
+// 跟踪问题把物理状态与路径累计弧长一并优化。第三控制量是沿路径正方向的虚拟速度。
 template<int Horizon>
 class FollowProblemT {
 public:
@@ -68,7 +68,7 @@ private:
     LPVDiscreteModel model_ {};
     CapabilityProfile effective_capability_;
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule_;
-    double total_time_ = 0.0;
+    double total_length_ = 0.0;
 };
 
 using FollowProblem = FollowProblemT<MPC_HORIZON>;

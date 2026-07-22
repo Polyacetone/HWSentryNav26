@@ -154,7 +154,8 @@ void NavExecutorNode::control_tick() {
     std::optional<RouteEstimate> route_estimate = route_tracker_->update(
         active_path_before_update,
         chassis_pose_map,
-        chassis_state_.velocity
+        chassis_state_.velocity,
+        stamp
     );
     RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
@@ -203,7 +204,8 @@ void NavExecutorNode::control_tick() {
         route_estimate = route_tracker_->update(
             task_output.command.active_path,
             chassis_pose_map,
-            chassis_state_.velocity
+            chassis_state_.velocity,
+            stamp
         );
     }
 
@@ -256,8 +258,12 @@ void NavExecutorNode::control_tick() {
             interfaces::msg::MPCDiag mpc_debug_msg;
             if (out.predicted_v) mpc_debug_msg.v_pred = *out.predicted_v;
             if (out.predicted_w) mpc_debug_msg.w_pred = *out.predicted_w;
-            if (out.predicted_phase_time) mpc_debug_msg.phase_time = *out.predicted_phase_time;
-            if (out.predicted_phase_rate) mpc_debug_msg.phase_rate = *out.predicted_phase_rate;
+            if (out.predicted_path_progress) {
+                mpc_debug_msg.path_progress = *out.predicted_path_progress;
+            }
+            if (out.predicted_path_speed) {
+                mpc_debug_msg.path_speed = *out.predicted_path_speed;
+            }
             if (out.ref_velocity) mpc_debug_msg.ref_velocity = *out.ref_velocity;
             if (out.ref_angular_velocity) mpc_debug_msg.ref_angular_velocity = *out.ref_angular_velocity;
             debug_mpc_diag_pub_->publish(mpc_debug_msg);

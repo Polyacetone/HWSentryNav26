@@ -95,8 +95,8 @@ LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params,
 MPCControlBounds command_rate_control_bounds(
     const StateVec& x,
     const CapabilityProfile& capability,
-    double phase_rate_min,
-    double phase_rate_max,
+    double path_speed_min,
+    double path_speed_max,
     const MPCStartCommandLimits* start_command = nullptr
 );
 

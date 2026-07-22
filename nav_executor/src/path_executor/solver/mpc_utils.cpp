@@ -142,8 +142,8 @@ LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params,
 MPCControlBounds command_rate_control_bounds(
     const StateVec& x,
     const CapabilityProfile& capability,
-    const double phase_rate_min,
-    const double phase_rate_max,
+    const double path_speed_min,
+    const double path_speed_max,
     const MPCStartCommandLimits* const start_command
 ) {
     const auto& envelope = capability.command_envelope;
@@ -232,8 +232,8 @@ MPCControlBounds command_rate_control_bounds(
         dynamics.angular_velocity_rate_max,
         start_command ? start_command->omega_cmd_act_gap_max : 0.0
     );
-    bounds.lower(iu::PHASE_RATE_CMD) = phase_rate_min;
-    bounds.upper(iu::PHASE_RATE_CMD) = phase_rate_max;
+    bounds.lower(iu::PATH_SPEED_CMD) = path_speed_min;
+    bounds.upper(iu::PATH_SPEED_CMD) = path_speed_max;
     return bounds;
 }
 

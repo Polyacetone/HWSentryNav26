@@ -70,6 +70,9 @@ struct PlannerConfig {
         double lateral_acceleration_tolerance;
         double traversal_velocity_target_tolerance;
         double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只打印日志不进行拒绝
+        double self_intersection_flatness_tolerance;
+        double self_intersection_max_edge_length;
+        double cusp_retrace_alignment_threshold;
     };
 
     // 可行性判定

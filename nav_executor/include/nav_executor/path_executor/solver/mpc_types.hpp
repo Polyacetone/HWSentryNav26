@@ -28,14 +28,14 @@ namespace ix {
         W_CMD,
         V_CMD_RATE,
         W_CMD_RATE,
-        PHASE_TIME,
-        PHASE_RATE,
+        PATH_PROGRESS,
+        PATH_SPEED,
     };
 }
 
 namespace iu {
     // 前两项是下位机速度指令的变化率，不是底盘实测物理加速度。
-    enum { V_CMD_RATE = 0, W_CMD_RATE, PHASE_RATE_CMD };
+    enum { V_CMD_RATE = 0, W_CMD_RATE, PATH_SPEED_CMD };
 }
 
 struct MPCStartCommandLimits {
@@ -56,13 +56,12 @@ struct MPCFollowTrackingWeights {
     double tangent_blend_speed_scale;
 };
 
-struct MPCFollowPhaseParams {
-    double rate_min;
-    double rate_max;
-    double nominal_rate;
+struct MPCFollowProgressParams {
+    double speed_min;
+    double speed_max;
     double progress_reward;
-    double rate_tracking_weight;
-    double rate_smoothness_weight;
+    double speed_tracking_weight;
+    double speed_smoothness_weight;
     double overshoot_weight;
 };
 
@@ -71,7 +70,7 @@ struct MPCFollowTerminalWeights {
     double heading;
     double velocity;
     double angular_velocity;
-    double remaining_phase;
+    double remaining_progress;
     double overshoot;
 };
 
@@ -192,7 +191,7 @@ struct MPCFollowParams {
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowRolloutSafetyParams rollout_safety;
     MPCFollowAncillaryFeedbackParams ancillary_feedback;
-    MPCFollowPhaseParams phase;
+    MPCFollowProgressParams progress;
     MPCFollowTerminalWeights terminal_weights;
     int max_iters;
 };
@@ -259,7 +258,7 @@ struct MPCHoldParams {
     int max_iters;
 };
 
-// 路径台阶约束。仅供 MPC 按预测相位对应的 tau 查询，不携带底盘模式或 FSM 语义。
+// 路径台阶约束。仅供 MPC 按预测弧长换算出的 tau 查询，不携带底盘模式或 FSM 语义。
 //
 // 锚点语义（沿路径 u 从小到大）：
 //   commit_u ≤ step_enter_u ≤ exit_u
@@ -316,8 +315,8 @@ struct MPCPrediction {
     std::vector<double> headings;
     std::vector<double> v_pred;
     std::vector<double> w_pred;
-    std::vector<double> phase_time_pred;
-    std::vector<double> phase_rate_pred;
+    std::vector<double> path_progress_pred;
+    std::vector<double> path_speed_pred;
 };
 
 struct MPCParams {

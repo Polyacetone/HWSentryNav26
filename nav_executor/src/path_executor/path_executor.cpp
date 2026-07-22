@@ -206,11 +206,13 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     if (!command_blocked && has_path) {
         if (prev_state == MotionState::FOLLOW) {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
-                current_u, params_.follow_no_progress_guard, MotionState::FOLLOW, prev_state, input.observation.stamp
+                input.route->arc_length, params_.follow_no_progress_guard,
+                MotionState::FOLLOW, prev_state, input.observation.stamp
             );
         } else if (prev_state == MotionState::STEPPING) {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
-                current_u, params_.stepping_no_progress_guard, MotionState::STEPPING, prev_state, input.observation.stamp
+                input.route->arc_length, params_.stepping_no_progress_guard,
+                MotionState::STEPPING, prev_state, input.observation.stamp
             );
         }
     }
@@ -360,8 +362,8 @@ void assign_hold_output(ExecutorOutput& out, const std::tuple<Eigen::Vector2d, M
     out.mpc_path_map = std::get<1>(result).path_map;
     out.predicted_v = std::get<1>(result).v_pred;
     out.predicted_w = std::get<1>(result).w_pred;
-    out.predicted_phase_time = std::get<1>(result).phase_time_pred;
-    out.predicted_phase_rate = std::get<1>(result).phase_rate_pred;
+    out.predicted_path_progress = std::get<1>(result).path_progress_pred;
+    out.predicted_path_speed = std::get<1>(result).path_speed_pred;
     out.valid = true;
 }
 
@@ -394,7 +396,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_follow(
         path, input.observation.chassis_pose_map, input.observation.chassis_state,
-        input.route->phase_time,
+        input.route->arc_length, input.route->path_speed,
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         step_controller_.effective_capability(),
         input.intent.active_path->step_constraint_schedule,
@@ -440,11 +442,11 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     out.mpc_path_map = prediction.path_map;
     out.predicted_v = prediction.v_pred;
     out.predicted_w = prediction.w_pred;
-    out.predicted_phase_time = prediction.phase_time_pred;
-    out.predicted_phase_rate = prediction.phase_rate_pred;
-    // MINCO 参考速度（当前跟随相位处的期望值）
+    out.predicted_path_progress = prediction.path_progress_pred;
+    out.predicted_path_speed = prediction.path_speed_pred;
+    // MINCO 参考速度（当前路径进度处的期望值）
     if (input.route) {
-        const TrajSample ref_sample = path.eval_time(input.route->phase_time);
+        const TrajSample ref_sample = path.eval_arc_length(input.route->arc_length);
         out.ref_velocity = path.longitudinal_velocity(ref_sample);
         out.ref_angular_velocity = path.angular_velocity(ref_sample);
     }

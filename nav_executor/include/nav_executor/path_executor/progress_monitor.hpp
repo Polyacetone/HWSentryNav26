@@ -8,7 +8,7 @@
 namespace nav_executor {
 
 struct NoProgressGuardParams {
-    double tau_landmark_spacing;
+    double arc_length_landmark_spacing;
     double timeout;
 };
 
@@ -17,7 +17,7 @@ public:
     explicit ProgressMonitor(rclcpp::Logger logger);
 
     bool update_and_check_no_progress(
-        double current_tau,
+        double current_arc_length,
         const NoProgressGuardParams& params,
         MotionState current_state,
         MotionState prev_state,
@@ -26,8 +26,8 @@ public:
 
     void reset();
 private:
-    int max_tau_landmark_index_ = -1;
-    std::chrono::steady_clock::time_point max_tau_landmark_time_ = {};
+    int max_arc_length_landmark_index_ = -1;
+    std::chrono::steady_clock::time_point max_arc_length_landmark_time_ = {};
     MotionState last_no_progress_check_state_ = MotionState::IDLE;
     rclcpp::Logger logger_;
 };

@@ -1,6 +1,7 @@
 #include <nav_executor/common/minco_trajectory.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numeric>
 
@@ -36,27 +37,67 @@ MincoTrajectory::MincoTrajectory(
 }
 
 void MincoTrajectory::compute_arc_length() {
-    constexpr int ARC_SAMPLES = 400;
+    constexpr int SUBDIVISIONS_PER_SEGMENT = 32;
+    constexpr std::array<double, 5> GAUSS_NODES {
+        -0.9061798459386640,
+        -0.5384693101056831,
+        0.0,
+        0.5384693101056831,
+        0.9061798459386640,
+    };
+    constexpr std::array<double, 5> GAUSS_WEIGHTS {
+        0.2369268850561891,
+        0.4786286704993665,
+        0.5688888888888889,
+        0.4786286704993665,
+        0.2369268850561891,
+    };
     total_arc_length_ = 0.0;
-    arc_samples_.assign(ARC_SAMPLES + 1, 0.0);
-    if (durations_.empty()) return;
-    Eigen::Vector2d prev = eval(0.0).p;
-    for (int i = 1; i <= ARC_SAMPLES; ++i) {
-        const double tau = static_cast<double>(i) / static_cast<double>(ARC_SAMPLES);
-        const Eigen::Vector2d cur = eval(tau).p;
-        total_arc_length_ += (cur - prev).norm();
-        arc_samples_[static_cast<size_t>(i)] = total_arc_length_;
-        prev = cur;
+    arc_taus_.clear();
+    arc_samples_.clear();
+    if (durations_.empty() || total_time_ <= MIN_SEGMENT_DURATION) return;
+    arc_taus_.reserve(durations_.size() * SUBDIVISIONS_PER_SEGMENT + 1);
+    arc_samples_.reserve(durations_.size() * SUBDIVISIONS_PER_SEGMENT + 1);
+    arc_taus_.push_back(0.0);
+    arc_samples_.push_back(0.0);
+
+    for (int segment = 0; segment < segment_count(); ++segment) {
+        const double duration = durations_[static_cast<size_t>(segment)];
+        for (int subdivision = 0; subdivision < SUBDIVISIONS_PER_SEGMENT; ++subdivision) {
+            const double local_begin = duration * static_cast<double>(subdivision)
+                / static_cast<double>(SUBDIVISIONS_PER_SEGMENT);
+            const double local_end = duration * static_cast<double>(subdivision + 1)
+                / static_cast<double>(SUBDIVISIONS_PER_SEGMENT);
+            const double midpoint = 0.5 * (local_begin + local_end);
+            const double half_span = 0.5 * (local_end - local_begin);
+            double interval_length = 0.0;
+            for (size_t i = 0; i < GAUSS_NODES.size(); ++i) {
+                const double local_time = midpoint + half_span * GAUSS_NODES[i];
+                const TrajSample sample = sample_at(segment, local_time);
+                interval_length += GAUSS_WEIGHTS[i]
+                    * sample.dp_dtau.norm() / total_time_;
+            }
+            total_arc_length_ += half_span * interval_length;
+            const double absolute_time = cumulative_times_[static_cast<size_t>(segment)]
+                + local_end;
+            arc_taus_.push_back(absolute_time / total_time_);
+            arc_samples_.push_back(total_arc_length_);
+        }
     }
 }
 
 double MincoTrajectory::arc_length_at_tau(const double tau) const {
-    if (arc_samples_.size() < 2) return 0.0;
+    if (arc_taus_.size() < 2 || arc_samples_.size() != arc_taus_.size()) return 0.0;
     const double clamped = std::clamp(tau, 0.0, 1.0);
-    const double scaled = clamped * static_cast<double>(arc_samples_.size() - 1);
-    const size_t lower = static_cast<size_t>(std::floor(scaled));
-    const size_t upper = std::min(lower + 1, arc_samples_.size() - 1);
-    const double frac = scaled - static_cast<double>(lower);
+    const auto upper_it = std::lower_bound(arc_taus_.begin(), arc_taus_.end(), clamped);
+    if (upper_it == arc_taus_.begin()) return 0.0;
+    if (upper_it == arc_taus_.end()) return total_arc_length_;
+    const size_t upper = static_cast<size_t>(std::distance(arc_taus_.begin(), upper_it));
+    const size_t lower = upper - 1;
+    const double tau_span = arc_taus_[upper] - arc_taus_[lower];
+    const double frac = tau_span > 1e-12
+        ? (clamped - arc_taus_[lower]) / tau_span
+        : 0.0;
     return std::lerp(arc_samples_[lower], arc_samples_[upper], frac);
 }
 
@@ -64,6 +105,10 @@ double MincoTrajectory::segment_boundary_tau(const int boundary_index) const {
     if (durations_.empty() || total_time_ <= MIN_SEGMENT_DURATION) return 0.0;
     const int clamped = std::clamp(boundary_index, 0, segment_count());
     return cumulative_times_[static_cast<size_t>(clamped)] / total_time_;
+}
+
+double MincoTrajectory::segment_boundary_arc_length(const int boundary_index) const {
+    return arc_length_at_tau(segment_boundary_tau(boundary_index));
 }
 
 double MincoTrajectory::tau_at_arc_length(const double arc_length) const {
@@ -76,11 +121,17 @@ double MincoTrajectory::tau_at_arc_length(const double arc_length) const {
     const size_t lower = upper - 1;
     const double span = arc_samples_[upper] - arc_samples_[lower];
     const double frac = span > 1e-12 ? (clamped - arc_samples_[lower]) / span : 0.0;
-    return (static_cast<double>(lower) + frac) / static_cast<double>(arc_samples_.size() - 1);
+    return std::lerp(arc_taus_[lower], arc_taus_[upper], frac);
 }
 
 double MincoTrajectory::arc_length_between(const double tau0, const double tau1) const {
     return std::abs(arc_length_at_tau(tau1) - arc_length_at_tau(tau0));
+}
+
+int MincoTrajectory::segment_index_at_arc_length(const double arc_length) const {
+    if (durations_.empty()) return 0;
+    const double tau = tau_at_arc_length(arc_length);
+    return locate_time(tau * total_time_).segment;
 }
 
 MincoTrajectory::Locator MincoTrajectory::locate_time(const double t) const {
@@ -137,6 +188,7 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
     const double cross = out.dp_dtau.x() * out.ddp_dtau.y() - out.dp_dtau.y() * out.ddp_dtau.x();
     const double ds = out.ds_dtau;
     out.kappa = ds > TANGENT_EPS ? cross / (ds * ds * ds) : 0.0;
+    out.gear = gear;
 
     // ── 平坦朝向：θ_body = atan2(gear · 运动方向)。──
     const double speed_t = vel_t.norm();
@@ -193,50 +245,66 @@ TrajSample MincoTrajectory::eval(const double tau) const {
     return eval_time(tau * total_time_);
 }
 
-double MincoTrajectory::project(const Eigen::Vector2d& pos, double tau_lo, double tau_hi) const {
-    if (durations_.empty()) return 0.0;
-    tau_lo = std::clamp(tau_lo, 0.0, 1.0);
-    tau_hi = std::clamp(tau_hi, 0.0, 1.0);
-    if (tau_lo > tau_hi) std::swap(tau_lo, tau_hi);
-
-    // 粗采样定位最近区段，再三分细化（与 SplinePath::project 同构）。
-    constexpr int COARSE_SAMPLES = 40;
-    constexpr int REFINE_ITERS = 20;
-    double best_tau = tau_lo;
-    double best_d2 = (eval(tau_lo).p - pos).squaredNorm();
-    for (int i = 1; i <= COARSE_SAMPLES; ++i) {
-        const double tau = tau_lo + (tau_hi - tau_lo) * static_cast<double>(i) / COARSE_SAMPLES;
-        const double d2 = (eval(tau).p - pos).squaredNorm();
-        if (d2 < best_d2) {
-            best_d2 = d2;
-            best_tau = tau;
-        }
-    }
-
-    const double span = (tau_hi - tau_lo) / COARSE_SAMPLES;
-    double left = std::max(tau_lo, best_tau - span);
-    double right = std::min(tau_hi, best_tau + span);
-    for (int i = 0; i < REFINE_ITERS; ++i) {
-        const double m1 = left + (right - left) / 3.0;
-        const double m2 = right - (right - left) / 3.0;
-        if ((eval(m1).p - pos).squaredNorm() <= (eval(m2).p - pos).squaredNorm()) {
-            right = m2;
-        } else {
-            left = m1;
-        }
-    }
-    return 0.5 * (left + right);
+TrajSample MincoTrajectory::eval_arc_length(const double arc_length) const {
+    return eval(tau_at_arc_length(arc_length));
 }
 
 double MincoTrajectory::longitudinal_velocity(const TrajSample& s) const {
-    if (total_time_ <= MIN_SEGMENT_DURATION) return 0.0;
-    const Eigen::Vector2d dp_dt = s.dp_dtau / total_time_;
-    return dp_dt.x() * std::cos(s.theta) + dp_dt.y() * std::sin(s.theta);
+    return s.gear * nominal_path_speed(s);
 }
 
 double MincoTrajectory::angular_velocity(const TrajSample& s) const {
     if (total_time_ <= MIN_SEGMENT_DURATION) return 0.0;
     return s.dtheta_dtau / total_time_;
+}
+
+double MincoTrajectory::nominal_path_speed(const TrajSample& s) const {
+    if (total_time_ <= MIN_SEGMENT_DURATION) return 0.0;
+    return s.ds_dtau / total_time_;
+}
+
+double MincoTrajectory::heading_rate_per_arc_length(const TrajSample& s) const {
+    const double path_speed = nominal_path_speed(s);
+    return path_speed > TANGENT_EPS ? angular_velocity(s) / path_speed : 0.0;
+}
+
+double MincoTrajectory::segment_gear(const int segment_index) const {
+    if (gears_.empty()) return 1.0;
+    const int clamped = std::clamp(segment_index, 0, segment_count() - 1);
+    return gears_[static_cast<size_t>(clamped)];
+}
+
+MincoTrajectory::ControlPointBlock MincoTrajectory::segment_bezier_control_points(
+    const int segment_index
+) const {
+    ControlPointBlock control_points = ControlPointBlock::Zero();
+    if (coeffs_.empty()) return control_points;
+    const int segment = std::clamp(segment_index, 0, segment_count() - 1);
+    const CoefBlock& coefficients = coeffs_[static_cast<size_t>(segment)];
+    const double duration = durations_[static_cast<size_t>(segment)];
+    constexpr int BINOMIAL[NCOEF][NCOEF] {
+        {1, 0, 0, 0, 0, 0},
+        {1, 1, 0, 0, 0, 0},
+        {1, 2, 1, 0, 0, 0},
+        {1, 3, 3, 1, 0, 0},
+        {1, 4, 6, 4, 1, 0},
+        {1, 5, 10, 10, 5, 1},
+    };
+    std::array<double, NCOEF> duration_powers {};
+    duration_powers[0] = 1.0;
+    for (int i = 1; i < NCOEF; ++i) {
+        duration_powers[static_cast<size_t>(i)]
+            = duration_powers[static_cast<size_t>(i - 1)] * duration;
+    }
+    for (int i = 0; i < NCOEF; ++i) {
+        for (int k = 0; k <= i; ++k) {
+            const double factor = static_cast<double>(BINOMIAL[i][k])
+                / static_cast<double>(BINOMIAL[DEGREE][k]);
+            control_points.row(i) += factor
+                * duration_powers[static_cast<size_t>(k)] * coefficients.row(k);
+        }
+    }
+    return control_points;
 }
 
 bool MincoTrajectory::operator==(const MincoTrajectory& other) const {

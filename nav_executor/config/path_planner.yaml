@@ -83,6 +83,9 @@
           lateral_acceleration_tolerance: 0.4 # 侧向加速度硬约束的允许超限容差（m/s²）
           traversal_velocity_target_tolerance: 0.2 # 台阶速度目标的允许超限容差，只打印日志不进行拒绝（m/s）
           traversal_angle_tolerance: 0.4 # 台阶方向角的允许偏差，只打印日志不进行拒绝（rad）
+          self_intersection_flatness_tolerance: 0.001 # 自适应 Bezier 细分相对弦的最大几何误差 (m)
+          self_intersection_max_edge_length: 0.02 # 自交验收折线边的最大长度 (m)
+          cusp_retrace_alignment_threshold: 0.999 # 仅允许相反 gear 轨迹在尖点附近切向接触；其余自交一律拒绝
 
       step:
         detection:

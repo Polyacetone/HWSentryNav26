@@ -15,10 +15,9 @@ using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct ReferenceFrame {
     TrajSample sample;
-    double phase_time = 0.0;
+    double path_progress = 0.0;
     double tau = 0.0;
-    double nominal_velocity = 0.0;
-    double nominal_angular_velocity = 0.0;
+    double nominal_path_speed = 0.0;
     Eigen::Vector2d tangent = Eigen::Vector2d::UnitX();
 };
 
@@ -29,20 +28,19 @@ struct FrozenStepGate {
 
 ReferenceFrame reference_frame(
     const MincoTrajectory& trajectory,
-    const double requested_phase_time,
+    const double requested_path_progress,
     const double tangent_blend_speed_scale
 ) {
     ReferenceFrame reference;
-    const double total_time = trajectory.total_time();
-    reference.phase_time = std::clamp(requested_phase_time, 0.0, total_time);
-    reference.tau = total_time > COST_EPS ? reference.phase_time / total_time : 0.0;
-    reference.sample = trajectory.eval_time(reference.phase_time);
-    reference.nominal_velocity = trajectory.longitudinal_velocity(reference.sample);
-    reference.nominal_angular_velocity = trajectory.angular_velocity(reference.sample);
+    const double total_length = trajectory.total_arc_length();
+    reference.path_progress = std::clamp(
+        requested_path_progress, 0.0, total_length
+    );
+    reference.tau = trajectory.tau_at_arc_length(reference.path_progress);
+    reference.sample = trajectory.eval(reference.tau);
+    reference.nominal_path_speed = trajectory.nominal_path_speed(reference.sample);
 
-    const double translational_speed = total_time > COST_EPS
-        ? reference.sample.ds_dtau / total_time
-        : 0.0;
+    const double translational_speed = reference.nominal_path_speed;
     const Eigen::Vector2d heading_axis(
         std::cos(reference.sample.theta), std::sin(reference.sample.theta)
     );
@@ -80,7 +78,7 @@ FollowResidualVec follow_residual_impl(
 ) {
     const auto& follow = params.follow;
     const auto& tracking = follow.tracking_weights;
-    const auto& phase = follow.phase;
+    const auto& progress = follow.progress;
     const auto& command = follow.command_weights;
     const auto& dynamics_weights = follow.command_dynamics_weights;
     const auto& traversal_weights = follow.traversal_target_weights;
@@ -96,12 +94,12 @@ FollowResidualVec follow_residual_impl(
     const Eigen::Vector2d next_command = command_after_control(x, u);
     const double v_cmd = next_command.x();
     const double omega_cmd = next_command.y();
-    const double phase_rate_cmd = u(iu::PHASE_RATE_CMD);
+    const double path_speed_cmd = u(iu::PATH_SPEED_CMD);
     const double dv_cmd = MPC_DT * u(iu::V_CMD_RATE);
     const double domega_cmd = MPC_DT * u(iu::W_CMD_RATE);
 
     const ReferenceFrame reference = reference_frame(
-        trajectory, x(ix::PHASE_TIME), tracking.tangent_blend_speed_scale
+        trajectory, x(ix::PATH_PROGRESS), tracking.tangent_blend_speed_scale
     );
     const Eigen::Vector2d position_error(px - reference.sample.p.x(), py - reference.sample.p.y());
     const Eigen::Vector2d normal(-reference.tangent.y(), reference.tangent.x());
@@ -110,13 +108,16 @@ FollowResidualVec follow_residual_impl(
 
     residual(2) = tracking.heading * wrap_pi(theta - reference.sample.theta);
     residual(3) = tracking.velocity
-        * (v_actual - phase_rate_cmd * reference.nominal_velocity);
+        * (v_actual - reference.sample.gear * path_speed_cmd);
     residual(4) = tracking.angular_velocity
-        * (omega_actual - phase_rate_cmd * reference.nominal_angular_velocity);
-    residual(5) = phase.rate_tracking_weight * (phase_rate_cmd - phase.nominal_rate);
-    residual(6) = phase.rate_smoothness_weight * (phase_rate_cmd - x(ix::PHASE_RATE));
-    residual(7) = phase.overshoot_weight
-        * positive_part(x(ix::PHASE_TIME) - trajectory.total_time());
+        * (omega_actual
+            - trajectory.heading_rate_per_arc_length(reference.sample) * path_speed_cmd);
+    residual(5) = progress.speed_tracking_weight
+        * (path_speed_cmd - reference.nominal_path_speed);
+    residual(6) = progress.speed_smoothness_weight
+        * (path_speed_cmd - x(ix::PATH_SPEED));
+    residual(7) = progress.overshoot_weight
+        * positive_part(x(ix::PATH_PROGRESS) - trajectory.total_arc_length());
 
     residual(8) = command.r_v * v_cmd;
     residual(9) = command.r_omega * omega_cmd;
@@ -173,7 +174,7 @@ FollowTerminalResidualVec follow_terminal_residual_impl(
     const auto& weights = params.follow.terminal_weights;
     const ReferenceFrame reference = reference_frame(
         trajectory,
-        x(ix::PHASE_TIME),
+        x(ix::PATH_PROGRESS),
         params.follow.tracking_weights.tangent_blend_speed_scale
     );
 
@@ -182,13 +183,15 @@ FollowTerminalResidualVec follow_terminal_residual_impl(
     residual(1) = weights.position * (x(ix::Y) - reference.sample.p.y());
     residual(2) = weights.heading * wrap_pi(x(ix::THETA) - reference.sample.theta);
     residual(3) = weights.velocity
-        * (x(ix::V) - x(ix::PHASE_RATE) * reference.nominal_velocity);
+        * (x(ix::V) - reference.sample.gear * x(ix::PATH_SPEED));
     residual(4) = weights.angular_velocity
-        * (x(ix::W) - x(ix::PHASE_RATE) * reference.nominal_angular_velocity);
+        * (x(ix::W)
+            - trajectory.heading_rate_per_arc_length(reference.sample)
+                * x(ix::PATH_SPEED));
     residual(5) = weights.overshoot
-        * positive_part(x(ix::PHASE_TIME) - trajectory.total_time());
+        * positive_part(x(ix::PATH_PROGRESS) - trajectory.total_arc_length());
     residual(6) = weights.overshoot
-        * positive_part(-x(ix::PHASE_TIME));
+        * positive_part(-x(ix::PATH_PROGRESS));
     return residual;
 }
 
@@ -215,13 +218,13 @@ FollowProblemT<Horizon>::FollowProblemT(
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     effective_capability_(effective_capability),
     step_constraint_schedule_(std::move(step_constraint_schedule)),
-    total_time_(trajectory_.total_time()) {}
+    total_length_(trajectory_.total_arc_length()) {}
 
 template<int Horizon>
 StateVec FollowProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
     StateVec next = mpc_dynamics(x, u, model_);
-    next(ix::PHASE_TIME) = x(ix::PHASE_TIME) + MPC_DT * u(iu::PHASE_RATE_CMD);
-    next(ix::PHASE_RATE) = u(iu::PHASE_RATE_CMD);
+    next(ix::PATH_PROGRESS) = x(ix::PATH_PROGRESS) + MPC_DT * u(iu::PATH_SPEED_CMD);
+    next(ix::PATH_SPEED) = u(iu::PATH_SPEED_CMD);
     return next;
 }
 
@@ -234,25 +237,34 @@ void FollowProblemT<Horizon>::dynamics_jacobians(
     MatXU& fu
 ) const {
     mpc_dynamics_jacobians(x, u, model_, fx, fu);
-    fx.row(ix::PHASE_TIME).setZero();
-    fx(ix::PHASE_TIME, ix::PHASE_TIME) = 1.0;
-    fu.row(ix::PHASE_TIME).setZero();
-    fu(ix::PHASE_TIME, iu::PHASE_RATE_CMD) = MPC_DT;
+    fx.row(ix::PATH_PROGRESS).setZero();
+    fx(ix::PATH_PROGRESS, ix::PATH_PROGRESS) = 1.0;
+    fu.row(ix::PATH_PROGRESS).setZero();
+    fu(ix::PATH_PROGRESS, iu::PATH_SPEED_CMD) = MPC_DT;
 
-    fx.row(ix::PHASE_RATE).setZero();
-    fu.row(ix::PHASE_RATE).setZero();
-    fu(ix::PHASE_RATE, iu::PHASE_RATE_CMD) = 1.0;
+    fx.row(ix::PATH_SPEED).setZero();
+    fu.row(ix::PATH_SPEED).setZero();
+    fu(ix::PATH_SPEED, iu::PATH_SPEED_CMD) = 1.0;
 }
 
 template<int Horizon>
 MPCControlBounds FollowProblemT<Horizon>::control_bounds(const int k, const StateVec& x) const {
-    return command_rate_control_bounds(
+    MPCControlBounds bounds = command_rate_control_bounds(
         x,
         effective_capability_,
-        p_.follow.phase.rate_min,
-        p_.follow.phase.rate_max,
+        p_.follow.progress.speed_min,
+        p_.follow.progress.speed_max,
         k == 0 ? &p_.follow.start_command : nullptr
     );
+    const TrajSample reference = trajectory_.eval_arc_length(x(ix::PATH_PROGRESS));
+    const double physically_reachable_path_speed = reference.gear > 0.0
+        ? effective_capability_.command_envelope.velocity.max
+        : -effective_capability_.command_envelope.velocity.min;
+    bounds.upper(iu::PATH_SPEED_CMD) = std::min(
+        bounds.upper(iu::PATH_SPEED_CMD),
+        std::max(physically_reachable_path_speed, bounds.lower(iu::PATH_SPEED_CMD))
+    );
+    return bounds;
 }
 
 template<int Horizon>
@@ -281,11 +293,13 @@ double FollowProblemT<Horizon>::running_cost_value_only(
         effective_capability_.command_dynamics, step_constraint_schedule_
     );
     double cost = residual_cost(residual);
-    const double remaining_phase = positive_part(total_time_ - x(ix::PHASE_TIME));
-    const double requested_advance = MPC_DT * u(iu::PHASE_RATE_CMD);
-    if (remaining_phase > 0.0 && requested_advance > 0.0) {
-        const double realized_advance = std::min(requested_advance, remaining_phase);
-        cost -= p_.follow.phase.progress_reward * realized_advance / MPC_DT;
+    const double remaining_progress = positive_part(
+        total_length_ - x(ix::PATH_PROGRESS)
+    );
+    const double requested_advance = MPC_DT * u(iu::PATH_SPEED_CMD);
+    if (remaining_progress > 0.0 && requested_advance > 0.0) {
+        const double realized_advance = std::min(requested_advance, remaining_progress);
+        cost -= p_.follow.progress.progress_reward * realized_advance / MPC_DT;
     }
     return cost;
 }
@@ -302,8 +316,10 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
 ) const {
     const auto& cost_grid = cost_grid_for_step(k);
-    const double phase_time = std::clamp(x(ix::PHASE_TIME), 0.0, total_time_);
-    const double tau = total_time_ > COST_EPS ? phase_time / total_time_ : 0.0;
+    const double path_progress = std::clamp(
+        x(ix::PATH_PROGRESS), 0.0, total_length_
+    );
+    const double tau = trajectory_.tau_at_arc_length(path_progress);
     FrozenStepGate frozen_step_gate;
     frozen_step_gate.constraint = step_constraint_schedule_
         ? step_constraint_schedule_->constraint_at(tau)
@@ -320,13 +336,15 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     gauss_newton_running_derivatives<FOLLOW_RESIDUAL_DIM>(
         residual_fn, x, u, lx, lu, lxx, lux, luu
     );
-    const double remaining_phase = positive_part(total_time_ - x(ix::PHASE_TIME));
-    const double requested_advance = MPC_DT * u(iu::PHASE_RATE_CMD);
-    if (remaining_phase > 0.0) {
-        if (requested_advance < remaining_phase) {
-            lu(iu::PHASE_RATE_CMD) -= p_.follow.phase.progress_reward;
+    const double remaining_progress = positive_part(
+        total_length_ - x(ix::PATH_PROGRESS)
+    );
+    const double requested_advance = MPC_DT * u(iu::PATH_SPEED_CMD);
+    if (remaining_progress > 0.0) {
+        if (requested_advance < remaining_progress) {
+            lu(iu::PATH_SPEED_CMD) -= p_.follow.progress.progress_reward;
         } else {
-            lx(ix::PHASE_TIME) += p_.follow.phase.progress_reward / MPC_DT;
+            lx(ix::PATH_PROGRESS) += p_.follow.progress.progress_reward / MPC_DT;
         }
     }
 }
@@ -334,8 +352,8 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 template<int Horizon>
 double FollowProblemT<Horizon>::terminal_cost(const StateVec& x) const {
     double cost = residual_cost(follow_terminal_residual_impl(x, trajectory_, p_));
-    cost += p_.follow.terminal_weights.remaining_phase
-        * positive_part(total_time_ - x(ix::PHASE_TIME));
+    cost += p_.follow.terminal_weights.remaining_progress
+        * positive_part(total_length_ - x(ix::PATH_PROGRESS));
     return cost;
 }
 
@@ -351,8 +369,8 @@ void FollowProblemT<Horizon>::terminal_cost_derivatives(
     gauss_newton_terminal_derivatives<FOLLOW_TERMINAL_RESIDUAL_DIM>(
         residual_fn, x, lfx, lfxx
     );
-    if (x(ix::PHASE_TIME) < total_time_) {
-        lfx(ix::PHASE_TIME) -= p_.follow.terminal_weights.remaining_phase;
+    if (x(ix::PATH_PROGRESS) < total_length_) {
+        lfx(ix::PATH_PROGRESS) -= p_.follow.terminal_weights.remaining_progress;
     }
 }
 

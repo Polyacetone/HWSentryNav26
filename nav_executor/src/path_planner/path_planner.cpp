@@ -8,6 +8,8 @@
 
 #include <rclcpp/logging.hpp>
 
+#include <nav_executor/common/trajectory_topology.hpp>
+
 namespace nav_executor {
 
 namespace {
@@ -115,6 +117,20 @@ bool validate_trajectory(
     const double total_time = trajectory.total_time();
     if (!std::isfinite(total_time) || total_time <= 0.0) {
         error = "trajectory has invalid total time";
+        return false;
+    }
+    const auto self_intersection = find_disallowed_self_intersection(
+        trajectory,
+        {
+            .flatness_tolerance = validation.self_intersection_flatness_tolerance,
+            .max_edge_length = validation.self_intersection_max_edge_length,
+            .cusp_retrace_alignment_threshold = validation.cusp_retrace_alignment_threshold,
+        }
+    );
+    if (self_intersection) {
+        error = "trajectory self-intersects between MINCO segments "
+            + std::to_string(self_intersection->first_segment) + " and "
+            + std::to_string(self_intersection->second_segment);
         return false;
     }
     const int samples_per_segment = std::max(validation.samples_per_segment, 1);
