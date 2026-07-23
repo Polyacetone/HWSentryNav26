@@ -8,13 +8,6 @@
       nudge:
         max_distance: 1.0 # 在 cost_map 的 merged 图层上搜索空闲格子的最大 BFS 半径（米）
 
-      start_prediction:
-        enable: true # 是否把机器人当前速度考虑进去，把起点沿运动方向往前推一段
-        max_accel: 1.0 # 最大减速度（m/s²），用于估算从当前速度到停止要滑多远
-        planning_delay: 0.2 # Dijkstra + Kinodynamic A* + MINCO 整套规划预计耗时（秒），用来估算前推距离
-        min_speed: 0.3 # 车速低于这个值就不做起点前推了（m/s）
-        collision_check_step: 0.02 # 检查前推起点到原始起点之间是否畅通时，每隔多远采一个点（米）
-
       dynamic_prediction:
         horizon_seconds: 2.0 # 融合局部代价地图预测帧的时间窗口，0 表示只用当前帧
         weight_decay: 0.6 # 时间窗口内各预测帧的权重线性衰减系数 [0,1]，1 表示不衰减

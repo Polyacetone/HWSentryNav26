@@ -79,13 +79,6 @@ struct PlannerConfig {
     int occupied_threshold;
     double on_step_threshold;
 
-    // 起点预测
-    bool start_prediction_enable;
-    double start_prediction_max_accel;
-    double start_prediction_planning_delay;
-    double start_prediction_min_speed;
-    double start_prediction_collision_check_step;
-
     // nudge
     double nudge_max_distance;
 
@@ -139,8 +132,6 @@ private:
 
     // ── 规划期几何工具 ──
     [[nodiscard]] bool is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& map_pt) const;
-    [[nodiscard]] Eigen::Vector2d predict_start_map(const PlanRequest& req, const CostMap& cost_map, const DirectionMap& direction_map) const;
-    [[nodiscard]] Eigen::Vector2d adjust_reachable_start_on_segment(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const;
     [[nodiscard]] std::optional<Eigen::Vector2d> nudge_point_to_free(const CostMap& cost_map, const DirectionMap& direction_map, const Eigen::Vector2d& map_pt, double max_nudge_distance) const;
 
     PlannerConfig config_;

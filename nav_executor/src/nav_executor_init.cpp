@@ -421,11 +421,6 @@ PlannerConfig NavExecutorNode::load_planner_config() {
     PlannerConfig c;
     c.occupied_threshold = static_cast<int>(declare_parameter<int>("path_planner.traversability.occupied_threshold"));
     c.on_step_threshold = declare_parameter<double>("path_planner.traversability.on_step_threshold");
-    c.start_prediction_enable = declare_parameter<bool>("path_planner.start_prediction.enable");
-    c.start_prediction_max_accel = declare_parameter<double>("path_planner.start_prediction.max_accel");
-    c.start_prediction_planning_delay = declare_parameter<double>("path_planner.start_prediction.planning_delay");
-    c.start_prediction_min_speed = declare_parameter<double>("path_planner.start_prediction.min_speed");
-    c.start_prediction_collision_check_step = declare_parameter<double>("path_planner.start_prediction.collision_check_step");
     c.nudge_max_distance = declare_parameter<double>("path_planner.nudge.max_distance");
     c.goal_reached_distance = declare_parameter<double>("path_planner.planner.goal_reached_distance");
     c.skip_distance = declare_parameter<double>("path_planner.planner.skip_distance");

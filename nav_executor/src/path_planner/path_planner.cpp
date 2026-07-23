@@ -1,7 +1,6 @@
 #include <nav_executor/path_planner/path_planner.hpp>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <queue>
@@ -398,30 +397,6 @@ bool PathPlanner::is_map_point_feasible(
         && direction_map.interpolate(dir_grid).norm() < config_.on_step_threshold;
 }
 
-Eigen::Vector2d PathPlanner::adjust_reachable_start_on_segment(
-    const CostMap& cost_map,
-    const DirectionMap& direction_map,
-    const Eigen::Vector2d& from_map,
-    const Eigen::Vector2d& to_map
-) const {
-    const Eigen::Vector2d delta = to_map - from_map;
-    const double length = delta.norm();
-    if (length <= 1e-6) return from_map;
-
-    const double step = std::max(1e-3, config_.start_prediction_collision_check_step);
-    const int n = std::max(1, static_cast<int>(std::ceil(length / step)));
-    const Eigen::Vector2d dir = delta / length;
-
-    Eigen::Vector2d last_feasible = from_map;
-    for (int i = 0; i <= n; ++i) {
-        const double d = length * (static_cast<double>(i) / static_cast<double>(n));
-        const Eigen::Vector2d pt = from_map + dir * d;
-        if (!is_map_point_feasible(cost_map, direction_map, pt)) break;
-        last_feasible = pt;
-    }
-    return last_feasible;
-}
-
 std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
@@ -482,29 +457,6 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
     return std::nullopt;
 }
 
-Eigen::Vector2d PathPlanner::predict_start_map(
-    const PlanRequest& req,
-    const CostMap& cost_map,
-    const DirectionMap& direction_map
-) const {
-    const Eigen::Vector2d current_map = req.current_pos_map;
-    if (!config_.start_prediction_enable) return current_map;
-
-    const double speed = req.current_velocity;
-    if (speed < std::max(0.0, config_.start_prediction_min_speed)) return current_map;
-
-    const Eigen::Vector2d heading_dir(std::cos(req.current_yaw), std::sin(req.current_yaw));
-
-    const double brake_distance = speed * speed / (2.0 * config_.start_prediction_max_accel);
-    const double delay_distance = speed * std::max(0.0, config_.start_prediction_planning_delay);
-    const double total_distance = brake_distance + delay_distance;
-
-    const Eigen::Vector2d predicted = current_map + heading_dir * total_distance;
-    return adjust_reachable_start_on_segment(
-        cost_map, direction_map, current_map, predicted
-    );
-}
-
 // ═══════════════════════ 规划主流程 ═══════════════════════
 
 PlanResult PathPlanner::plan(const PlanRequest& req) const {
@@ -534,9 +486,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         *req.terrain_constraints.blocked_cost_layer
     );
 
-    Eigen::Vector2d start_map = predict_start_map(
-        req, planning_cost_map, *req.direction_map
-    );
+    Eigen::Vector2d start_map = req.current_pos_map;
     Eigen::Vector2d goal_plan = goal_map;
 
     // ── 起点 global 严格检查 ──
