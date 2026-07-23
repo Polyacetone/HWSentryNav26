@@ -1,44 +1,99 @@
 #pragma once
 
 #include <functional>
+#include <string_view>
+#include <vector>
 
 #include <Eigen/Core>
 
 namespace nav_executor {
 
-// 有限内存 BFGS。强 Wolfe 搜索失败时回退到已探测到的最佳 Armijo 下降点；
-// 曲率非正的历史对会被丢弃，以维持逆 Hessian 近似正定。
+// block-scaled trust-region L-BFGS。调用方提供完整的变量 block 与物理尺度；
+// 算法在无量纲缩放坐标内维护历史，并沿 L-BFGS 方向做 trust-region 径向截断。
 class LbfgsMinimizer {
 public:
+    struct VariableBlock {
+        int offset = 0;
+        int size = 0;
+        double scale = 1.0;
+    };
+
+    struct TrustRegionOptions {
+        double initial_radius = 0.5;
+        double min_radius = 1e-6;
+        double max_radius = 2.0;
+        double acceptance_ratio = 0.1;
+        double shrink_ratio = 0.25;
+        double expansion_ratio = 0.75;
+        double shrink_factor = 0.25;
+        double expansion_factor = 2.0;
+        int max_consecutive_rejections = 12;
+        int history_reset_after_rejections = 3;
+    };
+
     struct Options {
         int max_iterations = 200;
-        int history_size = 8;        // 保留的 (s, y) 对数
-        double grad_tolerance = 1e-5; // ‖g‖_inf 收敛阈（作用于归一化目标）
-        double step_tolerance = 1e-12; // 步长区间下界（zoom 收缩判定）
-        double armijo_c = 1e-4;       // 充分下降系数 c1（strong Wolfe）
-        double wolfe_c = 0.9;         // 曲率条件系数 c2（strong Wolfe，quasi-Newton 取 0.9）
-        int max_line_search = 24;     // bracket / zoom 各自的最大评估次数
+        int max_function_evaluations = 400;
+        int history_size = 8;
+        double gradient_tolerance = 1e-5; // 归一化、缩放后的 max-block 梯度阈值
+        double scaled_step_tolerance = 1e-8;
+        TrustRegionOptions trust_region;
+        double curvature_relative_threshold = 1e-8;
+        double history_acceptance_ratio = 0.25;
     };
 
     enum class Status {
-        CONVERGED,        // 梯度达阈
-        MAX_ITERATIONS,   // 迭代上限
-        LINE_SEARCH_FAILED, // 线搜索无法找到下降步
+        CONVERGED,
+        MAX_ITERATIONS,
+        MAX_EVALUATIONS,
+        TRUST_REGION_TOO_SMALL,
+        STAGNATED,
+        INITIAL_EVALUATION_NONFINITE,
+        NUMERICAL_FAILURE,
     };
 
     struct Result {
         Status status = Status::MAX_ITERATIONS;
-        double cost = 0.0;
-        int iterations = 0;
-        int line_search_iterations = 0;
-        double grad_inf_norm = 0.0;
+        double cost = 0.0; // 当前有限 incumbent 的 raw cost
+        double initial_grad_inf_norm = 0.0; // raw gradient
+        double grad_inf_norm = 0.0;         // raw gradient
+        double normalized_scaled_grad_max_block_norm = 0.0;
+        double objective_scale = 1.0;
+
+        int accepted_iterations = 0;
+        int function_evaluations = 0; // 含初始评估
+        int trial_evaluations = 0;
+        int rejected_trials = 0;
+        int nonfinite_trials = 0;
+
+        double initial_radius = 0.0;
+        double final_radius = 0.0;
+        double min_radius = 0.0;
+        double max_radius = 0.0;
+        int radius_shrinks = 0;
+        int radius_expansions = 0;
+        int boundary_steps = 0;
+
+        int history_updates = 0;
+        int history_skips = 0;
+        int history_resets = 0;
+
+        double last_actual_reduction = 0.0;    // 归一化目标
+        double last_predicted_reduction = 0.0; // 归一化目标
+        double last_reduction_ratio = 0.0;
     };
 
     using CostFunction = std::function<double(const Eigen::VectorXd& x, Eigen::VectorXd& grad)>;
 
     explicit LbfgsMinimizer(Options options) : opt_(options) {}
 
-    Result minimize(const CostFunction& cost_fn, Eigen::VectorXd& x) const;
+    [[nodiscard]] static std::string_view status_string(Status status) noexcept;
+
+    Result minimize(
+        const CostFunction& cost_fn,
+        Eigen::VectorXd& x,
+        const std::vector<VariableBlock>& blocks
+    ) const;
 
 private:
     Options opt_;

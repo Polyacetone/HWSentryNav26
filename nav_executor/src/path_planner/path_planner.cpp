@@ -741,17 +741,28 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     if (config_.enable_debug && opt.diagnostics_valid) {
         const auto& s = opt.seed_costs;
         const auto& f = opt.final_costs;
-        static constexpr const char* LBFGS_STATUS[] = {"CONVERGED", "MAX_ITER", "LS_FAILED"};
-        const int status_index = std::clamp(opt.lbfgs_status, 0, 2);
+        const std::string_view status = opt.optimizer_status_string();
         RCLCPP_DEBUG(
             logger_,
-            "MINCO diag: status=%s iters=%d |grad|_inf %.3g -> %.3g (pos=%.3g, time=%.3g) | "
-            "cost %.3g -> %.3g | waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
-            "seed[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g] "
-            "final[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g]",
-            LBFGS_STATUS[status_index], opt.iterations,
+            "MINCO optimizer: status=%.*s accepted=%d evals=%d trials=%d rejected=%d nonfinite=%d | "
+            "raw |grad|_inf %.3g -> %.3g (pos=%.3g, virtual_time=%.3g), normalized_scaled_max_block=%.3g | "
+            "radius initial=%.3g final=%.3g range=[%.3g,%.3g] shrink=%d expand=%d boundary=%d | "
+            "history update=%d skip=%d reset=%d",
+            static_cast<int>(status.size()), status.data(),
+            opt.accepted_iterations, opt.function_evaluations, opt.trial_evaluations,
+            opt.rejected_trials, opt.nonfinite_trials,
             opt.initial_grad_inf_norm, opt.final_grad_inf_norm,
             opt.final_grad_pos_inf_norm, opt.final_grad_time_inf_norm,
+            opt.final_normalized_scaled_grad_max_block_norm,
+            opt.initial_radius, opt.final_radius, opt.min_radius, opt.max_radius,
+            opt.radius_shrinks, opt.radius_expansions, opt.boundary_steps,
+            opt.history_updates, opt.history_skips, opt.history_resets
+        );
+        RCLCPP_DEBUG(
+            logger_,
+            "MINCO objective: cost %.3g -> %.3g | waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
+            "seed[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g] "
+            "final[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g]",
             s.total(), f.total(),
             opt.free_waypoint_count, opt.waypoint_total_displacement, opt.waypoint_max_displacement,
             s.energy, s.time, s.obstacle, s.trajectory_velocity, s.lateral_acc,
@@ -839,7 +850,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     RCLCPP_INFO(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
         "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, seed_length=%.2f m, raw_states=%zu, "
-        "segments=%d, vars=%d, cusps=%d, iters=%d, |grad|=%.3g",
+        "segments=%d, vars=%d, cusps=%d, optimizer=%.*s, accepted=%d, evals=%d, "
+        "normalized_scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : "", result.path->step_segments.size(),
@@ -847,7 +859,9 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         std::chrono::duration<double, std::milli>(kinodynamic_done - dijkstra_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
         seed_path_length, seed_states_raw.size(), segment_count, variable_count, cusp_count,
-        opt.iterations, opt.final_grad_inf_norm
+        static_cast<int>(opt.optimizer_status_string().size()), opt.optimizer_status_string().data(),
+        opt.accepted_iterations, opt.function_evaluations,
+        opt.final_normalized_scaled_grad_max_block_norm, opt.final_grad_inf_norm
     );
 
     return result;

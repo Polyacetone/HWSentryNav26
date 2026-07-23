@@ -7,6 +7,7 @@
 #include <Eigen/Core>
 
 #include <nav_executor/common/minco_trajectory.hpp>
+#include <nav_executor/path_planner/lbfgs_minimizer.hpp>
 #include <nav_executor/path_planner/minco_minjerk.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 
@@ -16,8 +17,9 @@ namespace nav_executor {
 //
 // 只优化 2D 平坦输出 (x,y)：决策变量 = 内部路点 Q（DIM×(N-1)）+ 段时长 T（经虚拟时间
 // 正性重参数化）。朝向 θ = atan2(gear·运动方向) 由平坦输出解析导出，非完整约束因此**恒等
-// 满足**，不再需要增广拉格朗日或 θ 自由度。L-BFGS 无约束优化，约束以采样罚实现，梯度经
-// MincoMinJerk::propagate_gradient 从系数回传到 Q/T。换向尖点由 seed 冻结（两侧 v=0）。
+// 满足**，不再需要增广拉格朗日或 θ 自由度。block-scaled trust-region L-BFGS 做无约束
+// 优化，约束以采样罚实现，梯度经 MincoMinJerk::propagate_gradient 从系数回传到 Q/T。
+// 换向尖点由 seed 冻结（两侧 v=0）。
 //
 // 目标：
 //   J = w_energy·∫‖jerk‖² + w_time·ΣT
@@ -49,12 +51,25 @@ public:
 
     // 方向地形罚的平滑门控（连续 smoothstep，替代离散 label/阈值硬开关）。
     // 以方向场插值模长 ‖dir‖ 为自变量：< norm_lo 罚项关闭，> norm_hi 全强度，
-    // 区间内 C1 平滑过渡。恢复目标沿采样点位移的分段光滑性，使 strong Wolfe 线搜索
-    // 不在台阶边界处遇到代价断崖。
+    // 区间内 C1 平滑过渡。恢复目标沿采样点位移的分段光滑性，改善局部 trust-region
+    // 模型在台阶边界附近的预测质量。
     struct TerrainGate {
         double norm_lo = 0.1; // ‖dir‖ 下限：低于则方向地形罚为零
         double norm_hi = 0.9; // ‖dir‖ 上限：高于则方向地形罚全强度
         double motion_speed_scale = 0.05; // 低速方向/速度正则尺度 (m/s)
+    };
+
+    struct OptimizerParams {
+        double position_scale = 0.5;       // 每个 2D waypoint block 的物理尺度 (m)
+        double physical_time_scale = 0.1;  // 每个 time block 的目标物理尺度 (s)
+        double max_virtual_time_scale = 20.0;
+        int max_function_evaluations = 4000;
+        int history_size = 8;
+        double gradient_tolerance = 1e-5;
+        double scaled_step_tolerance = 1e-8;
+        LbfgsMinimizer::TrustRegionOptions trust_region;
+        double curvature_relative_threshold = 1e-8;
+        double history_acceptance_ratio = 0.25;
     };
 
     struct Params {
@@ -63,6 +78,7 @@ public:
         TerrainGate terrain_gate;
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;
+        OptimizerParams optimizer;
         double min_segment_time = 0.05;
         double runup_body_norm_lo = 0.9; // 助跑源仅由物理本体附近激活
         double runup_body_norm_hi = 0.95;
@@ -98,9 +114,29 @@ public:
         MincoTrajectory trajectory;
         bool success = false;
         double cost = 0.0;
-        int iterations = 0;
-        double final_grad_inf_norm = 0.0;
-        int line_search_iterations = 0;
+        LbfgsMinimizer::Status optimizer_status = LbfgsMinimizer::Status::MAX_ITERATIONS;
+        int accepted_iterations = 0;
+        int function_evaluations = 0;
+        int trial_evaluations = 0;
+        int rejected_trials = 0;
+        int nonfinite_trials = 0;
+        double final_grad_inf_norm = 0.0; // raw mixed-coordinate gradient，仅作兼容诊断
+        double final_normalized_scaled_grad_max_block_norm = 0.0;
+
+        double initial_radius = 0.0;
+        double final_radius = 0.0;
+        double min_radius = 0.0;
+        double max_radius = 0.0;
+        int radius_shrinks = 0;
+        int radius_expansions = 0;
+        int boundary_steps = 0;
+        int history_updates = 0;
+        int history_skips = 0;
+        int history_resets = 0;
+
+        [[nodiscard]] std::string_view optimizer_status_string() const noexcept {
+            return LbfgsMinimizer::status_string(optimizer_status);
+        }
 
         // 失败诊断（success=false 时填充，供调用方日志）。
         std::string error;
@@ -111,15 +147,14 @@ public:
         int grad_check_worst_index = -1;
         int grad_check_num_time_vars = 0;
 
-        // 收敛诊断（debug_diagnostics=true 时填充）。
+        // 分项与 block 梯度诊断（debug_diagnostics=true 时填充）。
         bool diagnostics_valid = false;
         CostTerms seed_costs;              // 优化前（种子）分项代价
         CostTerms final_costs;             // 优化后（最终解）分项代价
-        double initial_grad_inf_norm = 0.0; // 种子处 ‖g‖_inf
+        double initial_grad_inf_norm = 0.0; // 种子处 raw ‖g‖_inf
         // 最终解处梯度按变量类别拆分（区分几何 vs 时序的剩余下降方向）。
         double final_grad_pos_inf_norm = 0.0; // 位置变量分量 ‖g_q‖_inf
-        double final_grad_time_inf_norm = 0.0; // 时间变量分量 ‖g_T‖_inf
-        int lbfgs_status = 0;              // LbfgsMinimizer::Status（0=CONVERGED,1=MAX_ITER,2=LS_FAILED）
+        double final_grad_time_inf_norm = 0.0; // virtual-time 变量分量 ‖g_tau‖_inf
         double waypoint_total_displacement = 0.0; // Σ‖q_final − q_seed‖（仅自由路点）
         double waypoint_max_displacement = 0.0;    // max‖q_final − q_seed‖（仅自由路点）
         int free_waypoint_count = 0;       // 参与优化的自由路点数

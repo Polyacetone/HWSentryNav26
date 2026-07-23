@@ -76,7 +76,28 @@
           body_norm_hi: 0.95 # 助跑源门控上界；仅物理本体附近达到完整强度
           saturation_length: 0.05 # 往前看台阶暴露量时的饱和弧长（米），暴露量超过此尺度后助跑惩罚不再增加
           transition_distance: 0.1 # 助跑区边界往外平滑过渡的弧长宽度（米），让助跑效果逐渐消失而非突然截断
-        max_iterations: 2000 # L-BFGS 优化器的最大迭代次数
+        max_iterations: 2000 # trust-region L-BFGS 最大 accepted step 数
+        optimizer:
+          position_scale: 0.5 # 每个 2D waypoint block 的物理尺度（米）
+          physical_time_scale: 0.1 # 每个 time block 的目标物理尺度（秒）
+          max_virtual_time_scale: 20.0 # softplus Jacobian 很小时 virtual-time scale 的上限
+          max_function_evaluations: 4000 # 含初始评估及所有 rejected trial
+          history_size: 8 # 保留的 L-BFGS (s,y) 对数
+          gradient_tolerance: 1.0e-5 # normalized scaled max-block gradient 收敛阈值
+          scaled_step_tolerance: 1.0e-8 # 归一化 block 步长停滞阈值
+          trust_region:
+            initial_radius: 0.5
+            min_radius: 1.0e-6
+            max_radius: 2.0
+            acceptance_ratio: 0.1
+            shrink_ratio: 0.25
+            expansion_ratio: 0.75
+            shrink_factor: 0.25
+            expansion_factor: 2.0
+            max_consecutive_rejections: 12
+            history_reset_after_rejections: 3
+          curvature_relative_threshold: 1.0e-8 # sy > eps*||s||*||y|| 才接受曲率对
+          history_acceptance_ratio: 0.25 # 低模型可信度的 accepted step 不写入历史
         min_segment_time: 0.05 # 每段轨迹最短时长（秒），防止时长归零导致数值问题
         output_validation:
           samples_per_segment: 20 # 最终验收时每段采多少个点做约束检查

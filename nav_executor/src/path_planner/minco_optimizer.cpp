@@ -910,7 +910,40 @@ MincoOptimizer::Result MincoOptimizer::optimize(
 
     LbfgsMinimizer::Options lopt;
     lopt.max_iterations = params_.max_iterations;
+    lopt.max_function_evaluations = params_.optimizer.max_function_evaluations;
+    lopt.history_size = params_.optimizer.history_size;
+    lopt.gradient_tolerance = params_.optimizer.gradient_tolerance;
+    lopt.scaled_step_tolerance = params_.optimizer.scaled_step_tolerance;
+    lopt.trust_region = params_.optimizer.trust_region;
+    lopt.curvature_relative_threshold = params_.optimizer.curvature_relative_threshold;
+    lopt.history_acceptance_ratio = params_.optimizer.history_acceptance_ratio;
     LbfgsMinimizer solver(lopt);
+
+    std::vector<LbfgsMinimizer::VariableBlock> variable_blocks;
+    variable_blocks.reserve(static_cast<size_t>(nw + n));
+    for (int i = 0; i < nw; ++i) {
+        variable_blocks.push_back({
+            .offset = DIM * i,
+            .size = DIM,
+            .scale = params_.optimizer.position_scale,
+        });
+    }
+    for (int i = 0; i < n; ++i) {
+        const double initial_time_jacobian = virtual_to_time_grad(vars(time_offset + i));
+        double virtual_time_scale = params_.optimizer.max_virtual_time_scale;
+        if (std::isfinite(initial_time_jacobian) && initial_time_jacobian > 0.0) {
+            virtual_time_scale = std::clamp(
+                params_.optimizer.physical_time_scale / initial_time_jacobian,
+                params_.optimizer.physical_time_scale,
+                params_.optimizer.max_virtual_time_scale
+            );
+        }
+        variable_blocks.push_back({
+            .offset = time_offset + i,
+            .size = 1,
+            .scale = virtual_time_scale,
+        });
+    }
 
     auto cost_fn = [&](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
         return evaluate(ws, x, g);
@@ -953,18 +986,50 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         result.initial_grad_inf_norm = g_seed.lpNorm<Eigen::Infinity>();
     }
 
-    const LbfgsMinimizer::Result lr = solver.minimize(cost_fn, vars);
-    result.iterations = lr.iterations;
-    result.line_search_iterations = lr.line_search_iterations;
+    const LbfgsMinimizer::Result lr = solver.minimize(cost_fn, vars, variable_blocks);
+    result.optimizer_status = lr.status;
+    result.accepted_iterations = lr.accepted_iterations;
+    result.function_evaluations = lr.function_evaluations;
+    result.trial_evaluations = lr.trial_evaluations;
+    result.rejected_trials = lr.rejected_trials;
+    result.nonfinite_trials = lr.nonfinite_trials;
+    result.initial_grad_inf_norm = lr.initial_grad_inf_norm;
     result.final_grad_inf_norm = lr.grad_inf_norm;
-    if (lr.status == LbfgsMinimizer::Status::LINE_SEARCH_FAILED && lr.iterations == 0) {
-        result.error = "L-BFGS line search failed at start (cost=" + std::to_string(lr.cost)
-            + ", |grad|_inf=" + std::to_string(lr.grad_inf_norm) + ")";
+    result.final_normalized_scaled_grad_max_block_norm =
+        lr.normalized_scaled_grad_max_block_norm;
+    result.initial_radius = lr.initial_radius;
+    result.final_radius = lr.final_radius;
+    result.min_radius = lr.min_radius;
+    result.max_radius = lr.max_radius;
+    result.radius_shrinks = lr.radius_shrinks;
+    result.radius_expansions = lr.radius_expansions;
+    result.boundary_steps = lr.boundary_steps;
+    result.history_updates = lr.history_updates;
+    result.history_skips = lr.history_skips;
+    result.history_resets = lr.history_resets;
+
+    const bool failed_initial_evaluation =
+        lr.status == LbfgsMinimizer::Status::INITIAL_EVALUATION_NONFINITE;
+    const bool terminal_failure_without_progress = lr.accepted_iterations == 0
+        && (lr.status == LbfgsMinimizer::Status::TRUST_REGION_TOO_SMALL
+            || lr.status == LbfgsMinimizer::Status::STAGNATED
+            || lr.status == LbfgsMinimizer::Status::NUMERICAL_FAILURE);
+    if (failed_initial_evaluation || terminal_failure_without_progress) {
+        result.error = "L-BFGS terminated with "
+            + std::string(LbfgsMinimizer::status_string(lr.status))
+            + " before accepting a step (cost=" + std::to_string(lr.cost)
+            + ", |grad|_inf=" + std::to_string(lr.grad_inf_norm)
+            + ", evals=" + std::to_string(lr.function_evaluations)
+            + ", rejected=" + std::to_string(lr.rejected_trials) + ")";
         return result;
     }
 
     Eigen::VectorXd scratch_grad(vars.size());
-    evaluate(ws, vars, scratch_grad);
+    const double final_evaluated_cost = evaluate(ws, vars, scratch_grad);
+    if (!std::isfinite(final_evaluated_cost) || !scratch_grad.allFinite()) {
+        result.error = "L-BFGS finite incumbent could not be reconstructed";
+        return result;
+    }
     result.trajectory = ws.minco.to_trajectory(ws.gears);
     result.cost = lr.cost;
     result.success = true;
@@ -978,7 +1043,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         for (int i = time_offset; i < scratch_grad.size(); ++i) g_time = std::max(g_time, std::abs(scratch_grad(i)));
         result.final_grad_pos_inf_norm = g_pos;
         result.final_grad_time_inf_norm = g_time;
-        result.lbfgs_status = static_cast<int>(lr.status);
         double disp_sum = 0.0;
         double disp_max = 0.0;
         int free_count = 0;
