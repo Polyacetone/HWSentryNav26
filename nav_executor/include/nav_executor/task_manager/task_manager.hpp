@@ -48,6 +48,7 @@ struct MotionFeedback {
     bool mpc_lethal = false;
     AnnotatedPath::ConstPtr lethal_path;
     MotionState motion_state = MotionState::IDLE;
+    StepPhase step_phase = StepPhase::NONE;
     bool preemptible = true;
 };
 
@@ -93,12 +94,14 @@ private:
     [[nodiscard]] TaskCommandView command_view() const;
 
     void ingest_goal(const std::optional<Goal>& incoming, bool preemptible);
+    void apply_deferred_goal_preemption(bool preemptible);
     void ingest_executor_replan_event(bool event);
     void ingest_goal_reached(bool goal_reached, const AnnotatedPath::ConstPtr& reached_path);
     void poll_planner_result(bool preemptible);
     bool maybe_submit_plan(bool preemptible, const PlanRequestSnapshot& snapshot, std::chrono::steady_clock::time_point stamp);
     void monitor_route(const std::optional<RouteMonitorInput>& input);
     void on_route_invalid(ReplanReason reason);
+    void begin_new_plan_generation();
 
     TaskManagerParams params_;
     PathPlanner* planner_;
@@ -109,6 +112,7 @@ private:
     std::optional<Eigen::Vector2d> hold_goal_;
 
     bool needs_plan_ = false;
+    uint64_t plan_generation_ = 0;
 
     // 失败冷却元数据
     bool in_cooldown_ = false;

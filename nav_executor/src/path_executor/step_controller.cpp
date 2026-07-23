@@ -12,7 +12,27 @@ constexpr double U_EPSILON = 1e-6;
 double approach(const double current, const double target, const double max_step) {
     return current + std::clamp(target - current, -max_step, max_step);
 }
+
+StepPhase phase_in_segment(const StepPlanSegment& segment, const double current_u) {
+    if (current_u + U_EPSILON >= segment.commit_u) return StepPhase::COMMITTED;
+    if (current_u + U_EPSILON >= segment.active_u) return StepPhase::ARMED;
+    return StepPhase::PREPARING;
+}
 } // anonymous namespace
+
+StepPhaseObservation classify_step_phase(const AnnotatedPath& path, const double current_u) {
+    for (size_t i = 0; i < path.step_segments.size(); ++i) {
+        const StepPlanSegment& segment = path.step_segments[i];
+        if (current_u + U_EPSILON < segment.prepare_u) break;
+        if (current_u >= segment.release_u) continue;
+        if (!is_step_mode(segment.chassis_command.mode)) continue;
+        return {
+            .phase = phase_in_segment(segment, current_u),
+            .segment_index = i,
+        };
+    }
+    return {};
+}
 
 StepController::StepController(
     const double step_dist_offset,
@@ -30,12 +50,14 @@ StepController::StepController(
 
 void StepController::clear() {
     path_.reset();
+    next_step_segment_index_ = 0;
     held_step_segment_index_ = std::nullopt;
     current_profile_ = normal_profile_;
     target_profile_ = normal_profile_;
 }
 
 void StepController::set_path(AnnotatedPath::ConstPtr path) {
+    next_step_segment_index_ = 0;
     held_step_segment_index_ = std::nullopt;
     target_profile_ = normal_profile_;
     path_ = std::move(path);
@@ -48,7 +70,7 @@ void StepController::set_path(AnnotatedPath::ConstPtr path) {
 
 std::optional<size_t> StepController::find_active_segment_index(const double current_u) const {
     if (!path_) return std::nullopt;
-    for (size_t i = 0; i < path_->step_segments.size(); ++i) {
+    for (size_t i = next_step_segment_index_; i < path_->step_segments.size(); ++i) {
         const StepPlanSegment& segment = path_->step_segments[i];
         if (current_u + U_EPSILON < segment.prepare_u) {
             break;
@@ -84,6 +106,7 @@ const StepPlanSegment* StepController::current_command_segment(const double curr
 
 void StepController::update_active_segment(const double current_u) {
     if (!path_) {
+        next_step_segment_index_ = 0;
         held_step_segment_index_ = std::nullopt;
         target_profile_ = normal_profile_;
         return;
@@ -97,11 +120,17 @@ void StepController::update_active_segment(const double current_u) {
                 "Step segment #%zu released (current_u=%.3f >= release_u=%.3f)",
                 *held_step_segment_index_, current_u, segment.release_u
             );
+            next_step_segment_index_ = *held_step_segment_index_ + 1;
             held_step_segment_index_ = std::nullopt;
             // fall through 尝试获取下一段
         } else {
             return;
         }
+    }
+
+    while (next_step_segment_index_ < path_->step_segments.size()
+        && current_u >= path_->step_segments[next_step_segment_index_].release_u) {
+        ++next_step_segment_index_;
     }
 
     const auto next_index = find_active_segment_index(current_u);
@@ -117,11 +146,11 @@ void StepController::update_active_segment(const double current_u) {
     RCLCPP_DEBUG(
         logger_,
         "Step segment #%zu acquired: label=%hhu dir=%s "
-        "prepare=%.3f active=%.3f step=[%.3f,%.3f) release=%.3f mode=%hhu",
+        "prepare=%.3f active=%.3f commit=%.3f step=[%.3f,%.3f) release=%.3f mode=%hhu",
         *held_step_segment_index_,
         segment.terrain_label,
         segment.direction == StepDirection::UP ? "UP" : "DOWN",
-        segment.prepare_u, segment.active_u,
+        segment.prepare_u, segment.active_u, segment.commit_u,
         segment.step_enter_u, segment.step_exit_u, segment.release_u,
         segment.chassis_command.mode
     );
@@ -176,13 +205,23 @@ const StepChassisCommand* StepController::current_chassis_command(const double c
     return segment ? &segment->chassis_command : nullptr;
 }
 
-bool StepController::is_step_nonpreemptible(const double current_u) const {
-    const StepPlanSegment* const segment = current_command_segment(current_u);
-    return segment && current_u + U_EPSILON >= segment->active_u;
-}
+StepPhaseObservation StepController::observe_step_phase(const double current_u) const {
+    if (!path_) return {};
 
-bool StepController::should_activate_chassis_mode(const double current_u) const {
-    return is_step_nonpreemptible(current_u);
+    std::optional<size_t> index;
+    if (held_step_segment_index_) {
+        const StepPlanSegment& held = path_->step_segments[*held_step_segment_index_];
+        if (current_u < held.release_u) index = held_step_segment_index_;
+    }
+    if (!index) index = find_active_segment_index(current_u);
+    if (!index) return {};
+
+    const StepPlanSegment& segment = path_->step_segments[*index];
+    if (!is_step_mode(segment.chassis_command.mode)) return {};
+    return {
+        .phase = phase_in_segment(segment, current_u),
+        .segment_index = index,
+    };
 }
 
 uint8_t StepController::compute_step_distance_cm(const MincoTrajectory& path, const double current_u) const {

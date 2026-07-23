@@ -31,6 +31,11 @@ struct Goal {
 struct PlanRequest {
     Goal goal;
 
+    // 同一 goal 下每次路径失效或重新规划意图都会推进 generation。
+    // worker 结果必须与 TaskManager 当前 generation 一致，避免旧地图/旧失效周期的
+    // 晚到结果重新获得执行权。
+    uint64_t plan_generation = 0;
+
     // 当前位姿快照（map 系）
     Eigen::Vector2d current_pos_map = Eigen::Vector2d::Zero();
     double current_yaw = 0.0;
@@ -55,6 +60,7 @@ struct PlanResult {
 
     Kind kind = Kind::FAILED;
     uint64_t goal_id = 0;         // 对应请求的 goal id（接纳验证用）
+    uint64_t plan_generation = 0; // 对应请求的规划代次（同一 goal 内拒绝过期结果）
     AnnotatedPath::ConstPtr path; // 仅 kind==PATH 有效
     Eigen::Vector2d goal_pos = Eigen::Vector2d::Zero(); // fixed 短路时的保持点
 

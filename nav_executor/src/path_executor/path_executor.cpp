@@ -25,6 +25,47 @@ PathExecutor::PathExecutor(
     last_motion_state_ = control_fsm_->state();
 }
 
+StepExecutionPreview PathExecutor::preview_step_execution(
+    const AnnotatedPath::ConstPtr& path,
+    const double current_u,
+    const bool route_tracked
+) const {
+    const MotionState state = control_fsm_->state();
+    const StepPhase latched_phase = control_fsm_->step_phase();
+
+    // 投影无效时不能把“未观测到阶段”解释成 release。保留 FSM 已锁存策略，
+    // 由 RouteMonitor 在可抢占阶段决定是否清除 active_path。
+    if (!path || !route_tracked) {
+        return {
+            .phase = latched_phase,
+            .preemptible = preemptible(),
+        };
+    }
+
+    const bool same_path = path == bound_path_;
+    const StepPhaseObservation observed = same_path
+        ? step_controller_.observe_step_phase(current_u)
+        : classify_step_phase(*path, current_u);
+
+    StepPhase effective_phase = observed.phase;
+    const bool same_lifecycle = state == MotionState::STEPPING
+        && same_path
+        && bound_path_epoch_ == control_fsm_->step_path_epoch()
+        && observed.segment_index == control_fsm_->step_segment_index();
+    if (same_lifecycle
+        && static_cast<uint8_t>(latched_phase) > static_cast<uint8_t>(effective_phase)) {
+        effective_phase = latched_phase;
+    }
+
+    const bool can_preempt = state == MotionState::STEPPING
+        ? effective_phase != StepPhase::COMMITTED
+        : preemptible() && effective_phase != StepPhase::COMMITTED;
+    return {
+        .phase = effective_phase,
+        .preemptible = can_preempt,
+    };
+}
+
 // ═══════════════════════ 辅助 ════════════════════════════════
 
 void PathExecutor::sync_mpc_context(const ExecutorInput& input, const bool allow_observer_update) {
@@ -169,14 +210,15 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         && last_command_output_.mode == chassis_mode::NORMAL;
     sync_mpc_context(input, observer_update_allowed);
 
-    const bool has_bound_path = static_cast<bool>(input.intent.active_path);
-    const bool has_path = has_bound_path && input.route
+    const bool has_active_path = static_cast<bool>(input.intent.active_path);
+    const bool has_path = has_active_path && input.route
         && input.route->path == input.intent.active_path
         && input.route->status == RouteTrackingStatus::TRACKED;
 
     // ── path 绑定切换（新的不可变包 → 重置台阶/进度状态）──
     if (input.intent.active_path != bound_path_) {
         bound_path_ = input.intent.active_path;
+        ++bound_path_epoch_;
         step_controller_.set_path(bound_path_);
         progress_monitor_.reset();
         mpc_controller_->reset_warm_start();
@@ -201,15 +243,25 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         }
     }
 
-    // ── stuck-like 检测：follow/stepping 无进度 + 卡住 ──
+    const StepPhaseObservation step_observation = has_path
+        ? step_controller_.observe_step_phase(current_u)
+        : StepPhaseObservation {};
+    const StepExecutionPreview current_step_preview = preview_step_execution(
+        input.intent.active_path,
+        current_u,
+        has_path
+    );
+
+    // ── stuck-like 检测：commit 前沿用 follow，commit 后使用 stepping 策略 ──
     bool no_progress_detected = false;
-    if (!command_blocked && has_path) {
-        if (prev_state == MotionState::FOLLOW) {
+    if (!command_blocked && has_path
+        && (prev_state == MotionState::FOLLOW || prev_state == MotionState::STEPPING)) {
+        if (current_step_preview.phase != StepPhase::COMMITTED) {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
                 input.route->arc_length, params_.follow_no_progress_guard,
                 MotionState::FOLLOW, prev_state, input.observation.stamp
             );
-        } else if (prev_state == MotionState::STEPPING) {
+        } else {
             no_progress_detected = progress_monitor_.update_and_check_no_progress(
                 input.route->arc_length, params_.stepping_no_progress_guard,
                 MotionState::STEPPING, prev_state, input.observation.stamp
@@ -224,10 +276,13 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
 
     // ── 组装 FSM 输入 ──
     FsmInput fsm_input;
-    fsm_input.has_path = has_path;
+    fsm_input.has_active_path = has_active_path;
+    fsm_input.route_tracked = has_path;
     fsm_input.has_hold_goal = input.intent.hold_goal.has_value();
     fsm_input.reach_goal = endpoint_reached && progress_reached;
-    fsm_input.step_nonpreemptible = has_path && step_controller_.is_step_nonpreemptible(current_u);
+    fsm_input.step_phase = step_observation.phase;
+    fsm_input.step_path_epoch = bound_path_epoch_;
+    fsm_input.step_segment_index = step_observation.segment_index;
     fsm_input.resumed_from_stopped = resumed_from_stopped;
     fsm_input.command_blocked = command_blocked;
     fsm_input.spin_requested = input.intent.spin_requested;
@@ -271,12 +326,63 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
             case MotionState::HAZARD_RECOVERY: output = execute_recovery(input); break;
             case MotionState::STUCK_REVERSE: output = execute_stuck_reverse(); break;
             case MotionState::FIXED: output = execute_fixed(input); break;
-            case MotionState::STEPPING: output = execute_follow(input, false); break;
+            case MotionState::STEPPING:
+                if (control_fsm_->step_phase() == StepPhase::COMMITTED
+                    && has_active_path && !has_path) {
+                    // COMMITTED 中的短暂投影丢失不能停止刷新台阶提示。沿用上一帧
+                    // 已验证命令，等待 RouteTracker 恢复，而不是产生 invalid 输出。
+                    apply_held_command(output);
+                } else {
+                    output = execute_follow(
+                        input,
+                        is_step_phase_precommit(control_fsm_->step_phase())
+                    );
+                }
+                break;
             case MotionState::DEAD: output = execute_idle(); break;
         }
     }
 
+    // 台阶计划在 commit 前被打断时，取消 mode 的优先级高于 MPC 输出是否成功。
+    // 正常情况下 STOPPING/恢复控制器会给出平滑减速；若求解失败，仍发送零速 NORMAL
+    // 作为一次确定的取消指令，避免下位机继续持有上一帧台阶提示。
+    if (fsm_output.step_cancelled) {
+        output.mode = chassis_mode::NORMAL;
+        output.step_dist_cm = 0;
+        if (command_blocked) {
+            // BLOCKED 分支默认复用上一帧完整命令；取消事件不能继续携带旧台阶速度意图。
+            output.velocity = 0.0;
+            output.omega = 0.0;
+            output.valid = true;
+        } else if (!output.valid) {
+            RCLCPP_ERROR(logger_, "Step cancellation controller failed; publishing zero NORMAL fallback");
+            output.velocity = 0.0;
+            output.omega = 0.0;
+            output.valid = true;
+        }
+    }
+
+    // held-command 分支可能跨越 release 或其他状态转换复用上一帧完整命令。
+    // 一旦 FSM 不再处于 ARMED/COMMITTED，旧台阶提示便不再有执行权，必须独立于
+    // 求解器是否运行而改写为 NORMAL，防止 release 后继续重发 STEP mode。
+    const bool previous_step_mode_still_held = has_last_command_output_
+        && is_step_mode(last_command_output_.mode);
+    const bool step_mode_no_longer_authorized =
+        !step_phase_activates_chassis_mode(control_fsm_->step_phase())
+        && (is_step_mode(output.mode) || (!output.valid && previous_step_mode_still_held));
+    if (step_mode_no_longer_authorized) {
+        output.mode = chassis_mode::NORMAL;
+        output.step_dist_cm = 0;
+        if (!output.valid) {
+            RCLCPP_ERROR(logger_, "Step release controller failed; publishing zero NORMAL fallback");
+            output.velocity = 0.0;
+            output.omega = 0.0;
+            output.valid = true;
+        }
+    }
+
     output.motion_state = state;
+    output.step_phase = control_fsm_->step_phase();
     output.goal_reached = fsm_output.goal_reached;
     output.executor_replan_event = fsm_output.executor_replan_event;
     output.mpc_lethal = mpc_lethal_pending_;
@@ -311,7 +417,7 @@ void PathExecutor::on_state_transition(const MotionState prev, const MotionState
     const bool prev_follow_like = (prev == MotionState::FOLLOW) || (prev == MotionState::STEPPING);
     const bool next_follow_like = (next == MotionState::FOLLOW) || (next == MotionState::STEPPING);
 
-    if (prev_follow_like || next_follow_like) {
+    if (prev_follow_like != next_follow_like) {
         progress_monitor_.reset();
     }
 
@@ -453,7 +559,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
         out.mode = chassis_mode::NORMAL;
     } else if (const StepChassisCommand* const chassis_command = step_controller_.current_chassis_command(u0);
-               chassis_command && step_controller_.should_activate_chassis_mode(u0)) {
+               chassis_command && step_phase_activates_chassis_mode(control_fsm_->step_phase())) {
         out.mode = chassis_command->mode;
     } else {
         out.mode = chassis_mode::NORMAL;

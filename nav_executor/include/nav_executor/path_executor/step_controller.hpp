@@ -11,6 +11,7 @@
 #include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <nav_executor/path_executor/solver/mpc_solver.hpp>
+#include <nav_executor/path_executor/state_machine.hpp>
 
 namespace nav_executor {
 
@@ -21,6 +22,16 @@ struct ProfileBlendParams {
     double alpha_step;
     double a_lat_step;
 };
+
+struct StepPhaseObservation {
+    StepPhase phase = StepPhase::NONE;
+    std::optional<size_t> segment_index;
+};
+
+// 对任意不可变路径做无状态阶段判定，供 TaskManager 在本控制周期接纳目标或规划结果前
+// 检查 commit 边界。运行期 StepController::observe_step_phase() 还会结合已持有区段，
+// 避免路径投影小幅回退时丢失当前台阶段。
+[[nodiscard]] StepPhaseObservation classify_step_phase(const AnnotatedPath& path, double current_u);
 
 // 台阶运行时：跟踪当前区段，并协调能力档、底盘模式和距离上报。
 class StepController {
@@ -41,10 +52,9 @@ public:
     [[nodiscard]] std::optional<size_t> find_active_segment_index(double current_u) const;
     [[nodiscard]] const StepPlanSegment* active_segment(double current_u) const;
     [[nodiscard]] const StepPlanSegment* current_command_segment(double current_u) const;
+    [[nodiscard]] StepPhaseObservation observe_step_phase(double current_u) const;
 
     [[nodiscard]] const StepChassisCommand* current_chassis_command(double current_u) const;
-    [[nodiscard]] bool is_step_nonpreemptible(double current_u) const;
-    [[nodiscard]] bool should_activate_chassis_mode(double current_u) const;
     [[nodiscard]] uint8_t compute_step_distance_cm(const MincoTrajectory& path, double current_u) const;
 
     void tick_profile_blend();
@@ -63,6 +73,7 @@ private:
     CapabilityProfile target_profile_;
 
     AnnotatedPath::ConstPtr path_;
+    size_t next_step_segment_index_ = 0;
     std::optional<size_t> held_step_segment_index_;
 };
 

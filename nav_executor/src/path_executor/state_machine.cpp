@@ -5,6 +5,16 @@
 
 namespace nav_executor {
 
+const char* step_phase_str(const StepPhase phase) {
+    switch (phase) {
+        case StepPhase::NONE: return "NONE";
+        case StepPhase::PREPARING: return "PREPARING";
+        case StepPhase::ARMED: return "ARMED";
+        case StepPhase::COMMITTED: return "COMMITTED";
+    }
+    return "NONE";
+}
+
 StateMachine::StateMachine(const FsmParams& params, rclcpp::Logger logger)
     : params_(params), logger_(logger) {}
 
@@ -29,14 +39,80 @@ FsmOutput StateMachine::transition_to(const MotionState next) {
         reverse_entry_initialized_ = false;
     }
     active_state_ = next;
+    if (next != MotionState::STEPPING) {
+        step_phase_ = StepPhase::NONE;
+        step_path_epoch_ = 0;
+        step_segment_index_.reset();
+    }
     return { .state = next };
+}
+
+FsmOutput StateMachine::enter_stepping(
+    const StepPhase phase,
+    const uint64_t path_epoch,
+    const std::optional<size_t> segment_index
+) {
+    step_phase_ = phase;
+    step_path_epoch_ = path_epoch;
+    step_segment_index_ = segment_index;
+    return transition_to(MotionState::STEPPING);
+}
+
+void StateMachine::synchronize_step_phase(
+    const StepPhase observed_phase,
+    const uint64_t path_epoch,
+    const std::optional<size_t> segment_index
+) {
+    if (!is_step_phase_active(observed_phase)) return;
+
+    // segment 下标只在一条 AnnotatedPath 内有意义。路径身份变化时，即使下标相同，
+    // 也必须从新路径观测到的阶段开启新的生命周期，不能继承旧路径的 ARMED/COMMITTED。
+    if (path_epoch != step_path_epoch_) {
+        if (segment_index) {
+            RCLCPP_INFO(
+                logger_, "STEPPING path epoch changed to %lu, segment=#%zu phase=%s",
+                static_cast<unsigned long>(path_epoch), *segment_index,
+                step_phase_str(observed_phase)
+            );
+        } else {
+            RCLCPP_INFO(
+                logger_, "STEPPING path epoch changed to %lu, segment=none phase=%s",
+                static_cast<unsigned long>(path_epoch), step_phase_str(observed_phase)
+            );
+        }
+        step_path_epoch_ = path_epoch;
+        step_segment_index_ = segment_index;
+        step_phase_ = observed_phase;
+        return;
+    }
+
+    // 相邻台阶段可以在上一段 release 的同一位置进入下一段 prepare。段身份变化时，
+    // PREPARING 是新生命周期的合法起点，不属于同一段内的阶段回退。
+    if (segment_index && segment_index != step_segment_index_) {
+        RCLCPP_INFO(
+            logger_, "STEPPING segment switched to #%zu, phase=%s",
+            *segment_index, step_phase_str(observed_phase)
+        );
+        step_segment_index_ = segment_index;
+        step_phase_ = observed_phase;
+        return;
+    }
+
+    // 同一台阶段一旦越过边界便只向前推进，投影抖动不能解除 ARMED 或 COMMITTED。
+    if (static_cast<uint8_t>(observed_phase) <= static_cast<uint8_t>(step_phase_)) return;
+
+    RCLCPP_INFO(
+        logger_, "STEPPING phase %s -> %s",
+        step_phase_str(step_phase_), step_phase_str(observed_phase)
+    );
+    step_phase_ = observed_phase;
 }
 
 StateMachine::Terminal StateMachine::terminal_target(const FsmInput& in) const {
     const bool should_spin = in.spin_requested
-        && (in.spin_high_priority || (!in.has_path && !in.has_hold_goal));
+        && (in.spin_high_priority || (!in.route_tracked && !in.has_hold_goal));
     if (should_spin) return Terminal::SPIN;
-    if (in.has_path) return Terminal::FOLLOW;
+    if (in.route_tracked) return Terminal::FOLLOW;
     if (in.has_hold_goal) return Terminal::FIXED;
     return Terminal::IDLE;
 }
@@ -115,7 +191,7 @@ FsmOutput StateMachine::on_idle(const FsmInput& in) {
         RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY (is hazard)");
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
-    if (in.has_path) {
+    if (in.route_tracked) {
         RCLCPP_INFO(logger_, "FSM -> FOLLOW (has path)");
         return transition_to(MotionState::FOLLOW);
     }
@@ -146,7 +222,7 @@ FsmOutput StateMachine::on_fixed(const FsmInput& in) {
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (is stuck)");
         return transition_to(MotionState::STUCK_REVERSE);
     }
-    if (in.has_path) {
+    if (in.route_tracked) {
         RCLCPP_INFO(logger_, "FSM -> FOLLOW (has path)");
         return transition_to(MotionState::FOLLOW);
     }
@@ -173,10 +249,14 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
 
-    // 台阶不可抢占区最高优先，且不被 stuck/no_progress 打断前置处理。
-    if (in.step_nonpreemptible) {
-        RCLCPP_INFO(logger_, "FSM -> STEPPING (step nonpreemptible)");
-        return transition_to(MotionState::STEPPING);
+    // COMMITTED 是本周期路径替换锁的最高优先级；即使同时出现普通中断信号，
+    // 也必须先进入不可抢占子状态。
+    if (in.step_phase == StepPhase::COMMITTED) {
+        RCLCPP_INFO(
+            logger_, "FSM -> STEPPING/%s (step lifecycle entered)",
+            step_phase_str(in.step_phase)
+        );
+        return enter_stepping(in.step_phase, in.step_path_epoch, in.step_segment_index);
     }
 
     // stuck-like（follow no-progress 或卡住）统一走脱困链，恢复后 one-shot replan。
@@ -189,7 +269,7 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
     }
 
     // path 被顶层清空（RouteMonitor 判 invalid 或消费）→ 平滑停止后回落。
-    if (!in.has_path) {
+    if (!in.route_tracked) {
         stopping_start_time_ = in.stamp;
         RCLCPP_INFO(logger_, "FSM -> STOPPING (no path)");
         return transition_to(MotionState::STOPPING);
@@ -209,16 +289,43 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
         return out;
     }
 
+    // PREPARING/ARMED 与 FOLLOW 共享上述中断策略；仅在本周期没有中断时进入父状态。
+    if (is_step_phase_precommit(in.step_phase)) {
+        RCLCPP_INFO(
+            logger_, "FSM -> STEPPING/%s (step lifecycle entered)",
+            step_phase_str(in.step_phase)
+        );
+        return enter_stepping(in.step_phase, in.step_path_epoch, in.step_segment_index);
+    }
+
     return { .state = MotionState::FOLLOW };
 }
 
 // ═══════════════════════════ STEPPING ═══════════════════════
 
 FsmOutput StateMachine::on_stepping(const FsmInput& in) {
+    synchronize_step_phase(in.step_phase, in.step_path_epoch, in.step_segment_index);
+
     if (should_start_resume_hazard_recovery(in)) {
         replan_after_recovery_ = true;
         RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY (resumed from stopped into hazard during STEPPING)");
-        return transition_to(MotionState::HAZARD_RECOVERY);
+        const bool cancelled = is_step_phase_precommit(step_phase_);
+        FsmOutput out = transition_to(MotionState::HAZARD_RECOVERY);
+        out.step_cancelled = cancelled;
+        return out;
+    }
+
+    // PREPARING/ARMED 中 active_path 一旦被任务层清除，旧台阶计划立即失去执行权。
+    // 直接进入 STOPPING，避免先回 FOLLOW 后因无路径产生一周期空命令。
+    if (is_step_phase_precommit(step_phase_) && !in.has_active_path) {
+        stopping_start_time_ = in.stamp;
+        RCLCPP_INFO(
+            logger_, "FSM -> STOPPING (STEPPING/%s path cancelled)",
+            step_phase_str(step_phase_)
+        );
+        FsmOutput out = transition_to(MotionState::STOPPING);
+        out.step_cancelled = true;
+        return out;
     }
 
     if (in.no_progress_detected || in.is_stuck) {
@@ -226,10 +333,55 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
         pending_reverse_start_time_ = in.stamp;
         pending_reverse_start_pos_ = in.chassis_pos_map;
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (stuck-like)");
-        return transition_to(MotionState::STUCK_REVERSE);
+        const bool cancelled = is_step_phase_precommit(step_phase_);
+        FsmOutput out = transition_to(MotionState::STUCK_REVERSE);
+        out.step_cancelled = cancelled;
+        return out;
     }
 
-    if (in.step_nonpreemptible) {
+    // commit 前保持与 FOLLOW 一致的外部打断能力。
+    if (is_step_phase_precommit(step_phase_)) {
+        if (in.spin_requested && in.spin_high_priority) {
+            stopping_start_time_ = in.stamp;
+            RCLCPP_INFO(
+                logger_, "FSM -> STOPPING (spin requested during STEPPING/%s)",
+                step_phase_str(step_phase_)
+            );
+            FsmOutput out = transition_to(MotionState::STOPPING);
+            out.step_cancelled = true;
+            return out;
+        }
+
+        if (in.reach_goal) {
+            stopping_start_time_ = in.stamp;
+            RCLCPP_INFO(
+                logger_, "FSM -> STOPPING (goal reached during STEPPING/%s)",
+                step_phase_str(step_phase_)
+            );
+            FsmOutput out = transition_to(MotionState::STOPPING);
+            out.goal_reached = true;
+            out.step_cancelled = true;
+            return out;
+        }
+    }
+
+    if (!in.has_active_path) {
+        // 仅 release 后的本周期抢占或已在 precommit 产生的硬失效允许走到这里。
+        // 无论来源如何，都不能回 FOLLOW 后在无路径条件下产生空命令。
+        stopping_start_time_ = in.stamp;
+        RCLCPP_WARN(logger_, "STEPPING/COMMITTED active path removed; forcing STOPPING");
+        FsmOutput out = transition_to(MotionState::STOPPING);
+        out.step_cancelled = true;
+        return out;
+    }
+
+    // 短暂投影丢失不等于路径被清除或台阶段 release。COMMITTED 必须保持当前
+    // 台阶提示；precommit 则等待 RouteMonitor 的路径失效决策。
+    if (!in.route_tracked) {
+        return { .state = MotionState::STEPPING };
+    }
+
+    if (is_step_phase_active(in.step_phase)) {
         return { .state = MotionState::STEPPING };
     }
 
@@ -246,7 +398,7 @@ FsmOutput StateMachine::on_spin(const FsmInput& in) {
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
 
-    const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.has_path && !in.has_hold_goal));
+    const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.route_tracked && !in.has_hold_goal));
 
     if (!keep_spinning) {
         stopping_start_time_ = in.stamp;

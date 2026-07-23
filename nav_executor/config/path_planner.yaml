@@ -49,7 +49,7 @@
           lateral_acceleration: 100.0 # 侧向加速度约束权重：防止转弯过快导致侧滑，限制 |v·ω|
           angular_velocity: 100.0 # 角速度约束权重：限制转向快慢，防急转
           acceleration: 100.0 # 加速度约束权重：限制加减速的剧烈程度
-          traversal_alignment: 1000.0 # 过台阶时让车身顺着台阶方向走的对齐惩罚
+          traversal_alignment: 1600.0 # 过台阶时让车身顺着台阶方向走的对齐惩罚
           traversal_velocity_target: 200.0 # 过台阶时让速度匹配台阶推荐速度窗口的软约束
           prohibited_traversal: 1000.0 # 往台阶禁止方向（如逆行）走的惩罚
           runup_acceleration: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 a² 状态正则
@@ -79,16 +79,16 @@
           gradient_tolerance: 1.0e-5 # normalized scaled max-block gradient 收敛阈值
           scaled_step_tolerance: 1.0e-8 # 归一化 block 步长停滞阈值
           trust_region:
-            initial_radius: 0.5
-            min_radius: 1.0e-6
-            max_radius: 2.0
-            acceptance_ratio: 0.1
-            shrink_ratio: 0.25
-            expansion_ratio: 0.75
-            shrink_factor: 0.25
-            expansion_factor: 2.0
-            max_consecutive_rejections: 12
-            history_reset_after_rejections: 3
+            initial_radius: 0.5 # trust-region 初始半径（米）
+            min_radius: 1.0e-6 # trust-region 最小半径（米）
+            max_radius: 2.0 # trust-region 最大半径（米）
+            acceptance_ratio: 0.1 # 归一化 trial step 的 accepted ratio 阈值，低于此值就缩小 trust-region
+            shrink_ratio: 0.25 # trust-region 缩小比例
+            expansion_ratio: 0.75 # trust-region 扩大比例
+            shrink_factor: 0.25 # trust-region 缩小因子，低于 acceptance_ratio 时才缩小
+            expansion_factor: 2.0 # trust-region 扩大因子，高于 acceptance_ratio 时才扩大
+            max_consecutive_rejections: 12 # 连续 rejected trial 超过此值就强制缩小 trust-region
+            history_reset_after_rejections: 3 # 连续 rejected trial 超过此值就清空 L-BFGS 历史，避免陷入局部最优
           curvature_relative_threshold: 1.0e-8 # sy > eps*||s||*||y|| 才接受曲率对
           history_acceptance_ratio: 0.25 # 低模型可信度的 accepted step 不写入历史
         min_segment_time: 0.05 # 每段轨迹最短时长（秒），防止时长归零导致数值问题
@@ -109,8 +109,8 @@
           detect_dot_threshold: 0.5 # 路径方向与台阶方向点积的阈值：大于此值判定为上台阶，小于负的此值判定为下台阶
           path_sample_resolution: 0.05 # 台阶标注弧长采样间距上限；实际不超过方向地图分辨率的一半（米）
         execution:
-          profile_prepare_distance: 2.0 # 从渐变起点到 commit 点的距离，在这段距离内逐步切换底盘能力配置（米）
-          chassis_activation_distance: 1.0 # 从不可抢占起点到 commit 点的距离，进入这段后激活底盘台阶模式并锁定 FSM（米）
+          profile_prepare_distance: 2.0 # 从 STEPPING/PREPARING 起点到 commit 点的距离，在这段距离内逐步切换底盘能力配置（米）
+          chassis_activation_distance: 1.0 # 从 STEPPING/ARMED 起点到 commit 点的距离；开始发送可撤销的台阶提示，commit 前仍可抢占（米）
           fsm_release_distance: 0.3 # 走出物理台阶后，FSM 额外再往前推多远才退出 STEPPING 状态（米）
         mpc_constraints:
           gate_transition_distance: 0.3 # 台阶内部 MPC 约束窗两侧的软门控过渡带宽度（米），让约束逐渐生效而非硬开关

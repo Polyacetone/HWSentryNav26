@@ -462,6 +462,7 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
 PlanResult PathPlanner::plan(const PlanRequest& req) const {
     PlanResult result;
     result.goal_id = req.goal.id;
+    result.plan_generation = req.plan_generation;
     result.goal_pos = req.goal.position_map;
 
     if (!req.global_cost_map || !req.merged_cost_map || !req.direction_map || !req.terrain_constraints.blocked_cost_layer) {

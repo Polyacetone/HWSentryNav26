@@ -16,16 +16,29 @@ bool TaskManager::goals_equivalent(const Goal& a, const Goal& b) const {
 
 TaskUpdateOutput TaskManager::update(const TaskUpdateInput& input) {
     ingest_goal(input.incoming_goal, input.feedback.preemptible);
+    apply_deferred_goal_preemption(input.feedback.preemptible);
     ingest_executor_replan_event(input.feedback.executor_replan_event);
     poll_planner_result(input.feedback.preemptible);
-    maybe_submit_plan(input.feedback.preemptible, input.plan_snapshot, input.stamp);
     monitor_route(input.route_monitor);
     ingest_goal_reached(input.feedback.goal_reached, input.feedback.goal_reached_path);
+    maybe_submit_plan(input.feedback.preemptible, input.plan_snapshot, input.stamp);
 
     return {
         .command = command_view(),
         .diagnostics = diagnostics(),
     };
+}
+
+void TaskManager::apply_deferred_goal_preemption(const bool preemptible) {
+    if (!preemptible || !current_goal_ || !active_path_) return;
+    if (active_path_->goal_id == current_goal_->id) return;
+
+    active_path_.reset();
+    RCLCPP_INFO(
+        logger_,
+        "Deferred goal preemption released; invalidated stale active path before replanning goal #%lu",
+        static_cast<unsigned long>(current_goal_->id)
+    );
 }
 
 TaskCommandView TaskManager::command_view() const {
@@ -35,7 +48,14 @@ TaskCommandView TaskManager::command_view() const {
     };
 }
 
-// 新语义目标立即替换已提交任务，但旧路径可继续执行至新路径就绪。
+void TaskManager::begin_new_plan_generation() {
+    ++plan_generation_;
+    needs_plan_ = true;
+}
+
+// 新语义目标立即替换已提交任务。当前阶段可抢占时，旧路径同时失去执行权，
+// Executor 在没有候选路径的间隔内减速；新路径就绪后可直接接管，无需等待停稳。
+// COMMITTED 等不可抢占阶段只更新 latest-wins 目标，保留当前路径至阶段释放。
 void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool preemptible) {
     if (!incoming) return;
 
@@ -49,8 +69,12 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
     current_goal_ = goal;
 
     hold_goal_.reset();       // 新 goal 清空 hold_goal
-    needs_plan_ = true;       // 标记需要重新规划
-    in_cooldown_ = false;     // 新 goal 立即打断旧冷却
+    if (preemptible && active_path_) {
+        active_path_.reset();
+        RCLCPP_INFO(logger_, "New goal invalidated active path; braking until replacement is ready");
+    }
+    begin_new_plan_generation(); // 同时淘汰所有旧目标/旧路径周期的在途结果
+    in_cooldown_ = false;         // 新 goal 立即打断旧冷却
 
     RCLCPP_INFO(
         logger_, "New goal #%lu (%.2f, %.2f) fixed=%d [%s]",
@@ -71,7 +95,7 @@ void TaskManager::ingest_executor_replan_event(const bool event) {
     // 当前执行形式已不可信 → 清掉 path/hold，回到 planner 重新决定 FOLLOW 还是 FIXED。
     active_path_.reset();
     hold_goal_.reset();
-    needs_plan_ = true;
+    begin_new_plan_generation();
     last_replan_reason_ = ReplanReason::EXECUTOR_REPLAN_EVENT;
     RCLCPP_INFO(logger_, "executor_replan_event → drop path/hold, replan current goal");
 }
@@ -83,6 +107,16 @@ void TaskManager::poll_planner_result(const bool preemptible) {
 
     if (!current_goal_ || result->goal_id != current_goal_->id) {
         RCLCPP_INFO(logger_, "Discard plan result: goal changed (result goal_id mismatch)");
+        return;
+    }
+
+    if (result->plan_generation != plan_generation_) {
+        RCLCPP_INFO(
+            logger_,
+            "Discard plan result: stale generation (result=%lu current=%lu)",
+            static_cast<unsigned long>(result->plan_generation),
+            static_cast<unsigned long>(plan_generation_)
+        );
         return;
     }
 
@@ -151,6 +185,7 @@ bool TaskManager::maybe_submit_plan(
 
     PlanRequest request;
     request.goal = *current_goal_;
+    request.plan_generation = plan_generation_;
     request.current_pos_map = snapshot.current_pos_map;
     request.current_yaw = snapshot.current_yaw;
     request.current_velocity = snapshot.current_velocity;
@@ -161,7 +196,11 @@ bool TaskManager::maybe_submit_plan(
     request.performance = snapshot.performance;
 
     planner_->submit(request);
-    RCLCPP_DEBUG(logger_, "Submitted plan request for goal #%lu", static_cast<unsigned long>(current_goal_->id));
+    RCLCPP_DEBUG(
+        logger_, "Submitted plan request for goal #%lu generation=%lu",
+        static_cast<unsigned long>(current_goal_->id),
+        static_cast<unsigned long>(plan_generation_)
+    );
     return true;
 }
 
@@ -176,7 +215,7 @@ void TaskManager::monitor_route(const std::optional<RouteMonitorInput>& input) {
 
 void TaskManager::on_route_invalid(const ReplanReason reason) {
     active_path_.reset();
-    needs_plan_ = true;
+    begin_new_plan_generation();
     last_replan_reason_ = reason;
     RCLCPP_INFO(logger_, "Path invalid (%s) → drop path, replan", replan_reason_str(reason));
 }

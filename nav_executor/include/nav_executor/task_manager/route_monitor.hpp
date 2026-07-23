@@ -66,7 +66,8 @@ struct RouteMonitorReport {
     ReplanReason reason = ReplanReason::NONE;
 };
 
-// 顶层可抢占阶段的 path monitoring：无状态纯函数，仅在 active_path 非空时调用。
+// 顶层可抢占阶段（含 STEPPING/PREPARING、ARMED）的 path monitoring：
+// 无状态纯函数，仅在 active_path 非空时调用。
 // 输出 needs_replan 的合法原因见 ReplanReason。
 RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Logger logger);
 

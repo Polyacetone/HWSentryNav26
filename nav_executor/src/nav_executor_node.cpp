@@ -132,8 +132,6 @@ void NavExecutorNode::control_tick() {
 
     const auto stamp = std::chrono::steady_clock::now();
 
-    previous_motion_feedback_.preemptible = executor_->preemptible();
-    previous_motion_feedback_.motion_state = executor_->motion_state();
     const CostLayers cost_layers {
         .global = global_cost_map_,
         .current_dynamic = current_cost_map_,
@@ -157,6 +155,21 @@ void NavExecutorNode::control_tick() {
         chassis_state_.velocity,
         stamp
     );
+
+    // TaskManager 必须使用本周期 route 位置判断 commit，而不能只依赖上一周期 FSM。
+    // 这样规划结果恰好在跨过 commit_u 的控制周期到达时，也不会获得路径执行权。
+    previous_motion_feedback_.motion_state = executor_->motion_state();
+    const bool route_tracked = active_path_before_update && route_estimate
+        && route_estimate->path == active_path_before_update
+        && route_estimate->status == RouteTrackingStatus::TRACKED;
+    const StepExecutionPreview step_preview = executor_->preview_step_execution(
+        active_path_before_update,
+        route_tracked ? route_estimate->tau : 0.0,
+        route_tracked
+    );
+    previous_motion_feedback_.step_phase = step_preview.phase;
+    previous_motion_feedback_.preemptible = step_preview.preemptible;
+
     RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
     if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
 
@@ -178,9 +191,14 @@ void NavExecutorNode::control_tick() {
     }
 
     const MotionState previous_state = previous_motion_feedback_.motion_state;
-    const bool route_monitoring_state = previous_state == MotionState::FOLLOW
-        || previous_state == MotionState::STOPPING
-        || previous_state == MotionState::IDLE;
+    const bool pending_mpc_lethal = previous_motion_feedback_.mpc_lethal
+        && previous_motion_feedback_.lethal_path == active_path_before_update;
+    const bool route_monitoring_state = pending_mpc_lethal
+        || (previous_motion_feedback_.preemptible
+            && (previous_state == MotionState::FOLLOW
+                || previous_state == MotionState::STOPPING
+                || previous_state == MotionState::IDLE
+                || previous_state == MotionState::STEPPING));
     if (active_path_before_update && route_estimate && route_monitoring_state) {
         RouteMonitorInput rm;
         rm.active_path = active_path_before_update;
@@ -243,6 +261,7 @@ void NavExecutorNode::control_tick() {
     previous_motion_feedback_.mpc_lethal = out.mpc_lethal;
     previous_motion_feedback_.lethal_path = out.mpc_lethal ? task_output.command.active_path : nullptr;
     previous_motion_feedback_.motion_state = out.motion_state;
+    previous_motion_feedback_.step_phase = out.step_phase;
 
     if (out.valid) {
         interfaces::msg::ChassisCmd cmd;
@@ -314,6 +333,7 @@ void NavExecutorNode::publish_diagnostics(
     interfaces::msg::NavExecutorDiag msg;
 
     msg.motion_state = static_cast<uint8_t>(executor_output.motion_state);
+    msg.step_phase = static_cast<uint8_t>(executor_output.step_phase);
     msg.has_goal = diag.has_goal;
     msg.has_path = diag.has_path;
     msg.has_hold_goal = diag.has_hold_goal;

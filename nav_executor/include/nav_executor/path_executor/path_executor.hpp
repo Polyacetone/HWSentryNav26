@@ -71,6 +71,7 @@ struct ExecutorOutput {
     bool valid = false;
 
     MotionState motion_state = MotionState::IDLE;
+    StepPhase step_phase = StepPhase::NONE;
 
     // one-shot 事实/事件
     bool goal_reached = false;
@@ -80,6 +81,11 @@ struct ExecutorOutput {
     // 调试
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
     std::optional<MPCDiagnostics> mpc_diagnostics;
+};
+
+struct StepExecutionPreview {
+    StepPhase phase = StepPhase::NONE;
+    bool preemptible = true;
 };
 
 // 运动控制编排：持有 FSM / MPC / 台阶运行时 / stuck 检测与恢复链，消费顶层每周期传入的 active_path 与 hold_goal。
@@ -98,12 +104,20 @@ public:
     ExecutorOutput update(const ExecutorInput& input);
 
     [[nodiscard]] MotionState motion_state() const { return control_fsm_->state(); }
+    [[nodiscard]] StepPhase step_phase() const { return control_fsm_->step_phase(); }
+    [[nodiscard]] StepExecutionPreview preview_step_execution(
+        const AnnotatedPath::ConstPtr& path,
+        double current_u,
+        bool route_tracked
+    ) const;
 
     [[nodiscard]] bool preemptible() const {
         const MotionState s = control_fsm_->state();
         switch (s) {
             case MotionState::SPIN:
                 return !last_spin_high_priority_;
+            case MotionState::STEPPING:
+                return is_step_phase_precommit(control_fsm_->step_phase());
             case MotionState::FOLLOW:
             case MotionState::IDLE:
             case MotionState::STOPPING:
@@ -145,6 +159,7 @@ private:
 
     // 当前绑定的 path（身份用于检测切换）
     AnnotatedPath::ConstPtr bound_path_;
+    uint64_t bound_path_epoch_ = 0;
 
     bool last_spin_high_priority_ = false;
     MotionState last_motion_state_ = MotionState::IDLE;
