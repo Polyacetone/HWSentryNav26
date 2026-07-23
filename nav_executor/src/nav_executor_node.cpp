@@ -251,26 +251,9 @@ void NavExecutorNode::control_tick() {
         cmd.mode = out.mode;
         cmd.step_dist = out.step_dist_cm;
         chassis_cmd_pub_->publish(cmd);
-
-        if (enable_debug_) {
-            if (out.mpc_path_map) debug_mpc_path_pub_->publish(path_to_nav_msg(*out.mpc_path_map));
-
-            interfaces::msg::MPCDiag mpc_debug_msg;
-            if (out.predicted_v) mpc_debug_msg.v_pred = *out.predicted_v;
-            if (out.predicted_w) mpc_debug_msg.w_pred = *out.predicted_w;
-            if (out.predicted_path_progress) {
-                mpc_debug_msg.path_progress = *out.predicted_path_progress;
-            }
-            if (out.predicted_path_speed) {
-                mpc_debug_msg.path_speed = *out.predicted_path_speed;
-            }
-            if (out.ref_velocity) mpc_debug_msg.ref_velocity = *out.ref_velocity;
-            if (out.ref_angular_velocity) mpc_debug_msg.ref_angular_velocity = *out.ref_angular_velocity;
-            debug_mpc_diag_pub_->publish(mpc_debug_msg);
-        }
     }
 
-    publish_diagnostics(task_output.diagnostics, out.motion_state, task_output.command.active_path);
+    publish_diagnostics(task_output.diagnostics, out, task_output.command.active_path);
 
     if (enable_debug_ && debug_final_cost_map_pub_) {
         nav_msgs::msg::OccupancyGrid grid_msg;
@@ -312,23 +295,73 @@ bool NavExecutorNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
 
 void NavExecutorNode::publish_diagnostics(
     const TaskDiagnostics& diag,
-    const MotionState motion_state,
+    const ExecutorOutput& executor_output,
     const AnnotatedPath::ConstPtr& active_path
 ) {
-    interfaces::msg::NavExecutorState msg;
-    msg.motion_state = static_cast<uint8_t>(motion_state);
+    if (active_path) global_path_pub_->publish(trajectory_to_nav_msg(active_path->trajectory));
+    if (!enable_debug_) return;
+
+    if (!diag.debug_rough_path.empty()) {
+        debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
+    }
+    if (active_path) {
+        debug_minco_trajectory_pub_->publish(trajectory_to_marker(active_path->trajectory));
+    }
+    if (executor_output.mpc_path_map) {
+        debug_mpc_path_pub_->publish(path_to_nav_msg(*executor_output.mpc_path_map));
+    }
+
+    interfaces::msg::NavExecutorDiag msg;
+
+    msg.motion_state = static_cast<uint8_t>(executor_output.motion_state);
     msg.has_goal = diag.has_goal;
     msg.has_path = diag.has_path;
     msg.has_hold_goal = diag.has_hold_goal;
     msg.planner_state = static_cast<uint8_t>(diag.planner_state);
     msg.last_replan_reason = static_cast<uint8_t>(diag.last_replan_reason);
-    if (active_path) global_path_pub_->publish(trajectory_to_nav_msg(active_path->trajectory));
-    state_pub_->publish(msg);
 
-    if (enable_debug_) {
-        if (!diag.debug_rough_path.empty()) debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
-        if (active_path) debug_minco_trajectory_pub_->publish(trajectory_to_marker(active_path->trajectory));
+    msg.command_published = executor_output.valid;
+    msg.command_velocity = executor_output.velocity;
+    msg.command_angular_velocity = executor_output.omega;
+    msg.command_mode = executor_output.mode;
+    msg.command_step_distance = executor_output.step_dist_cm;
+
+    msg.mpc_attempted = executor_output.mpc_diagnostics.has_value();
+    if (executor_output.mpc_diagnostics) {
+        const MPCDiagnostics& mpc = *executor_output.mpc_diagnostics;
+        msg.mpc_mode = static_cast<uint8_t>(mpc.solver_mode);
+        msg.mpc_succeeded = mpc.solve_succeeded;
+        msg.mpc_error = mpc.solve_error;
+
+        msg.ancillary_enabled = mpc.ancillary_enabled;
+        msg.ancillary_active = mpc.ancillary_active;
+        msg.ancillary_reanchored = mpc.nominal_reanchored;
+        msg.ancillary_tube_feasible = mpc.first_command_tube_feasible;
+
+        msg.measured_velocity = mpc.measured_velocity.x();
+        msg.measured_angular_velocity = mpc.measured_velocity.y();
+        msg.previous_command_velocity = mpc.previous_command.x();
+        msg.previous_command_angular_velocity = mpc.previous_command.y();
+        msg.mpc_nominal_command_velocity = mpc.nominal_command.x();
+        msg.mpc_nominal_command_angular_velocity = mpc.nominal_command.y();
+        msg.mpc_nominal_command_velocity_rate = mpc.nominal_command_rate.x();
+        msg.mpc_nominal_command_angular_velocity_rate = mpc.nominal_command_rate.y();
+        msg.mpc_applied_command_velocity_rate = mpc.applied_command_rate.x();
+        msg.mpc_applied_command_angular_velocity_rate = mpc.applied_command_rate.y();
+
+        msg.mpc_reference_path_progress = mpc.reference_path_progress;
+        msg.mpc_reference_path_speed = mpc.reference_path_speed;
+        msg.trajectory_nominal_velocity = mpc.trajectory_nominal_velocity;
+        msg.trajectory_nominal_angular_velocity = mpc.trajectory_nominal_angular_velocity;
+        msg.mpc_reference_velocity = mpc.reference_velocity;
+        msg.mpc_reference_angular_velocity = mpc.reference_angular_velocity;
+        msg.mpc_nominal_prediction_velocity = mpc.nominal_prediction.v_pred;
+        msg.mpc_nominal_prediction_angular_velocity = mpc.nominal_prediction.w_pred;
+        msg.mpc_applied_prediction_velocity = mpc.applied_prediction.v_pred;
+        msg.mpc_applied_prediction_angular_velocity = mpc.applied_prediction.w_pred;
     }
+
+    debug_diag_pub_->publish(msg);
 }
 
 nav_msgs::msg::Path NavExecutorNode::path_to_nav_msg(const std::vector<Eigen::Vector2d>& path) const {

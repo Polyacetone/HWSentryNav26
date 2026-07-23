@@ -208,10 +208,8 @@ RolloutStates<SolverT> rollout_states(const ProblemT& prob, const SolverT& solve
     return rollout;
 }
 
-template<typename ProblemT, typename SolverT>
-MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, const StateVec& x0) {
-    const auto rollout = rollout_states(prob, solver, x0);
-
+template<typename SolverT>
+MPCPrediction prediction_from_rollout(const RolloutStates<SolverT>& rollout) {
     MPCPrediction pred;
     const size_t sz = rollout.valid_steps + 1;
     pred.path_map.reserve(sz);
@@ -230,6 +228,26 @@ MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, co
         pred.path_speed_pred.push_back(x(ix::PATH_SPEED));
     }
     return pred;
+}
+
+template<typename ProblemT, typename SolverT>
+MPCPrediction rollout_prediction(const ProblemT& prob, const SolverT& solver, const StateVec& x0) {
+    return prediction_from_rollout(rollout_states(prob, solver, x0));
+}
+
+MPCDiagnostics initial_diagnostics(
+    const MPCSolverMode mode,
+    const StateVec& measured_x0
+) {
+    MPCDiagnostics diagnostics;
+    diagnostics.solver_mode = mode;
+    diagnostics.measured_velocity = {
+        measured_x0(ix::V), measured_x0(ix::W)
+    };
+    diagnostics.previous_command = {
+        measured_x0(ix::V_CMD), measured_x0(ix::W_CMD)
+    };
+    return diagnostics;
 }
 
 // ── MPCSolver 方法 ──
@@ -508,24 +526,46 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         follow_warm_ = false;
         return std::unexpected("Follow MPC produced a non-finite applied rollout");
     }
-    MPCPrediction prediction;
-    {
-        const size_t sz = applied_rollout.valid_steps + 1;
-        prediction.path_map.reserve(sz);
-        prediction.headings.reserve(sz);
-        prediction.v_pred.reserve(sz);
-        prediction.w_pred.reserve(sz);
-        prediction.path_progress_pred.reserve(sz);
-        prediction.path_speed_pred.reserve(sz);
-        for (size_t i = 0; i <= applied_rollout.valid_steps; ++i) {
-            const auto& x = applied_rollout.xs[i];
-            prediction.path_map.emplace_back(x(ix::X), x(ix::Y));
-            prediction.headings.push_back(x(ix::THETA));
-            prediction.v_pred.push_back(x(ix::V));
-            prediction.w_pred.push_back(x(ix::W));
-            prediction.path_progress_pred.push_back(x(ix::PATH_PROGRESS));
-            prediction.path_speed_pred.push_back(x(ix::PATH_SPEED));
-        }
+    MPCDiagnostics diagnostics = initial_diagnostics(MPCSolverMode::FOLLOW, measured_x0);
+    diagnostics.solve_succeeded = true;
+    diagnostics.ancillary_enabled = feedback.enable;
+    diagnostics.ancillary_active = feedback_active;
+    diagnostics.nominal_reanchored = feedback_active && nominal_initial.reanchored;
+    diagnostics.first_command_tube_feasible = feedback_active
+        && first_command_tube_feasible;
+    diagnostics.nominal_command = command_after_control(x0, follow_solver_.us[0]);
+    diagnostics.nominal_command_rate = {
+        follow_solver_.us[0](iu::V_CMD_RATE),
+        follow_solver_.us[0](iu::W_CMD_RATE)
+    };
+    diagnostics.applied_command_rate = {
+        applied_control(iu::V_CMD_RATE), applied_control(iu::W_CMD_RATE)
+    };
+    diagnostics.nominal_prediction = prediction_from_rollout(nominal_rollout);
+    diagnostics.applied_prediction = prediction_from_rollout(applied_rollout);
+
+    diagnostics.reference_path_progress.reserve(MPC_HORIZON);
+    diagnostics.reference_path_speed.reserve(MPC_HORIZON);
+    diagnostics.trajectory_nominal_velocity.reserve(MPC_HORIZON);
+    diagnostics.trajectory_nominal_angular_velocity.reserve(MPC_HORIZON);
+    diagnostics.reference_velocity.reserve(MPC_HORIZON);
+    diagnostics.reference_angular_velocity.reserve(MPC_HORIZON);
+    for (size_t k = 0; k < MPC_HORIZON; ++k) {
+        const double path_progress = nominal_rollout.xs[k](ix::PATH_PROGRESS);
+        const double path_speed = follow_solver_.us[k](iu::PATH_SPEED_CMD);
+        const TrajSample sample = global_trajectory.eval_arc_length(path_progress);
+        diagnostics.reference_path_progress.push_back(path_progress);
+        diagnostics.reference_path_speed.push_back(path_speed);
+        diagnostics.trajectory_nominal_velocity.push_back(
+            global_trajectory.longitudinal_velocity(sample)
+        );
+        diagnostics.trajectory_nominal_angular_velocity.push_back(
+            global_trajectory.angular_velocity(sample)
+        );
+        diagnostics.reference_velocity.push_back(sample.gear * path_speed);
+        diagnostics.reference_angular_velocity.push_back(
+            global_trajectory.heading_rate_per_arc_length(sample) * path_speed
+        );
     }
 
     if (check_lethal_status) {
@@ -548,8 +588,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             }
 
             FollowSolveResult out;
-            out.command = std::get<0>(*stop_result);
-            out.prediction = std::get<1>(*stop_result);
+            out.command = stop_result->command;
+            out.diagnostics = std::move(stop_result->diagnostics);
             out.status = FollowSolveStatus::STOP_AND_WAIT_REPLAN;
             out.lethal_obstacle = lethal;
             return out;
@@ -578,12 +618,12 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     FollowSolveResult out;
     out.command = cmd;
-    out.prediction = std::move(prediction);
+    out.diagnostics = std::move(diagnostics);
     out.status = FollowSolveStatus::FOLLOW;
     return out;
 }
 
-std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_stop(
+std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_stop(
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
     const CostMap& cost_map
@@ -627,10 +667,19 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     last_cmd_rate_.x() = stop_solver_.us[0](iu::V_CMD_RATE);
     last_cmd_rate_.y() = stop_solver_.us[0](iu::W_CMD_RATE);
     last_cmd_ = cmd;
-    return std::tuple {cmd, rollout_prediction(prob, stop_solver_, x0)};
+    MPCDiagnostics diagnostics = initial_diagnostics(MPCSolverMode::STOP, x0);
+    diagnostics.solve_succeeded = true;
+    diagnostics.nominal_command = cmd;
+    diagnostics.nominal_command_rate = {
+        stop_solver_.us[0](iu::V_CMD_RATE), stop_solver_.us[0](iu::W_CMD_RATE)
+    };
+    diagnostics.applied_command_rate = diagnostics.nominal_command_rate;
+    diagnostics.nominal_prediction = rollout_prediction(prob, stop_solver_, x0);
+    diagnostics.applied_prediction = diagnostics.nominal_prediction;
+    return SolveResult {.command = cmd, .diagnostics = std::move(diagnostics)};
 }
 
-std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver::solve_hold(
+std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_hold(
     const Eigen::Vector2d& goal_map,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
@@ -675,7 +724,16 @@ std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> MPCSolver
     last_cmd_rate_.x() = hold_solver_.us[0](iu::V_CMD_RATE);
     last_cmd_rate_.y() = hold_solver_.us[0](iu::W_CMD_RATE);
     last_cmd_ = cmd;
-    return std::tuple {cmd, rollout_prediction(prob, hold_solver_, x0)};
+    MPCDiagnostics diagnostics = initial_diagnostics(MPCSolverMode::HOLD, x0);
+    diagnostics.solve_succeeded = true;
+    diagnostics.nominal_command = cmd;
+    diagnostics.nominal_command_rate = {
+        hold_solver_.us[0](iu::V_CMD_RATE), hold_solver_.us[0](iu::W_CMD_RATE)
+    };
+    diagnostics.applied_command_rate = diagnostics.nominal_command_rate;
+    diagnostics.nominal_prediction = rollout_prediction(prob, hold_solver_, x0);
+    diagnostics.applied_prediction = diagnostics.nominal_prediction;
+    return SolveResult {.command = cmd, .diagnostics = std::move(diagnostics)};
 }
 
 } // namespace nav_executor

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 #include <vector>
 #include <Eigen/Dense>
 #include <nav_executor/common/chassis_defs.hpp>
@@ -317,6 +318,40 @@ struct MPCPrediction {
     std::vector<double> w_pred;
     std::vector<double> path_progress_pred;
     std::vector<double> path_speed_pred;
+};
+
+enum class MPCSolverMode : uint8_t {
+    NONE = 0,
+    FOLLOW = 1,
+    STOP = 2,
+    HOLD = 3,
+};
+
+struct MPCDiagnostics {
+    MPCSolverMode solver_mode = MPCSolverMode::NONE;
+    bool solve_succeeded = false;
+    std::string solve_error;
+
+    bool ancillary_enabled = false;
+    bool ancillary_active = false;
+    bool nominal_reanchored = false;
+    bool first_command_tube_feasible = false;
+
+    Eigen::Vector2d measured_velocity = Eigen::Vector2d::Zero();
+    Eigen::Vector2d previous_command = Eigen::Vector2d::Zero();
+    Eigen::Vector2d nominal_command = Eigen::Vector2d::Zero();
+    Eigen::Vector2d nominal_command_rate = Eigen::Vector2d::Zero();
+    Eigen::Vector2d applied_command_rate = Eigen::Vector2d::Zero();
+
+    std::vector<double> reference_path_progress;
+    std::vector<double> reference_path_speed;
+    std::vector<double> trajectory_nominal_velocity;
+    std::vector<double> trajectory_nominal_angular_velocity;
+    std::vector<double> reference_velocity;
+    std::vector<double> reference_angular_velocity;
+
+    MPCPrediction nominal_prediction;
+    MPCPrediction applied_prediction;
 };
 
 struct MPCParams {

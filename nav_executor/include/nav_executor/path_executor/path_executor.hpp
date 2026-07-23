@@ -79,14 +79,7 @@ struct ExecutorOutput {
 
     // 调试
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
-    std::optional<std::vector<double>> predicted_v;
-    std::optional<std::vector<double>> predicted_w;
-    std::optional<std::vector<double>> predicted_path_progress;
-    std::optional<std::vector<double>> predicted_path_speed;
-
-    // MINCO 参考（当前路径进度处的期望值）
-    std::optional<double> ref_velocity;
-    std::optional<double> ref_angular_velocity;
+    std::optional<MPCDiagnostics> mpc_diagnostics;
 };
 
 // 运动控制编排：持有 FSM / MPC / 台阶运行时 / stuck 检测与恢复链，消费顶层每周期传入的 active_path 与 hold_goal。

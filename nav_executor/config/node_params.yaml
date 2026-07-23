@@ -14,7 +14,6 @@
         spin_cmd_sub: "/decision/spin_cmd"
         global_path_pub: "/nav_executor/global_path"
         chassis_cmd_pub: "/nav_executor/chassis_cmd"
-        state_pub: "/nav_executor/state"
 
       debug:
         enable: true
@@ -23,4 +22,4 @@
         warmup_path_pub_topic: "/nav_executor/debug/warmup_path"
         mpc_path_pub_topic: "/nav_executor/debug/mpc_path"
         minco_trajectory_pub_topic: "/nav_executor/debug/minco_trajectory"
-        mpc_diag_pub_topic: "/nav_executor/debug/mpc_diag"
+        diag_pub_topic: "/nav_executor/debug/diag"

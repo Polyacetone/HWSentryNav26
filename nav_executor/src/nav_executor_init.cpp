@@ -39,7 +39,9 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         );
         debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.rough_path_pub_topic"), 1);
         debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.warmup_path_pub_topic"), 1);
-        debug_mpc_diag_pub_ = create_publisher<interfaces::msg::MPCDiag>(declare_parameter<std::string>("node.debug.mpc_diag_pub_topic"), 1);
+        debug_diag_pub_ = create_publisher<interfaces::msg::NavExecutorDiag>(
+            declare_parameter<std::string>("node.debug.diag_pub_topic"), 1
+        );
         debug_final_cost_map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(declare_parameter<std::string>("node.debug.final_cost_map_pub_topic"), 1);
     }
 
@@ -190,8 +192,6 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
 
     global_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.topics.global_path_pub"), 1);
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("node.topics.chassis_cmd_pub"), 1);
-    state_pub_ = create_publisher<interfaces::msg::NavExecutorState>(declare_parameter<std::string>("node.topics.state_pub"), 1);
-
     control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_DT), [this]() { control_tick(); });
 }
 

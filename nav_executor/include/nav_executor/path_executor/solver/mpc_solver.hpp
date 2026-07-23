@@ -19,9 +19,14 @@ public:
 
     struct FollowSolveResult {
         Eigen::Vector2d command = Eigen::Vector2d::Zero();
-        MPCPrediction prediction;
+        MPCDiagnostics diagnostics;
         FollowSolveStatus status = FollowSolveStatus::FOLLOW;
         std::optional<RolloutLethalObstacleInfo> lethal_obstacle;
+    };
+
+    struct SolveResult {
+        Eigen::Vector2d command = Eigen::Vector2d::Zero();
+        MPCDiagnostics diagnostics;
     };
 
     MPCSolver(const MPCParams& params, rclcpp::Logger logger);
@@ -55,13 +60,13 @@ public:
         bool check_lethal_status
     );
 
-    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_stop(
+    std::expected<SolveResult, std::string> solve_stop(
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
         const CostMap& cost_map
     );
 
-    std::expected<std::tuple<Eigen::Vector2d, MPCPrediction>, std::string> solve_hold(
+    std::expected<SolveResult, std::string> solve_hold(
         const Eigen::Vector2d& goal_map,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,

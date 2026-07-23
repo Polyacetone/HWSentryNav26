@@ -355,15 +355,28 @@ void warn_if_slow_solve(rclcpp::Logger logger, const char* name, double solve_ms
     }
 }
 
-void assign_hold_output(ExecutorOutput& out, const std::tuple<Eigen::Vector2d, MPCPrediction>& result) {
-    out.velocity = std::get<0>(result).x();
-    out.omega = std::get<0>(result).y();
+MPCDiagnostics failed_diagnostics(
+    const MPCSolverMode mode,
+    const std::string& error,
+    const ChassisMotionState& chassis_state,
+    const Eigen::Vector2d& previous_command,
+    const bool ancillary_enabled = false
+) {
+    MPCDiagnostics diagnostics;
+    diagnostics.solver_mode = mode;
+    diagnostics.solve_error = error;
+    diagnostics.ancillary_enabled = ancillary_enabled;
+    diagnostics.measured_velocity = {chassis_state.velocity, chassis_state.omega};
+    diagnostics.previous_command = previous_command;
+    return diagnostics;
+}
+
+void assign_hold_output(ExecutorOutput& out, const MPCSolver::SolveResult& result) {
+    out.velocity = result.command.x();
+    out.omega = result.command.y();
     out.mode = chassis_mode::NORMAL;
-    out.mpc_path_map = std::get<1>(result).path_map;
-    out.predicted_v = std::get<1>(result).v_pred;
-    out.predicted_w = std::get<1>(result).w_pred;
-    out.predicted_path_progress = std::get<1>(result).path_progress_pred;
-    out.predicted_path_speed = std::get<1>(result).path_speed_pred;
+    out.mpc_path_map = result.diagnostics.applied_prediction.path_map;
+    out.mpc_diagnostics = result.diagnostics;
     out.valid = true;
 }
 
@@ -404,13 +417,20 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Follow) solve failed: %s", result.error().c_str());
+        out.mpc_diagnostics = failed_diagnostics(
+            MPCSolverMode::FOLLOW,
+            result.error(),
+            input.observation.chassis_state,
+            last_cmd_,
+            mpc_controller_->params().follow.ancillary_feedback.enable
+        );
         return out;
     }
     warn_if_slow_solve(logger_, "Follow", timer.elapsed_ms());
 
     const auto& follow_result = *result;
     const auto& cmd = follow_result.command;
-    const auto& prediction = follow_result.prediction;
+    const auto& diagnostics = follow_result.diagnostics;
 
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
         // path invalid（MPC_LETHAL）：本周期输出减速指令，标记 one-shot 供顶层 replan。
@@ -439,17 +459,8 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
         out.mode = chassis_mode::NORMAL;
     }
 
-    out.mpc_path_map = prediction.path_map;
-    out.predicted_v = prediction.v_pred;
-    out.predicted_w = prediction.w_pred;
-    out.predicted_path_progress = prediction.path_progress_pred;
-    out.predicted_path_speed = prediction.path_speed_pred;
-    // MINCO 参考速度（当前路径进度处的期望值）
-    if (input.route) {
-        const TrajSample ref_sample = path.eval_arc_length(input.route->arc_length);
-        out.ref_velocity = path.longitudinal_velocity(ref_sample);
-        out.ref_angular_velocity = path.angular_velocity(ref_sample);
-    }
+    out.mpc_path_map = diagnostics.applied_prediction.path_map;
+    out.mpc_diagnostics = diagnostics;
 
     out.step_dist_cm = step_controller_.compute_step_distance_cm(path, u0);
     out.valid = true;
@@ -478,6 +489,12 @@ ExecutorOutput PathExecutor::execute_stop(const ExecutorInput& input) {
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Stop) solve failed: %s", result.error().c_str());
+        out.mpc_diagnostics = failed_diagnostics(
+            MPCSolverMode::STOP,
+            result.error(),
+            input.observation.chassis_state,
+            last_cmd_
+        );
         return out;
     }
     warn_if_slow_solve(logger_, "Stop", timer.elapsed_ms());
@@ -516,6 +533,12 @@ ExecutorOutput PathExecutor::execute_recovery(const ExecutorInput& input) {
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Recovery) solve failed: %s", result.error().c_str());
+        out.mpc_diagnostics = failed_diagnostics(
+            MPCSolverMode::HOLD,
+            result.error(),
+            input.observation.chassis_state,
+            last_cmd_
+        );
         return out;
     }
     warn_if_slow_solve(logger_, "Recovery", timer.elapsed_ms());
@@ -546,6 +569,12 @@ ExecutorOutput PathExecutor::execute_fixed(const ExecutorInput& input) {
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Fixed) solve failed: %s", result.error().c_str());
+        out.mpc_diagnostics = failed_diagnostics(
+            MPCSolverMode::HOLD,
+            result.error(),
+            input.observation.chassis_state,
+            last_cmd_
+        );
         return out;
     }
     warn_if_slow_solve(logger_, "Fixed", timer.elapsed_ms());

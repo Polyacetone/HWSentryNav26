@@ -20,8 +20,7 @@
 #include <interfaces/msg/chassis_cmd.hpp>
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/comp_stage.hpp>
-#include <interfaces/msg/nav_executor_state.hpp>
-#include <interfaces/msg/mpc_diag.hpp>
+#include <interfaces/msg/nav_executor_diag.hpp>
 
 #include <nav_executor/common/world_context.hpp>
 #include <nav_executor/common/route_tracker.hpp>
@@ -66,7 +65,7 @@ private:
     visualization_msgs::msg::Marker trajectory_to_marker(const MincoTrajectory& trajectory) const;
     void publish_diagnostics(
         const TaskDiagnostics& diag,
-        MotionState motion_state,
+        const ExecutorOutput& executor_output,
         const AnnotatedPath::ConstPtr& active_path
     );
 
@@ -80,13 +79,12 @@ private:
     rclcpp::Subscription<interfaces::msg::CompStage>::SharedPtr comp_stage_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr global_path_pub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
-    rclcpp::Publisher<interfaces::msg::NavExecutorState>::SharedPtr state_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_warmup_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mpc_path_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr debug_minco_trajectory_pub_;
-    rclcpp::Publisher<interfaces::msg::MPCDiag>::SharedPtr debug_mpc_diag_pub_;
+    rclcpp::Publisher<interfaces::msg::NavExecutorDiag>::SharedPtr debug_diag_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
