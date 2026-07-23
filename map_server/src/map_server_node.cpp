@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <cmath>
 #include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <pcl/point_types.h>
@@ -18,6 +19,8 @@
 #include <small_gicp/points/point_cloud.hpp>
 #include <small_gicp/util/downsampling.hpp>
 #include <small_gicp/util/normal_estimation.hpp>
+#include <sstream>
+#include <stdexcept>
 #include <map_server/object_tracker.hpp>
 #include <map_server/utils.hpp>
 
@@ -103,8 +106,22 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     map_inflation_params_ = {
         .robot_radius_m = declare_parameter<double>("map_inflation.robot_radius_m"),
         .cutoff_radius_m = declare_parameter<double>("map_inflation.cutoff_radius_m"),
-        .decay_alpha = declare_parameter<double>("map_inflation.decay_alpha")
+        .decay_alpha = declare_parameter<double>("map_inflation.decay_alpha"),
+        .direction_non_body_magnitude_cap = declare_parameter<double>(
+            "map_inflation.direction_non_body_magnitude_cap"
+        ),
     };
+    if (!std::isfinite(map_inflation_params_.robot_radius_m)
+        || map_inflation_params_.robot_radius_m < 0.0
+        || !std::isfinite(map_inflation_params_.cutoff_radius_m)
+        || map_inflation_params_.cutoff_radius_m < map_inflation_params_.robot_radius_m
+        || !std::isfinite(map_inflation_params_.decay_alpha)
+        || map_inflation_params_.decay_alpha < 0.0
+        || !std::isfinite(map_inflation_params_.direction_non_body_magnitude_cap)
+        || map_inflation_params_.direction_non_body_magnitude_cap <= 0.0
+        || map_inflation_params_.direction_non_body_magnitude_cap > 0.9) {
+        throw std::invalid_argument("invalid map_inflation parameters");
+    }
 
     local_map_params_ = {
         .cloud_accumulate_frames = (size_t)declare_parameter<int>("local_map.cloud_accumulate_frames"),
@@ -611,6 +628,44 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
 
 void MapServerNode::load_nav_map(const std::string& filename) {
     auto maps = map_utils::load_navigation_maps(filename, map_inflation_params_);
+    if (maps.direction_overlaps.cell_count > 0) {
+        std::ostringstream details;
+        details << "pairs={";
+        for (size_t i = 0; i < maps.direction_overlaps.pairs.size(); ++i) {
+            if (i > 0) details << ", ";
+            const auto& pair = maps.direction_overlaps.pairs[i];
+            details << static_cast<int>(pair.first_label) << "/"
+                    << static_cast<int>(pair.second_label) << ":" << pair.cell_count;
+        }
+        details << "}, samples={";
+        for (size_t i = 0; i < maps.direction_overlaps.samples.size(); ++i) {
+            if (i > 0) details << ", ";
+            const auto& sample = maps.direction_overlaps.samples[i];
+            details << "grid(" << sample.x << "," << sample.y << ")/map("
+                    << static_cast<double>(sample.x) * maps.resolution << ","
+                    << static_cast<double>(sample.y) * maps.resolution << ") labels[";
+            bool first_label = true;
+            for (uint8_t label = static_cast<uint8_t>(map_utils::TerrainType::SLOPE);
+                 label <= static_cast<uint8_t>(map_utils::TerrainType::STEP_HIGH); ++label) {
+                const uint8_t bit = static_cast<uint8_t>(
+                    1U << (label - static_cast<uint8_t>(map_utils::TerrainType::SLOPE))
+                );
+                if ((sample.label_mask & bit) == 0) continue;
+                if (!first_label) details << ",";
+                details << static_cast<int>(label);
+                first_label = false;
+            }
+            details << "]";
+        }
+        details << "}";
+        const std::string detail_text = details.str();
+        RCLCPP_WARN(
+            get_logger(),
+            "Directional terrain inflation overlaps on %zu cells; %s",
+            maps.direction_overlaps.cell_count,
+            detail_text.c_str()
+        );
+    }
     map_resolution_ = maps.resolution;
     map_inflation_params_.resolution = map_resolution_;
     map_size_x_ = maps.width;
@@ -627,7 +682,7 @@ void MapServerNode::pub_direction_map(
     // terrain_map 为 CV_8UC3:
     //   ch0: 膨胀后的方向角度 (0-255 → 0~2π)
     //   ch1: 膨胀后的方向模长 (0-255 → 0.0~1.0)
-    //   ch2: 原始语义标签 (0-6)
+    //   ch2: 与方向场同支持传播的有效语义标签 (0-6)
     sensor_msgs::msg::Image::SharedPtr direction_map_msg = cv_bridge::CvImage(
         std_msgs::msg::Header(), "8UC3", direction_map
     ).toImageMsg();

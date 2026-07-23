@@ -20,7 +20,6 @@ struct StepBlockReplanParams {
     bool enable;
     double lookahead_distance;
     double sample_resolution;
-    double step_norm_threshold;
     double obstacle_cost_threshold;
     double predicted_obstacle_ratio_threshold;
 };
@@ -51,7 +50,7 @@ struct RouteMonitorInput {
     const CostMap* current_dynamic_cost_map = nullptr;
     std::vector<const CostMap*> per_step_dynamic_cost_maps;
 
-    const DirectionMap* masked_direction_map = nullptr;
+    const DirectionMap* base_direction_map = nullptr;
 
     FollowProjectionGuardParams proj_guard{};
     StepBlockReplanParams step_block{};

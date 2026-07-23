@@ -11,7 +11,6 @@
 namespace nav_executor {
 
 struct StepDetectionParams {
-    double detect_norm_threshold;
     double detect_dot_threshold;
     double path_sample_resolution;
     double profile_prepare_distance;
@@ -20,7 +19,7 @@ struct StepDetectionParams {
     double gate_transition_distance; // 约束窗软门控两侧过渡带宽度 (m)
 };
 
-// 台阶几何标注器：规划期基于方向场对样条做一次扫描，产出不可变的 StepPlanSegment 列表装入 AnnotatedPath.step_segments。
+// 台阶几何标注器：规划期基于原始方向地形本体对样条做一次扫描，产出不可变的 StepPlanSegment 列表装入 AnnotatedPath.step_segments。
 // 无状态纯函数集合，可在规划 worker 线程安全调用。
 namespace step_annotator {
 

@@ -115,8 +115,6 @@ struct TerrainTraversalConstraints {
     std::array<SelectedTerrainModes, 5> selected_modes{};
     std::shared_ptr<const CostMap> blocked_cost_layer;
 
-    [[nodiscard]] bool has_blocked_corner(const DirectionMap& direction_map, const Eigen::Vector2d& grid_coord) const;
-    [[nodiscard]] bool is_direction_prohibited(const DirectionMap& direction_map, const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, double dot_threshold) const;
     [[nodiscard]] const TraversalMode* selected_mode(uint8_t label, bool is_up) const;
 };
 
@@ -155,6 +153,7 @@ class DirectionMap {
 public:
     using Ptr = std::shared_ptr<DirectionMap>;
     using ConstPtr = std::shared_ptr<const DirectionMap>;
+    static constexpr double TERRAIN_BODY_MAGNITUDE_THRESHOLD = 0.95; // 本体 iff raw magnitude > threshold
 
     struct DirectionSample {
         Eigen::Vector2d value;
@@ -187,6 +186,11 @@ public:
     bool is_valid_coord(const Eigen::Vector2d& grid_coord) const;
 
     Eigen::Vector2d at(const Eigen::Vector2i& grid_coord) const;
+    // 严格本体语义只读取包含该位置的原始格点，不使用双线性插值。
+    double raw_magnitude_at(const Eigen::Vector2i& grid_coord) const;
+    double raw_magnitude_at(const Eigen::Vector2d& grid_coord) const;
+    bool is_terrain_body_at(const Eigen::Vector2i& grid_coord) const;
+    bool is_terrain_body_at(const Eigen::Vector2d& grid_coord) const;
     Eigen::Vector2d interpolate(const Eigen::Vector2d& grid_coord) const;
     DirectionSample interpolate_with_gradient(const Eigen::Vector2d& grid_coord) const;
 

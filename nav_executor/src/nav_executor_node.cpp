@@ -189,7 +189,7 @@ void NavExecutorNode::control_tick() {
         rm.masked_global_cost_map = route_context.masked_global.get();
         rm.current_dynamic_cost_map = current_cost_map_.get();
         rm.per_step_dynamic_cost_maps = route_context.prediction_dynamic_ptrs;
-        rm.masked_direction_map = route_context.masked_direction.get();
+        rm.base_direction_map = global_direction_map_.get();
         rm.proj_guard = proj_guard_params_;
         rm.step_block = step_block_params_;
         rm.performance = performance_replan_params_;

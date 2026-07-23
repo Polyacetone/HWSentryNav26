@@ -1,9 +1,16 @@
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <algorithm>
+#include <cmath>
 #include <numbers>
 #include <stdexcept>
 
 namespace nav_executor {
+
+namespace {
+
+constexpr uint8_t MAX_NON_BODY_ENCODED_MAGNITUDE = 229;
+
+} // anonymous namespace
 
 CostMap::CostMap(int width, int height, double resolution, double origin_x, double origin_y, const std::vector<uint8_t>& data):
     width(width), height(height), resolution(resolution), origin_x(origin_x), origin_y(origin_y), data(data) {}
@@ -78,32 +85,6 @@ Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
     return sum_grad / samples;
 }
 
-namespace {
-
-double prohibited_direction_score_impl(const Eigen::Vector2d& step_dir, const TerrainRule& rule, const Eigen::Vector2d& move_dir, double dot_threshold) {
-    if (step_dir.squaredNorm() <= 1e-12 || move_dir.squaredNorm() <= 1e-12) {
-        return 0.0;
-    }
-
-    const Eigen::Vector2d normalized_step_dir = step_dir.normalized();
-    const Eigen::Vector2d normalized_move_dir = move_dir.normalized();
-    const double alignment = normalized_move_dir.dot(normalized_step_dir);
-    const double clamped_threshold = std::clamp(dot_threshold, 0.0, 1.0);
-    const double denom = std::max(1.0 - clamped_threshold, 1e-6);
-
-    if (alignment > clamped_threshold && !rule.forward_allowed) {
-        return std::clamp((alignment - clamped_threshold) / denom, 0.0, 1.0);
-    }
-
-    if (alignment < -clamped_threshold && !rule.backward_allowed) {
-        return std::clamp((-alignment - clamped_threshold) / denom, 0.0, 1.0);
-    }
-
-    return 0.0;
-}
-
-} // anonymous namespace
-
 /*static*/ std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>>
 DirectionMap::decode_mat(const cv::Mat& mat) {
     if (mat.type() != CV_8UC3) {
@@ -117,6 +98,25 @@ DirectionMap::decode_mat(const cv::Mat& mat) {
     for (int y = 0; y < mat.rows; y++) {
         for (int x = 0; x < mat.cols; x++) {
             const cv::Vec3b val = mat.at<cv::Vec3b>(y, x);
+            if (val[2] >= TERRAIN_LABEL_COUNT) {
+                throw std::runtime_error(
+                    "Direction map has invalid terrain label at ("
+                    + std::to_string(x) + "," + std::to_string(y) + ")"
+                );
+            }
+            const bool directional_label = val[2] >= static_cast<uint8_t>(TerrainType::SLOPE);
+            if (directional_label != (val[1] > 0)) {
+                throw std::runtime_error(
+                    "Direction map violates label/magnitude invariant at ("
+                    + std::to_string(x) + "," + std::to_string(y) + ")"
+                );
+            }
+            if (val[1] > MAX_NON_BODY_ENCODED_MAGNITUDE && val[1] < 255) {
+                throw std::runtime_error(
+                    "Direction map magnitude is neither capped inflation nor terrain body at ("
+                    + std::to_string(x) + "," + std::to_string(y) + ")"
+                );
+            }
             if (val[1] == 0) {
                 dir.emplace_back(0.0, 0.0);
             } else {
@@ -155,11 +155,20 @@ DirectionMap::DirectionMap(
     origin_y(origin_y),
     data(std::move(dir_data)),
     terrain(terrain_data.empty() ? std::vector<uint8_t>(static_cast<size_t>(width) * static_cast<size_t>(height), static_cast<uint8_t>(TerrainType::FLAT)) : std::move(terrain_data)) {
+    if (width <= 0 || height <= 0 || !std::isfinite(resolution) || resolution <= 0.0
+        || !std::isfinite(origin_x) || !std::isfinite(origin_y)) {
+        throw std::runtime_error("DirectionMap geometry is invalid");
+    }
     if (static_cast<int>(this->data.size()) != width * height) {
         throw std::runtime_error("DirectionMap data size does not match width*height");
     }
     if (static_cast<int>(this->terrain.size()) != width * height) {
         throw std::runtime_error("DirectionMap terrain size does not match width*height");
+    }
+    for (size_t i = 0; i < this->data.size(); ++i) {
+        if (!this->data[i].allFinite() || this->terrain[i] >= TERRAIN_LABEL_COUNT) {
+            throw std::runtime_error("DirectionMap contains invalid cell data");
+        }
     }
 }
 
@@ -184,6 +193,23 @@ Eigen::Vector2d DirectionMap::at(const Eigen::Vector2i& grid_coord) const {
         return data[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
     }
     return {0, 0};
+}
+
+double DirectionMap::raw_magnitude_at(const Eigen::Vector2i& grid_coord) const {
+    return at(grid_coord).norm();
+}
+
+double DirectionMap::raw_magnitude_at(const Eigen::Vector2d& grid_coord) const {
+    const Eigen::Array2i floored = grid_coord.array().floor().cast<int>();
+    return raw_magnitude_at(Eigen::Vector2i(floored.x(), floored.y()));
+}
+
+bool DirectionMap::is_terrain_body_at(const Eigen::Vector2i& grid_coord) const {
+    return raw_magnitude_at(grid_coord) > TERRAIN_BODY_MAGNITUDE_THRESHOLD;
+}
+
+bool DirectionMap::is_terrain_body_at(const Eigen::Vector2d& grid_coord) const {
+    return raw_magnitude_at(grid_coord) > TERRAIN_BODY_MAGNITUDE_THRESHOLD;
 }
 
 Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) const {
@@ -236,21 +262,6 @@ const TraversalMode* TerrainTraversalConstraints::selected_mode(const uint8_t la
     return mode ? &*mode : nullptr;
 }
 
-bool TerrainTraversalConstraints::has_blocked_corner(const DirectionMap& direction_map, const Eigen::Vector2d& grid_coord) const {
-    if (!direction_map.is_valid_coord(grid_coord)) return false;
-    const int x0 = static_cast<int>(grid_coord.x());
-    const int y0 = static_cast<int>(grid_coord.y());
-    for (const Eigen::Vector2i& sample : {Eigen::Vector2i{x0, y0}, {x0 + 1, y0}, {x0, y0 + 1}, {x0 + 1, y0 + 1}}) {
-        const TerrainRule& rule = rules[direction_map.terrain_at(sample)];
-        if (!rule.forward_allowed && !rule.backward_allowed) return true;
-    }
-    return false;
-}
-
-bool TerrainTraversalConstraints::is_direction_prohibited(const DirectionMap& direction_map, const Eigen::Vector2i& grid_coord, const Eigen::Vector2d& move_dir, const double dot_threshold) const {
-    return prohibited_direction_score_impl(direction_map.at(grid_coord), rules[direction_map.terrain_at(grid_coord)], move_dir, dot_threshold) > 0.0;
-}
-
 TerrainTraversalConstraints build_terrain_traversal_constraints(
     const DirectionMap& direction_map,
     const TraversalConfiguration& configuration,
@@ -277,8 +288,14 @@ TerrainTraversalConstraints build_terrain_traversal_constraints(
         };
     }
     for (size_t i = 0; i < blocked.size(); ++i) {
-        const TerrainRule& rule = constraints.rules[direction_map.terrain[i]];
-        blocked[i] = (!rule.forward_allowed && !rule.backward_allowed) ? 255 : 0;
+        const uint8_t label = direction_map.terrain[i];
+        const TerrainRule& rule = constraints.rules[label];
+        if (label >= static_cast<uint8_t>(TerrainType::SLOPE)
+            && !rule.forward_allowed && !rule.backward_allowed) {
+            blocked[i] = static_cast<uint8_t>(std::clamp(
+                std::lround(255.0 * direction_map.data[i].norm()), 0L, 255L
+            ));
+        }
     }
     constraints.blocked_cost_layer = std::make_shared<CostMap>(
         direction_map.width, direction_map.height, direction_map.resolution, direction_map.origin_x, direction_map.origin_y, blocked

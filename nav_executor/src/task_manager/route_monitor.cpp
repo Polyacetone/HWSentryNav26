@@ -53,7 +53,6 @@ bool check_projection_guard(const RouteMonitorInput& in, rclcpp::Logger logger) 
 
 // 台阶阻塞
 struct BlockSampleStats {
-    int sample_count = 0;
     int step_sample_count = 0;
     int blocked_step_sample_count = 0;
 };
@@ -61,9 +60,11 @@ struct BlockSampleStats {
 std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, const MincoTrajectory& path) {
     const auto& p = in.step_block;
     const double lookahead_distance = std::max(0.0, p.lookahead_distance);
-    const double resolution = std::max(1e-3, p.sample_resolution);
     const bool using_predicted = !in.per_step_dynamic_cost_maps.empty();
-    const DirectionMap& direction_map = *in.masked_direction_map;
+    const double map_limited_resolution = in.base_direction_map
+        ? std::min(p.sample_resolution, in.base_direction_map->resolution * 0.5)
+        : p.sample_resolution;
+    const double resolution = map_limited_resolution;
 
     BlockSampleStats stats;
     const int samples = using_predicted
@@ -89,32 +90,48 @@ std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, 
         return u;
     };
 
+    double previous_u = std::clamp(in.route.tau, 0.0, 1.0);
     for (int i = 0; i < samples; ++i) {
         const double t = samples == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(samples - 1);
         const double u = advance_path_u(lookahead_distance * t);
 
-        const Eigen::Vector2d pos = path.position(u);
-        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(pos);
-        if (!direction_map.is_valid_coord(dir_grid)) return std::nullopt;
+        if (using_predicted) {
+            const CostMap* const cost_map =
+                in.per_step_dynamic_cost_maps[static_cast<size_t>(i)];
+            if (!cost_map) return std::nullopt;
+            for (const StepPlanSegment& segment : in.active_path->step_segments) {
+                const double overlap_begin = std::max(previous_u, segment.step_enter_u);
+                const double overlap_end = std::min(u, segment.step_exit_u);
+                if (overlap_begin > overlap_end) continue;
 
-        const double step_norm = direction_map.interpolate(dir_grid).norm();
-        const bool on_step = step_norm >= p.step_norm_threshold;
+                const double field_sample_u = 0.5 * (overlap_begin + overlap_end);
+                const Eigen::Vector2d pos = path.position(field_sample_u);
+                const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
+                if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
+                const bool blocked_dynamic =
+                    cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
+                stats.step_sample_count++;
+                if (blocked_dynamic) stats.blocked_step_sample_count++;
+            }
+            previous_u = u;
+            continue;
+        }
+
+        previous_u = u;
+        if (!in.base_direction_map) return std::nullopt;
+        const Eigen::Vector2d pos = path.position(u);
+        const Eigen::Vector2d dir_grid =
+            in.base_direction_map->map_coord_to_grid(pos);
+        if (!in.base_direction_map->is_valid_coord(dir_grid)) return std::nullopt;
+        if (!in.base_direction_map->is_terrain_body_at(dir_grid)) continue;
 
         bool blocked_dynamic = false;
-        if (using_predicted) {
-            const CostMap* const cost_map = in.per_step_dynamic_cost_maps[static_cast<size_t>(i)];
-            if (!cost_map) return std::nullopt;
-            const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
-            if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
-            blocked_dynamic = cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
-        } else if (in.current_dynamic_cost_map) {
+        if (in.current_dynamic_cost_map) {
             const Eigen::Vector2d cost_grid = in.current_dynamic_cost_map->map_coord_to_grid(pos);
             if (!in.current_dynamic_cost_map->is_valid_coord(cost_grid)) return std::nullopt;
             blocked_dynamic = in.current_dynamic_cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
         }
 
-        stats.sample_count++;
-        if (!on_step) continue;
         stats.step_sample_count++;
         if (blocked_dynamic) stats.blocked_step_sample_count++;
     }
@@ -124,7 +141,8 @@ std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, 
 
 bool check_step_blocked(const RouteMonitorInput& in, const MincoTrajectory& path, rclcpp::Logger logger) {
     const auto& p = in.step_block;
-    if (!p.enable || !in.masked_direction_map) return false;
+    if (!p.enable) return false;
+    if (in.per_step_dynamic_cost_maps.empty() && !in.base_direction_map) return false;
 
     const auto stats = sample_block_stats(in, path);
     if (!stats || stats->step_sample_count == 0) return false;

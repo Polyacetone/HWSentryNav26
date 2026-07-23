@@ -7,9 +7,10 @@
       dynamic_points_pub_topic: "/map_server/debug/dynamic_obstacle_points" # 动态障碍物点云发布话题名称
 
     map_inflation: # 全局与局部统一的代价地图/方向场膨胀参数（单位：米，自动根据地图分辨率换算为像素）
-      robot_radius_m: 0.1 # 膨胀保持半径（米），该距离内代价/模长保持为源值
+      robot_radius_m: 0.1 # 膨胀平台半径（米）；障碍代价保持255，方向场非本体保持到独立 cap
       cutoff_radius_m: 0.3 # 膨胀截断半径（米），超过该距离不再膨胀
-      decay_alpha: 1.2 # 指数衰减系数，越大衰减越快
+      decay_alpha: 1.2 # 指数衰减系数（像素距离语义），越大衰减越快
+      direction_non_body_magnitude_cap: 0.9 # 非原始方向地形本体格的模长上限；uint8 向下量化为 229/255，本体固定为 1
 
     global_map:
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图

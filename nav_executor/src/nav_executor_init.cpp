@@ -102,10 +102,18 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         .enable = declare_parameter<bool>("task_manager.route_monitor.step_block.enable"),
         .lookahead_distance = declare_parameter<double>("task_manager.route_monitor.step_block.lookahead_distance"),
         .sample_resolution = declare_parameter<double>("task_manager.route_monitor.step_block.sample_resolution"),
-        .step_norm_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.step_norm_threshold"),
         .obstacle_cost_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.obstacle_cost_threshold"),
         .predicted_obstacle_ratio_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.predicted_obstacle_ratio_threshold")
     };
+    require_parameter(
+        nonnegative_finite(step_block_params_.lookahead_distance)
+        && positive_finite(step_block_params_.sample_resolution)
+        && step_block_params_.obstacle_cost_threshold >= 0.0
+        && step_block_params_.obstacle_cost_threshold <= 255.0
+        && step_block_params_.predicted_obstacle_ratio_threshold >= 0.0
+        && step_block_params_.predicted_obstacle_ratio_threshold <= 1.0,
+        "route_monitor step_block parameters are invalid"
+    );
     performance_replan_params_ = {
         .lookahead_distance = declare_parameter<double>("task_manager.route_monitor.performance.lookahead_distance")
     };
@@ -477,10 +485,15 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .terrain_gate = {
             .norm_lo = declare_parameter<double>("path_planner.minco.terrain_gate.norm_lo"),
             .norm_hi = declare_parameter<double>("path_planner.minco.terrain_gate.norm_hi"),
+            .motion_speed_scale = declare_parameter<double>(
+                "path_planner.minco.terrain_gate.motion_speed_scale"
+            ),
         },
         .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.samples_per_segment")),
         .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.minco.max_iterations")),
         .min_segment_time = declare_parameter<double>("path_planner.minco.min_segment_time"),
+        .runup_body_norm_lo = declare_parameter<double>("path_planner.minco.runup.body_norm_lo"),
+        .runup_body_norm_hi = declare_parameter<double>("path_planner.minco.runup.body_norm_hi"),
         .runup_saturation_length = declare_parameter<double>("path_planner.minco.runup.saturation_length"),
         .runup_transition_distance = declare_parameter<double>("path_planner.minco.runup.transition_distance"),
         .debug_check_gradient = enable_debug_,
@@ -488,7 +501,6 @@ PlannerConfig NavExecutorNode::load_planner_config() {
     };
 
     c.step_detection = {
-        .detect_norm_threshold = declare_parameter<double>("path_planner.step.detection.detect_norm_threshold"),
         .detect_dot_threshold = declare_parameter<double>("path_planner.step.detection.detect_dot_threshold"),
         .path_sample_resolution = declare_parameter<double>("path_planner.step.detection.path_sample_resolution"),
         .profile_prepare_distance = declare_parameter<double>("path_planner.step.execution.profile_prepare_distance"),
@@ -515,6 +527,10 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         ),
     };
     require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in [0, 255]");
+    require_parameter(
+        c.on_step_threshold > 0.0 && c.on_step_threshold <= 1.0,
+        "path_planner on_step_threshold must be finite and in (0, 1]"
+    );
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
     require_parameter(c.kinodynamic.state_limits.velocity.min < c.kinodynamic.state_limits.velocity.max, "kinodynamic vel_min must be smaller than vel_max");
     require_parameter(
@@ -533,8 +549,26 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         "kinodynamic sample counts and max_expansions must be positive"
     );
     require_parameter(
-        c.minco.trajectory_limits.velocity.min < c.minco.trajectory_limits.velocity.max,
+        std::isfinite(c.minco.trajectory_limits.velocity.min)
+        && std::isfinite(c.minco.trajectory_limits.velocity.max)
+        && c.minco.trajectory_limits.velocity.min < c.minco.trajectory_limits.velocity.max,
         "MINCO vel_min must be smaller than vel_max"
+    );
+    const auto& minco_weights = c.minco.weights;
+    require_parameter(
+        nonnegative_finite(minco_weights.energy)
+        && nonnegative_finite(minco_weights.time)
+        && nonnegative_finite(minco_weights.obstacle)
+        && nonnegative_finite(minco_weights.trajectory_velocity)
+        && nonnegative_finite(minco_weights.lateral_acc)
+        && nonnegative_finite(minco_weights.omega)
+        && nonnegative_finite(minco_weights.accel)
+        && nonnegative_finite(minco_weights.traversal_alignment)
+        && nonnegative_finite(minco_weights.traversal_velocity_target)
+        && nonnegative_finite(minco_weights.prohibited_traversal)
+        && nonnegative_finite(minco_weights.runup_accel)
+        && nonnegative_finite(minco_weights.runup_omega),
+        "MINCO penalty weights must be finite and non-negative"
     );
     require_parameter(
         positive_finite(c.minco.trajectory_limits.angular_velocity_max)
@@ -548,18 +582,33 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         "MINCO sample and iteration counts must be positive"
     );
     require_parameter(
-        positive_finite(c.minco.runup_saturation_length)
+        c.minco.runup_body_norm_lo >= 0.9
+        && c.minco.runup_body_norm_hi > c.minco.runup_body_norm_lo
+        && c.minco.runup_body_norm_hi <= 1.0
+        && positive_finite(c.minco.runup_saturation_length)
         && nonnegative_finite(c.minco.runup_transition_distance),
-        "MINCO runup saturation length must be positive and transition distance nonnegative"
+        "MINCO runup body gate or distance parameters are invalid"
     );
     require_parameter(
         c.minco.terrain_gate.norm_lo >= 0.0
-        && c.minco.terrain_gate.norm_hi > c.minco.terrain_gate.norm_lo,
-        "MINCO terrain_gate requires 0 <= norm_lo < norm_hi"
+        && c.minco.terrain_gate.norm_hi > c.minco.terrain_gate.norm_lo
+        && c.minco.terrain_gate.norm_hi <= 1.0
+        && positive_finite(c.minco.terrain_gate.motion_speed_scale),
+        "MINCO terrain_gate or motion_speed_scale is invalid"
     );
     require_parameter(
         c.trajectory_validation.samples_per_segment > 0,
         "trajectory validation samples_per_segment must be positive"
+    );
+    require_parameter(
+        c.step_detection.detect_dot_threshold > 0.0
+        && c.step_detection.detect_dot_threshold <= 1.0
+        && positive_finite(c.step_detection.path_sample_resolution)
+        && nonnegative_finite(c.step_detection.profile_prepare_distance)
+        && nonnegative_finite(c.step_detection.chassis_activation_distance)
+        && nonnegative_finite(c.step_detection.fsm_release_distance)
+        && nonnegative_finite(c.step_detection.gate_transition_distance),
+        "step detection/execution parameters are invalid"
     );
     require_parameter(
         nonnegative_finite(c.trajectory_validation.velocity_tolerance)

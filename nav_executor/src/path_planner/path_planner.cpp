@@ -107,7 +107,6 @@ bool validate_trajectory(
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
     const int occupied_threshold,
-    const double step_norm_threshold,
     const double step_alignment_threshold,
     const MincoOptimizer::TrajectoryLimits& limits,
     const PlannerConfig::TrajectoryValidationParams& validation,
@@ -117,6 +116,11 @@ bool validate_trajectory(
     const double total_time = trajectory.total_time();
     if (!std::isfinite(total_time) || total_time <= 0.0) {
         error = "trajectory has invalid total time";
+        return false;
+    }
+    const double total_arc_length = trajectory.total_arc_length();
+    if (!std::isfinite(total_arc_length) || total_arc_length < 0.0) {
+        error = "trajectory has invalid total arc length";
         return false;
     }
     const auto self_intersection = find_disallowed_self_intersection(
@@ -133,13 +137,8 @@ bool validate_trajectory(
             + std::to_string(self_intersection->second_segment);
         return false;
     }
-    const int samples_per_segment = std::max(validation.samples_per_segment, 1);
-    for (int segment = 0; segment < trajectory.segment_count(); ++segment) {
-        const double tau_begin = trajectory.segment_boundary_tau(segment);
-        const double tau_end = trajectory.segment_boundary_tau(segment + 1);
-        for (int sample = 0; sample <= samples_per_segment; ++sample) {
-            const double fraction = static_cast<double>(sample) / static_cast<double>(samples_per_segment);
-            const double tau = std::lerp(tau_begin, tau_end, fraction);
+
+    const auto validate_sample = [&](const double tau, const bool check_dynamics) {
         const TrajSample s = trajectory.eval(tau);
         if (!s.p.allFinite() || !std::isfinite(s.theta) || !s.dp_dtau.allFinite()
             || !s.ddp_dtau.allFinite() || !std::isfinite(s.dtheta_dtau)) {
@@ -151,56 +150,59 @@ bool validate_trajectory(
                 + " dtheta_dtau=" + std::to_string(s.dtheta_dtau);
             return false;
         }
-        const Eigen::Vector2d acceleration = s.ddp_dtau / (total_time * total_time);
         const double longitudinal_velocity = trajectory.longitudinal_velocity(s);
         const double omega = trajectory.angular_velocity(s);
-        // 非完整约束在平坦表示下恒等满足（θ=atan2(gear·ṗ)），无需校验。
-        if (longitudinal_velocity < limits.velocity.min - validation.velocity_tolerance
-            || longitudinal_velocity > limits.velocity.max + validation.velocity_tolerance) {
-            error = "trajectory violates velocity limit at tau=" + std::to_string(tau)
-                + ": v=" + std::to_string(longitudinal_velocity)
-                + " (allowed=[" + std::to_string(limits.velocity.min)
-                + "," + std::to_string(limits.velocity.max)
-                + "], tolerance=" + std::to_string(validation.velocity_tolerance) + ")";
-            return false;
+        if (check_dynamics) {
+            const Eigen::Vector2d acceleration = s.ddp_dtau / (total_time * total_time);
+            // 非完整约束在平坦表示下恒等满足（θ=atan2(gear·ṗ)），无需校验。
+            if (longitudinal_velocity < limits.velocity.min - validation.velocity_tolerance
+                || longitudinal_velocity > limits.velocity.max + validation.velocity_tolerance) {
+                error = "trajectory violates velocity limit at tau=" + std::to_string(tau)
+                    + ": v=" + std::to_string(longitudinal_velocity)
+                    + " (allowed=[" + std::to_string(limits.velocity.min)
+                    + "," + std::to_string(limits.velocity.max)
+                    + "], tolerance=" + std::to_string(validation.velocity_tolerance) + ")";
+                return false;
+            }
+            if (std::abs(omega)
+                > limits.angular_velocity_max + validation.omega_tolerance) {
+                error = "trajectory violates angular velocity limit at tau=" + std::to_string(tau)
+                    + ": |omega|=" + std::to_string(std::abs(omega))
+                    + " > angular_velocity_max="
+                    + std::to_string(limits.angular_velocity_max)
+                    + " + tolerance=" + std::to_string(validation.omega_tolerance)
+                    + " = " + std::to_string(
+                        limits.angular_velocity_max + validation.omega_tolerance
+                    );
+                return false;
+            }
+            if (acceleration.norm()
+                > limits.acceleration_max + validation.acceleration_tolerance) {
+                error = "trajectory violates acceleration limit at tau=" + std::to_string(tau)
+                    + ": |acc|=" + std::to_string(acceleration.norm())
+                    + " > acceleration_max=" + std::to_string(limits.acceleration_max)
+                    + " + tolerance=" + std::to_string(validation.acceleration_tolerance)
+                    + " = " + std::to_string(
+                        limits.acceleration_max + validation.acceleration_tolerance
+                    );
+                return false;
+            }
+            if (std::abs(longitudinal_velocity * omega)
+                > limits.lateral_acceleration_max
+                    + validation.lateral_acceleration_tolerance) {
+                error = "trajectory violates lateral acceleration limit at tau=" + std::to_string(tau)
+                    + ": |v*omega|=" + std::to_string(std::abs(longitudinal_velocity * omega))
+                    + " > lateral_acceleration_max="
+                    + std::to_string(limits.lateral_acceleration_max)
+                    + " + tolerance=" + std::to_string(validation.lateral_acceleration_tolerance)
+                    + " = " + std::to_string(
+                        limits.lateral_acceleration_max
+                        + validation.lateral_acceleration_tolerance
+                    );
+                return false;
+            }
         }
-        if (std::abs(omega)
-            > limits.angular_velocity_max + validation.omega_tolerance) {
-            error = "trajectory violates angular velocity limit at tau=" + std::to_string(tau)
-                + ": |omega|=" + std::to_string(std::abs(omega))
-                + " > angular_velocity_max="
-                + std::to_string(limits.angular_velocity_max)
-                + " + tolerance=" + std::to_string(validation.omega_tolerance)
-                + " = " + std::to_string(
-                    limits.angular_velocity_max + validation.omega_tolerance
-                );
-            return false;
-        }
-        if (acceleration.norm()
-            > limits.acceleration_max + validation.acceleration_tolerance) {
-            error = "trajectory violates acceleration limit at tau=" + std::to_string(tau)
-                + ": |acc|=" + std::to_string(acceleration.norm())
-                + " > acceleration_max=" + std::to_string(limits.acceleration_max)
-                + " + tolerance=" + std::to_string(validation.acceleration_tolerance)
-                + " = " + std::to_string(
-                    limits.acceleration_max + validation.acceleration_tolerance
-                );
-            return false;
-        }
-        if (std::abs(longitudinal_velocity * omega)
-            > limits.lateral_acceleration_max
-                + validation.lateral_acceleration_tolerance) {
-            error = "trajectory violates lateral acceleration limit at tau=" + std::to_string(tau)
-                + ": |v*omega|=" + std::to_string(std::abs(longitudinal_velocity * omega))
-                + " > lateral_acceleration_max="
-                + std::to_string(limits.lateral_acceleration_max)
-                + " + tolerance=" + std::to_string(validation.lateral_acceleration_tolerance)
-                + " = " + std::to_string(
-                    limits.lateral_acceleration_max
-                    + validation.lateral_acceleration_tolerance
-                );
-            return false;
-        }
+
         const Eigen::Vector2d grid = cost_map.map_coord_to_grid(s.p);
         if (!cost_map.is_valid_coord(grid)) {
             error = "trajectory leaves planning map at tau=" + std::to_string(tau);
@@ -218,17 +220,29 @@ bool validate_trajectory(
             error = "trajectory leaves direction map at tau=" + std::to_string(tau);
             return false;
         }
-        const uint8_t label = direction_map.terrain_at(dir_grid);
-        const Eigen::Vector2d raw_dir = direction_map.interpolate(dir_grid);
-        if (label >= static_cast<uint8_t>(TerrainType::SLOPE)
-            && raw_dir.norm() >= step_norm_threshold) {
+        if (direction_map.is_terrain_body_at(dir_grid)) {
+            if (s.gear < 0.0) {
+                error = "trajectory reverses on directional terrain body at tau="
+                    + std::to_string(tau);
+                return false;
+            }
+            const Eigen::Array2i cell_array = dir_grid.array().floor().cast<int>();
+            const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
+            const uint8_t label = direction_map.terrain_at(cell);
+            const Eigen::Vector2d raw_dir = direction_map.at(cell);
+            if (label < static_cast<uint8_t>(TerrainType::SLOPE)
+                || raw_dir.squaredNorm() <= 1e-12) {
+                error = "trajectory encountered invalid directional terrain body at tau="
+                    + std::to_string(tau);
+                return false;
+            }
             const Eigen::Vector2d dir = raw_dir.normalized();
             const Eigen::Vector2d heading(std::cos(s.theta), std::sin(s.theta));
             const double alignment = heading.dot(dir);
-            if (std::abs(alignment) < step_alignment_threshold) {
+            if (std::abs(alignment) <= step_alignment_threshold) {
                 error = "trajectory is not aligned with directional terrain at tau=" + std::to_string(tau)
                     + ": |heading.dot(dir)|=" + std::to_string(std::abs(alignment))
-                    + " < threshold=" + std::to_string(step_alignment_threshold);
+                    + " <= threshold=" + std::to_string(step_alignment_threshold);
                 return false;
             }
             const bool going_up = alignment >= 0.0;
@@ -265,7 +279,32 @@ bool validate_trajectory(
                 }
             }
         }
+        return true;
+    };
+
+    // 时间均匀采样负责动态量硬验收，并同时复用同一个位置/地形检查器。
+    const int samples_per_segment = std::max(validation.samples_per_segment, 1);
+    for (int segment = 0; segment < trajectory.segment_count(); ++segment) {
+        const double tau_begin = trajectory.segment_boundary_tau(segment);
+        const double tau_end = trajectory.segment_boundary_tau(segment + 1);
+        for (int sample = 0; sample <= samples_per_segment; ++sample) {
+            const double fraction = static_cast<double>(sample)
+                / static_cast<double>(samples_per_segment);
+            const double tau = std::lerp(tau_begin, tau_end, fraction);
+            if (!validate_sample(tau, true)) return false;
         }
+    }
+
+    // 额外按弧长采样，避免物理本体缩窄为原始格后被固定 tau 网格跨过。
+    const double max_spatial_spacing = direction_map.resolution * 0.5;
+    const int spatial_intervals = std::max(
+        1, static_cast<int>(std::ceil(total_arc_length / max_spatial_spacing))
+    );
+    for (int sample = 0; sample <= spatial_intervals; ++sample) {
+        const double arc_length = total_arc_length * static_cast<double>(sample)
+            / static_cast<double>(spatial_intervals);
+        const double tau = trajectory.tau_at_arc_length(arc_length);
+        if (!validate_sample(tau, false)) return false;
     }
     return true;
 }
@@ -346,17 +385,25 @@ void PathPlanner::worker_loop() {
 
 // ═══════════════════════ 规划期几何工具 ═══════════════════════
 
-bool PathPlanner::is_map_point_feasible(const CostMap& cost_map, const DirectionMap& direction_map, const TerrainTraversalConstraints& terrain_constraints, const Eigen::Vector2d& map_pt) const {
+bool PathPlanner::is_map_point_feasible(
+    const CostMap& cost_map,
+    const DirectionMap& direction_map,
+    const Eigen::Vector2d& map_pt
+) const {
     const Eigen::Vector2d cost_grid = cost_map.map_coord_to_grid(map_pt);
     const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(map_pt);
     if (!cost_map.is_valid_coord(cost_grid) || !direction_map.is_valid_coord(dir_grid)) return false;
 
     return cost_map.interpolate(cost_grid) < config_.occupied_threshold
-        && direction_map.interpolate(dir_grid).norm() < config_.on_step_threshold
-        && !terrain_constraints.has_blocked_corner(direction_map, dir_grid);
+        && direction_map.interpolate(dir_grid).norm() < config_.on_step_threshold;
 }
 
-Eigen::Vector2d PathPlanner::adjust_reachable_start_on_segment(const PlanRequest& req, const Eigen::Vector2d& from_map, const Eigen::Vector2d& to_map) const {
+Eigen::Vector2d PathPlanner::adjust_reachable_start_on_segment(
+    const CostMap& cost_map,
+    const DirectionMap& direction_map,
+    const Eigen::Vector2d& from_map,
+    const Eigen::Vector2d& to_map
+) const {
     const Eigen::Vector2d delta = to_map - from_map;
     const double length = delta.norm();
     if (length <= 1e-6) return from_map;
@@ -369,24 +416,28 @@ Eigen::Vector2d PathPlanner::adjust_reachable_start_on_segment(const PlanRequest
     for (int i = 0; i <= n; ++i) {
         const double d = length * (static_cast<double>(i) / static_cast<double>(n));
         const Eigen::Vector2d pt = from_map + dir * d;
-        if (!is_map_point_feasible(*req.merged_cost_map, *req.direction_map, req.terrain_constraints, pt)) break;
+        if (!is_map_point_feasible(cost_map, direction_map, pt)) break;
         last_feasible = pt;
     }
     return last_feasible;
 }
 
-std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(const PlanRequest& req, const Eigen::Vector2d& map_pt, const double max_nudge_distance) const {
-    const CostMap& merged = *req.merged_cost_map;
-    const DirectionMap& dir = *req.direction_map;
-    const Eigen::Vector2d grid_pt = merged.map_coord_to_grid(map_pt);
-    const int width = merged.width;
-    const int height = merged.height;
+std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
+    const CostMap& cost_map,
+    const DirectionMap& direction_map,
+    const Eigen::Vector2d& map_pt,
+    const double max_nudge_distance
+) const {
+    const Eigen::Vector2d grid_pt = cost_map.map_coord_to_grid(map_pt);
+    const int width = cost_map.width;
+    const int height = cost_map.height;
 
     const auto key = [width](const int x, const int y) {
         return static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
     };
 
-    if (merged.is_valid_coord(grid_pt) && is_map_point_feasible(merged, dir, req.terrain_constraints, map_pt)) {
+    if (cost_map.is_valid_coord(grid_pt)
+        && is_map_point_feasible(cost_map, direction_map, map_pt)) {
         return map_pt;
     }
 
@@ -406,11 +457,11 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(const PlanReques
         const auto current = q.front();
         q.pop();
 
-        const double dist = (current.cast<double>() - grid_pt).norm() * merged.resolution;
+        const double dist = (current.cast<double>() - grid_pt).norm() * cost_map.resolution;
         if (dist > max_nudge_distance) continue;
 
-        const Eigen::Vector2d candidate_map = merged.grid_coord_to_map(current.cast<double>());
-        if (is_map_point_feasible(merged, dir, req.terrain_constraints, candidate_map)) {
+        const Eigen::Vector2d candidate_map = cost_map.grid_coord_to_map(current.cast<double>());
+        if (is_map_point_feasible(cost_map, direction_map, candidate_map)) {
             return candidate_map;
         }
 
@@ -418,7 +469,8 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(const PlanReques
             const int nx = current.x() + dx[i];
             const int ny = current.y() + dy[i];
             if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-            const double ndist = (Eigen::Vector2d(nx, ny) - grid_pt).norm() * merged.resolution;
+            const double ndist = (Eigen::Vector2d(nx, ny) - grid_pt).norm()
+                * cost_map.resolution;
             if (ndist > max_nudge_distance) continue;
             const size_t nk = key(nx, ny);
             if (visited[nk]) continue;
@@ -430,7 +482,11 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(const PlanReques
     return std::nullopt;
 }
 
-Eigen::Vector2d PathPlanner::predict_start_map(const PlanRequest& req) const {
+Eigen::Vector2d PathPlanner::predict_start_map(
+    const PlanRequest& req,
+    const CostMap& cost_map,
+    const DirectionMap& direction_map
+) const {
     const Eigen::Vector2d current_map = req.current_pos_map;
     if (!config_.start_prediction_enable) return current_map;
 
@@ -444,7 +500,9 @@ Eigen::Vector2d PathPlanner::predict_start_map(const PlanRequest& req) const {
     const double total_distance = brake_distance + delay_distance;
 
     const Eigen::Vector2d predicted = current_map + heading_dir * total_distance;
-    return adjust_reachable_start_on_segment(req, current_map, predicted);
+    return adjust_reachable_start_on_segment(
+        cost_map, direction_map, current_map, predicted
+    );
 }
 
 // ═══════════════════════ 规划主流程 ═══════════════════════
@@ -463,56 +521,72 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const Eigen::Vector2d goal_map = req.goal.position_map;
     const bool fixed = req.goal.fixed;
 
-    // ── 近距离短路判断：robot-to-goal ──
-    if ((req.current_pos_map - goal_map).norm() < config_.goal_reached_distance) {
-        result.kind = fixed ? PlanResult::Kind::USE_AS_FIXED_GOAL : PlanResult::Kind::COMPLETE_NO_PLAN_NEEDED;
-        RCLCPP_INFO(
-            logger_, "Goal within reached distance (%.2f m): %s",
-            config_.goal_reached_distance, fixed ? "USE_AS_FIXED_GOAL" : "COMPLETE_NO_PLAN_NEEDED"
-        );
-        return result;
-    }
-
     const auto fail = [&](const std::string& msg) {
         RCLCPP_ERROR(logger_, "Plan failed: %s", msg.c_str());
         result.kind = PlanResult::Kind::FAILED;
         return result;
     };
 
-    Eigen::Vector2d start_map = predict_start_map(req);
+    const CostMap global_feasibility_cost = req.global_cost_map->merge(
+        *req.terrain_constraints.blocked_cost_layer
+    );
+    const CostMap planning_cost_map = req.merged_cost_map->merge(
+        *req.terrain_constraints.blocked_cost_layer
+    );
+
+    Eigen::Vector2d start_map = predict_start_map(
+        req, planning_cost_map, *req.direction_map
+    );
     Eigen::Vector2d goal_plan = goal_map;
 
     // ── 起点 global 严格检查 ──
     {
-        const Eigen::Vector2d sg = req.global_cost_map->map_coord_to_grid(start_map);
-        if (!req.global_cost_map->is_valid_coord(sg)) return fail("Start is out of bound");
-        if (!is_map_point_feasible(*req.global_cost_map, *req.direction_map, req.terrain_constraints, start_map)) return fail("Start is not feasible on global map");
+        const Eigen::Vector2d sg = global_feasibility_cost.map_coord_to_grid(start_map);
+        if (!global_feasibility_cost.is_valid_coord(sg)) return fail("Start is out of bound");
+        if (!is_map_point_feasible(global_feasibility_cost, *req.direction_map, start_map)) return fail("Start is not feasible on global map");
     }
 
     // ── 起点 nudge（merged 上最近 free）──
     {
-        const auto nudged = nudge_point_to_free(req, start_map, config_.nudge_max_distance);
+        const auto nudged = nudge_point_to_free(
+            planning_cost_map, *req.direction_map, start_map, config_.nudge_max_distance
+        );
         if (!nudged) return fail("Cannot nudge start to a free cell");
         start_map = *nudged;
     }
 
     // ── 终点 global 严格检查 ──
     {
-        const Eigen::Vector2d gg = req.global_cost_map->map_coord_to_grid(goal_map);
-        if (!req.global_cost_map->is_valid_coord(gg)) return fail("Goal is out of bound");
-        if (!is_map_point_feasible(*req.global_cost_map, *req.direction_map, req.terrain_constraints, goal_map)) return fail("Goal is not feasible on global map");
+        const Eigen::Vector2d gg = global_feasibility_cost.map_coord_to_grid(goal_map);
+        if (!global_feasibility_cost.is_valid_coord(gg)) return fail("Goal is out of bound");
+        if (!is_map_point_feasible(global_feasibility_cost, *req.direction_map, goal_map)) return fail("Goal is not feasible on global map");
     }
 
     // ── 终点 merged 检查 / nudge（取决于 fixed）──
     if (fixed) {
-        if (!is_map_point_feasible(*req.merged_cost_map, *req.direction_map, req.terrain_constraints, goal_map)) return fail("Fixed goal is occupied by a dynamic obstacle");
+        if (!is_map_point_feasible(planning_cost_map, *req.direction_map, goal_map)) return fail("Fixed goal is occupied by a dynamic obstacle");
     } else {
-        const auto nudged = nudge_point_to_free(req, goal_map, config_.nudge_max_distance);
+        const auto nudged = nudge_point_to_free(
+            planning_cost_map, *req.direction_map, goal_map, config_.nudge_max_distance
+        );
         if (!nudged) return fail("Cannot nudge goal to a free cell");
         goal_plan = *nudged;
     }
 
-    const CostMap planning_cost_map = req.merged_cost_map->merge(*req.terrain_constraints.blocked_cost_layer);
+    // ── 近距离短路判断：仅在起终点通过完整安全检查后，按最终可执行目标判定 ──
+    if ((req.current_pos_map - goal_plan).norm() < config_.goal_reached_distance) {
+        result.goal_pos = goal_plan;
+        result.kind = fixed
+            ? PlanResult::Kind::USE_AS_FIXED_GOAL
+            : PlanResult::Kind::COMPLETE_NO_PLAN_NEEDED;
+        RCLCPP_INFO(
+            logger_, "Feasible goal within reached distance (%.2f m): %s",
+            config_.goal_reached_distance,
+            fixed ? "USE_AS_FIXED_GOAL" : "COMPLETE_NO_PLAN_NEEDED"
+        );
+        return result;
+    }
+
     const Eigen::Vector2d goal_grid = planning_cost_map.map_coord_to_grid(goal_plan);
     const double dist = (goal_plan - start_map).norm();
 
@@ -541,18 +615,19 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
         const Eigen::Vector2d dg = direction_map->map_coord_to_grid(map_pt);
         if (!direction_map->is_valid_coord(dg)) return false;
-        const uint8_t label = direction_map->terrain_at(dg);
-        const Eigen::Vector2d raw_dir = direction_map->interpolate(dg);
+        if (!direction_map->is_terrain_body_at(dg)) return true;
+        const Eigen::Array2i cell_array = dg.array().floor().cast<int>();
+        const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
+        const uint8_t label = direction_map->terrain_at(cell);
+        const Eigen::Vector2d raw_dir = direction_map->at(cell);
         if (label < static_cast<uint8_t>(TerrainType::SLOPE)
-            || raw_dir.norm() < config.step_detection.detect_norm_threshold) {
-            return true;
-        }
+            || raw_dir.squaredNorm() <= 1e-12) return false;
 
         const Eigen::Vector2d displacement(to.x - from.x, to.y - from.y);
         if (displacement.norm() < 1e-6) return false;
         const Eigen::Vector2d dir = raw_dir.normalized();
         const double travel_alignment = displacement.normalized().dot(dir);
-        if (std::abs(travel_alignment) < config.step_detection.detect_dot_threshold) return false;
+        if (std::abs(travel_alignment) <= config.step_detection.detect_dot_threshold) return false;
         const TraversalMode* rule = terrain.selected_mode(label, travel_alignment >= 0.0);
         if (!rule) return false;
 
@@ -561,7 +636,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             && to.v <= rule->velocity_window.max + 1e-6;
     };
 
-    // 位置容差内仍需证明可由 MINCO 在一条短、平坦、无碰撞连接段上精确接到目标。
+    // 位置容差内仍需证明可由 MINCO 在一条短、无方向地形本体、无碰撞连接段上精确接到目标。
     // 该 predicate 防止目标在台阶另一侧时，搜索在台阶前提前成功。
     const auto goal_reached = [
         planning_map_ptr,
@@ -583,9 +658,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             }
             const Eigen::Vector2d direction_grid = direction_map->map_coord_to_grid(point);
             if (!direction_map->is_valid_coord(direction_grid)) return false;
-            if (direction_map->terrain_at(direction_grid) >= static_cast<uint8_t>(TerrainType::SLOPE)
-                && direction_map->interpolate(direction_grid).norm()
-                    >= config.step_detection.detect_norm_threshold) {
+            if (direction_map->is_terrain_body_at(direction_grid)) {
                 return false;
             }
         }
@@ -603,7 +676,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     MincoOptimizer::Params minco_params = config_.minco;
 
     std::vector<KinodynamicAstar::State> seed_states_raw;
-    bool direct_segment_is_flat = true;
+    bool direct_segment_avoids_terrain_body = true;
     if (dist > 1e-9) {
         const int samples = std::max(2, static_cast<int>(std::ceil(dist / 0.03)) + 1);
         for (int i = 0; i <= samples; ++i) {
@@ -611,14 +684,13 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
                 + (goal_plan - start_map) * (static_cast<double>(i) / static_cast<double>(samples));
             const Eigen::Vector2d dg = req.direction_map->map_coord_to_grid(p);
             if (req.direction_map->is_valid_coord(dg)
-                && req.direction_map->terrain_at(dg) >= static_cast<uint8_t>(TerrainType::SLOPE)
-                && req.direction_map->interpolate(dg).norm() >= config_.step_detection.detect_norm_threshold) {
-                direct_segment_is_flat = false;
+                && req.direction_map->is_terrain_body_at(dg)) {
+                direct_segment_avoids_terrain_body = false;
                 break;
             }
         }
     }
-    if (dist < config_.skip_distance && direct_segment_is_flat) {
+    if (dist < config_.skip_distance && direct_segment_avoids_terrain_body) {
         // 近距离直连：起点 + 终点两状态，MINCO 直接优化。
         KinodynamicAstar::State goal_state;
         goal_state.x = goal_plan.x();
@@ -635,7 +707,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto kinodynamic_done = std::chrono::steady_clock::now();
 
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
-    // A* predicate 已证明容差内末节点存在平坦短连接；显式追加精确目标，不改写搜索状态。
+    // A* predicate 已证明容差内末节点存在无地形本体的短连接；显式追加精确目标，不改写搜索状态。
     if (std::hypot(seed_states_raw.back().x - goal_plan.x(), seed_states_raw.back().y - goal_plan.y()) > 1e-9) {
         KinodynamicAstar::State exact_goal = seed_states_raw.back();
         exact_goal.x = goal_plan.x();
@@ -707,7 +779,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             *req.direction_map,
             req.terrain_constraints,
             config_.occupied_threshold,
-            config_.step_detection.detect_norm_threshold,
             config_.step_detection.detect_dot_threshold,
             minco_params.trajectory_limits,
             config_.trajectory_validation,

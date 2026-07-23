@@ -36,8 +36,8 @@ public:
         double traversal_alignment = 200.0;
         double traversal_velocity_target = 200.0; // 台阶区域共享速度窗口的软目标
         double prohibited_traversal = 1000.0;
-        double runup_accel = 100.0;    // 台阶及其助跑区内的 ‖a‖² 正则
-        double runup_omega = 100.0;    // 台阶及其助跑区内的 ω² 正则
+        double runup_accel = 100.0;    // 台阶场及其助跑区内的 ‖a‖² 正则
+        double runup_omega = 100.0;    // 台阶场及其助跑区内的 ω² 正则
     };
 
     struct TrajectoryLimits {
@@ -54,6 +54,7 @@ public:
     struct TerrainGate {
         double norm_lo = 0.1; // ‖dir‖ 下限：低于则方向地形罚为零
         double norm_hi = 0.9; // ‖dir‖ 上限：高于则方向地形罚全强度
+        double motion_speed_scale = 0.05; // 低速方向/速度正则尺度 (m/s)
     };
 
     struct Params {
@@ -63,6 +64,8 @@ public:
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;
         double min_segment_time = 0.05;
+        double runup_body_norm_lo = 0.9; // 助跑源仅由物理本体附近激活
+        double runup_body_norm_hi = 0.95;
         double runup_saturation_length = 0.05; // 前向地形暴露积分达到该弧长后基本饱和
         double runup_transition_distance = 0.1; // run_up 外侧的平滑弧长过渡带
         bool debug_check_gradient = false;    // 若开：optimize 起始处对比解析梯度 vs 有限差分并记录

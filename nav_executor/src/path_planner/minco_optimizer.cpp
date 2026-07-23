@@ -18,7 +18,6 @@ constexpr double OMEGA_SPEED_REG = 0.05;
 constexpr double OMEGA_SPEED_REG_SQ = OMEGA_SPEED_REG * OMEGA_SPEED_REG;
 
 inline double violation(double g) { return std::max(g, 0.0); }
-inline double violation_grad(double g) { return g > 0.0 ? 1.0 : 0.0; }
 
 // 用 C1 过渡启停地形罚，避免台阶边界出现代价跳变。
 inline std::pair<double, double> smoothstep_gate(double x, double lo, double hi) {
@@ -41,6 +40,32 @@ inline std::pair<double, double> runup_distance_gate(
     const double value = x * x * (3.0 - 2.0 * x);
     const double derivative = -6.0 * x * (1.0 - x) / transition;
     return {value, derivative};
+}
+
+struct SmoothMotion {
+    double speed = 0.0;
+    Eigen::Vector2d speed_gradient = Eigen::Vector2d::Zero();
+    Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+    Eigen::Matrix2d direction_jacobian = Eigen::Matrix2d::Zero();
+};
+
+SmoothMotion smooth_motion(const Eigen::Vector2d& velocity, const double speed_scale) {
+    const double speed_squared = velocity.squaredNorm();
+    const double scale_squared = speed_scale * speed_scale;
+    const double denominator_squared = speed_squared + scale_squared;
+    const double denominator = std::sqrt(denominator_squared);
+    const double denominator_cubed = denominator_squared * denominator;
+
+    // s=q/sqrt(D): ds/dv=(q+2v0²)v/D^(3/2)；u=v/sqrt(D): du/dv=I/sqrt(D)-vvᵀ/D^(3/2)。
+    SmoothMotion result;
+    result.speed = speed_squared / denominator;
+    result.speed_gradient = velocity * (
+        (speed_squared + 2.0 * scale_squared) / denominator_cubed
+    );
+    result.direction = velocity / denominator;
+    result.direction_jacobian = Eigen::Matrix2d::Identity() / denominator
+        - velocity * velocity.transpose() / denominator_cubed;
+    return result;
 }
 
 // 虚拟时间正性重参数化：T = softplus(tau_v) = ln(1+e^{tau_v})，保证 T>0 且光滑。
@@ -94,7 +119,6 @@ double MincoOptimizer::accumulate_penalties(
     const int n = ws.n_segments;
     const auto& w = params_.weights;
     const auto& lim = params_.trajectory_limits;
-    constexpr double SPEED_EPS = 1e-4;
 
     double cost = 0.0;
     grad_c.setZero(NCOEF * n, DIM);
@@ -114,9 +138,15 @@ double MincoOptimizer::accumulate_penalties(
         Eigen::Vector2d position = Eigen::Vector2d::Zero();
         Eigen::Vector2d velocity = Eigen::Vector2d::Zero();
         Eigen::Vector2d acceleration = Eigen::Vector2d::Zero();
-        double speed = 0.0;
+        SmoothMotion motion;
         double omega = 0.0;
         double arc_measure = 0.0;
+        uint8_t terrain_label = static_cast<uint8_t>(TerrainType::FLAT);
+        double direction_norm = 0.0;
+        Eigen::Vector2d terrain_direction = Eigen::Vector2d::Zero();
+        Eigen::Matrix2d terrain_direction_jacobian = Eigen::Matrix2d::Zero();
+        double terrain_gate = 0.0;
+        Eigen::Vector2d terrain_gate_position_gradient = Eigen::Vector2d::Zero();
         std::array<RunupSource, TERRAIN_LABEL_COUNT - 2> sources;
         int source_count = 0;
     };
@@ -125,7 +155,9 @@ double MincoOptimizer::accumulate_penalties(
     std::vector<LookaheadSample> lookahead_samples;
     lookahead_samples.reserve(static_cast<size_t>(n * samples_per_segment));
 
-    // 方向场幅值决定连续强度，双线性标签权重只用于选择离散地形配置。
+    // 方向场幅值决定连续强度，双线性标签权重只用于 runup source。主 profile 仍取包含
+    // 采样点的单个栅格 label：跨 label 重合属于地图异常并由 map_server 聚合告警，本阶段
+    // 不引入 per-label 连续混合；典型单 label 外边界在 terrain gate 开启前已衰减掉。
     for (int seg = 0; seg < n; ++seg) {
         const double T = ws.times[static_cast<size_t>(seg)];
         const int c_off = NCOEF * seg;
@@ -157,28 +189,53 @@ double MincoOptimizer::accumulate_penalties(
                 sample.acceleration.x() += coeffs(c_off + k, 0) * b2[k];
                 sample.acceleration.y() += coeffs(c_off + k, 1) * b2[k];
             }
-            sample.speed = sample.velocity.norm();
-            sample.arc_measure = sample.dt * sample.speed;
+            sample.motion = smooth_motion(
+                sample.velocity, params_.terrain_gate.motion_speed_scale
+            );
+            sample.arc_measure = sample.dt * sample.motion.speed;
             const double speed2 = sample.velocity.squaredNorm();
             sample.omega = (
                 sample.velocity.x() * sample.acceleration.y()
                 - sample.velocity.y() * sample.acceleration.x()
             ) / (speed2 + OMEGA_SPEED_REG_SQ);
 
-            if (ws.direction_map && ws.terrain_constraints && sample.speed > SPEED_EPS) {
+            if (ws.direction_map && ws.terrain_constraints) {
                 const Eigen::Vector2d grid = ws.direction_map->map_coord_to_grid(sample.position);
                 if (ws.direction_map->is_valid_coord(grid)) {
                     const auto direction_sample = ws.direction_map->interpolate_with_gradient(grid);
                     const double direction_norm = direction_sample.value.norm();
-                    const auto [terrain_gate, dgate_dnorm] = smoothstep_gate(
-                        direction_norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi
-                    );
-                    if (terrain_gate > 0.0 && direction_norm > EPS) {
+                    sample.terrain_label = ws.direction_map->terrain_at(grid);
+                    sample.direction_norm = direction_norm;
+                    if (direction_norm > EPS) {
                         const Eigen::Vector2d direction = direction_sample.value / direction_norm;
+                        sample.terrain_direction = direction;
+                        sample.terrain_direction_jacobian = (
+                            (Eigen::Matrix2d::Identity()
+                                - direction * direction.transpose()) / direction_norm
+                        ) * direction_sample.gradient / ws.direction_map->resolution;
                         const Eigen::Vector2d dnorm_dpos =
                             (direction_sample.gradient.transpose() * direction)
                             / ws.direction_map->resolution;
-                        const Eigen::Vector2d dgate_dpos = dgate_dnorm * dnorm_dpos;
+                        const auto [terrain_gate, dterrain_gate_dnorm] = smoothstep_gate(
+                            direction_norm,
+                            params_.terrain_gate.norm_lo,
+                            params_.terrain_gate.norm_hi
+                        );
+                        sample.terrain_gate = terrain_gate;
+                        sample.terrain_gate_position_gradient =
+                            dterrain_gate_dnorm * dnorm_dpos;
+
+                        const auto [body_gate, dbody_gate_dnorm] = smoothstep_gate(
+                            direction_norm,
+                            params_.runup_body_norm_lo,
+                            params_.runup_body_norm_hi
+                        );
+                        if (body_gate <= 0.0) {
+                            lookahead_samples.push_back(std::move(sample));
+                            continue;
+                        }
+                        const Eigen::Vector2d dbody_gate_dpos =
+                            dbody_gate_dnorm * dnorm_dpos;
                         const bool going_up = sample.velocity.dot(direction) >= 0.0;
 
                         const int x0 = static_cast<int>(std::floor(grid.x()));
@@ -216,10 +273,10 @@ double MincoOptimizer::accumulate_penalties(
                                 ws.terrain_constraints->selected_mode(label, going_up);
                             if (!rule) continue;
                             sample.sources[static_cast<size_t>(sample.source_count++)] = RunupSource {
-                                .value = terrain_gate * label_weight,
+                                .value = body_gate * label_weight,
                                 .radius = rule->run_up,
-                                .position_gradient = label_weight * dgate_dpos
-                                    + terrain_gate * label_gradients[label],
+                                .position_gradient = label_weight * dbody_gate_dpos
+                                    + body_gate * label_gradients[label],
                             };
                         }
                     }
@@ -267,7 +324,8 @@ double MincoOptimizer::accumulate_penalties(
         );
     }
 
-    // 反传前视门控对采样位置和弧长的梯度；差分数组将区间贡献累积到各采样点。
+    // 状态正则 gate = 1-(1-runup_gate)(1-terrain_gate)。这里反传其 runup 分支；
+    // terrain 分支的位置梯度在局部采样循环中累积。
     std::vector<Eigen::Vector2d> lookahead_position_gradient(
         static_cast<size_t>(sample_count), Eigen::Vector2d::Zero()
     );
@@ -280,6 +338,7 @@ double MincoOptimizer::accumulate_penalties(
         const double omega_density = 0.5 * w.runup_omega * current.omega * current.omega;
         const double dcost_dexposure = current.dt
             * (acceleration_density + omega_density)
+            * (1.0 - current.terrain_gate)
             * std::exp(-runup_exposure[static_cast<size_t>(i)]
                 / params_.runup_saturation_length)
             / params_.runup_saturation_length;
@@ -399,6 +458,12 @@ double MincoOptimizer::accumulate_penalties(
             const double cross = vx * ay - vy * ax;
             const double omega = cross / omega_den;
             const double v_signed = gear * speed;
+            const int flat_sample_index = seg * S + s;
+            const LookaheadSample& cached_sample = lookahead_samples[
+                static_cast<size_t>(flat_sample_index)
+            ];
+            const Eigen::Vector2d velocity(vx, vy);
+            const SmoothMotion& motion = cached_sample.motion;
 
             // (a) 障碍罚：双线性插值 map 坐标梯度。
             if (ws.cost_map && w.obstacle > 0.0) {
@@ -443,10 +508,10 @@ double MincoOptimizer::accumulate_penalties(
                 }
             }
 
-            // ∂v_signed/∂(vx,vy) = gear·(vx,vy)/speed（speed>eps 时有效）。
-            const bool speed_ok = speed > SPEED_EPS;
-            const double dvs_dvx = speed_ok ? gear * vx / speed : 0.0;
-            const double dvs_dvy = speed_ok ? gear * vy / speed : 0.0;
+            // 全局物理速度界使用真实 ‖v‖；仅在精确零速处取安全的零次梯度。
+            const double inverse_speed = speed > EPS ? 1.0 / speed : 0.0;
+            const double dvs_dvx = gear * vx * inverse_speed;
+            const double dvs_dvy = gear * vy * inverse_speed;
 
             // (b) 带符号速度窗：v ≤ vel_max, v ≥ vel_min
             {
@@ -509,128 +574,184 @@ double MincoOptimizer::accumulate_penalties(
                 gay += coeff * ay;
             }
 
-            // 台阶及助跑区状态正则。runup gate 由当前轨迹向前的饱和弧长积分给出；
-            // 其非局部位置/弧长梯度在主循环后统一回传，这里只累积局部 a/ω 导数。
-            const int flat_sample_index = seg * S + s;
-            const double approach_gate = runup_gate[static_cast<size_t>(flat_sample_index)];
-            if (approach_gate > 0.0) {
-                const double runup_accel_density = 0.5 * w.runup_accel * (ax * ax + ay * ay);
-                const double runup_omega_density = 0.5 * w.runup_omega * omega * omega;
-                density += approach_gate * (runup_accel_density + runup_omega_density);
+            // 状态正则从助跑贯穿本体/膨胀过渡：gate 是 runup 与当前位置 terrain 的平滑并集。
+            // runup 的非局部梯度稍后回传；当前位置 terrain 分支在这里按乘积法则回传。
+            const double current_runup_gate = runup_gate[
+                static_cast<size_t>(flat_sample_index)
+            ];
+            const double state_gate = 1.0
+                - (1.0 - current_runup_gate) * (1.0 - cached_sample.terrain_gate);
+            const double runup_accel_density = 0.5 * w.runup_accel
+                * (ax * ax + ay * ay);
+            const double runup_omega_density = 0.5 * w.runup_omega * omega * omega;
+            const double state_regularization_density =
+                runup_accel_density + runup_omega_density;
+            if (state_gate > 0.0) {
+                density += state_gate * state_regularization_density;
                 if (terms) {
-                    d_runup_accel += approach_gate * runup_accel_density;
-                    d_runup_omega += approach_gate * runup_omega_density;
+                    d_runup_accel += state_gate * runup_accel_density;
+                    d_runup_omega += state_gate * runup_omega_density;
                 }
-                gax += approach_gate * w.runup_accel * ax;
-                gay += approach_gate * w.runup_accel * ay;
-                const double omega_coeff = approach_gate * w.runup_omega * omega;
+                gax += state_gate * w.runup_accel * ax;
+                gay += state_gate * w.runup_accel * ay;
+                const double omega_coeff = state_gate * w.runup_omega * omega;
                 gvx += omega_coeff * domega_dvx;
                 gvy += omega_coeff * domega_dvy;
                 gax += omega_coeff * domega_dax;
                 gay += omega_coeff * domega_day;
             }
+            const double terrain_union_scale = (1.0 - current_runup_gate)
+                * state_regularization_density;
+            gpx += terrain_union_scale
+                * cached_sample.terrain_gate_position_gradient.x();
+            gpy += terrain_union_scale
+                * cached_sample.terrain_gate_position_gradient.y();
 
             // 膨胀方向场连续控制对齐强度；离散 terrain label 只选择速度 profile。
-            if (ws.direction_map && ws.terrain_constraints && speed_ok
+            if (ws.terrain_constraints
                 && (w.traversal_alignment > 0.0
                     || w.traversal_velocity_target > 0.0
-                    || w.prohibited_traversal > 0.0)) {
-                const Eigen::Vector2d dg = ws.direction_map->map_coord_to_grid({px, py});
-                if (ws.direction_map->is_valid_coord(dg)) {
-                    const uint8_t label = ws.direction_map->terrain_at(dg);
-                    const DirectionMap::DirectionSample direction_sample =
-                        ws.direction_map->interpolate_with_gradient(dg);
-                    const Eigen::Vector2d& raw_dir = direction_sample.value;
-                    const double dir_norm = raw_dir.norm();
-                    const auto [gate, dgate_dnorm] = smoothstep_gate(
-                        dir_norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi
+                    || w.prohibited_traversal > 0.0)
+                && cached_sample.terrain_gate > 0.0
+                && cached_sample.direction_norm > EPS) {
+                const double gate = cached_sample.terrain_gate;
+                const uint8_t label = cached_sample.terrain_label;
+                const Eigen::Vector2d& dir = cached_sample.terrain_direction;
+                const Eigen::Matrix2d& dir_jacobian_map =
+                    cached_sample.terrain_direction_jacobian;
+
+                double terrain_density = 0.0;
+
+                // (1) 对齐罚。低速方向 u=v/sqrt(‖v‖²+v0²)，无零速激活断崖。
+                const Eigen::Vector2d& smooth_direction = motion.direction;
+                const double e = smooth_direction.x() * dir.y()
+                    - smooth_direction.y() * dir.x();
+                const double alignment = smooth_direction.dot(dir);
+                const double align_density = w.traversal_alignment * 0.5 * e * e;
+                terrain_density += align_density;
+                density += gate * align_density;
+                if (terms) d_traversal_alignment += gate * align_density;
+                const double de_scale = gate * w.traversal_alignment * e;
+                const Eigen::Vector2d de_dsmooth_direction(dir.y(), -dir.x());
+                const Eigen::Vector2d de_dvelocity =
+                    motion.direction_jacobian.transpose() * de_dsmooth_direction;
+                gvx += de_scale * de_dvelocity.x();
+                gvy += de_scale * de_dvelocity.y();
+                const Eigen::Vector2d de_ddir(
+                    -smooth_direction.y(), smooth_direction.x()
+                );
+                const Eigen::Vector2d de_dposition =
+                    dir_jacobian_map.transpose() * de_ddir;
+                gpx += de_scale * de_dposition.x();
+                gpy += de_scale * de_dposition.y();
+
+                // (2) 两侧 mode 均存在时，速度窗在低投影速度附近平滑混合；仅一侧存在时
+                // 始终使用该可用窗口，禁止方向由 prohibited 项负责，避免 availability 权重
+                // 在零速把梯度推向缺失侧。目标速度统一使用 gear·smooth_speed。
+                const TraversalMode* up_rule =
+                    ws.terrain_constraints->selected_mode(label, true);
+                const TraversalMode* down_rule =
+                    ws.terrain_constraints->selected_mode(label, false);
+                const double traversal_speed = gear * motion.speed;
+                struct VelocityWindowCost {
+                    double density = 0.0;
+                    double speed_derivative = 0.0;
+                };
+                const auto velocity_window_cost = [&](const TraversalMode* mode) {
+                    VelocityWindowCost result;
+                    if (!mode) return result;
+                    const double over = traversal_speed - mode->velocity_window.max;
+                    const double under = mode->velocity_window.min - traversal_speed;
+                    const double go = violation(over);
+                    const double gu = violation(under);
+                    result.density = 0.5 * w.traversal_velocity_target
+                        * (go * go + gu * gu);
+                    result.speed_derivative = w.traversal_velocity_target * (go - gu);
+                    return result;
+                };
+                const VelocityWindowCost up_velocity = velocity_window_cost(up_rule);
+                const VelocityWindowCost down_velocity = velocity_window_cost(down_rule);
+
+                double up_weight = 0.0;
+                double down_weight = 0.0;
+                double dup_weight_dprojected_speed = 0.0;
+                if (up_rule && down_rule) {
+                    const double projected_speed = velocity.dot(dir);
+                    const double profile_scale_squared =
+                        params_.terrain_gate.motion_speed_scale
+                        * params_.terrain_gate.motion_speed_scale;
+                    const double projection_denominator = std::sqrt(
+                        projected_speed * projected_speed + profile_scale_squared
                     );
-                    if (gate > 0.0 && dir_norm > EPS) {
-                        const Eigen::Vector2d dir = raw_dir / dir_norm;
-                        const Eigen::Matrix2d dir_jacobian_map = (
-                            (Eigen::Matrix2d::Identity() - dir * dir.transpose()) / dir_norm
-                        ) * direction_sample.gradient / ws.direction_map->resolution;
-                        // ∂‖dir‖/∂pos = dirᵀ·(∂raw_dir/∂pos)；∂raw_dir/∂pos = gradient/resolution（map系）。
-                        const Eigen::Vector2d dnorm_dpos =
-                            (direction_sample.gradient.transpose() * dir) / ws.direction_map->resolution;
-                        const Eigen::Vector2d dgate_dpos = dgate_dnorm * dnorm_dpos;
-
-                        // 门控内累积的方向地形密度（用于把 gate 的位置梯度按乘积法则回传）。
-                        double terrain_density = 0.0;
-
-                        // (1) 对齐罚：运动方向单位向量 u=(vx,vy)/speed；e = u×dir。
-                        const double ux = vx / speed, uy = vy / speed;
-                        const double e = ux * dir.y() - uy * dir.x();
-                        const double alignment = ux * dir.x() + uy * dir.y();
-                        const double align_density = w.traversal_alignment * 0.5 * e * e;
-                        terrain_density += align_density;
-                        density += gate * align_density;
-                        if (terms) d_traversal_alignment += gate * align_density;
-                        const double de = gate * w.traversal_alignment * e;
-                        const double inv_s = 1.0 / speed;
-                        const double inv_s3 = inv_s * inv_s * inv_s;
-                        const double dux_dvx = (speed2 - vx * vx) * inv_s3;
-                        const double dux_dvy = -vx * vy * inv_s3;
-                        const double duy_dvx = -vx * vy * inv_s3;
-                        const double duy_dvy = (speed2 - vy * vy) * inv_s3;
-                        gvx += de * (dir.y() * dux_dvx - dir.x() * duy_dvx);
-                        gvy += de * (dir.y() * dux_dvy - dir.x() * duy_dvy);
-                        // ∂e/∂dir = (−uy, ux)；dir 依赖位置（经 dir_jacobian_map）。
-                        const Eigen::Vector2d de_ddir(-uy, ux);
-                        const Eigen::Vector2d de_dpos = dir_jacobian_map.transpose() * de_ddir;
-                        gpx += de * de_dpos.x();
-                        gpy += de * de_dpos.y();
-
-                        // (2) 速度窗罚（所选模式）。
-                        const TraversalMode* up_rule =
-                            ws.terrain_constraints->selected_mode(label, true);
-                        const TraversalMode* down_rule =
-                            ws.terrain_constraints->selected_mode(label, false);
-                        const TraversalMode* rule = alignment >= 0.0 ? up_rule : down_rule;
-                        if (rule) {
-                            const double over = v_signed - rule->velocity_window.max;
-                            const double under = rule->velocity_window.min - v_signed;
-                            const double go = violation(over), gu = violation(under);
-                            const double vel_density = w.traversal_velocity_target
-                                * 0.5 * (go * go + gu * gu);
-                            terrain_density += vel_density;
-                            density += gate * vel_density;
-                            if (terms) d_traversal_velocity += gate * vel_density;
-                            const double dv = gate * w.traversal_velocity_target * (go - gu);
-                            gvx += dv * dvs_dvx;
-                            gvy += dv * dvs_dvy;
-                        }
-
-                        // (3) 单向禁止罚。对禁止侧的 signed alignment 做单边二次罚；
-                        // 与模 π 对齐项共同作用时，唯一低代价极小值位于允许方向。
-                        const bool directional_label =
-                            label >= static_cast<uint8_t>(TerrainType::SLOPE);
-                        const double prohibited_up = directional_label && !up_rule
-                            ? violation(alignment)
-                            : 0.0;
-                        const double prohibited_down = directional_label && !down_rule
-                            ? violation(-alignment)
-                            : 0.0;
-                        const double prohibited_density = 0.5 * w.prohibited_traversal
-                            * (prohibited_up * prohibited_up + prohibited_down * prohibited_down);
-                        terrain_density += prohibited_density;
-                        density += gate * prohibited_density;
-                        if (terms) d_prohibited_traversal += gate * prohibited_density;
-                        const double dalignment = gate * w.prohibited_traversal
-                            * (prohibited_up - prohibited_down);
-                        gvx += dalignment * (dir.x() * dux_dvx + dir.y() * duy_dvx);
-                        gvy += dalignment * (dir.x() * dux_dvy + dir.y() * duy_dvy);
-                        const Eigen::Vector2d alignment_dir_gradient(ux, uy);
-                        const Eigen::Vector2d alignment_position_gradient =
-                            dir_jacobian_map.transpose() * alignment_dir_gradient;
-                        gpx += dalignment * alignment_position_gradient.x();
-                        gpy += dalignment * alignment_position_gradient.y();
-
-                        // gate 对位置的梯度（乘积法则）：∂(gate·terrain_density)/∂pos ⊃ terrain_density·∂gate/∂pos。
-                        gpx += terrain_density * dgate_dpos.x();
-                        gpy += terrain_density * dgate_dpos.y();
-                    }
+                    up_weight = 0.5 * (
+                        1.0 + projected_speed / projection_denominator
+                    );
+                    down_weight = 1.0 - up_weight;
+                    dup_weight_dprojected_speed = 0.5 * profile_scale_squared
+                        / (projection_denominator * projection_denominator
+                            * projection_denominator);
+                } else if (up_rule) {
+                    up_weight = 1.0;
+                } else if (down_rule) {
+                    down_weight = 1.0;
                 }
+                const double velocity_density = up_weight * up_velocity.density
+                    + down_weight * down_velocity.density;
+                terrain_density += velocity_density;
+                density += gate * velocity_density;
+                if (terms) d_traversal_velocity += gate * velocity_density;
+
+                const double speed_density_derivative = up_weight
+                    * up_velocity.speed_derivative
+                    + down_weight * down_velocity.speed_derivative;
+                const Eigen::Vector2d speed_velocity_gradient = gear
+                    * motion.speed_gradient;
+                const double profile_weight_gradient_scale =
+                    (up_velocity.density - down_velocity.density)
+                    * dup_weight_dprojected_speed;
+                const Eigen::Vector2d velocity_density_gradient =
+                    speed_density_derivative * speed_velocity_gradient
+                    + profile_weight_gradient_scale * dir;
+                gvx += gate * velocity_density_gradient.x();
+                gvy += gate * velocity_density_gradient.y();
+
+                const Eigen::Vector2d projected_speed_position_gradient =
+                    dir_jacobian_map.transpose() * velocity;
+                const Eigen::Vector2d profile_weight_position_gradient =
+                    profile_weight_gradient_scale
+                    * projected_speed_position_gradient;
+                gpx += gate * profile_weight_position_gradient.x();
+                gpy += gate * profile_weight_position_gradient.y();
+
+                // (3) 单向禁止仅表示对应 up/down traversal mode 缺失。
+                const bool directional_label =
+                    label >= static_cast<uint8_t>(TerrainType::SLOPE);
+                const double prohibited_up = directional_label && !up_rule
+                    ? violation(alignment)
+                    : 0.0;
+                const double prohibited_down = directional_label && !down_rule
+                    ? violation(-alignment)
+                    : 0.0;
+                const double prohibited_density = 0.5 * w.prohibited_traversal
+                    * (prohibited_up * prohibited_up + prohibited_down * prohibited_down);
+                terrain_density += prohibited_density;
+                density += gate * prohibited_density;
+                if (terms) d_prohibited_traversal += gate * prohibited_density;
+                const double alignment_scale = gate * w.prohibited_traversal
+                    * (prohibited_up - prohibited_down);
+                const Eigen::Vector2d dalignment_dvelocity =
+                    motion.direction_jacobian.transpose() * dir;
+                gvx += alignment_scale * dalignment_dvelocity.x();
+                gvy += alignment_scale * dalignment_dvelocity.y();
+                const Eigen::Vector2d alignment_position_gradient =
+                    dir_jacobian_map.transpose() * smooth_direction;
+                gpx += alignment_scale * alignment_position_gradient.x();
+                gpy += alignment_scale * alignment_position_gradient.y();
+
+                gpx += terrain_density
+                    * cached_sample.terrain_gate_position_gradient.x();
+                gpy += terrain_density
+                    * cached_sample.terrain_gate_position_gradient.y();
             }
 
             cost += dt * density;
@@ -664,15 +785,14 @@ double MincoOptimizer::accumulate_penalties(
         }
     }
 
-    // 将前视门控的非局部梯度回传到多项式系数和显式段时长。
+    // arc=dt·smooth_speed：对 v 的伴随为 arc_adjoint·dt·ds/dv；显式 T 导数还包含
+    // smooth_speed/S 与采样横坐标漂移。将这些非局部项回传到多项式系数和段时长。
     for (int sample_index = 0; sample_index < sample_count; ++sample_index) {
         const auto& sample = lookahead_samples[static_cast<size_t>(sample_index)];
         const int c_off = NCOEF * sample.segment;
         const double arc_adjoint = arc_measure_gradient[static_cast<size_t>(sample_index)];
-        Eigen::Vector2d velocity_adjoint = Eigen::Vector2d::Zero();
-        if (sample.speed > SPEED_EPS) {
-            velocity_adjoint = arc_adjoint * sample.dt * sample.velocity / sample.speed;
-        }
+        const Eigen::Vector2d velocity_adjoint = arc_adjoint * sample.dt
+            * sample.motion.speed_gradient;
         const Eigen::Vector2d& position_adjoint =
             lookahead_position_gradient[static_cast<size_t>(sample_index)];
 
@@ -689,7 +809,7 @@ double MincoOptimizer::accumulate_penalties(
                 + velocity_adjoint.y() * b1[k];
         }
 
-        grad_t_explicit(sample.segment) += arc_adjoint * sample.speed
+        grad_t_explicit(sample.segment) += arc_adjoint * sample.motion.speed
             / static_cast<double>(samples_per_segment);
         grad_t_explicit(sample.segment) += sample.sample_time_fraction * (
             position_adjoint.dot(sample.velocity)

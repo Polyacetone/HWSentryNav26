@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
+
 #include <opencv2/opencv.hpp>
 
 namespace map_server::map_utils {
@@ -28,7 +31,26 @@ struct MapInflationParams {
     double robot_radius_m;
     double cutoff_radius_m;
     double decay_alpha;
+    double direction_non_body_magnitude_cap; // (0, 0.9]，须与本体 magnitude=1 保持可分离
     double resolution = 0.0; // map resolution (m/px), must be set before calling inflation functions
+};
+
+struct DirectionOverlapPair {
+    uint8_t first_label;
+    uint8_t second_label;
+    size_t cell_count;
+};
+
+struct DirectionOverlapSample {
+    int x;
+    int y;
+    uint8_t label_mask;
+};
+
+struct DirectionOverlapReport {
+    size_t cell_count = 0;
+    std::vector<DirectionOverlapPair> pairs;
+    std::vector<DirectionOverlapSample> samples;
 };
 
 struct NavigationMapData {
@@ -37,6 +59,14 @@ struct NavigationMapData {
     double resolution;
     cv::Mat cost_map;
     cv::Mat direction_map;
+    DirectionOverlapReport direction_overlaps;
+};
+
+struct InflatedDirectionField {
+    cv::Mat angle;
+    cv::Mat magnitude;
+    cv::Mat terrain;
+    DirectionOverlapReport overlaps;
 };
 
 constexpr bool is_directional_label(uint8_t label) {
@@ -60,11 +90,10 @@ cv::Mat inflate_cost_map(
     const MapInflationParams& params
 );
 
-void inflate_direction_field(
+InflatedDirectionField inflate_direction_field(
     const TerrainMapData& data,
-    const MapInflationParams& params,
-    cv::Mat& out_angle,
-    cv::Mat& out_magnitude);
+    const MapInflationParams& params
+);
 
 void build_terrain_3chan(
     const cv::Mat& angle,

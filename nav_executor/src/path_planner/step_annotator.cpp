@@ -76,13 +76,13 @@ const TraversalMode* lookup_step_rule(
 
 } // anonymous namespace
 
-// 设计选择：基于 terrain label 扫描（而非采样点间 gap 检测）。
-// 遍历均匀 u 采样点，跟踪地形标签的变化：
-//   - label >= SLOPE 且与上一个采样点不同 → 结束上一段（如有），
+// 设计选择：仅扫描原始方向地形本体，膨胀 label 不参与物理边界定位。
+// 按累计弧长等距采样并转回 tau，跟踪本体地形标签的变化：
+//   - 位于本体且 label 与上一个采样点不同 → 结束上一段（如有），
 //     如果路径在此处的穿越方向有效则开启新段
-//   - label < SLOPE → 结束上一段
-// 段边界完全由 terrain label 在路径上的连续分布决定，
-// 不依赖样条参数化质量或 arc_length 积分。
+//   - 离开本体 → 结束上一段
+// 段边界完全由原始 magnitude=1 的本体格在路径上的连续分布决定；采样密度由
+// 累计弧长直接约束，不再受 tau 参数化快慢影响。
 // 方向过滤（detect_dot_threshold）仅在段入口处做一次，
 // 避免每个采样点逐个判断带来的偶发碎片化。
 std::vector<StepPlanSegment> build_step_plan(
@@ -92,52 +92,44 @@ std::vector<StepPlanSegment> build_step_plan(
     const TerrainTraversalConstraints& terrain_constraints,
     rclcpp::Logger logger
 ) {
-    const double resolution = std::max(1e-3, p.path_sample_resolution);
-
-    // 估算路径长度，确定均匀 u 采样点数
-    double estimated_length = 0.0;
-    Eigen::Vector2d prev = path.position(0.0);
-    constexpr int length_estimate_samples = 100;
-    for (int i = 1; i <= length_estimate_samples; ++i) {
-        const double u = static_cast<double>(i) / static_cast<double>(length_estimate_samples);
-        const Eigen::Vector2d pos = path.position(u);
-        estimated_length += (pos - prev).norm();
-        prev = pos;
-    }
-
-    const int sample_count = std::max(2, static_cast<int>(std::ceil(estimated_length / resolution)) + 1);
-    const double u_step = 1.0 / static_cast<double>(sample_count - 1);
+    const double sample_spacing = std::min(
+        p.path_sample_resolution, direction_map.resolution * 0.5
+    );
+    const double total_arc_length = path.total_arc_length();
+    const int sample_intervals = std::max(
+        1, static_cast<int>(std::ceil(total_arc_length / sample_spacing))
+    );
 
     struct ActiveSegment {
-        int start_index;
         uint8_t label;
         StepDirection direction;
+        double step_enter_u;
+        double last_body_u;
         Eigen::Vector2d step_enter_pos_map;
+        Eigen::Vector2d last_body_pos_map;
         Eigen::Vector2d dir_map;
     };
     std::optional<ActiveSegment> active;
     std::vector<StepPlanSegment> plan;
 
-    auto finalize = [&](int end_index) {
+    auto finalize = [&]() {
         if (!active) return;
-
-        const double step_exit_u = static_cast<double>(end_index - 1) * u_step;
-        const Eigen::Vector2d step_exit_pos = path.position(step_exit_u);
-        const double step_enter_u = static_cast<double>(active->start_index) * u_step;
 
         const TraversalMode* rule = lookup_step_rule(
             active->direction, active->step_enter_pos_map, direction_map, terrain_constraints
         );
         if (rule) {
             // commit_u：物理边缘上游回退 run_up，作为所有运行时约束的锚点。
-            const double commit_u = retreat_path_u_by_distance(p, path, step_enter_u, rule->run_up);
+            const double commit_u = retreat_path_u_by_distance(
+                p, path, active->step_enter_u, rule->run_up
+            );
 
             StepPlanSegment seg;
             seg.commit_u = commit_u;
-            seg.step_enter_u = step_enter_u;
-            seg.step_exit_u = step_exit_u;
+            seg.step_enter_u = active->step_enter_u;
+            seg.step_exit_u = active->last_body_u;
             seg.step_enter_pos_map = active->step_enter_pos_map;
-            seg.step_exit_pos_map = step_exit_pos;
+            seg.step_exit_pos_map = active->last_body_pos_map;
             seg.dir_map = active->dir_map;
             seg.direction = active->direction;
             seg.chassis_command = StepChassisCommand {
@@ -146,8 +138,8 @@ std::vector<StepPlanSegment> build_step_plan(
             };
             seg.traversal_constraint.velocity_window = rule->velocity_window;
             seg.traversal_constraint.commit_u = commit_u;
-            seg.traversal_constraint.step_enter_u = step_enter_u;
-            seg.traversal_constraint.exit_u = step_exit_u;
+            seg.traversal_constraint.step_enter_u = active->step_enter_u;
+            seg.traversal_constraint.exit_u = active->last_body_u;
             seg.traversal_constraint.dir_map = active->dir_map.normalized();
             seg.terrain_label = active->label;
             seg.requires_high_performance = rule->requires_high_performance;
@@ -156,33 +148,41 @@ std::vector<StepPlanSegment> build_step_plan(
         active.reset();
     };
 
-    for (int i = 0; i < sample_count; ++i) {
-        const double u = static_cast<double>(i) * u_step;
+    for (int i = 0; i <= sample_intervals; ++i) {
+        const double arc_length = total_arc_length * static_cast<double>(i)
+            / static_cast<double>(sample_intervals);
+        const double u = path.tau_at_arc_length(arc_length);
         const Eigen::Vector2d pos = path.position(u);
         const Eigen::Vector2d g = direction_map.map_coord_to_grid(pos);
 
         if (!direction_map.is_valid_coord(g)) {
-            finalize(i);
+            finalize();
             continue;
         }
 
-        const uint8_t label = direction_map.terrain_at(g);
-        const Eigen::Vector2d dir = direction_map.interpolate(g);
-
-        if (label < static_cast<uint8_t>(TerrainType::SLOPE)
-            || dir.norm() < p.detect_norm_threshold) {
-            finalize(i);
+        if (!direction_map.is_terrain_body_at(g)) {
+            finalize();
+            continue;
+        }
+        const Eigen::Array2i cell_array = g.array().floor().cast<int>();
+        const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
+        const uint8_t label = direction_map.terrain_at(cell);
+        const Eigen::Vector2d dir = direction_map.at(cell);
+        if (label < static_cast<uint8_t>(TerrainType::SLOPE)) {
+            finalize();
             continue;
         }
 
         if (active && label == active->label) {
+            active->last_body_u = u;
+            active->last_body_pos_map = pos;
             continue;
         }
 
-        finalize(i);
+        finalize();
 
         const Eigen::Vector2d tangent = path.tangent(u);
-        if (dir.norm() < ANGLE_EPSILON) continue;
+        if (dir.norm() < ANGLE_EPSILON || tangent.norm() < ANGLE_EPSILON) continue;
 
         const double dot = dir.normalized().dot(tangent.normalized());
         if (std::abs(dot) <= p.detect_dot_threshold) continue;
@@ -190,15 +190,17 @@ std::vector<StepPlanSegment> build_step_plan(
         const StepDirection direction = dot > 0.0 ? StepDirection::UP : StepDirection::DOWN;
 
         active = ActiveSegment{
-            .start_index = i,
             .label = label,
             .direction = direction,
+            .step_enter_u = u,
+            .last_body_u = u,
             .step_enter_pos_map = pos,
+            .last_body_pos_map = pos,
             .dir_map = dir,
         };
     }
 
-    finalize(sample_count);
+    finalize();
 
     if (plan.empty()) return plan;
 
