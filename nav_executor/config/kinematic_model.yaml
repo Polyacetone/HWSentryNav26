@@ -9,43 +9,41 @@
       sgn_eps: 0.05
 
       # [x_h_dot, v_dot]^T = (Ac0 + rho*Ac1)[x_h, v]^T + (Bc0 + rho*Bc1) dv + Gnl*nl
-      ca00: -2.771139173787186
-      ca01: -6.326285593848927
-      ca10: 1.4331331524492867
-      ca11: 1.418575633080309
-      cb0: 3.043085655265649
-      cb1: 0.25273782815199863
+      ca00: -2.8927427621550916
+      ca01: -6.921585881789012
+      ca10: 1.3847667781343795
+      ca11: 1.5434642202222895
+      cb0: 3.1006930883659978
+      cb1: 0.25796295349405374
 
       # Rho slopes for the continuous-time LPV matrices
-      dca00: -0.14543013563523877
-      dca01: 0.5204071581571662
-      dca10: 0.011386296317887325
-      dca11: 0.415624592430132
-      dcb0: -1.0250096559918818
-      dcb1: -0.18462234478438772
+      dca00: -0.1322229939390674
+      dca01: 0.4828405541386671
+      dca10: 0.0041885385013589556
+      dca11: 0.4081776942626388
+      dcb0: -1.019706276167897
+      dcb1: -0.18562933777357724
 
       # Nonlinear term: nl = cf1*tanh(v/sgn_eps) + cf2*v*abs(w)
-      gxh: 0.050354158904313516
-      gv: 0.11256891328894653
-      cf1: -0.060332819651179447
-      cf2: -0.9815536283425856
+      gxh: 0.11738297241619658
+      gv: 0.32887232316829196
+      cf1: -0.01571449358165795
+      cf2: -0.3359141338668791
 
       # Yaw channel: w_dot = -(w_lam0 + rho*w_lam1) * w + (w_k0 + rho*w_k1) * dw - (w_cf0 + rho*w_cf1) * tanh(w/sgn_eps)
-      w_lam0: 15.50971650372554
-      w_k0: 16.131958812785463
-      w_cf0: 0.5361899875358731
-      w_lam1: 0.04378379430693363
-      w_k1: 0.023828310633107176
-      w_cf1: 0.07295561089659769
+      w_lam0: 15.651602980854568
+      w_k0: 16.24780468193183
+      w_cf0: 0.5126213741249158
+      w_lam1: 0.14628376008035154
+      w_k1: 0.08361625361327188
+      w_cf1: 0.03018853437140166
 
-      # Shadow leg_psi residual model. Diagnostics only; it does not correct or
-      # invalidate the longitudinal observer.
-      psi_bias: 0.042975279908146834
-      psi_gain: 0.19629303004811718
-      psi_v: 0.2023843512379656
+      # Shadow leg_psi residual model. Diagnostics only.
+      psi_bias: 0.043012829036848874
+      psi_gain: 0.18995972732721672
+      psi_v: 0.2207546712499432
 
-      # Longitudinal observer. Initialization is solved from the discrete model
-      # so that the measured velocity is held for one prediction step.
-      obs_lv: 4.484294986367658
+      # Longitudinal observer. Tune on grouped field data with optimize_observer.py.
+      obs_lv: 3.0
       obs_v_correction_clip: 0.12
       obs_v_reset_threshold: 0.25
