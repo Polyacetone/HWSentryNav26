@@ -48,7 +48,6 @@ PARAM_NAMES = [
     "dca00", "dca01", "dca10", "dca11", "dcb0", "dcb1",
     "gxh", "gv", "cf1", "cf2",
     "w_lam0", "w_k0", "w_cf0", "w_lam1", "w_k1", "w_cf1",
-    "xh0_bias", "xh0_psi", "xh0_v",
     "psi_bias", "psi_gain", "psi_v",
 ]
 
@@ -124,16 +123,16 @@ def zoh_v_matrices(
     tr_m = m00 + m11
     det_m = m00 * m11 - m01 * m10
     disc = tr_m * tr_m - 4.0 * det_m
-    eps_m = 1e-12
+    eps_m = 1e-8
 
     if disc > eps_m:
         s = math.sqrt(disc)
         lam1 = 0.5 * (tr_m + s)
         lam2 = 0.5 * (tr_m - s)
-        e1 = math.exp(lam1)
+        delta = lam1 - lam2
         e2 = math.exp(lam2)
-        beta = (e1 - e2) / (lam1 - lam2)
-        alpha = e1 - beta * lam1
+        beta = e2 * math.expm1(delta) / delta
+        alpha = math.exp(lam1) - beta * lam1
     elif disc < -eps_m:
         p = 0.5 * tr_m
         q = 0.5 * math.sqrt(-disc)
@@ -153,7 +152,7 @@ def zoh_v_matrices(
 
     det_a = a00 * a11 - a01 * a10
     c = alpha - 1.0
-    if abs(det_a) > 1e-10:
+    if abs(det_a) > 1e-6:
         inv_det = 1.0 / det_a
         g00 = c * a11 * inv_det + beta * dt
         g01 = c * (-a01) * inv_det
@@ -241,8 +240,9 @@ def load_and_preprocess_npz(
 
     v = lowpass_then_downsample(v_raw, **kw)
     w = lowpass_then_downsample(w_raw, **kw)
-    vc = lowpass_then_downsample(vc_raw, **kw)
-    wc = lowpass_then_downsample(wc_raw, **kw)
+    # Commands are causal ZOH signals and must not be zero-phase filtered.
+    vc = vc_raw[::q].copy()
+    wc = wc_raw[::q].copy()
     h = lowpass_then_downsample(h_raw, **kw)
     psi = lowpass_then_downsample(psi_raw, **kw)
     s_meas = lowpass_then_downsample(s_raw, **kw) if s_raw is not None else None
@@ -285,6 +285,8 @@ def predict(
     sgn_eps: float = SGN_EPS_DEFAULT,
 ) -> Dict[str, np.ndarray]:
     n = len(data["v"])
+    if n == 0:
+        raise ValueError("Cannot predict an empty recording")
     xh = np.empty(n, dtype=float)
     vp = np.empty(n, dtype=float)
     wp = np.empty(n, dtype=float)
@@ -292,13 +294,28 @@ def predict(
 
     vp[0] = float(data["v"][0])
     wp[0] = float(data["w"][0])
-    xh[0] = float(params["xh0_bias"] + params["xh0_psi"] * data["leg_psi"][0]
-                  + params["xh0_v"] * data["v"][0])
-    psi_proxy[0] = float(params["psi_bias"] + params["psi_gain"] * xh[0]
-                         + params["psi_v"] * vp[0])
-
     vcmd0 = float(data["v_cmd"][0])
     wcmd0 = float(data["w_cmd"][0])
+    rho0 = float(data["rho"][0])
+    a00 = float(params["ca00"] + rho0 * params["dca00"])
+    a01 = float(params["ca01"] + rho0 * params["dca01"])
+    a10 = float(params["ca10"] + rho0 * params["dca10"])
+    a11 = float(params["ca11"] + rho0 * params["dca11"])
+    b0 = float(params["cb0"] + rho0 * params["dcb0"])
+    b1 = float(params["cb1"] + rho0 * params["dcb1"])
+    _, _, ad10, ad11, _, bd1, _, gd1 = zoh_v_matrices(
+        a00, a01, a10, a11, b0, b1,
+        float(params["gxh"]), float(params["gv"]), dt,
+    )
+    if abs(ad10) < 1e-3:
+        raise ValueError(f"Cannot initialize hidden state: ad10={ad10:.6g}")
+    nonlinear0 = float(
+        params["cf1"] * smooth_sgn(vp[0], sgn_eps)
+        + params["cf2"] * vp[0] * abs(wp[0])
+    )
+    xh[0] = (vp[0] - ad11 * vp[0] - bd1 * vcmd0 - gd1 * nonlinear0) / ad10
+    psi_proxy[0] = float(params["psi_bias"] + params["psi_gain"] * xh[0]
+                         + params["psi_v"] * vp[0])
     for k in range(n - 1):
         kd = k - input_delay
         vc = float(data["v_cmd"][kd]) if kd >= 0 else vcmd0

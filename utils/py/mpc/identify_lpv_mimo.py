@@ -231,15 +231,20 @@ def load_all_npz_to_mpc_rate(
             wc = _as_1d(zf["w_cmd"])
             leg_h = _as_1d(zf["leg_h_meas"])
             leg_psi = _as_1d(zf["leg_psi_meas"])
-            meta = zf["meta"].item() if "meta" in zf else {}
+            if "metadata_json" in zf:
+                meta = json.loads(str(np.asarray(zf["metadata_json"]).item()))
+            else:
+                meta = zf["meta"].item() if "meta" in zf else {}
 
         fs = robust_fs_from_t(t)
         q = max(1, round(fs * DT)) if raw_to_mpc_q is None else max(1, int(raw_to_mpc_q))
         kw = dict(fs_hz=fs, cutoff_hz=cutoff_hz, q=q)
         v_ds = lowpass_then_downsample(v, **kw)
         w_ds = lowpass_then_downsample(w, **kw)
-        vc_ds = lowpass_then_downsample(vc, **kw)
-        wc_ds = lowpass_then_downsample(wc, **kw)
+        # Commands are causal ZOH signals. Zero-phase filtering would smear
+        # edges and create values that were never sent.
+        vc_ds = vc[::q].copy()
+        wc_ds = wc[::q].copy()
         h_ds = lowpass_then_downsample(leg_h, **kw)
         psi_ds = lowpass_then_downsample(leg_psi, **kw)
         t_ds = t[::q].copy()
@@ -485,16 +490,16 @@ def _zoh_v_matrices(
     tr_m = m00 + m11
     det_m = m00 * m11 - m01 * m10
     disc = tr_m * tr_m - 4.0 * det_m
-    eps = 1e-12
+    eps = 1e-8
 
     if disc > eps:
         s = math.sqrt(disc)
         lam1 = 0.5 * (tr_m + s)
         lam2 = 0.5 * (tr_m - s)
-        e1 = math.exp(lam1)
+        delta = lam1 - lam2
         e2 = math.exp(lam2)
-        beta = (e1 - e2) / (lam1 - lam2)
-        alpha = e1 - beta * lam1
+        beta = e2 * math.expm1(delta) / delta
+        alpha = math.exp(lam1) - beta * lam1
     elif disc < -eps:
         p = 0.5 * tr_m
         q = 0.5 * math.sqrt(-disc)
@@ -514,7 +519,7 @@ def _zoh_v_matrices(
 
     det_a = a00 * a11 - a01 * a10
     c = alpha - 1.0
-    if abs(det_a) > 1e-10:
+    if abs(det_a) > 1e-6:
         inv_det = 1.0 / det_a
         g00 = c * a11 * inv_det + beta * dt
         g01 = c * (-a01) * inv_det
@@ -904,10 +909,13 @@ def observer_gains(params: np.ndarray, target_pole: float = 0.55) -> Dict[str, f
     a00, a01, a10, a11, _, _, _, _ = _zoh_v_matrices(
         float(params[0]), float(params[1]), float(params[2]), float(params[3]), 0.0, 0.0, 0.0, 0.0, DT
     )
-    psi_gain = float(params[26])
     lv = (a00 - target_pole) / a10 if abs(a10) > 1e-8 else 0.0
-    lpsi = 0.15 / psi_gain if abs(psi_gain) > 1e-8 else 0.0
-    return {"target_pole_v_only": target_pole, "L_v": float(lv), "L_psi": float(lpsi), "Ad00_at_rho0": float(a00), "Ad10_at_rho0": float(a10)}
+    return {
+        "target_pole_v_only": target_pole,
+        "L_v": float(lv),
+        "Ad00_at_rho0": float(a00),
+        "Ad10_at_rho0": float(a10),
+    }
 
 
 def format_matrix(mat: np.ndarray) -> str:
@@ -918,9 +926,8 @@ def generate_kinematic_model_yaml(
     params: np.ndarray,
     sched: Dict[str, float],
     *,
-    obs_v_innovation_max: float = 0.25,
-    obs_omega_innovation_max: float = 2.5,
-    obs_psi_innovation_max: float = 0.35,
+    obs_v_correction_clip: float = 0.12,
+    obs_v_reset_threshold: float = 0.25,
 ) -> str:
     obs = observer_gains(params)
     lines = [
@@ -958,19 +965,17 @@ def generate_kinematic_model_yaml(
         lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
     lines.extend([
         "",
-        "      # Hidden-state initialization / leg_psi proxy observer",
+        "      # Shadow leg_psi residual model. Diagnostics only.",
     ])
-    for name in ["xh0_bias", "xh0_psi", "xh0_v", "psi_bias", "psi_gain", "psi_v"]:
+    for name in ["psi_bias", "psi_gain", "psi_v"]:
         lines.append(f"      {name}: {float(params[PARAM_NAMES.index(name)])}")
-    lines.append(f"      obs_lv: {float(obs['L_v'])}")
-    lines.append(f"      obs_lpsi: {float(obs['L_psi'])}")
     lines.extend([
         "",
-        "      # Preliminary one-step innovation gates; validate on representative Mature/NORMAL logs.",
-        f"      obs_v_innovation_max: {obs_v_innovation_max}",
-        f"      obs_omega_innovation_max: {obs_omega_innovation_max}",
-        f"      obs_psi_innovation_max: {obs_psi_innovation_max}",
+        "      # Longitudinal observer. Tune on grouped field data with optimize_observer.py.",
     ])
+    lines.append(f"      obs_lv: {float(obs['L_v'])}")
+    lines.append(f"      obs_v_correction_clip: {obs_v_correction_clip}")
+    lines.append(f"      obs_v_reset_threshold: {obs_v_reset_threshold}")
     return "\n".join(lines)
 
 
@@ -1050,15 +1055,18 @@ def save_model_txt(
         "",
         f"Nonlinear discrete gains at rho=0: Gnl_xh={gd0:.10e}, Gnl_v={gd1:.10e}, Gnl_w={(-integ_w0 * params[18]):.10e}",
         "",
-        "Initial hidden-state model:",
+        "Identification-only episode initializer:",
         "  x_h[0] = xh0_bias + xh0_psi*leg_psi[0] + xh0_v*v[0]",
+        "Runtime observer initialization:",
+        "  solve x_h from the discrete v equation so one step holds measured velocity",
         "leg_psi proxy model:",
         "  leg_psi_hat = psi_bias + psi_gain*x_h + psi_v*v",
         "observer_report_for_future_MPC_integration:",
         "  xh_pred = model x_h prediction before correction",
         "  v_pred = model v prediction before correction",
         "  psi_proxy_pred = psi_bias + psi_gain*xh_pred + psi_v*v_pred",
-        "  xh_hat_next = xh_pred + L_v*(v_meas-v_pred) + L_psi*(leg_psi_meas-psi_proxy_pred)",
+        "  xh_hat_next = xh_pred + L_v*clamp(v_meas-v_pred, -clip, clip)",
+        "  yaw/leg_psi residuals are diagnostics only and do not reset longitudinal state",
     ])
     for k, v in obs.items():
         lines.append(f"  {k}: {v:.12g}")
@@ -1222,22 +1230,20 @@ def main() -> int:
     ap.add_argument("--w-yaw", type=float, default=0.2, help="weight for heading integral error")
     ap.add_argument("--w-transient", type=float, default=0.8, help="extra v error weight around v_cmd edges")
     ap.add_argument("--w-psi", type=float, default=0.2, help="weak auxiliary leg_psi proxy loss for x_h observability")
-    ap.add_argument("--obs-v-innovation-max", type=float, default=0.25, help="preliminary observer velocity innovation gate in m/s")
-    ap.add_argument("--obs-omega-innovation-max", type=float, default=2.5, help="preliminary observer yaw-rate innovation gate in rad/s")
-    ap.add_argument("--obs-psi-innovation-max", type=float, default=0.35, help="preliminary observer leg-angle proxy innovation gate in rad")
+    ap.add_argument("--obs-v-correction-clip", type=float, default=0.12, help="initial field-tuning candidate for robust velocity correction in m/s")
+    ap.add_argument("--obs-v-reset-threshold", type=float, default=0.25, help="initial field-tuning candidate for longitudinal hard reset in m/s")
     ap.add_argument("--de-maxiter", type=int, default=100, help="differential evolution iterations; 0 skips global search")
     ap.add_argument("--de-popsize", type=int, default=32, help="differential evolution population size")
     ap.add_argument("--local-maxiter", type=int, default=800, help="local optimization iterations for each random start")
     ap.add_argument("--random-starts", type=int, default=4, help="number of random jittered starts around the best DE result for local refinement")
     ap.add_argument("--seed", type=int, default=42, help="random seed for reproducibility of global search and random starts")
     args = ap.parse_args()
-    innovation_gates = (
-        args.obs_v_innovation_max,
-        args.obs_omega_innovation_max,
-        args.obs_psi_innovation_max,
-    )
-    if not all(math.isfinite(value) and value > 0.0 for value in innovation_gates):
-        ap.error("observer innovation gates must be finite and positive")
+    if not (
+        math.isfinite(args.obs_v_correction_clip)
+        and math.isfinite(args.obs_v_reset_threshold)
+        and 0.0 < args.obs_v_correction_clip < args.obs_v_reset_threshold
+    ):
+        ap.error("observer correction clip must be positive and below reset threshold")
 
     data_dir = Path(args.data_dir)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1262,9 +1268,8 @@ def main() -> int:
     yaml_str = generate_kinematic_model_yaml(
         params,
         sched,
-        obs_v_innovation_max=args.obs_v_innovation_max,
-        obs_omega_innovation_max=args.obs_omega_innovation_max,
-        obs_psi_innovation_max=args.obs_psi_innovation_max,
+        obs_v_correction_clip=args.obs_v_correction_clip,
+        obs_v_reset_threshold=args.obs_v_reset_threshold,
     )
     (out_dir / "kinematic_model.yaml").write_text(yaml_str + "\n", encoding="utf-8")
     generate_plots(series, results, plots_dir)

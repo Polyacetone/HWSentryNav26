@@ -3,7 +3,7 @@
 This script listens to the same topics that the original `identify_pub_and_rec.py`
 published to, but it *does not* send any command.  It simply subscribes to
 `/nav_executor/chassis_cmd` and `/serial_bridge/chassis_status` and stores all
-messages along with their wall‑clock timestamps.  When the node is shut down
+messages along with monotonic receive timestamps.  When the node is shut down
 (e.g. via Ctrl‑C) the collected data is saved in the same `identify_data/`
 directory as the original script.
 
@@ -12,10 +12,10 @@ Usage examples:
   source /home/yuki/sentry_2026/install/setup.bash
 
   # record until manually stopped
-  python3 navigation_sentry_2026/utils/py/lqr/rec_identify_data.py --tag test1
+  python3 navigation_sentry_2026/utils/py/mpc/rec_identify_data.py --tag test1
 
   # add a duration (seconds), then the script exits automatically
-  python3 navigation_sentry_2026/utils/py/lqr/rec_identify_data.py --duration 15.0
+  python3 navigation_sentry_2026/utils/py/mpc/rec_identify_data.py --duration 15.0
 
 The output files are named using a timestamp and optional tag:
 
@@ -27,6 +27,7 @@ The output files are named using a timestamp and optional tag:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import time
@@ -63,7 +64,7 @@ def ensure_unique_path(path: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record chassis_cmd and chassis_status")
-    parser.add_argument("--tag", type=str, required=True, help="additional tag to put in filename")
+    parser.add_argument("--tag", type=str, default="", help="optional tag to put in filename")
     parser.add_argument("--out-dir", type=str, default="identify_data", help="output directory")
     parser.add_argument(
         "--duration",
@@ -80,6 +81,10 @@ def main() -> int:
     args = parser.parse_args()
 
     warmup_sec = float(args.warmup)
+    if not math.isfinite(args.duration) or args.duration < 0.0:
+        parser.error("--duration must be finite and nonnegative")
+    if not math.isfinite(warmup_sec) or warmup_sec < 0.0:
+        parser.error("--warmup must be finite and nonnegative")
 
     cmd_t: List[float] = []
     cmd_v: List[float] = []
@@ -107,14 +112,14 @@ def main() -> int:
 
     class RecordNode(Node):
         def __init__(self, warmup: float):
-            super().__init__("wheel_leg_lqr_ident_rec")
+            super().__init__("wheel_leg_mpc_ident_rec")
             self.sub_cmd = self.create_subscription(ChassisCmd, "/nav_executor/chassis_cmd", self._cmd_cb, 1)
             self.sub_status = self.create_subscription(
                 ChassisStatus, "/serial_bridge/chassis_status", self._status_cb, 1
             )
             self._tf_buffer = Buffer()
             self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=False)
-            self._t0 = time.time()
+            self._t0 = time.monotonic()
             self._warmup = warmup
             self._recording_started = warmup <= 0.0
             self._s_acc = 0.0
@@ -122,7 +127,7 @@ def main() -> int:
             self.get_logger().info(f"record node started (warmup={warmup}s)")
 
         def _cmd_cb(self, msg: ChassisCmd) -> None:
-            t = time.time() - self._t0
+            t = time.monotonic() - self._t0
             if t < self._warmup:
                 return
             if not self._recording_started:
@@ -133,7 +138,7 @@ def main() -> int:
             cmd_w.append(float(msg.omega))
 
         def _status_cb(self, msg: ChassisStatus) -> None:
-            t = time.time() - self._t0
+            t = time.monotonic() - self._t0
             if t < self._warmup:
                 return
             st_t.append(float(t))
@@ -179,12 +184,12 @@ def main() -> int:
 
     rclpy.init()
     node = RecordNode(warmup=warmup_sec)
-    start_time = time.time()
+    start_time = time.monotonic()
     try:
         if args.duration > 0.0:
             # spin for max duration
-            deadline = start_time + args.duration
-            while rclpy.ok() and time.time() < deadline:
+            deadline = start_time + warmup_sec + args.duration
+            while rclpy.ok() and time.monotonic() < deadline:
                 rclpy.spin_once(node, timeout_sec=0.1)
         else:
             rclpy.spin(node)
@@ -197,11 +202,11 @@ def main() -> int:
         except Exception:
             pass
 
-    if len(cmd_t) == 0 and len(st_t) == 0:
-        print("未收到任何消息，未生成输出。")
+    if len(st_t) == 0:
+        print("未收到 chassis_status，未生成输出。")
         return 1
 
-    # sort status timeline (primary) and also sort command timeline for interpolation
+    # Sort the primary status timeline and the independently received commands.
     t_st = np.asarray(st_t, dtype=float)
     v_meas = np.asarray(st_v, dtype=float)
     w_meas = np.asarray(st_w, dtype=float)
@@ -228,14 +233,36 @@ def main() -> int:
     v_cmd_raw = v_cmd_raw[order_cmd]
     w_cmd_raw = w_cmd_raw[order_cmd]
 
-    # interpolate command onto the status timeline (same as identify_pub_and_rec)
+    # Commands are zero-order held. Linear interpolation would create command
+    # values that were never sent and leak future command changes into fitting.
     if t_cmd.size > 0:
-        v_cmd = np.interp(t_st, t_cmd, v_cmd_raw)
-        w_cmd = np.interp(t_st, t_cmd, w_cmd_raw)
+        command_index = np.searchsorted(t_cmd, t_st, side="right") - 1
+        command_valid = command_index >= 0
+        safe_index = np.maximum(command_index, 0)
+        v_cmd = np.where(command_valid, v_cmd_raw[safe_index], np.nan)
+        w_cmd = np.where(command_valid, w_cmd_raw[safe_index], np.nan)
     else:
         v_cmd = np.full_like(t_st, np.nan, dtype=float)
         w_cmd = np.full_like(t_st, np.nan, dtype=float)
     t = t_st
+
+    finite = np.all(np.isfinite(np.column_stack([
+        t, v_meas, w_meas, leg_h_meas, leg_psi_meas, v_cmd, w_cmd,
+    ])), axis=1)
+    if np.sum(finite) < 2:
+        print("有效状态/命令样本不足，未生成输出。")
+        return 1
+    t = t[finite]
+    t -= t[0]
+    v_meas = v_meas[finite]
+    w_meas = w_meas[finite]
+    leg_h_meas = leg_h_meas[finite]
+    leg_psi_meas = leg_psi_meas[finite]
+    s_meas = s_meas[finite]
+    yaw_meas = yaw_meas[finite]
+    pitch_meas = pitch_meas[finite]
+    v_cmd = v_cmd[finite]
+    w_cmd = w_cmd[finite]
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -256,7 +283,7 @@ def main() -> int:
 
     np.savez_compressed(
         npz_path,
-        meta=meta,
+        metadata_json=np.asarray(json.dumps(meta, ensure_ascii=False)),
         # status timeline (primary)
         t=t,
         v_meas=v_meas,
@@ -336,4 +363,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
