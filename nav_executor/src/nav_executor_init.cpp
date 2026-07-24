@@ -896,17 +896,12 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .w_lam1 = declare_parameter<double>("kinematic_model.w_lam1"),
             .w_k1 = declare_parameter<double>("kinematic_model.w_k1"),
             .w_cf1 = declare_parameter<double>("kinematic_model.w_cf1"),
-            .xh0_bias = declare_parameter<double>("kinematic_model.xh0_bias"),
-            .xh0_psi = declare_parameter<double>("kinematic_model.xh0_psi"),
-            .xh0_v = declare_parameter<double>("kinematic_model.xh0_v"),
             .psi_bias = declare_parameter<double>("kinematic_model.psi_bias"),
             .psi_gain = declare_parameter<double>("kinematic_model.psi_gain"),
             .psi_v = declare_parameter<double>("kinematic_model.psi_v"),
             .obs_lv = declare_parameter<double>("kinematic_model.obs_lv"),
-            .obs_lpsi = declare_parameter<double>("kinematic_model.obs_lpsi"),
-            .obs_v_innovation_max = declare_parameter<double>("kinematic_model.obs_v_innovation_max"),
-            .obs_omega_innovation_max = declare_parameter<double>("kinematic_model.obs_omega_innovation_max"),
-            .obs_psi_innovation_max = declare_parameter<double>("kinematic_model.obs_psi_innovation_max")
+            .obs_v_correction_clip = declare_parameter<double>("kinematic_model.obs_v_correction_clip"),
+            .obs_v_reset_threshold = declare_parameter<double>("kinematic_model.obs_v_reset_threshold")
         }
     };
     const auto& progress = mpc_params.follow.progress;
@@ -1056,17 +1051,13 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && std::isfinite(model.w_lam1)
         && std::isfinite(model.w_k1)
         && std::isfinite(model.w_cf1)
-        && std::isfinite(model.xh0_bias)
-        && std::isfinite(model.xh0_psi)
-        && std::isfinite(model.xh0_v)
         && std::isfinite(model.psi_bias)
         && std::isfinite(model.psi_gain)
         && std::isfinite(model.psi_v)
         && std::isfinite(model.obs_lv)
-        && std::isfinite(model.obs_lpsi)
-        && positive_finite(model.obs_v_innovation_max)
-        && positive_finite(model.obs_omega_innovation_max)
-        && positive_finite(model.obs_psi_innovation_max),
+        && positive_finite(model.obs_v_correction_clip)
+        && positive_finite(model.obs_v_reset_threshold)
+        && model.obs_v_correction_clip < model.obs_v_reset_threshold,
         "kinematic model or observer parameters are invalid"
     );
     return mpc_params;

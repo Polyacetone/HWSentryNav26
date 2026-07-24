@@ -346,6 +346,29 @@ void NavExecutorNode::publish_diagnostics(
     msg.command_mode = executor_output.mode;
     msg.command_step_distance = executor_output.step_dist_cm;
 
+    const ObserverDiagnostics& observer = executor_output.observer_diagnostics;
+    msg.observer_event = static_cast<uint8_t>(observer.event);
+    msg.observer_last_reset_reason = static_cast<uint8_t>(observer.last_reset_reason);
+    msg.observer_initialized = observer.initialized;
+    msg.observer_validated = observer.validated;
+    msg.observer_prediction_available = observer.prediction_available;
+    msg.observer_auxiliary_prediction_available = observer.auxiliary_prediction_available;
+    msg.observer_velocity_correction_clipped = observer.velocity_correction_clipped;
+    msg.observer_state_sequence = observer.state_sequence;
+    msg.observer_reset_count = observer.reset_count;
+    msg.observer_active_run_length = observer.active_run_length;
+    msg.observer_revalidation_latency_updates = observer.revalidation_latency_updates;
+    msg.observer_hidden_state = observer.hidden_state_estimate;
+    msg.observer_predicted_hidden_state = observer.predicted_hidden_state;
+    msg.observer_predicted_velocity = observer.predicted_velocity;
+    msg.observer_velocity_innovation = observer.velocity_innovation;
+    msg.observer_predicted_angular_velocity = observer.predicted_angular_velocity;
+    msg.observer_angular_velocity_innovation = observer.angular_velocity_innovation;
+    msg.observer_predicted_leg_psi = observer.predicted_leg_psi;
+    msg.observer_leg_psi_innovation = observer.leg_psi_innovation;
+    msg.observer_input_command_velocity = observer.input_command_velocity;
+    msg.observer_input_command_angular_velocity = observer.input_command_angular_velocity;
+
     msg.mpc_attempted = executor_output.mpc_diagnostics.has_value();
     if (executor_output.mpc_diagnostics) {
         const MPCDiagnostics& mpc = *executor_output.mpc_diagnostics;

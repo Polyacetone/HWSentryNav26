@@ -79,6 +79,7 @@ struct ExecutorOutput {
     bool mpc_lethal = false;
 
     // 调试
+    ObserverDiagnostics observer_diagnostics;
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
     std::optional<MPCDiagnostics> mpc_diagnostics;
 };
@@ -138,7 +139,9 @@ private:
     ExecutorOutput execute_fixed(const ExecutorInput& input);
 
     void sync_mpc_context(const ExecutorInput& input, bool allow_observer_update);
-    void reset_mpc_observer();
+    void reset_mpc_observer(
+        ObserverResetReason reason = ObserverResetReason::EXPLICIT_REQUEST
+    );
     void resynchronize_command_state(const ChassisMotionState& chassis_state);
     void apply_held_command(ExecutorOutput& output) const;
     void remember_command_output(

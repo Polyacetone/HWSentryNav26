@@ -2,6 +2,7 @@
 
 #include <expected>
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
+#include <nav_executor/path_executor/solver/lpv_observer.hpp>
 #include <nav_executor/common/minco_trajectory.hpp>
 #include <nav_executor/path_executor/solver/follow_problem.hpp>
 #include <nav_executor/path_executor/solver/stop_problem.hpp>
@@ -38,11 +39,19 @@ public:
     );
     void reset_warm_start();
 
-    void update_observer(const ChassisMotionState& chassis_state);
-    void reset_observer();
+    void update_observer(
+        const ChassisMotionState& chassis_state,
+        uint64_t state_sequence
+    );
+    void reset_observer(
+        ObserverResetReason reason = ObserverResetReason::EXPLICIT_REQUEST
+    );
 
     [[nodiscard]] double hidden_state_estimate() const {
-        return x_h_hat_;
+        return observer_.hidden_state_estimate();
+    }
+    [[nodiscard]] const ObserverDiagnostics& observer_diagnostics() const {
+        return observer_.diagnostics();
     }
 
     std::expected<FollowSolveResult, std::string> solve_follow(
@@ -80,6 +89,7 @@ public:
 private:
     MPCParams params_;
     rclcpp::Logger logger_;
+    LPVLongitudinalObserver observer_;
     Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
     Eigen::Vector2d last_cmd_rate_ = Eigen::Vector2d::Zero();
     fddp::Solver<FollowProblem> follow_solver_;
@@ -90,14 +100,6 @@ private:
     bool hold_warm_ = false;
     std::optional<StateVec> follow_nominal_longitudinal_state_;
 
-    double x_h_hat_ = 0.0;
-    double prev_v_act_ = 0.0;
-    double prev_w_act_ = 0.0;
-    double prev_schedule_rho_ = 0.0;
-    Eigen::Vector2d observer_input_command_ = Eigen::Vector2d::Zero();
-    bool observer_initialized_ = false;
-    bool observer_validated_ = false;
-    bool observer_rejection_active_ = false;
     int fddp_lethal_consecutive_count_ = 0;
 
     StateVec make_initial_state(

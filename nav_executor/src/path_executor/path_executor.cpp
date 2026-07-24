@@ -71,25 +71,25 @@ StepExecutionPreview PathExecutor::preview_step_execution(
 void PathExecutor::sync_mpc_context(const ExecutorInput& input, const bool allow_observer_update) {
     mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
     if (!allow_observer_update) {
-        reset_mpc_observer();
+        reset_mpc_observer(ObserverResetReason::CONTROL_UNAVAILABLE);
         return;
     }
 
     const uint64_t sequence = input.observation.chassis_state_sequence;
     if (sequence == 0) {
-        mpc_controller_->update_observer(input.observation.chassis_state);
+        mpc_controller_->update_observer(input.observation.chassis_state, sequence);
         return;
     }
     if (last_observer_state_sequence_ && sequence == *last_observer_state_sequence_) return;
     if (last_observer_state_sequence_ && sequence != *last_observer_state_sequence_ + 1) {
-        reset_mpc_observer();
+        reset_mpc_observer(ObserverResetReason::STATE_SEQUENCE_GAP);
     }
-    mpc_controller_->update_observer(input.observation.chassis_state);
+    mpc_controller_->update_observer(input.observation.chassis_state, sequence);
     last_observer_state_sequence_ = sequence;
 }
 
-void PathExecutor::reset_mpc_observer() {
-    mpc_controller_->reset_observer();
+void PathExecutor::reset_mpc_observer(const ObserverResetReason reason) {
+    mpc_controller_->reset_observer(reason);
     last_observer_state_sequence_.reset();
 }
 
@@ -101,7 +101,7 @@ void PathExecutor::resynchronize_command_state(const ChassisMotionState& chassis
     last_command_output_stamp_.reset();
     mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
     mpc_controller_->reset_warm_start();
-    reset_mpc_observer();
+    reset_mpc_observer(ObserverResetReason::COMMAND_RESYNCHRONIZED);
 }
 
 void PathExecutor::apply_held_command(ExecutorOutput& output) const {
@@ -158,7 +158,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         if (interval > 1.5 * MPC_DT) {
             last_cmd_rate_.setZero();
             mpc_controller_->reset_warm_start();
-            reset_mpc_observer();
+            reset_mpc_observer(ObserverResetReason::CONTROL_UPDATE_GAP);
         }
     }
     last_update_stamp_ = input.observation.stamp;
@@ -191,16 +191,17 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         last_cmd_rate_ = Eigen::Vector2d::Zero();
         mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
         mpc_controller_->reset_warm_start();
-        reset_mpc_observer();
+        reset_mpc_observer(ObserverResetReason::CONTROL_UNAVAILABLE);
         safety_monitor_.reset_stuck();
         safety_monitor_.reset_recovery();
+        out.observer_diagnostics = mpc_controller_->observer_diagnostics();
         remember_command_output(out, input.observation.stamp);
         return out;
     }
 
     if (entered_controllable) {
         RCLCPP_DEBUG(logger_, "Chassis entered mature control state: resetting Luenberger observer");
-        reset_mpc_observer();
+        reset_mpc_observer(ObserverResetReason::EXPLICIT_REQUEST);
     }
     if (command_blocked) mpc_controller_->reset_warm_start();
 
@@ -403,9 +404,10 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         last_cmd_rate_.setZero();
         mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
         mpc_controller_->reset_warm_start();
-        reset_mpc_observer();
+        reset_mpc_observer(ObserverResetReason::CONTROL_OUTPUT_INVALID);
     }
 
+    output.observer_diagnostics = mpc_controller_->observer_diagnostics();
     return output;
 }
 

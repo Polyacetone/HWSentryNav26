@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <Eigen/Dense>
@@ -135,17 +136,12 @@ struct LPVKinematicModelParams {
     double w_k1;
     double w_cf1;
 
-    double xh0_bias;
-    double xh0_psi;
-    double xh0_v;
     double psi_bias;
     double psi_gain;
     double psi_v;
     double obs_lv;
-    double obs_lpsi;
-    double obs_v_innovation_max;
-    double obs_omega_innovation_max;
-    double obs_psi_innovation_max;
+    double obs_v_correction_clip;
+    double obs_v_reset_threshold;
 };
 
 struct LPVDiscreteModel {
@@ -325,6 +321,54 @@ enum class MPCSolverMode : uint8_t {
     FOLLOW = 1,
     STOP = 2,
     HOLD = 3,
+};
+
+enum class ObserverUpdateEvent : uint8_t {
+    NONE = 0,
+    RESET = 1,
+    INITIALIZED = 2,
+    CORRECTED = 3,
+    MODEL_STRESS = 4,
+};
+
+enum class ObserverResetReason : uint8_t {
+    NONE = 0,
+    EXPLICIT_REQUEST = 1,
+    NONFINITE_INPUT = 2,
+    MODEL_DEGENERATE = 3,
+    NONFINITE_PREDICTION = 4,
+    VELOCITY_INNOVATION = 5,
+    STATE_SEQUENCE_GAP = 6,
+    CONTROL_UPDATE_GAP = 7,
+    COMMAND_RESYNCHRONIZED = 8,
+    CONTROL_UNAVAILABLE = 9,
+    CONTROL_OUTPUT_INVALID = 10,
+};
+
+struct ObserverDiagnostics {
+    ObserverUpdateEvent event = ObserverUpdateEvent::NONE;
+    ObserverResetReason last_reset_reason = ObserverResetReason::NONE;
+    bool initialized = false;
+    bool validated = false;
+    bool prediction_available = false;
+    bool auxiliary_prediction_available = false;
+    bool velocity_correction_clipped = false;
+
+    uint64_t state_sequence = 0;
+    uint64_t reset_count = 0;
+    uint64_t active_run_length = 0;
+    uint64_t revalidation_latency_updates = 0;
+
+    double hidden_state_estimate = 0.0;
+    double predicted_hidden_state = 0.0;
+    double predicted_velocity = 0.0;
+    double velocity_innovation = 0.0;
+    double predicted_angular_velocity = 0.0;
+    double angular_velocity_innovation = 0.0;
+    double predicted_leg_psi = 0.0;
+    double leg_psi_innovation = 0.0;
+    double input_command_velocity = 0.0;
+    double input_command_angular_velocity = 0.0;
 };
 
 struct MPCDiagnostics {

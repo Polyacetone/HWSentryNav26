@@ -254,7 +254,8 @@ MPCDiagnostics initial_diagnostics(
 
 MPCSolver::MPCSolver(const MPCParams& params, rclcpp::Logger logger)
     : params_(params),
-      logger_(std::move(logger)) {}
+      logger_(std::move(logger)),
+      observer_(params.kinematic_model, logger_.get_child("observer")) {}
 
 MPCSolver::~MPCSolver() = default;
 
@@ -279,88 +280,22 @@ void MPCSolver::reset_warm_start() {
     }
 }
 
-void MPCSolver::update_observer(const ChassisMotionState& chassis_state) {
-    if (!std::isfinite(chassis_state.velocity) || !std::isfinite(chassis_state.omega)
-        || !std::isfinite(chassis_state.leg_h) || !std::isfinite(chassis_state.leg_psi)) {
-        reset_observer();
-        return;
+void MPCSolver::update_observer(
+    const ChassisMotionState& chassis_state,
+    const uint64_t state_sequence
+) {
+    const ObserverDiagnostics& diagnostics = observer_.update(
+        chassis_state,
+        last_cmd_,
+        state_sequence
+    );
+    if (diagnostics.event == ObserverUpdateEvent::RESET) {
+        follow_nominal_longitudinal_state_.reset();
     }
-    const double v_act = chassis_state.velocity;
-    const double w_act = chassis_state.omega;
-    const double rho_cur = schedule_rho_from_state(chassis_state, params_.kinematic_model);
-    if (!observer_initialized_) {
-        const double initial_xh = params_.kinematic_model.xh0_bias
-            + params_.kinematic_model.xh0_psi * chassis_state.leg_psi
-            + params_.kinematic_model.xh0_v * v_act;
-        if (!std::isfinite(rho_cur) || !std::isfinite(initial_xh)) {
-            reset_observer();
-            return;
-        }
-        x_h_hat_ = initial_xh;
-        prev_v_act_ = v_act;
-        prev_w_act_ = w_act;
-        prev_schedule_rho_ = rho_cur;
-        observer_input_command_ = last_cmd_;
-        observer_initialized_ = true;
-        return;
-    }
-    const auto model = build_lpv_discrete_model(params_.kinematic_model, 0.5 * (prev_schedule_rho_ + rho_cur));
-    const auto nl_eval = evaluate_lpv_nonlinear(prev_v_act_, prev_w_act_, model);
-    // 辨识模型包含一拍输入延迟，因此当前观测应由上次 observer 更新时捕获的命令预测。
-    const double xh_pred = model.ad00 * x_h_hat_ + model.ad01 * prev_v_act_ + model.bd0 * observer_input_command_.x() + model.gd0 * nl_eval.nl;
-    const double v_pred = model.ad10 * x_h_hat_ + model.ad11 * prev_v_act_ + model.bd1 * observer_input_command_.x() + model.gd1 * nl_eval.nl;
-    const double w_pred = model.alpha_w * prev_w_act_
-        + model.beta_w * observer_input_command_.y() - model.gamma_w * nl_eval.sw;
-    const double psi_proxy_pred = params_.kinematic_model.psi_bias + params_.kinematic_model.psi_gain * xh_pred
-        + params_.kinematic_model.psi_v * v_pred;
-    const double velocity_innovation = v_act - v_pred;
-    const double angular_velocity_innovation = w_act - w_pred;
-    const double leg_psi_innovation = chassis_state.leg_psi - psi_proxy_pred;
-    const double corrected_xh = xh_pred
-        + params_.kinematic_model.obs_lv * velocity_innovation
-        + params_.kinematic_model.obs_lpsi * leg_psi_innovation;
-    if (!std::isfinite(xh_pred)
-        || !std::isfinite(v_pred)
-        || !std::isfinite(w_pred)
-        || !std::isfinite(psi_proxy_pred)
-        || !std::isfinite(velocity_innovation)
-        || !std::isfinite(angular_velocity_innovation)
-        || !std::isfinite(leg_psi_innovation)
-        || !std::isfinite(corrected_xh)
-        || std::abs(velocity_innovation) > params_.kinematic_model.obs_v_innovation_max
-        || std::abs(angular_velocity_innovation) > params_.kinematic_model.obs_omega_innovation_max
-        || std::abs(leg_psi_innovation) > params_.kinematic_model.obs_psi_innovation_max) {
-        const bool should_log = !observer_rejection_active_;
-        reset_observer();
-        observer_rejection_active_ = true;
-        if (should_log) {
-            RCLCPP_WARN(
-                logger_,
-                "Rejecting LPV observer innovation: velocity=%.3f m/s, omega=%.3f rad/s, leg_psi=%.3f rad",
-                velocity_innovation,
-                angular_velocity_innovation,
-                leg_psi_innovation
-            );
-        }
-        return;
-    }
-    x_h_hat_ = corrected_xh;
-    prev_v_act_ = v_act;
-    prev_w_act_ = w_act;
-    prev_schedule_rho_ = rho_cur;
-    observer_input_command_ = last_cmd_;
-    observer_validated_ = true;
-    observer_rejection_active_ = false;
 }
 
-void MPCSolver::reset_observer() {
-    x_h_hat_ = 0.0;
-    prev_v_act_ = 0.0;
-    prev_w_act_ = 0.0;
-    observer_input_command_.setZero();
-    observer_initialized_ = false;
-    observer_validated_ = false;
-    observer_rejection_active_ = false;
+void MPCSolver::reset_observer(const ObserverResetReason reason) {
+    observer_.reset(reason);
     follow_nominal_longitudinal_state_.reset();
 }
 
@@ -376,7 +311,7 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::X) = pose.x();
     x0(ix::Y) = pose.y();
     x0(ix::THETA) = pose.z();
-    x0(ix::XH) = observer_validated_ ? x_h_hat_ : 0.0;
+    x0(ix::XH) = observer_.validated() ? observer_.hidden_state_estimate() : 0.0;
     x0(ix::V) = chassis_state.velocity;
     x0(ix::W) = chassis_state.omega;
     x0(ix::V_CMD) = current_command.x();
@@ -449,7 +384,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
 
     const auto& feedback = params_.follow.ancillary_feedback;
-    const bool feedback_active = feedback.enable && observer_validated_;
+    const bool feedback_active = feedback.enable && observer_.validated();
     if (!feedback_active) follow_nominal_longitudinal_state_.reset();
     const LongitudinalNominalInitialState nominal_initial = feedback_active
         ? longitudinal_nominal_initial_state(

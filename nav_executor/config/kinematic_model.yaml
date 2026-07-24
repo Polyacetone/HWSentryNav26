@@ -38,17 +38,14 @@
       w_k1: 0.023828310633107176
       w_cf1: 0.07295561089659769
 
-      # Hidden-state initialization / leg_psi proxy observer
-      xh0_bias: -0.299374221487719
-      xh0_psi: 7.148066217022126
-      xh0_v: 1.0903041175259374
+      # Shadow leg_psi residual model. Diagnostics only; it does not correct or
+      # invalidate the longitudinal observer.
       psi_bias: 0.042975279908146834
       psi_gain: 0.19629303004811718
       psi_v: 0.2023843512379656
-      obs_lv: 4.484294986367658
-      obs_lpsi: 0.7641636586038261
 
-      # Preliminary one-step innovation gates; validate on representative Mature/NORMAL logs.
-      obs_v_innovation_max: 0.25
-      obs_omega_innovation_max: 2.5
-      obs_psi_innovation_max: 0.35
+      # Longitudinal observer. Initialization is solved from the discrete model
+      # so that the measured velocity is held for one prediction step.
+      obs_lv: 4.484294986367658
+      obs_v_correction_clip: 0.12
+      obs_v_reset_threshold: 0.25
