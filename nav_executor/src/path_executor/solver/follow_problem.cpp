@@ -10,7 +10,7 @@ namespace nav_executor {
 namespace {
 
 constexpr double COST_EPS = 1e-9;
-constexpr int FOLLOW_RESIDUAL_DIM = 21;
+constexpr int FOLLOW_RESIDUAL_DIM = 22;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 struct ReferenceFrame {
@@ -73,6 +73,7 @@ FollowResidualVec follow_residual_impl(
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
     const CommandDynamicsLimits& motion_limits,
+    const LPVDiscreteModel& model,
     const std::shared_ptr<const StepConstraintSchedule>& step_schedule,
     const FrozenStepGate* frozen_step_gate = nullptr
 ) {
@@ -153,10 +154,16 @@ FollowResidualVec follow_residual_impl(
                 ? target.min - v_actual
                 : (v_actual > target.max ? v_actual - target.max : 0.0);
             residual(17) = traversal_weights.velocity * gate * velocity_error;
-            residual(18) = traversal_weights.angular_velocity * gate * omega_cmd;
-            residual(19) = traversal_weights.velocity_smoothness * gate * dv_cmd;
-            residual(20) = traversal_weights.angular_velocity_smoothness
-                * gate * domega_cmd;
+            residual(18) = traversal_weights.angular_velocity_command
+                * gate * omega_cmd;
+            residual(19) = traversal_weights.angular_velocity_predicted
+                * gate * omega_actual;
+            residual(20) = traversal_weights.velocity_command_smoothness
+                * gate * dv_cmd;
+            const double predicted_velocity_increment =
+                mpc_dynamics(x, u, model)(ix::V) - v_actual;
+            residual(21) = traversal_weights.velocity_predicted_smoothness
+                * gate * predicted_velocity_increment;
         }
     }
 
@@ -290,7 +297,7 @@ double FollowProblemT<Horizon>::running_cost_value_only(
 ) const {
     const FollowResidualVec residual = follow_residual_impl(
         x, u, trajectory_, p_, cost_grid_for_step(k), cost_info_,
-        effective_capability_.command_dynamics, step_constraint_schedule_
+        effective_capability_.command_dynamics, model_, step_constraint_schedule_
     );
     double cost = residual_cost(residual);
     const double remaining_progress = positive_part(
@@ -330,7 +337,8 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     auto residual_fn = [&](const StateVec& state, const ControlVec& control) {
         return follow_residual_impl(
             state, control, trajectory_, p_, cost_grid, cost_info_,
-            effective_capability_.command_dynamics, step_constraint_schedule_, &frozen_step_gate
+            effective_capability_.command_dynamics, model_, step_constraint_schedule_,
+            &frozen_step_gate
         );
     };
     gauss_newton_running_derivatives<FOLLOW_RESIDUAL_DIM>(

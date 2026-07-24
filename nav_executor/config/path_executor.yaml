@@ -112,9 +112,10 @@
         traversal_target_weights:
           velocity: 2.0 # v_actual 对共享台阶速度窗口的软目标
           direction: 2.4 # 台阶内部穿越方向对齐软目标
-          angular_velocity: 0.8 # 台阶内部角速度指令惩罚
-          velocity_smoothness: 0.8 # 台阶内部线速度指令平滑
-          angular_velocity_smoothness: 0.8 # 台阶内部角速度指令平滑
+          angular_velocity_command: 0.1 # 台阶内部角速度指令趋零
+          angular_velocity_predicted: 0.4 # 台阶内部预测车身角速度趋零
+          velocity_command_smoothness: 0.1 # 台阶内部线速度指令增量平滑
+          velocity_predicted_smoothness: 0.8 # 台阶内部预测车身速度增量平滑
         environment_weights:
           obstacle: 3.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
