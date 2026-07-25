@@ -14,7 +14,6 @@
 
       planner:
         goal_reached_distance: 0.5 # 机器人到终点距离小于该值时认为已到达，直接标记 COMPLETE
-        skip_distance: 0.5 # 起终点距离小于该值时跳过 kinodynamic 搜索，直接用直线连接做种子（米）
         seed_resample_distance: 0.5 # kinodynamic 搜索结果的路径点重采样间隔（米），决定 MINCO 分成多少段
 
       dijkstra:
@@ -23,19 +22,17 @@
 
       kinodynamic:
         state_limits:
-          velocity: { min: -1.6, max: 3.0 } # 速度限制：允许倒车最髙 -1.6 m/s，前进最快 3.0 m/s
+          speed_max: 3.0 # 前向平坦状态的最大速度 (m/s)
           angular_velocity_max: 6.0 # 最大转向角速度（rad/s）
           acceleration_max: 1.5 # 最大加减速度（m/s²）
           lateral_acceleration_max: 2.0 # 最大侧向加速度，即 |速度 × 角速度|（m/s²），限制转弯不侧滑
-        accel_samples: 5 # 从 [-accel_max, accel_max] 里采多少个加速度值作为搜索分支
-        omega_samples: 7 # 从 [-omega_max, omega_max] 里采多少个角速度值作为搜索分支
+        tangential_accel_samples: 5 # 切向加速度采样数
+        normal_accel_samples: 7 # 速度相关法向加速度比例采样数
         primitive_duration: 0.3 # 每条运动原语（primitive）的积分时长（秒）
         collision_substeps: 4 # 一条原语内部均匀分多少段来做碰撞检测
         dedup_xy: 0.2 # 位置去重的分辨率：两格靠多近视为同一个状态（米）
         dedup_theta: 0.314 # 朝向去重的分辨率（弧度），约 18°
-        dedup_v: 0.4 # 速度去重的分辨率（m/s）
-        time_weight: 1.0 # 每条原语的时长代价系数，越大越偏好用时短的路径
-        reverse_weight: 0.3 # 倒车时额外加的代价，鼓励前进但不禁止倒车
+        dedup_speed: 0.4 # 速度幅值去重的分辨率（m/s）
         heuristic_weight: 1.0 # Dijkstra 启发式权重，>1 搜索更快但可能不是最优
         goal_tolerance: 0.3 # 到终点的位置容差：进入此范围就算到达（米）
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
@@ -55,7 +52,7 @@
           runup_acceleration: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 a² 状态正则
           runup_angular_velocity: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 ω² 状态正则
         trajectory_limits:
-          velocity: { min: -1.6, max: 3.0 } # 整条轨迹的速度限制（m/s）
+          velocity_max: 3.0 # 整条轨迹的速度幅值上限（m/s）
           angular_velocity_max: 6.0 # 整条轨迹的角速度限制（rad/s）
           acceleration_max: 1.5 # 整条轨迹的加速度限制（m/s²）
           lateral_acceleration_max: 2.0 # 整条轨迹的侧向加速度限制（m/s²）
@@ -102,7 +99,6 @@
           traversal_angle_tolerance: 0.4 # 台阶方向角的允许偏差，只打印日志不进行拒绝（rad）
           self_intersection_flatness_tolerance: 0.001 # 自适应 Bezier 细分相对弦的最大几何误差 (m)
           self_intersection_max_edge_length: 0.02 # 自交验收折线边的最大长度 (m)
-          cusp_retrace_alignment_threshold: 0.999 # 仅允许相反 gear 轨迹在尖点附近切向接触；其余自交一律拒绝
 
       step:
         detection: # 物理边界固定按原始格点 direction magnitude > 0.95 判定

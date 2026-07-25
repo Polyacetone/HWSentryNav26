@@ -46,7 +46,7 @@ private:
     MPCParams load_mpc_params();
     FsmParams load_fsm_params();
     PathExecutorParams load_executor_params();
-    PlannerConfig load_planner_config();
+    PlannerConfig load_planner_config(const SignedVelocityBounds& forward_velocity_bounds);
     TaskManagerParams load_task_params();
     ProfileBlendParams load_blend_params();
     CapabilityProfile load_capability_profile(const std::string& prefix);
@@ -111,6 +111,7 @@ private:
 
     // 只读配置（跨线程共享）
     TraversalConfiguration traversal_configuration_;
+    CapabilityProfile bidirectional_profile_;
     std::shared_ptr<StepRoutingMask> step_routing_mask_;
     bool step_mask_ready_ = false;
 

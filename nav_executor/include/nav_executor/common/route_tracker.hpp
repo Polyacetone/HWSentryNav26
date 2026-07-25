@@ -15,7 +15,6 @@ struct RouteTrackerParams {
     double max_tracking_error;
     double prediction_time_limit;
     double path_speed_filter_alpha;
-    double cusp_switch_distance;
     TrajectoryProjectionParams projection;
 };
 
@@ -30,7 +29,6 @@ struct RouteEstimate {
     double tau = 0.0;
     double arc_length = 0.0;
     double path_speed = 0.0;
-    int segment_index = 0;
     double remaining_length = 0.0;
     Eigen::Vector2d reference_position = Eigen::Vector2d::Zero();
     Eigen::Vector2d projected_position = Eigen::Vector2d::Zero();
@@ -55,7 +53,6 @@ private:
     AnnotatedPath::ConstPtr path_;
     std::optional<RouteEstimate> estimate_;
     std::optional<std::chrono::steady_clock::time_point> last_stamp_;
-    int segment_cursor_ = 0;
 };
 
 } // namespace nav_executor

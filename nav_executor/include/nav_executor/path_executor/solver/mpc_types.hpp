@@ -59,8 +59,6 @@ struct MPCFollowTrackingWeights {
 };
 
 struct MPCFollowProgressParams {
-    double speed_min;
-    double speed_max;
     double progress_reward;
     double speed_tracking_weight;
     double speed_smoothness_weight;

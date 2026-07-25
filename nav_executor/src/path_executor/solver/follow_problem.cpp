@@ -109,7 +109,7 @@ FollowResidualVec follow_residual_impl(
 
     residual(2) = tracking.heading * wrap_pi(theta - reference.sample.theta);
     residual(3) = tracking.velocity
-        * (v_actual - reference.sample.gear * path_speed_cmd);
+        * (v_actual - path_speed_cmd);
     residual(4) = tracking.angular_velocity
         * (omega_actual
             - trajectory.heading_rate_per_arc_length(reference.sample) * path_speed_cmd);
@@ -190,7 +190,7 @@ FollowTerminalResidualVec follow_terminal_residual_impl(
     residual(1) = weights.position * (x(ix::Y) - reference.sample.p.y());
     residual(2) = weights.heading * wrap_pi(x(ix::THETA) - reference.sample.theta);
     residual(3) = weights.velocity
-        * (x(ix::V) - reference.sample.gear * x(ix::PATH_SPEED));
+        * (x(ix::V) - x(ix::PATH_SPEED));
     residual(4) = weights.angular_velocity
         * (x(ix::W)
             - trajectory.heading_rate_per_arc_length(reference.sample)
@@ -213,7 +213,8 @@ FollowProblemT<Horizon>::FollowProblemT(
     const CostMapGridView& masked_global_grid,
     const double prediction_dt,
     const double schedule_rho,
-    const CapabilityProfile& effective_capability,
+    const CapabilityProfile& command_capability,
+    const SignedVelocityBounds& path_speed_bounds,
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule
 ):
     trajectory_(std::move(trajectory)),
@@ -223,7 +224,8 @@ FollowProblemT<Horizon>::FollowProblemT(
     masked_global_grid_(masked_global_grid),
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
-    effective_capability_(effective_capability),
+    command_capability_(command_capability),
+    path_speed_bounds_(path_speed_bounds),
     step_constraint_schedule_(std::move(step_constraint_schedule)),
     total_length_(trajectory_.total_arc_length()) {}
 
@@ -258,18 +260,10 @@ template<int Horizon>
 MPCControlBounds FollowProblemT<Horizon>::control_bounds(const int k, const StateVec& x) const {
     MPCControlBounds bounds = command_rate_control_bounds(
         x,
-        effective_capability_,
-        p_.follow.progress.speed_min,
-        p_.follow.progress.speed_max,
+        command_capability_,
+        path_speed_bounds_.min,
+        path_speed_bounds_.max,
         k == 0 ? &p_.follow.start_command : nullptr
-    );
-    const TrajSample reference = trajectory_.eval_arc_length(x(ix::PATH_PROGRESS));
-    const double physically_reachable_path_speed = reference.gear > 0.0
-        ? effective_capability_.command_envelope.velocity.max
-        : -effective_capability_.command_envelope.velocity.min;
-    bounds.upper(iu::PATH_SPEED_CMD) = std::min(
-        bounds.upper(iu::PATH_SPEED_CMD),
-        std::max(physically_reachable_path_speed, bounds.lower(iu::PATH_SPEED_CMD))
     );
     return bounds;
 }
@@ -297,7 +291,7 @@ double FollowProblemT<Horizon>::running_cost_value_only(
 ) const {
     const FollowResidualVec residual = follow_residual_impl(
         x, u, trajectory_, p_, cost_grid_for_step(k), cost_info_,
-        effective_capability_.command_dynamics, model_, step_constraint_schedule_
+        command_capability_.command_dynamics, model_, step_constraint_schedule_
     );
     double cost = residual_cost(residual);
     const double remaining_progress = positive_part(
@@ -337,7 +331,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     auto residual_fn = [&](const StateVec& state, const ControlVec& control) {
         return follow_residual_impl(
             state, control, trajectory_, p_, cost_grid, cost_info_,
-            effective_capability_.command_dynamics, model_, step_constraint_schedule_,
+            command_capability_.command_dynamics, model_, step_constraint_schedule_,
             &frozen_step_gate
         );
     };

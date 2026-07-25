@@ -6,8 +6,8 @@
 
 namespace nav_executor {
 
-// 微分平坦轨迹的求值结果。theta 由带换向符号的运动方向导出；换向尖点速度为零时，
-// eval 会改用加速度方向以保持车身朝向连续。切线帧始终按位置曲线定义。
+// 微分平坦轨迹的求值结果。车身朝向由有向运动切线导出；端点速度为零时，
+// eval 使用段内侧速度恢复朝向。切线帧始终按位置曲线定义。
 struct TrajSample {
     Eigen::Vector2d p = Eigen::Vector2d::Zero();
     Eigen::Vector2d dp_dtau = Eigen::Vector2d::Zero();
@@ -20,12 +20,11 @@ struct TrajSample {
     double phi = 0.0;       // atan2(dp_dtau.y, dp_dtau.x)；|dp_dtau|→0 时保持上一有效值意义不定
     double sin_phi = 0.0;
     double cos_phi = 0.0;
-    double ds_dtau = 0.0;   // |dp_dtau|，弧长对 τ 的变化率（原地旋转处→0）
+    double ds_dtau = 0.0;   // |dp_dtau|，弧长对 τ 的变化率
     double kappa = 0.0;     // 位置曲线曲率
-    double gear = 1.0;      // 当前段换向符号：+1 前进，−1 倒车
 };
 
-// 逐段五次多项式轨迹。普通节点保持 C2 连续；换向尖点强制两侧速度为零。
+// 逐段五次多项式前向轨迹，内部节点保持速度至四阶导连续。
 // tau 与绝对时间线性对应，仅用于 MINCO 轨迹求值；跟随层统一使用累计弧长。
 class MincoTrajectory {
 public:
@@ -38,18 +37,14 @@ public:
     using ControlPointBlock = Eigen::Matrix<double, NCOEF, DIM>;
 
     MincoTrajectory() = default;
-    // gears：每段换向符号（+1 前进，−1 倒车），size 须等于 durations.size()；
-    // 空则默认全 +1（无倒车段）。
     MincoTrajectory(
         std::vector<double> durations,
-        std::vector<CoefBlock> coeffs,
-        std::vector<double> gears = {}
+        std::vector<CoefBlock> coeffs
     );
 
     [[nodiscard]] bool empty() const { return durations_.empty(); }
     [[nodiscard]] int segment_count() const { return static_cast<int>(durations_.size()); }
     [[nodiscard]] double total_time() const { return total_time_; }
-    // 折返段仍按实际行驶路程累计，因此弧长随 tau 单调。
     [[nodiscard]] double total_arc_length() const { return total_arc_length_; }
     [[nodiscard]] double length() const { return total_arc_length_; }
     // 第 boundary_index 个段边界对应的 tau，合法范围 [0, segment_count()]。
@@ -76,7 +71,6 @@ public:
     [[nodiscard]] double angular_velocity(const TrajSample& s) const;
     [[nodiscard]] double nominal_path_speed(const TrajSample& s) const;
     [[nodiscard]] double heading_rate_per_arc_length(const TrajSample& s) const;
-    [[nodiscard]] double segment_gear(int segment_index) const;
     [[nodiscard]] ControlPointBlock segment_bezier_control_points(int segment_index) const;
 
     [[nodiscard]] bool operator==(const MincoTrajectory& other) const;
@@ -95,7 +89,6 @@ private:
     std::vector<double> durations_;         // 每段时长 T_i
     std::vector<double> cumulative_times_;  // 前缀和，size = segment_count+1，首元素 0
     std::vector<CoefBlock> coeffs_;         // 每段系数（2D 平坦输出）
-    std::vector<double> gears_;             // 每段换向符号 ±1
     double total_time_ = 0.0;
     double total_arc_length_ = 0.0;
     std::vector<double> arc_taus_;          // 每段均匀细分的 τ 节点，显式包含所有段边界

@@ -21,15 +21,10 @@ constexpr double OMEGA_SPEED_REG = 0.05;
 
 MincoTrajectory::MincoTrajectory(
     std::vector<double> durations,
-    std::vector<CoefBlock> coeffs,
-    std::vector<double> gears
+    std::vector<CoefBlock> coeffs
 )
     : durations_(std::move(durations)),
-      coeffs_(std::move(coeffs)),
-      gears_(std::move(gears)) {
-    if (gears_.size() != durations_.size()) {
-        gears_.assign(durations_.size(), 1.0); // 缺省全前进
-    }
+      coeffs_(std::move(coeffs)) {
     cumulative_times_.assign(durations_.size() + 1, 0.0);
     std::partial_sum(durations_.begin(), durations_.end(), cumulative_times_.begin() + 1);
     total_time_ = cumulative_times_.empty() ? 0.0 : cumulative_times_.back();
@@ -150,7 +145,6 @@ MincoTrajectory::Locator MincoTrajectory::locate_time(const double t) const {
 TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) const {
     // 段内 2D 平坦多项式求值，导数对**真实时间**（局部时间即真实时间）。τ 换算在 eval 层完成。
     const CoefBlock& coef = coeffs_[static_cast<size_t>(segment)];
-    const double gear = gears_[static_cast<size_t>(segment)];
     const double T = durations_[static_cast<size_t>(segment)];
 
     Eigen::Vector2d pos = Eigen::Vector2d::Zero();
@@ -180,7 +174,7 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
     out.dp_dtau = vel_t * s;
     out.ddp_dtau = acc_t * s * s;
 
-    // 位置曲线切线帧（几何量，与 gear 无关）。
+    // 位置曲线切线帧。
     out.ds_dtau = out.dp_dtau.norm();
     out.phi = std::atan2(out.dp_dtau.y(), out.dp_dtau.x());
     out.sin_phi = std::sin(out.phi);
@@ -188,14 +182,11 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
     const double cross = out.dp_dtau.x() * out.ddp_dtau.y() - out.dp_dtau.y() * out.ddp_dtau.x();
     const double ds = out.ds_dtau;
     out.kappa = ds > TANGENT_EPS ? cross / (ds * ds * ds) : 0.0;
-    out.gear = gear;
-
-    // ── 平坦朝向：θ_body = atan2(gear · 运动方向)。──
+    // ── 前向平坦朝向：θ_body = atan2(运动方向)。──
     const double speed_t = vel_t.norm();
     Eigen::Vector2d motion_dir = vel_t;
     if (speed_t <= TANGENT_EPS) {
-        // v=0（尖点 / 端点）：运动方向取自段**内侧**一小步的速度——该处 speed>0，其方向
-        // 即本段行进方向（gear 已编码前进 / 倒车），无需翻正。端点 a、j 可能同时退化，
+        // v=0（端点）：运动方向取自段**内侧**一小步的速度。端点 a、j 可能同时退化，
         // 用有限步比 l'Hôpital 更稳。
         const double h = std::max(T * 1e-3, 1e-4);
         const double t_probe = local_t < 0.5 * T ? local_t + h : local_t - h;
@@ -208,9 +199,9 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
         motion_dir = v_probe;
         if (motion_dir.norm() <= TANGENT_EPS) motion_dir = acc_t; // 极端退化兜底
     }
-    out.theta = std::atan2(gear * motion_dir.y(), gear * motion_dir.x());
+    out.theta = std::atan2(motion_dir.y(), motion_dir.x());
 
-    // ── 角速度 ω = θ̇ = (ẋÿ − ẏẍ)/‖ṗ‖²（与 gear 无关）。分母用物理速度尺度正则化，
+    // ── 角速度 ω = θ̇ = (ẋÿ − ẏẍ)/‖ṗ‖²。分母用物理速度尺度正则化，
     //    使尖点 / 端点（v→0）处 ω→0 而非发散；高速时误差可忽略（O(reg²/s²)）。──
     const double omega_t = (vel_t.x() * acc_t.y() - vel_t.y() * acc_t.x())
         / (speed_t * speed_t + OMEGA_SPEED_REG * OMEGA_SPEED_REG);
@@ -250,7 +241,7 @@ TrajSample MincoTrajectory::eval_arc_length(const double arc_length) const {
 }
 
 double MincoTrajectory::longitudinal_velocity(const TrajSample& s) const {
-    return s.gear * nominal_path_speed(s);
+    return nominal_path_speed(s);
 }
 
 double MincoTrajectory::angular_velocity(const TrajSample& s) const {
@@ -266,12 +257,6 @@ double MincoTrajectory::nominal_path_speed(const TrajSample& s) const {
 double MincoTrajectory::heading_rate_per_arc_length(const TrajSample& s) const {
     const double path_speed = nominal_path_speed(s);
     return path_speed > TANGENT_EPS ? angular_velocity(s) / path_speed : 0.0;
-}
-
-double MincoTrajectory::segment_gear(const int segment_index) const {
-    if (gears_.empty()) return 1.0;
-    const int clamped = std::clamp(segment_index, 0, segment_count() - 1);
-    return gears_[static_cast<size_t>(clamped)];
 }
 
 MincoTrajectory::ControlPointBlock MincoTrajectory::segment_bezier_control_points(
@@ -314,9 +299,6 @@ bool MincoTrajectory::operator==(const MincoTrajectory& other) const {
     }
     for (size_t i = 0; i < coeffs_.size(); ++i) {
         if (coeffs_[i] != other.coeffs_[i]) return false;
-    }
-    for (size_t i = 0; i < gears_.size(); ++i) {
-        if (gears_[i] != other.gears_[i]) return false;
     }
     return true;
 }

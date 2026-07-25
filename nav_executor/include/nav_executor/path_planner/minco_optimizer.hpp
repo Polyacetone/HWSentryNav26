@@ -16,14 +16,13 @@ namespace nav_executor {
 // ── MINCO 时空优化器（微分平坦，替换 bspline_optimizer）──
 //
 // 只优化 2D 平坦输出 (x,y)：决策变量 = 内部路点 Q（DIM×(N-1)）+ 段时长 T（经虚拟时间
-// 正性重参数化）。朝向 θ = atan2(gear·运动方向) 由平坦输出解析导出，非完整约束因此**恒等
+// 正性重参数化）。朝向 θ = atan2(运动方向) 由前向平坦输出解析导出，非完整约束因此**恒等
 // 满足**，不再需要增广拉格朗日或 θ 自由度。block-scaled trust-region L-BFGS 做无约束
 // 优化，约束以采样罚实现，梯度经 MincoMinJerk::propagate_gradient 从系数回传到 Q/T。
-// 换向尖点由 seed 冻结（两侧 v=0）。
 //
 // 目标：
 //   J = w_energy·∫‖jerk‖² + w_time·ΣT
-//     + Σ_采样点 [ 障碍 + 带符号速度窗 + |v·ω|≤a_lat + |ω|界 + |a|界
+//     + Σ_采样点 [ 障碍 + 速度上界 + |v·ω|≤a_lat + |ω|界 + |a|界
 //                 + 膨胀方向场对齐 + 离散地形速度窗 + 助跑区 ‖a‖²/ω² ]
 class MincoOptimizer {
 public:
@@ -43,7 +42,7 @@ public:
     };
 
     struct TrajectoryLimits {
-        SignedVelocityBounds velocity {-1.6, 3.2};
+        double velocity_max = 3.2;
         double angular_velocity_max = 6.0;
         double acceleration_max = 1.8;
         double lateral_acceleration_max = 2.0;
@@ -165,13 +164,9 @@ public:
     // 由平坦 seed 初始化并优化。
     //   seed_states：N+1 个 2D 边界全状态（含 head/tail 的 pos/vel/acc，仅 x,y）；
     //   seed_durations：N 段初始时长；
-    //   seed_gears：N 段换向符号 ±1（前端冻结的离散拓扑）；
-    //   cusp_waypoints：N-1 内部节点掩码，true 表示换向尖点（两侧 v=0）。
     Result optimize(
         const std::vector<MincoMinJerk::BoundaryPVA>& seed_states,
         const std::vector<double>& seed_durations,
-        const std::vector<double>& seed_gears,
-        const std::vector<char>& cusp_waypoints,
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const TerrainTraversalConstraints& terrain_constraints

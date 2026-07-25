@@ -17,80 +17,54 @@ double wrap_angle(double a) {
     return std::atan2(std::sin(a), std::cos(a));
 }
 
-// kinodynamic 状态序列 → MINCO 平坦边界状态 + 段时长 + 换向拓扑。
+// kinodynamic 前向平坦状态序列 → MINCO 平坦边界状态 + 段时长。
 struct MincoSeed {
     std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
     std::vector<double> durations;
-    std::vector<double> gears;                     // 每段 ±1
-    std::vector<char> cusp_waypoints;              // 每内部节点是否换向尖点
 };
 
-// 把 kinodynamic (x,y,θ,v) 序列重采样后转成 MINCO 平坦边界状态 + 换向拓扑。
-//   - 平坦速度 = (v cosθ, v sinθ)（2D）；加速度置零（MINCO 会调整）。
-//   - 每段 gear = 段内主导速度符号（前进 +1 / 倒车 −1），由前端冻结。
-//   - gear 在相邻段翻转处标记为换向尖点：该内部节点两侧 v=0（MINCO 结构化施加）。
-//   - 距离、显著转向和换向点都会保留，避免把倒车尖点重采样掉。
-//   - 段时长沿用 A* 原语时间，避免用低速处的弧长/速度比制造异常长分段。
+// 距离和显著转向点会保留；段时长严格累加 A* 返回的真实逐边时长。
 MincoSeed build_minco_seed(
     const std::vector<KinodynamicAstar::State>& raw,
     const double resample_distance,
-    const double state_interval
+    const std::vector<double>& raw_durations
 ) {
     MincoSeed seed;
-    if (raw.size() < 2) return seed;
+    if (raw.size() < 2 || raw_durations.size() + 1 != raw.size()) return seed;
 
     std::vector<size_t> selected {0};
     const double distance_threshold = std::max(resample_distance, 0.05);
     constexpr double HEADING_THRESHOLD = 0.5;
-    constexpr double VELOCITY_EPS = 0.05;
     for (size_t i = 1; i + 1 < raw.size(); ++i) {
         const size_t last = selected.back();
-        const double distance = std::hypot(raw[i].x - raw[last].x, raw[i].y - raw[last].y);
-        const double heading_change = std::abs(wrap_angle(raw[i].theta - raw[last].theta));
-        const bool gear_change = (raw[i - 1].v < -VELOCITY_EPS && raw[i + 1].v > VELOCITY_EPS)
-            || (raw[i - 1].v > VELOCITY_EPS && raw[i + 1].v < -VELOCITY_EPS);
-        if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD || gear_change) {
+        const double distance = (raw[i].position - raw[last].position).norm();
+        const double heading = std::atan2(raw[i].velocity.y(), raw[i].velocity.x());
+        const double last_heading = std::atan2(
+            raw[last].velocity.y(), raw[last].velocity.x()
+        );
+        const double heading_change = std::abs(wrap_angle(heading - last_heading));
+        if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD) {
             selected.push_back(i);
         }
     }
     selected.push_back(raw.size() - 1);
 
     const size_t n = selected.size();
-
-    // ── 每段 gear：段内所有 raw 速度的带符号均值符号；接近 0 时沿用上一段。──
-    seed.gears.assign(n - 1, 1.0);
-    double prev_gear = raw[selected[0]].v < -VELOCITY_EPS ? -1.0 : 1.0;
-    for (size_t i = 0; i + 1 < n; ++i) {
-        double v_sum = 0.0;
-        for (size_t r = selected[i]; r <= selected[i + 1]; ++r) v_sum += raw[r].v;
-        double gear = prev_gear;
-        if (std::abs(v_sum) > VELOCITY_EPS) gear = v_sum < 0.0 ? -1.0 : 1.0;
-        seed.gears[i] = gear;
-        prev_gear = gear;
-    }
-
-    // ── 换向尖点：相邻段 gear 翻转的内部节点（waypoint index = i-1，节点在段 i-1|i 之间）。──
-    seed.cusp_waypoints.assign(n >= 2 ? n - 1 : 0, 0);
-    for (size_t i = 1; i + 1 < n; ++i) {
-        if (seed.gears[i - 1] != seed.gears[i]) {
-            seed.cusp_waypoints[i - 1] = 1;
-        }
-    }
-
     seed.states.resize(n);
     for (size_t i = 0; i < n; ++i) {
         const auto& s = raw[selected[i]];
         auto& bs = seed.states[i];
-        bs.pos << s.x, s.y;
-        bs.vel << s.v * std::cos(s.theta), s.v * std::sin(s.theta);
+        bs.pos = s.position;
+        bs.vel = s.velocity;
         bs.acc.setZero();
     }
     seed.durations.resize(n - 1);
     for (size_t i = 0; i + 1 < n; ++i) {
-        seed.durations[i] = std::max(
-            state_interval * static_cast<double>(selected[i + 1] - selected[i]),
-            0.1
-        );
+        double duration = 0.0;
+        for (size_t edge = selected[i]; edge < selected[i + 1]; ++edge) {
+            duration += raw_durations[edge];
+        }
+        seed.durations[i] = std::max(duration, 0.1);
     }
 
     // 规划终点只约束位置停止；起点沿用当前运动状态。
@@ -127,7 +101,6 @@ bool validate_trajectory(
         {
             .flatness_tolerance = validation.self_intersection_flatness_tolerance,
             .max_edge_length = validation.self_intersection_max_edge_length,
-            .cusp_retrace_alignment_threshold = validation.cusp_retrace_alignment_threshold,
         }
     );
     if (self_intersection) {
@@ -153,14 +126,12 @@ bool validate_trajectory(
         const double omega = trajectory.angular_velocity(s);
         if (check_dynamics) {
             const Eigen::Vector2d acceleration = s.ddp_dtau / (total_time * total_time);
-            // 非完整约束在平坦表示下恒等满足（θ=atan2(gear·ṗ)），无需校验。
-            if (longitudinal_velocity < limits.velocity.min - validation.velocity_tolerance
-                || longitudinal_velocity > limits.velocity.max + validation.velocity_tolerance) {
+            // 非完整约束在前向平坦表示下恒等满足。
+            if (longitudinal_velocity > limits.velocity_max + validation.velocity_tolerance) {
                 error = "trajectory violates velocity limit at tau=" + std::to_string(tau)
                     + ": v=" + std::to_string(longitudinal_velocity)
-                    + " (allowed=[" + std::to_string(limits.velocity.min)
-                    + "," + std::to_string(limits.velocity.max)
-                    + "], tolerance=" + std::to_string(validation.velocity_tolerance) + ")";
+                    + " (max=" + std::to_string(limits.velocity_max)
+                    + ", tolerance=" + std::to_string(validation.velocity_tolerance) + ")";
                 return false;
             }
             if (std::abs(omega)
@@ -220,11 +191,6 @@ bool validate_trajectory(
             return false;
         }
         if (direction_map.is_terrain_body_at(dir_grid)) {
-            if (s.gear < 0.0) {
-                error = "trajectory reverses on directional terrain body at tau="
-                    + std::to_string(tau);
-                return false;
-            }
             const Eigen::Array2i cell_array = dir_grid.array().floor().cast<int>();
             const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
             const uint8_t label = direction_map.terrain_at(cell);
@@ -539,8 +505,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     }
 
     const Eigen::Vector2d goal_grid = planning_cost_map.map_coord_to_grid(goal_plan);
-    const double dist = (goal_plan - start_map).norm();
-
     const auto plan_start = std::chrono::steady_clock::now();
 
     // ── [1] Dijkstra cost-to-goal（map 系工作，供 kinodynamic h + 开阔 seed）──
@@ -559,7 +523,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         &terrain = req.terrain_constraints,
         &config = config_
     ](const KinodynamicAstar::State& from, const KinodynamicAstar::State& to) {
-        const Eigen::Vector2d map_pt(to.x, to.y);
+        const Eigen::Vector2d& map_pt = to.position;
         const Eigen::Vector2d g = planning_map_ptr->map_coord_to_grid(map_pt);
         if (!planning_map_ptr->is_valid_coord(g)) return false;
         if (planning_map_ptr->interpolate(g) >= config.occupied_threshold) return false;
@@ -574,7 +538,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         if (label < static_cast<uint8_t>(TerrainType::SLOPE)
             || raw_dir.squaredNorm() <= 1e-12) return false;
 
-        const Eigen::Vector2d displacement(to.x - from.x, to.y - from.y);
+        const Eigen::Vector2d displacement = to.position - from.position;
         if (displacement.norm() < 1e-6) return false;
         const Eigen::Vector2d dir = raw_dir.normalized();
         const double travel_alignment = displacement.normalized().dot(dir);
@@ -582,96 +546,39 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         const TraversalMode* rule = terrain.selected_mode(label, travel_alignment >= 0.0);
         if (!rule) return false;
 
-        // 台阶模式速度窗定义为车身正向速度；倒车只用于台阶外的拓扑机动。
-        return to.v >= rule->velocity_window.min - 1e-6
-            && to.v <= rule->velocity_window.max + 1e-6;
+        const double speed = to.velocity.norm();
+        return speed >= rule->velocity_window.min - 1e-6
+            && speed <= rule->velocity_window.max + 1e-6;
     };
 
-    // 位置容差内仍需证明可由 MINCO 在一条短、无方向地形本体、无碰撞连接段上精确接到目标。
-    // 该 predicate 防止目标在台阶另一侧时，搜索在台阶前提前成功。
-    const auto goal_reached = [
-        planning_map_ptr,
-        direction_map = req.direction_map.get(),
-        goal_plan,
-        &config = config_
-    ](const KinodynamicAstar::State& state) {
-        const Eigen::Vector2d start(state.x, state.y);
-        const double distance = (goal_plan - start).norm();
-        if (distance > config.kinodynamic.goal_tolerance) return false;
-        const int samples = std::max(1, static_cast<int>(std::ceil(distance / 0.03)));
-        for (int i = 1; i <= samples; ++i) {
-            const double fraction = static_cast<double>(i) / static_cast<double>(samples);
-            const Eigen::Vector2d point = start + fraction * (goal_plan - start);
-            const Eigen::Vector2d cost_grid = planning_map_ptr->map_coord_to_grid(point);
-            if (!planning_map_ptr->is_valid_coord(cost_grid)
-                || planning_map_ptr->interpolate(cost_grid) >= config.occupied_threshold) {
-                return false;
-            }
-            const Eigen::Vector2d direction_grid = direction_map->map_coord_to_grid(point);
-            if (!direction_map->is_valid_coord(direction_grid)) return false;
-            if (direction_map->is_terrain_body_at(direction_grid)) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    // ── [2] Kinodynamic A*：全状态机动 seed（含倒车/绕行/原地转拓扑）──
+    // ── [2] Kinodynamic A*：仅前向平坦运动原语 + 动态可行停车连接 ──
     KinodynamicAstar::State kino_start;
-    kino_start.x = start_map.x();
-    kino_start.y = start_map.y();
-    kino_start.theta = req.current_yaw;
-    kino_start.v = req.current_velocity;
+    kino_start.position = start_map;
+    const double start_reference_speed = std::clamp(
+        req.current_velocity,
+        config_.forward_velocity_bounds.min,
+        config_.forward_velocity_bounds.max
+    );
+    kino_start.velocity = start_reference_speed * Eigen::Vector2d(
+        std::cos(req.current_yaw), std::sin(req.current_yaw)
+    );
 
     KinodynamicAstar::Params kinodynamic_params = config_.kinodynamic;
     MincoOptimizer::Params minco_params = config_.minco;
 
-    std::vector<KinodynamicAstar::State> seed_states_raw;
-    bool direct_segment_avoids_terrain_body = true;
-    if (dist > 1e-9) {
-        const int samples = std::max(2, static_cast<int>(std::ceil(dist / 0.03)) + 1);
-        for (int i = 0; i <= samples; ++i) {
-            const Eigen::Vector2d p = start_map
-                + (goal_plan - start_map) * (static_cast<double>(i) / static_cast<double>(samples));
-            const Eigen::Vector2d dg = req.direction_map->map_coord_to_grid(p);
-            if (req.direction_map->is_valid_coord(dg)
-                && req.direction_map->is_terrain_body_at(dg)) {
-                direct_segment_avoids_terrain_body = false;
-                break;
-            }
-        }
-    }
-    if (dist < config_.skip_distance && direct_segment_avoids_terrain_body) {
-        // 近距离直连：起点 + 终点两状态，MINCO 直接优化。
-        KinodynamicAstar::State goal_state;
-        goal_state.x = goal_plan.x();
-        goal_state.y = goal_plan.y();
-        goal_state.theta = req.current_yaw;
-        goal_state.v = 0.0;
-        seed_states_raw = {kino_start, goal_state};
-    } else {
-        KinodynamicAstar astar(kinodynamic_params);
-        const auto kino = astar.search(kino_start, dijkstra, transition_feasible, goal_reached);
-        if (!kino.success) return fail("Kinodynamic A* failed: " + kino.error);
-        seed_states_raw = kino.states;
-    }
+    KinodynamicAstar astar(kinodynamic_params);
+    const auto kino = astar.search(
+        kino_start, goal_plan, dijkstra, transition_feasible
+    );
+    if (!kino.success) return fail("Kinodynamic A* failed: " + kino.error);
+    const std::vector<KinodynamicAstar::State>& seed_states_raw = kino.states;
     const auto kinodynamic_done = std::chrono::steady_clock::now();
 
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
-    // A* predicate 已证明容差内末节点存在无地形本体的短连接；显式追加精确目标，不改写搜索状态。
-    if (std::hypot(seed_states_raw.back().x - goal_plan.x(), seed_states_raw.back().y - goal_plan.y()) > 1e-9) {
-        KinodynamicAstar::State exact_goal = seed_states_raw.back();
-        exact_goal.x = goal_plan.x();
-        exact_goal.y = goal_plan.y();
-        exact_goal.v = 0.0;
-        seed_states_raw.push_back(exact_goal);
-    } else {
-        seed_states_raw.back().v = 0.0;
-    }
     const auto minco_seed = build_minco_seed(
         seed_states_raw,
         config_.seed_resample_distance,
-        kinodynamic_params.primitive_duration / std::max(kinodynamic_params.collision_substeps, 1)
+        kino.durations
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
     // ── [3] MINCO 时空优化 ──
@@ -680,8 +587,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto opt = optimizer.optimize(
         minco_seed.states,
         minco_seed.durations,
-        minco_seed.gears,
-        minco_seed.cusp_waypoints,
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints
@@ -781,7 +686,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     if (config_.enable_debug) {
         std::vector<Eigen::Vector2d> seed_pts;
         seed_pts.reserve(seed_states_raw.size());
-        for (const auto& s : seed_states_raw) seed_pts.emplace_back(s.x, s.y);
+        for (const auto& s : seed_states_raw) seed_pts.push_back(s.position);
         result.debug_rough_path = std::move(seed_pts);
     }
 
@@ -789,19 +694,16 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     double seed_path_length = 0.0;
     for (size_t i = 1; i < seed_states_raw.size(); ++i) {
-        seed_path_length += std::hypot(
-            seed_states_raw[i].x - seed_states_raw[i - 1].x,
-            seed_states_raw[i].y - seed_states_raw[i - 1].y
-        );
+        seed_path_length += (
+            seed_states_raw[i].position - seed_states_raw[i - 1].position
+        ).norm();
     }
     const int segment_count = opt.trajectory.segment_count();
     const int variable_count = 2 * std::max(segment_count - 1, 0) + segment_count; // 平坦：2D 路点 + 段时长
-    int cusp_count = 0;
-    for (const char c : minco_seed.cusp_waypoints) cusp_count += c ? 1 : 0;
     RCLCPP_INFO(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
         "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, seed_length=%.2f m, raw_states=%zu, "
-        "segments=%d, vars=%d, cusps=%d, optimizer=%.*s, accepted=%d, evals=%d, "
+        "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
         "normalized_scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
@@ -809,7 +711,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         std::chrono::duration<double, std::milli>(dijkstra_done - plan_start).count(),
         std::chrono::duration<double, std::milli>(kinodynamic_done - dijkstra_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
-        seed_path_length, seed_states_raw.size(), segment_count, variable_count, cusp_count,
+        seed_path_length, seed_states_raw.size(), segment_count, variable_count,
         static_cast<int>(opt.optimizer_status_string().size()), opt.optimizer_status_string().data(),
         opt.accepted_iterations, opt.function_evaluations,
         opt.final_normalized_scaled_grad_max_block_norm, opt.final_grad_inf_norm

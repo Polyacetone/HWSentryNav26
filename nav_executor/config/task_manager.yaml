@@ -8,8 +8,7 @@
         initial_search_distance: 0.5 # 新路径仅允许在起点附近建立初始进度，覆盖规划延迟但禁止跳到后段 (m)
         max_tracking_error: 2.0 # 机器人与局部投影参考点超过该距离时视为跟踪丢失 (m)
         prediction_time_limit: 0.2 # 状态掉帧后最多积分这么久的速度，防止陈旧速度推动游标跨段 (s)
-        path_speed_filter_alpha: 0.4 # 实测路径速度一阶滤波系数；换向时自动重置
-        cusp_switch_distance: 0.05 # 仅在距换向尖点足够近且实测速度已反向时切换拓扑段 (m)
+        path_speed_filter_alpha: 0.4 # 前向实测路径速度一阶滤波系数
         projection_prediction_weight: 1.0 # 相对运动预测弧长创新的权重
         search_distance_backward: 0.2 # 相对预测进度向后校正的最大弧长 (m)
         search_distance_forward: 0.4 # 相对预测进度向前校正的最大弧长 (m)

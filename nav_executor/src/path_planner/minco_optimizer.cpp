@@ -97,9 +97,6 @@ struct MincoOptimizer::Workspace {
     const DirectionMap* direction_map = nullptr;
     const TerrainTraversalConstraints* terrain_constraints = nullptr;
 
-    std::vector<double> gears;          // 每段 ±1
-    std::vector<char> cusp;             // 每内部节点是否尖点（size n-1）
-
     // 当前解缓存
     Eigen::Matrix<double, DIM, Eigen::Dynamic> waypoints;
     std::vector<double> times;
@@ -380,7 +377,6 @@ double MincoOptimizer::accumulate_penalties(
     for (int seg = 0; seg < n; ++seg) {
         const double T = ws.times[static_cast<size_t>(seg)];
         const int c_off = NCOEF * seg;
-        const double gear = ws.gears[static_cast<size_t>(seg)];
 
         // ── min-jerk 能量（每维 x,y 独立）──
         const double T2 = T * T, T3 = T2 * T, T4 = T3 * T, T5 = T4 * T;
@@ -457,7 +453,6 @@ double MincoOptimizer::accumulate_penalties(
             const double omega_den = speed2 + OMEGA_SPEED_REG_SQ;
             const double cross = vx * ay - vy * ax;
             const double omega = cross / omega_den;
-            const double v_signed = gear * speed;
             const int flat_sample_index = seg * S + s;
             const LookaheadSample& cached_sample = lookahead_samples[
                 static_cast<size_t>(flat_sample_index)
@@ -510,21 +505,20 @@ double MincoOptimizer::accumulate_penalties(
 
             // 全局物理速度界使用真实 ‖v‖；仅在精确零速处取安全的零次梯度。
             const double inverse_speed = speed > EPS ? 1.0 / speed : 0.0;
-            const double dvs_dvx = gear * vx * inverse_speed;
-            const double dvs_dvy = gear * vy * inverse_speed;
+            const double dspeed_dvx = vx * inverse_speed;
+            const double dspeed_dvy = vy * inverse_speed;
 
-            // (b) 带符号速度窗：v ≤ vel_max, v ≥ vel_min
+            // (b) 前向轨迹只约束速度幅值上界；端点零速和内部低速不在此处硬拒绝。
             {
-                const double over = v_signed - lim.velocity.max;
-                const double under = lim.velocity.min - v_signed;
-                const double go = violation(over), gu = violation(under);
-                density += w.trajectory_velocity * 0.5 * (go * go + gu * gu);
+                const double over = speed - lim.velocity_max;
+                const double go = violation(over);
+                density += w.trajectory_velocity * 0.5 * go * go;
                 if (terms) {
-                    d_velocity += w.trajectory_velocity * 0.5 * (go * go + gu * gu);
+                    d_velocity += w.trajectory_velocity * 0.5 * go * go;
                 }
-                const double dv = w.trajectory_velocity * (go - gu); // dρ/dv_signed
-                gvx += dv * dvs_dvx;
-                gvy += dv * dvs_dvy;
+                const double dv = w.trajectory_velocity * go;
+                gvx += dv * dspeed_dvx;
+                gvy += dv * dspeed_dvy;
             }
 
             // ∂ω/∂(vx,vy,ax,ay)
@@ -536,17 +530,16 @@ double MincoOptimizer::accumulate_penalties(
 
             // (c) 侧向加速度 |v·ω| ≤ a_lat
             {
-                const double a_lat = v_signed * omega;
+                const double a_lat = speed * omega;
                 const double mag = std::abs(a_lat) - lim.lateral_acceleration_max;
                 const double gm = violation(mag);
                 density += w.lateral_acc * 0.5 * gm * gm;
                 if (terms) d_lateral_acc += w.lateral_acc * 0.5 * gm * gm;
                 const double coeff = w.lateral_acc * gm * ((a_lat > 0) ? 1.0 : -1.0);
-                // ∂a_lat/∂· = ω·∂v_signed/∂· + v_signed·∂ω/∂·
-                gvx += coeff * (omega * dvs_dvx + v_signed * domega_dvx);
-                gvy += coeff * (omega * dvs_dvy + v_signed * domega_dvy);
-                gax += coeff * (v_signed * domega_dax);
-                gay += coeff * (v_signed * domega_day);
+                gvx += coeff * (omega * dspeed_dvx + speed * domega_dvx);
+                gvy += coeff * (omega * dspeed_dvy + speed * domega_dvy);
+                gax += coeff * (speed * domega_dax);
+                gay += coeff * (speed * domega_day);
             }
 
             // (d) ω 界 |ω| ≤ omega_max
@@ -647,12 +640,12 @@ double MincoOptimizer::accumulate_penalties(
 
                 // (2) 两侧 mode 均存在时，速度窗在低投影速度附近平滑混合；仅一侧存在时
                 // 始终使用该可用窗口，禁止方向由 prohibited 项负责，避免 availability 权重
-                // 在零速把梯度推向缺失侧。目标速度统一使用 gear·smooth_speed。
+                // 在零速把梯度推向缺失侧。目标速度使用前向 smooth_speed。
                 const TraversalMode* up_rule =
                     ws.terrain_constraints->selected_mode(label, true);
                 const TraversalMode* down_rule =
                     ws.terrain_constraints->selected_mode(label, false);
-                const double traversal_speed = gear * motion.speed;
+                const double traversal_speed = motion.speed;
                 struct VelocityWindowCost {
                     double density = 0.0;
                     double speed_derivative = 0.0;
@@ -704,8 +697,7 @@ double MincoOptimizer::accumulate_penalties(
                 const double speed_density_derivative = up_weight
                     * up_velocity.speed_derivative
                     + down_weight * down_velocity.speed_derivative;
-                const Eigen::Vector2d speed_velocity_gradient = gear
-                    * motion.speed_gradient;
+                const Eigen::Vector2d& speed_velocity_gradient = motion.speed_gradient;
                 const double profile_weight_gradient_scale =
                     (up_velocity.density - down_velocity.density)
                     * dup_weight_dprojected_speed;
@@ -833,7 +825,7 @@ double MincoOptimizer::evaluate(Workspace& ws, const Eigen::VectorXd& vars, Eige
         ws.times[static_cast<size_t>(i)] = virtual_to_time(vars(time_offset + i), params_.min_segment_time);
     }
 
-    ws.minco.generate(ws.times, ws.head, ws.tail, ws.waypoints, ws.cusp);
+    ws.minco.generate(ws.times, ws.head, ws.tail, ws.waypoints);
 
     Eigen::MatrixXd grad_c;
     Eigen::VectorXd grad_t_expl;
@@ -858,8 +850,6 @@ double MincoOptimizer::evaluate(Workspace& ws, const Eigen::VectorXd& vars, Eige
 MincoOptimizer::Result MincoOptimizer::optimize(
     const std::vector<MincoMinJerk::BoundaryPVA>& seed_states,
     const std::vector<double>& seed_durations,
-    const std::vector<double>& seed_gears,
-    const std::vector<char>& cusp_waypoints,
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints
@@ -871,12 +861,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
                      + " states for " + std::to_string(n) + " segments (need n+1)";
         return result;
     }
-    if (static_cast<int>(seed_gears.size()) != n) {
-        result.error = "seed gears size mismatch: " + std::to_string(seed_gears.size())
-                     + " for " + std::to_string(n) + " segments";
-        return result;
-    }
-
     Workspace ws;
     ws.n_segments = n;
     ws.n_waypoints = n - 1;
@@ -886,11 +870,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     ws.direction_map = &direction_map;
     ws.terrain_constraints = &terrain_constraints;
     ws.times = seed_durations;
-    ws.gears = seed_gears;
-    ws.cusp.assign(static_cast<size_t>(std::max(n - 1, 0)), 0);
-    for (int i = 0; i < n - 1 && i < static_cast<int>(cusp_waypoints.size()); ++i) {
-        ws.cusp[static_cast<size_t>(i)] = cusp_waypoints[static_cast<size_t>(i)];
-    }
     ws.waypoints.setZero(DIM, std::max(n - 1, 0));
 
     for (int i = 0; i < n - 1; ++i) {
@@ -1030,7 +1009,7 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         result.error = "L-BFGS finite incumbent could not be reconstructed";
         return result;
     }
-    result.trajectory = ws.minco.to_trajectory(ws.gears);
+    result.trajectory = ws.minco.to_trajectory();
     result.cost = lr.cost;
     result.success = true;
 

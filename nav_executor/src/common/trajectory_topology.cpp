@@ -88,83 +88,6 @@ bool edges_may_intersect(const TrajectoryEdge& lhs, const TrajectoryEdge& rhs) {
         + rhs.geometric_error_bound + EPSILON;
 }
 
-bool is_allowed_cusp_retrace(
-    const MincoTrajectory& trajectory,
-    const TrajectoryEdge& lhs,
-    const TrajectoryEdge& rhs,
-    const TrajectoryTopologyParams& params
-) {
-    if (trajectory.segment_gear(lhs.segment) == trajectory.segment_gear(rhs.segment)) {
-        return false;
-    }
-    const Eigen::Vector2d lhs_direction = lhs.end - lhs.begin;
-    const Eigen::Vector2d rhs_direction = rhs.end - rhs.begin;
-    const double norm_product = lhs_direction.norm() * rhs_direction.norm();
-    if (norm_product <= 1e-12) return false;
-    const double alignment = lhs_direction.dot(rhs_direction) / norm_product;
-    const double collinearity = std::abs(cross_2d(lhs_direction, rhs_direction))
-        / norm_product;
-    const double max_cross = std::sqrt(std::max(
-        0.0,
-        1.0 - params.cusp_retrace_alignment_threshold
-            * params.cusp_retrace_alignment_threshold
-    ));
-    const double rhs_begin_line_distance = std::abs(cross_2d(
-        lhs_direction, rhs.begin - lhs.begin
-    )) / lhs_direction.norm();
-    const double rhs_end_line_distance = std::abs(cross_2d(
-        lhs_direction, rhs.end - lhs.begin
-    )) / lhs_direction.norm();
-    if (alignment > -params.cusp_retrace_alignment_threshold
-        || collinearity > max_cross
-        || rhs_begin_line_distance > params.flatness_tolerance
-        || rhs_end_line_distance > params.flatness_tolerance) {
-        return false;
-    }
-
-    const TrajectoryEdge& before_cusp = lhs.progress_begin < rhs.progress_begin ? lhs : rhs;
-    const TrajectoryEdge& after_cusp = lhs.progress_begin < rhs.progress_begin ? rhs : lhs;
-    for (int boundary = before_cusp.segment + 1;
-         boundary <= after_cusp.segment;
-         ++boundary) {
-        if (trajectory.segment_gear(boundary - 1)
-            == trajectory.segment_gear(boundary)) {
-            continue;
-        }
-        const double cusp_progress = trajectory.segment_boundary_arc_length(boundary);
-        const double before_distance = cusp_progress
-            - 0.5 * (before_cusp.progress_begin + before_cusp.progress_end);
-        const double after_distance = 0.5
-            * (after_cusp.progress_begin + after_cusp.progress_end) - cusp_progress;
-        if (before_distance < 0.0 || after_distance < 0.0
-            || std::abs(before_distance - after_distance) > params.max_edge_length) {
-            continue;
-        }
-
-        const double retrace_distance = std::max(before_distance, after_distance);
-        const int samples = std::max(
-            1, static_cast<int>(std::ceil(retrace_distance / params.max_edge_length))
-        );
-        bool connected_retrace = true;
-        for (int sample = 0; sample <= samples; ++sample) {
-            const double distance = retrace_distance * static_cast<double>(sample)
-                / static_cast<double>(samples);
-            const Eigen::Vector2d before = trajectory.eval_arc_length(
-                cusp_progress - distance
-            ).p;
-            const Eigen::Vector2d after = trajectory.eval_arc_length(
-                cusp_progress + distance
-            ).p;
-            if ((before - after).norm() > params.flatness_tolerance) {
-                connected_retrace = false;
-                break;
-            }
-        }
-        if (connected_retrace) return true;
-    }
-    return false;
-}
-
 std::vector<TrajectoryEdge> flatten_trajectory(
     const MincoTrajectory& trajectory,
     const TrajectoryTopologyParams& params
@@ -264,7 +187,6 @@ std::optional<TrajectorySelfIntersection> find_disallowed_self_intersection(
             const TrajectoryEdge& lhs = edges[i];
             const TrajectoryEdge& rhs = edges[j];
             if (!edges_may_intersect(lhs, rhs)) continue;
-            if (is_allowed_cusp_retrace(trajectory, lhs, rhs, params)) continue;
             return TrajectorySelfIntersection {
                 .first_segment = lhs.segment,
                 .second_segment = rhs.segment,

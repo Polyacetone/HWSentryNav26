@@ -78,7 +78,6 @@ struct PlannerConfig {
         double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只打印日志不进行拒绝
         double self_intersection_flatness_tolerance;
         double self_intersection_max_edge_length;
-        double cusp_retrace_alignment_threshold;
     };
 
     // 可行性判定
@@ -91,11 +90,11 @@ struct PlannerConfig {
     // 近距离短路（robot-to-goal 完成阈值，不是 goal-to-goal 去重阈值）
     double goal_reached_distance;
 
-    // 短路：起终点距离 < 该值时跳过 kinodynamic，直连折线种子
-    double skip_distance;
-
     // MINCO 种子构造：kinodynamic 状态序列的重采样间隔（米），决定 MINCO 段数
     double seed_resample_distance;
+
+    // 普通路径起点参考速度与 FOLLOW 使用同一份前向 capability 边界。
+    SignedVelocityBounds forward_velocity_bounds;
 
     DijkstraCostToGoal::Params dijkstra;
     KinodynamicAstar::Params kinodynamic;

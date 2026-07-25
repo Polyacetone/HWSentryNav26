@@ -117,9 +117,7 @@ AncillaryRollout<SolverT> rollout_ancillary_feedback(
     const RolloutStates<SolverT>& nominal_rollout,
     const CapabilityProfile& effective_capability,
     const MPCStartCommandLimits& start_command,
-    const MPCFollowAncillaryFeedbackParams& feedback,
-    const double path_speed_min,
-    const double path_speed_max
+    const MPCFollowAncillaryFeedbackParams& feedback
 ) {
     AncillaryRollout<SolverT> result;
     result.rollout.xs[0] = actual_x0;
@@ -128,8 +126,8 @@ AncillaryRollout<SolverT> rollout_ancillary_feedback(
         const MPCControlBounds applied_bounds = command_rate_control_bounds(
             result.rollout.xs[k],
             effective_capability,
-            path_speed_min,
-            path_speed_max,
+            effective_capability.command_envelope.velocity.min,
+            effective_capability.command_envelope.velocity.max,
             k == 0 ? &start_command : nullptr
         );
         const AncillaryControlResult ancillary = ancillary_velocity_command_rate(
@@ -348,8 +346,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     );
     const double path_speed0 = std::clamp(
         current_path_speed,
-        params_.follow.progress.speed_min,
-        params_.follow.progress.speed_max
+        effective_capability.command_envelope.velocity.min,
+        effective_capability.command_envelope.velocity.max
     );
 
     const double schedule_rho = select_follow_schedule_rho(
@@ -398,7 +396,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
 
     const FollowProblem problem(
         global_trajectory, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
-        nominal_capability, step_constraint_schedule
+        nominal_capability, effective_capability.command_envelope.velocity,
+        step_constraint_schedule
     );
 
     fddp::SolverOptions opts;
@@ -414,8 +413,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             global_trajectory.nominal_path_speed(
                 global_trajectory.eval_arc_length(path_progress0)
             ),
-            params_.follow.progress.speed_min,
-            params_.follow.progress.speed_max
+            effective_capability.command_envelope.velocity.min,
+            effective_capability.command_envelope.velocity.max
         );
         fill_solver_controls(follow_solver_, initial_control);
     }
@@ -447,9 +446,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
             nominal_rollout,
             effective_capability,
             params_.follow.start_command,
-            feedback,
-            params_.follow.progress.speed_min,
-            params_.follow.progress.speed_max
+            feedback
         );
         applied_control = ancillary_rollout.first_control;
         first_command_tube_feasible = ancillary_rollout.first_command_tube_feasible;
@@ -497,7 +494,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         diagnostics.trajectory_nominal_angular_velocity.push_back(
             global_trajectory.angular_velocity(sample)
         );
-        diagnostics.reference_velocity.push_back(sample.gear * path_speed);
+        diagnostics.reference_velocity.push_back(path_speed);
         diagnostics.reference_angular_velocity.push_back(
             global_trajectory.heading_rate_per_arc_length(sample) * path_speed
         );

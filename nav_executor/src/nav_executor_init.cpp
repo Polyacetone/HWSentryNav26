@@ -63,9 +63,11 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     step_params.length_num_samples = static_cast<int>(declare_parameter<int>("path_planner.step_mask.length_num_samples"));
     step_routing_mask_ = std::make_shared<StepRoutingMask>(step_params);
 
-    const PlannerConfig planner_config = load_planner_config();
-    minco_debug_velocity_min_ = planner_config.minco.trajectory_limits.velocity.min;
-    minco_debug_velocity_max_ = planner_config.minco.trajectory_limits.velocity.max;
+    const PlannerConfig planner_config = load_planner_config(
+        mpc_params.follow.normal_profile.command_envelope.velocity
+    );
+    minco_debug_velocity_min_ = 0.0;
+    minco_debug_velocity_max_ = planner_config.minco.trajectory_limits.velocity_max;
     planner_ = std::make_unique<PathPlanner>(planner_config, step_routing_mask_, get_logger());
     planner_->start();
 
@@ -76,7 +78,6 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         .max_tracking_error = declare_parameter<double>("task_manager.route_tracker.max_tracking_error"),
         .prediction_time_limit = declare_parameter<double>("task_manager.route_tracker.prediction_time_limit"),
         .path_speed_filter_alpha = declare_parameter<double>("task_manager.route_tracker.path_speed_filter_alpha"),
-        .cusp_switch_distance = declare_parameter<double>("task_manager.route_tracker.cusp_switch_distance"),
         .projection = {
             .prediction_weight = declare_parameter<double>("task_manager.route_tracker.projection_prediction_weight"),
             .search_distance_backward = declare_parameter<double>("task_manager.route_tracker.search_distance_backward"),
@@ -89,8 +90,6 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     require_parameter(route_tracker_params_.path_speed_filter_alpha > 0.0
         && route_tracker_params_.path_speed_filter_alpha <= 1.0,
         "route_tracker.path_speed_filter_alpha must be in (0, 1]");
-    require_parameter(positive_finite(route_tracker_params_.cusp_switch_distance),
-        "route_tracker.cusp_switch_distance must be finite and positive");
     require_parameter(positive_finite(route_tracker_params_.projection.prediction_weight)
         && nonnegative_finite(route_tracker_params_.projection.search_distance_backward)
         && positive_finite(route_tracker_params_.projection.search_distance_forward),
@@ -237,6 +236,9 @@ void NavExecutorNode::load_terrain_config() {
     traversal_configuration_.capability_profiles[static_cast<size_t>(LOW)] = load_capability_profile("capability_management.profiles.low");
     traversal_configuration_.capability_profiles[static_cast<size_t>(MEDIUM)] = load_capability_profile("capability_management.profiles.medium");
     traversal_configuration_.capability_profiles[static_cast<size_t>(HIGH)] = load_capability_profile("capability_management.profiles.high");
+    bidirectional_profile_ = load_capability_profile(
+        "capability_management.profiles.bidirectional"
+    );
 
     traversal_configuration_.high_performance_buffercap_threshold = declare_parameter<double>("terrain_traversal.high_performance_available.buffercap_threshold");
     traversal_configuration_.high_performance_supercap_threshold = declare_parameter<double>("terrain_traversal.high_performance_available.supercap_threshold");
@@ -299,8 +301,17 @@ void NavExecutorNode::load_terrain_config() {
             && positive_finite(dynamics.lateral_acceleration_max);
     };
     for (const CapabilityProfile& profile : traversal_configuration_.capability_profiles) {
-        require_parameter(valid_capability(profile), "capability profile is invalid");
+        require_parameter(
+            valid_capability(profile) && profile.command_envelope.velocity.min > 0.0,
+            "forward capability profile is invalid"
+        );
     }
+    require_parameter(
+        valid_capability(bidirectional_profile_)
+            && bidirectional_profile_.command_envelope.velocity.min < 0.0
+            && bidirectional_profile_.command_envelope.velocity.max > 0.0,
+        "bidirectional capability profile is invalid"
+    );
     for (const DirectionalTraversalModes& label : traversal_configuration_.directional_labels) {
         for (const auto* modes : {&label.up, &label.down}) {
             for (const TraversalMode& mode : *modes) {
@@ -417,14 +428,16 @@ PathExecutorParams NavExecutorNode::load_executor_params() {
 
 // ═══════════════════════ Planner 参数 ════════════════════════
 
-PlannerConfig NavExecutorNode::load_planner_config() {
+PlannerConfig NavExecutorNode::load_planner_config(
+    const SignedVelocityBounds& forward_velocity_bounds
+) {
     PlannerConfig c;
     c.occupied_threshold = static_cast<int>(declare_parameter<int>("path_planner.traversability.occupied_threshold"));
     c.on_step_threshold = declare_parameter<double>("path_planner.traversability.on_step_threshold");
     c.nudge_max_distance = declare_parameter<double>("path_planner.nudge.max_distance");
     c.goal_reached_distance = declare_parameter<double>("path_planner.planner.goal_reached_distance");
-    c.skip_distance = declare_parameter<double>("path_planner.planner.skip_distance");
     c.seed_resample_distance = declare_parameter<double>("path_planner.planner.seed_resample_distance");
+    c.forward_velocity_bounds = forward_velocity_bounds;
 
     c.dijkstra = {
         .obstacle_weight = declare_parameter<double>("path_planner.dijkstra.obstacle_weight"),
@@ -432,23 +445,18 @@ PlannerConfig NavExecutorNode::load_planner_config() {
     };
     c.kinodynamic = {
         .state_limits = {
-            .velocity = {
-                .min = declare_parameter<double>("path_planner.kinodynamic.state_limits.velocity.min"),
-                .max = declare_parameter<double>("path_planner.kinodynamic.state_limits.velocity.max"),
-            },
+            .speed_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.speed_max"),
             .angular_velocity_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.angular_velocity_max"),
             .acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.acceleration_max"),
             .lateral_acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.lateral_acceleration_max"),
         },
-        .accel_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.accel_samples")),
-        .omega_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.omega_samples")),
+        .tangential_accel_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.tangential_accel_samples")),
+        .normal_accel_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.normal_accel_samples")),
         .primitive_duration = declare_parameter<double>("path_planner.kinodynamic.primitive_duration"),
         .collision_substeps = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.collision_substeps")),
         .dedup_xy = declare_parameter<double>("path_planner.kinodynamic.dedup_xy"),
         .dedup_theta = declare_parameter<double>("path_planner.kinodynamic.dedup_theta"),
-        .dedup_v = declare_parameter<double>("path_planner.kinodynamic.dedup_v"),
-        .time_weight = declare_parameter<double>("path_planner.kinodynamic.time_weight"),
-        .reverse_weight = declare_parameter<double>("path_planner.kinodynamic.reverse_weight"),
+        .dedup_speed = declare_parameter<double>("path_planner.kinodynamic.dedup_speed"),
         .heuristic_weight = declare_parameter<double>("path_planner.kinodynamic.heuristic_weight"),
         .goal_tolerance = declare_parameter<double>("path_planner.kinodynamic.goal_tolerance"),
         .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.max_expansions")),
@@ -469,10 +477,7 @@ PlannerConfig NavExecutorNode::load_planner_config() {
             .runup_omega = declare_parameter<double>("path_planner.minco.penalty_weights.runup_angular_velocity"),
         },
         .trajectory_limits = {
-            .velocity = {
-                .min = declare_parameter<double>("path_planner.minco.trajectory_limits.velocity.min"),
-                .max = declare_parameter<double>("path_planner.minco.trajectory_limits.velocity.max"),
-            },
+            .velocity_max = declare_parameter<double>("path_planner.minco.trajectory_limits.velocity_max"),
             .angular_velocity_max = declare_parameter<double>("path_planner.minco.trajectory_limits.angular_velocity_max"),
             .acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.acceleration_max"),
             .lateral_acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.lateral_acceleration_max"),
@@ -540,9 +545,6 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         .self_intersection_max_edge_length = declare_parameter<double>(
             "path_planner.minco.output_validation.self_intersection_max_edge_length"
         ),
-        .cusp_retrace_alignment_threshold = declare_parameter<double>(
-            "path_planner.minco.output_validation.cusp_retrace_alignment_threshold"
-        ),
     };
     require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in [0, 255]");
     require_parameter(
@@ -550,27 +552,26 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         "path_planner on_step_threshold must be finite and in (0, 1]"
     );
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
-    require_parameter(c.kinodynamic.state_limits.velocity.min < c.kinodynamic.state_limits.velocity.max, "kinodynamic vel_min must be smaller than vel_max");
     require_parameter(
-        positive_finite(c.kinodynamic.state_limits.angular_velocity_max)
+        positive_finite(c.kinodynamic.state_limits.speed_max)
+        && positive_finite(c.kinodynamic.state_limits.angular_velocity_max)
         && positive_finite(c.kinodynamic.state_limits.acceleration_max)
         && positive_finite(c.kinodynamic.state_limits.lateral_acceleration_max)
         && positive_finite(c.kinodynamic.primitive_duration)
         && positive_finite(c.kinodynamic.dedup_xy)
         && positive_finite(c.kinodynamic.dedup_theta)
-        && positive_finite(c.kinodynamic.dedup_v),
+        && positive_finite(c.kinodynamic.dedup_speed),
         "kinodynamic limits, duration, and dedup resolutions must be finite and positive"
     );
     require_parameter(
-        c.kinodynamic.accel_samples > 0 && c.kinodynamic.omega_samples > 0
+        c.kinodynamic.tangential_accel_samples > 0
+        && c.kinodynamic.normal_accel_samples > 0
         && c.kinodynamic.collision_substeps > 0 && c.kinodynamic.max_expansions > 0,
         "kinodynamic sample counts and max_expansions must be positive"
     );
     require_parameter(
-        std::isfinite(c.minco.trajectory_limits.velocity.min)
-        && std::isfinite(c.minco.trajectory_limits.velocity.max)
-        && c.minco.trajectory_limits.velocity.min < c.minco.trajectory_limits.velocity.max,
-        "MINCO vel_min must be smaller than vel_max"
+        positive_finite(c.minco.trajectory_limits.velocity_max),
+        "MINCO velocity_max must be finite and positive"
     );
     const auto& minco_weights = c.minco.weights;
     require_parameter(
@@ -689,26 +690,30 @@ PlannerConfig NavExecutorNode::load_planner_config() {
         && nonnegative_finite(c.trajectory_validation.traversal_velocity_target_tolerance)
         && nonnegative_finite(c.trajectory_validation.traversal_angle_tolerance)
         && positive_finite(c.trajectory_validation.self_intersection_flatness_tolerance)
-        && positive_finite(c.trajectory_validation.self_intersection_max_edge_length)
-        && c.trajectory_validation.cusp_retrace_alignment_threshold > 0.0
-        && c.trajectory_validation.cusp_retrace_alignment_threshold <= 1.0,
+        && positive_finite(c.trajectory_validation.self_intersection_max_edge_length),
         "trajectory validation tolerances must be finite and non-negative"
     );
 
-    const auto overlaps = [](const SignedVelocityBounds& bounds,
-                             const TraversalVelocityWindow& window) {
-        return std::max(bounds.min, window.min) <= std::min(bounds.max, window.max);
+    require_parameter(
+        positive_finite(c.forward_velocity_bounds.min)
+            && c.forward_velocity_bounds.min < c.forward_velocity_bounds.max
+            && c.forward_velocity_bounds.max <= c.kinodynamic.state_limits.speed_max
+            && c.forward_velocity_bounds.max <= c.minco.trajectory_limits.velocity_max,
+        "FOLLOW forward capability is incompatible with planner velocity limits"
+    );
+    const auto overlaps = [](const double speed_max, const TraversalVelocityWindow& window) {
+        return window.min <= std::min(speed_max, window.max);
     };
     for (const DirectionalTraversalModes& label : traversal_configuration_.directional_labels) {
         for (const auto* modes : {&label.up, &label.down}) {
             for (const TraversalMode& mode : *modes) {
-                if (!overlaps(c.kinodynamic.state_limits.velocity, mode.velocity_window)) {
+                if (!overlaps(c.kinodynamic.state_limits.speed_max, mode.velocity_window)) {
                     throw std::invalid_argument(
                         "kinodynamic state velocity limits cannot satisfy traversal mode \""
                         + mode.name + "\""
                     );
                 }
-                if (!overlaps(c.minco.trajectory_limits.velocity, mode.velocity_window)) {
+                if (!overlaps(c.minco.trajectory_limits.velocity_max, mode.velocity_window)) {
                     throw std::invalid_argument(
                         "MINCO trajectory velocity limits cannot represent traversal target \""
                         + mode.name + "\""
@@ -735,9 +740,11 @@ TaskManagerParams NavExecutorNode::load_task_params() {
 MPCParams NavExecutorNode::load_mpc_params() {
     using enum CapabilityLevel;
 
-    // lambda: resolve a capability string from YAML to a pre-validated profile
+    // 台阶 capability 仍只使用 low/medium/high；MPC 可额外选择独立双向 profile。
     const auto resolve_profile = [&](const std::string& param_key) -> CapabilityProfile {
-        const auto level = capability_level_from_string(declare_parameter<std::string>(param_key));
+        const std::string name = declare_parameter<std::string>(param_key);
+        if (name == "bidirectional") return bidirectional_profile_;
+        const auto level = capability_level_from_string(name);
         return traversal_configuration_.capability_profiles[static_cast<size_t>(level)];
     };
 
@@ -797,8 +804,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .velocity_command_rate_margin = declare_parameter<double>("mpc.follow.ancillary_feedback.velocity_command_rate_margin")
             },
             .progress = {
-                .speed_min = declare_parameter<double>("mpc.follow.progress.speed_min"),
-                .speed_max = declare_parameter<double>("mpc.follow.progress.speed_max"),
                 .progress_reward = declare_parameter<double>("mpc.follow.progress.progress_reward"),
                 .speed_tracking_weight = declare_parameter<double>("mpc.follow.progress.speed_tracking_weight"),
                 .speed_smoothness_weight = declare_parameter<double>("mpc.follow.progress.speed_smoothness_weight"),
@@ -907,12 +912,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
     };
     const auto& progress = mpc_params.follow.progress;
     require_parameter(
-        nonnegative_finite(progress.speed_min)
-        && positive_finite(progress.speed_max)
-        && progress.speed_max > progress.speed_min,
-        "mpc.follow path-speed bounds are invalid"
-    );
-    require_parameter(
         nonnegative_finite(progress.progress_reward)
         && nonnegative_finite(progress.speed_tracking_weight)
         && nonnegative_finite(progress.speed_smoothness_weight)
@@ -987,7 +986,8 @@ MPCParams NavExecutorNode::load_mpc_params() {
             && positive_finite(dynamics.lateral_acceleration_max);
     };
     require_parameter(
-        valid_capability(mpc_params.follow.normal_profile),
+        valid_capability(mpc_params.follow.normal_profile)
+            && mpc_params.follow.normal_profile.command_envelope.velocity.min > 0.0,
         "mpc.follow capability profile is invalid"
     );
     if (feedback.enable) {
@@ -1017,11 +1017,15 @@ MPCParams NavExecutorNode::load_mpc_params() {
         }
     }
     require_parameter(
-        valid_capability(mpc_params.stop.profile),
+        valid_capability(mpc_params.stop.profile)
+            && mpc_params.stop.profile.command_envelope.velocity.min < 0.0
+            && mpc_params.stop.profile.command_envelope.velocity.max > 0.0,
         "mpc.stop capability profile is invalid"
     );
     require_parameter(
-        valid_capability(mpc_params.hold.profile),
+        valid_capability(mpc_params.hold.profile)
+            && mpc_params.hold.profile.command_envelope.velocity.min < 0.0
+            && mpc_params.hold.profile.command_envelope.velocity.max > 0.0,
         "mpc.hold capability profile is invalid"
     );
     const auto& model = mpc_params.kinematic_model;
