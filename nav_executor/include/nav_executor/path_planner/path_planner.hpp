@@ -68,6 +68,12 @@ struct PlanResult {
 };
 
 struct PlannerConfig {
+    struct StartYawRelaxationParams {
+        double speed_threshold;
+        double root_penalty;
+        double yaw_penalty;
+    } start_yaw_relaxation;
+
     struct TrajectoryValidationParams {
         int samples_per_segment;
         double velocity_tolerance;

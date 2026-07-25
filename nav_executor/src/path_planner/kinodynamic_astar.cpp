@@ -42,6 +42,7 @@ struct SearchNode {
     double g = 0.0;
     int parent = -1;
     SpatialPrimitive incoming;
+    bool relaxed_root = false;
     bool active = true;
 };
 
@@ -451,7 +452,7 @@ std::string propagation_trace_string(const SpeedPropagationTrace& trace) {
 } // anonymous namespace
 
 KinodynamicAstar::Result KinodynamicAstar::search(
-    const State& start,
+    const std::vector<SearchRoot>& roots,
     const Eigen::Vector2d& goal_position,
     const DijkstraCostToGoal& dijkstra,
     const TransitionConstraintFn& transition_constraint
@@ -461,12 +462,19 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         result.error = "Dijkstra field not built";
         return result;
     }
-    const double start_speed = start.velocity.norm();
-    if (!start.position.allFinite() || !start.velocity.allFinite()
-        || start_speed < FORWARD_SPEED_EPS
-        || start_speed > params_.state_limits.speed_max + EPS) {
-        result.error = "start state is not a feasible forward state";
+    if (roots.empty()) {
+        result.error = "no search roots provided";
         return result;
+    }
+    for (const SearchRoot& root : roots) {
+        const double speed = root.state.velocity.norm();
+        if (!root.state.position.allFinite() || !root.state.velocity.allFinite()
+            || !std::isfinite(root.initial_cost) || root.initial_cost < 0.0
+            || speed < FORWARD_SPEED_EPS
+            || speed > params_.state_limits.speed_max + EPS) {
+            result.error = "search root is not a feasible forward state";
+            return result;
+        }
     }
 
     const auto heuristic = [&](const Pose& pose) {
@@ -482,24 +490,73 @@ KinodynamicAstar::Result KinodynamicAstar::search(
     labels_by_pose.reserve(4096);
     std::priority_queue<OpenEntry, std::vector<OpenEntry>, std::greater<>> open;
 
-    Pose start_pose {
-        .position = start.position,
-        .theta = std::atan2(start.velocity.y(), start.velocity.x()),
+    const auto enqueue_label = [&nodes, &labels_by_pose, &open, &result, this](
+        const Pose& pose,
+        const SpeedSquaredInterval& reachable_speed,
+        const double g,
+        const double h,
+        const int parent,
+        const SpatialPrimitive& incoming,
+        const bool relaxed_root
+    ) {
+        const PoseKey key = make_key(pose, params_);
+        auto& pose_labels = labels_by_pose[key];
+        for (const int label_index : pose_labels) {
+            const SearchNode& incumbent = nodes[static_cast<size_t>(label_index)];
+            if (incumbent.active && incumbent.g <= g + EPS
+                && contains_interval(incumbent.reachable_speed, reachable_speed)) {
+                ++result.dominated_labels;
+                return false;
+            }
+        }
+        for (const int label_index : pose_labels) {
+            SearchNode& incumbent = nodes[static_cast<size_t>(label_index)];
+            if (incumbent.active && g <= incumbent.g + EPS
+                && contains_interval(reachable_speed, incumbent.reachable_speed)) {
+                incumbent.active = false;
+                ++result.dominated_labels;
+            }
+        }
+
+        const int node_index = static_cast<int>(nodes.size());
+        nodes.push_back({
+            .pose = pose,
+            .reachable_speed = reachable_speed,
+            .g = g,
+            .parent = parent,
+            .incoming = incoming,
+            .relaxed_root = relaxed_root,
+        });
+        pose_labels.push_back(node_index);
+        open.push({g + h, node_index});
+        ++result.generated_labels;
+        result.open_peak = std::max(result.open_peak, open.size());
+        return true;
     };
-    const SpeedSquaredInterval start_interval {
-        start_speed * start_speed, start_speed * start_speed,
-    };
-    const double start_f = heuristic(start_pose);
-    nodes.push_back({
-        .pose = start_pose,
-        .reachable_speed = start_interval,
-        .g = 0.0,
-        .incoming = {},
-    });
-    labels_by_pose[make_key(start_pose, params_)].push_back(0);
-    open.push({start_f, 0});
-    result.generated_labels = 1;
-    result.open_peak = 1;
+
+    for (const SearchRoot& root : roots) {
+        const double speed = root.state.velocity.norm();
+        const Pose pose {
+            .position = root.state.position,
+            .theta = std::atan2(root.state.velocity.y(), root.state.velocity.x()),
+        };
+        const SpeedSquaredInterval speed_interval {
+            speed * speed, speed * speed,
+        };
+        enqueue_label(
+            pose,
+            speed_interval,
+            root.initial_cost,
+            heuristic(pose),
+            -1,
+            {},
+            root.relaxed
+        );
+    }
+    if (open.empty()) {
+        result.error = "all search roots were dominated";
+        return result;
+    }
 
     const std::vector<double> curvatures = curvature_samples(params_);
     int goal_node_index = -1;
@@ -563,49 +620,15 @@ KinodynamicAstar::Result KinodynamicAstar::search(
             if (std::isinf(h)) continue;
 
             const double new_g = current.g + primitive.length;
-            const PoseKey key = make_key(propagated->pose, params_);
-            auto& pose_labels = labels_by_pose[key];
-            bool dominated = false;
-            for (const int label_index : pose_labels) {
-                const SearchNode& incumbent = nodes[static_cast<size_t>(label_index)];
-                if (!incumbent.active) continue;
-                if (incumbent.g <= new_g + EPS
-                    && contains_interval(
-                        incumbent.reachable_speed, propagated->reachable_speed
-                    )) {
-                    dominated = true;
-                    break;
-                }
-            }
-            if (dominated) {
-                ++result.dominated_labels;
-                continue;
-            }
-
-            for (const int label_index : pose_labels) {
-                SearchNode& incumbent = nodes[static_cast<size_t>(label_index)];
-                if (!incumbent.active) continue;
-                if (new_g <= incumbent.g + EPS
-                    && contains_interval(
-                        propagated->reachable_speed, incumbent.reachable_speed
-                    )) {
-                    incumbent.active = false;
-                    ++result.dominated_labels;
-                }
-            }
-
-            const int node_index = static_cast<int>(nodes.size());
-            nodes.push_back({
-                .pose = propagated->pose,
-                .reachable_speed = propagated->reachable_speed,
-                .g = new_g,
-                .parent = entry.node_index,
-                .incoming = primitive,
-            });
-            pose_labels.push_back(node_index);
-            open.push({new_g + h, node_index});
-            ++result.generated_labels;
-            result.open_peak = std::max(result.open_peak, open.size());
+            enqueue_label(
+                propagated->pose,
+                propagated->reachable_speed,
+                new_g,
+                h,
+                entry.node_index,
+                primitive,
+                false
+            );
         }
     }
 
@@ -621,6 +644,13 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         reversed_indices.push_back(index);
     }
     std::reverse(reversed_indices.begin(), reversed_indices.end());
+
+    const SearchNode& selected_root = nodes[static_cast<size_t>(reversed_indices.front())];
+    const Pose start_pose = selected_root.pose;
+    const SpeedSquaredInterval start_interval = selected_root.reachable_speed;
+    const double start_speed = std::sqrt(std::max(start_interval.min, 0.0));
+    result.selected_relaxed_root = selected_root.relaxed_root;
+    result.selected_root_cost = selected_root.g;
 
     std::vector<SpatialPrimitive> primitives;
     primitives.reserve(reversed_indices.size());

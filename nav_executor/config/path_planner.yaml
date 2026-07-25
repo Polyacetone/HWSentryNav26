@@ -15,6 +15,10 @@
       planner:
         goal_reached_distance: 0.5 # 机器人到终点距离小于该值时认为已到达，直接标记 COMPLETE
         seed_resample_distance: 0.5 # kinodynamic 搜索结果的路径点重采样间隔（米），决定 MINCO 分成多少段
+        start_yaw_relaxation:
+          speed_threshold: 0.5 # 实测速度不高于该值时，额外允许从最低前进速度的全航向根开始搜索 (m/s)
+          root_penalty: 2.0 # 使用松弛航向根的固定等效路径长度代价 (m)，优先保留真实起始运动状态
+          yaw_penalty: 0.5 # 松弛根相对真实 yaw 每旋转 1 rad 的附加等效路径长度 (m/rad)
 
       dijkstra:
         obstacle_weight: 0.02 # 障碍代价系数，把 cost_map 的 0~255 代价值缩放到与路径步长可比的数量级

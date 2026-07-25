@@ -437,6 +437,17 @@ PlannerConfig NavExecutorNode::load_planner_config(
     c.nudge_max_distance = declare_parameter<double>("path_planner.nudge.max_distance");
     c.goal_reached_distance = declare_parameter<double>("path_planner.planner.goal_reached_distance");
     c.seed_resample_distance = declare_parameter<double>("path_planner.planner.seed_resample_distance");
+    c.start_yaw_relaxation = {
+        .speed_threshold = declare_parameter<double>(
+            "path_planner.planner.start_yaw_relaxation.speed_threshold"
+        ),
+        .root_penalty = declare_parameter<double>(
+            "path_planner.planner.start_yaw_relaxation.root_penalty"
+        ),
+        .yaw_penalty = declare_parameter<double>(
+            "path_planner.planner.start_yaw_relaxation.yaw_penalty"
+        ),
+    };
     c.forward_velocity_bounds = forward_velocity_bounds;
 
     c.dijkstra = {
@@ -552,6 +563,13 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "path_planner on_step_threshold must be finite and in (0, 1]"
     );
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
+    require_parameter(
+        nonnegative_finite(c.start_yaw_relaxation.speed_threshold)
+            && c.start_yaw_relaxation.speed_threshold <= c.forward_velocity_bounds.max
+            && nonnegative_finite(c.start_yaw_relaxation.root_penalty)
+            && nonnegative_finite(c.start_yaw_relaxation.yaw_penalty),
+        "start yaw relaxation parameters are invalid"
+    );
     require_parameter(
         positive_finite(c.kinodynamic.state_limits.speed_max)
         && positive_finite(c.kinodynamic.state_limits.angular_velocity_max)

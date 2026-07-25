@@ -563,23 +563,59 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     };
 
     // ── [2] Kinodynamic A*：空间曲率原语 + 可达速度区间搜索 ──
-    KinodynamicAstar::State kino_start;
-    kino_start.position = start_map;
+    KinodynamicAstar::State strict_start;
+    strict_start.position = start_map;
     const double start_reference_speed = std::clamp(
         req.current_velocity,
         config_.forward_velocity_bounds.min,
         config_.forward_velocity_bounds.max
     );
-    kino_start.velocity = start_reference_speed * Eigen::Vector2d(
+    strict_start.velocity = start_reference_speed * Eigen::Vector2d(
         std::cos(req.current_yaw), std::sin(req.current_yaw)
     );
+
+    std::vector<KinodynamicAstar::SearchRoot> kino_roots;
+    kino_roots.push_back({
+        .state = strict_start,
+        .initial_cost = 0.0,
+        .relaxed = false,
+    });
+    if (std::abs(req.current_velocity)
+        <= config_.start_yaw_relaxation.speed_threshold) {
+        const int heading_bins = std::max(
+            1,
+            static_cast<int>(std::llround(
+                2.0 * M_PI / config_.kinodynamic.dedup_theta
+            ))
+        );
+        const double relaxed_speed = config_.forward_velocity_bounds.min;
+        for (int bin = 0; bin < heading_bins; ++bin) {
+            const double yaw = wrap_angle(
+                req.current_yaw
+                + 2.0 * M_PI * static_cast<double>(bin)
+                    / static_cast<double>(heading_bins)
+            );
+            const double yaw_change = std::abs(wrap_angle(yaw - req.current_yaw));
+            KinodynamicAstar::State relaxed_start;
+            relaxed_start.position = start_map;
+            relaxed_start.velocity = relaxed_speed * Eigen::Vector2d(
+                std::cos(yaw), std::sin(yaw)
+            );
+            kino_roots.push_back({
+                .state = relaxed_start,
+                .initial_cost = config_.start_yaw_relaxation.root_penalty
+                    + config_.start_yaw_relaxation.yaw_penalty * yaw_change,
+                .relaxed = true,
+            });
+        }
+    }
 
     KinodynamicAstar::Params kinodynamic_params = config_.kinodynamic;
     MincoOptimizer::Params minco_params = config_.minco;
 
     KinodynamicAstar astar(kinodynamic_params);
     const auto kino = astar.search(
-        kino_start, goal_plan, dijkstra, transition_constraint
+        kino_roots, goal_plan, dijkstra, transition_constraint
     );
     if (!kino.success) {
         return fail(
@@ -724,7 +760,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     RCLCPP_INFO(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
         "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, seed_length=%.2f m, raw_states=%zu, "
-        "kino[exp=%d labels=%d dominated=%d transitions=%d goal=%d open=%zu], "
+        "kino[root=%s root_cost=%.2f exp=%d labels=%d dominated=%d transitions=%d goal=%d open=%zu], "
         "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
         "normalized_scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
@@ -734,6 +770,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         std::chrono::duration<double, std::milli>(kinodynamic_done - dijkstra_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
         seed_path_length, seed_states_raw.size(),
+        kino.selected_relaxed_root ? "relaxed-yaw" : "strict",
+        kino.selected_root_cost,
         kino.expansions, kino.generated_labels, kino.dominated_labels,
         kino.transition_checks, kino.goal_connection_attempts, kino.open_peak,
         segment_count, variable_count,
