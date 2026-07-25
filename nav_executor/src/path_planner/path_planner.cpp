@@ -515,43 +515,54 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     }
     const auto dijkstra_done = std::chrono::steady_clock::now();
 
-    // 原语逐子步可行性：碰撞 + 方向地形的通行方向、对齐和入口速度窗。
+    // 空间原语逐子步约束：碰撞、方向地形通行方向以及局部允许速度范围。
     const CostMap* const planning_map_ptr = &planning_cost_map;
-    const auto transition_feasible = [
+    const auto transition_constraint = [
         planning_map_ptr,
         direction_map = req.direction_map.get(),
         &terrain = req.terrain_constraints,
         &config = config_
-    ](const KinodynamicAstar::State& from, const KinodynamicAstar::State& to) {
+    ](const KinodynamicAstar::Pose& from, const KinodynamicAstar::Pose& to)
+        -> std::optional<KinodynamicAstar::SpeedRange> {
         const Eigen::Vector2d& map_pt = to.position;
         const Eigen::Vector2d g = planning_map_ptr->map_coord_to_grid(map_pt);
-        if (!planning_map_ptr->is_valid_coord(g)) return false;
-        if (planning_map_ptr->interpolate(g) >= config.occupied_threshold) return false;
+        if (!planning_map_ptr->is_valid_coord(g)) return std::nullopt;
+        if (planning_map_ptr->interpolate(g) >= config.occupied_threshold) {
+            return std::nullopt;
+        }
 
         const Eigen::Vector2d dg = direction_map->map_coord_to_grid(map_pt);
-        if (!direction_map->is_valid_coord(dg)) return false;
-        if (!direction_map->is_terrain_body_at(dg)) return true;
+        if (!direction_map->is_valid_coord(dg)) return std::nullopt;
+        if (!direction_map->is_terrain_body_at(dg)) {
+            return KinodynamicAstar::SpeedRange {
+                .min = 0.0,
+                .max = config.kinodynamic.state_limits.speed_max,
+            };
+        }
         const Eigen::Array2i cell_array = dg.array().floor().cast<int>();
         const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
         const uint8_t label = direction_map->terrain_at(cell);
         const Eigen::Vector2d raw_dir = direction_map->at(cell);
         if (label < static_cast<uint8_t>(TerrainType::SLOPE)
-            || raw_dir.squaredNorm() <= 1e-12) return false;
+            || raw_dir.squaredNorm() <= 1e-12) return std::nullopt;
 
         const Eigen::Vector2d displacement = to.position - from.position;
-        if (displacement.norm() < 1e-6) return false;
+        if (displacement.norm() < 1e-6) return std::nullopt;
         const Eigen::Vector2d dir = raw_dir.normalized();
         const double travel_alignment = displacement.normalized().dot(dir);
-        if (std::abs(travel_alignment) <= config.step_detection.detect_dot_threshold) return false;
+        if (std::abs(travel_alignment) <= config.step_detection.detect_dot_threshold) {
+            return std::nullopt;
+        }
         const TraversalMode* rule = terrain.selected_mode(label, travel_alignment >= 0.0);
-        if (!rule) return false;
+        if (!rule) return std::nullopt;
 
-        const double speed = to.velocity.norm();
-        return speed >= rule->velocity_window.min - 1e-6
-            && speed <= rule->velocity_window.max + 1e-6;
+        return KinodynamicAstar::SpeedRange {
+            .min = rule->velocity_window.min,
+            .max = rule->velocity_window.max,
+        };
     };
 
-    // ── [2] Kinodynamic A*：仅前向平坦运动原语 + 动态可行停车连接 ──
+    // ── [2] Kinodynamic A*：空间曲率原语 + 可达速度区间搜索 ──
     KinodynamicAstar::State kino_start;
     kino_start.position = start_map;
     const double start_reference_speed = std::clamp(
@@ -568,9 +579,19 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     KinodynamicAstar astar(kinodynamic_params);
     const auto kino = astar.search(
-        kino_start, goal_plan, dijkstra, transition_feasible
+        kino_start, goal_plan, dijkstra, transition_constraint
     );
-    if (!kino.success) return fail("Kinodynamic A* failed: " + kino.error);
+    if (!kino.success) {
+        return fail(
+            "Kinodynamic A* failed: " + kino.error
+            + " (expansions=" + std::to_string(kino.expansions)
+            + ", labels=" + std::to_string(kino.generated_labels)
+            + ", dominated=" + std::to_string(kino.dominated_labels)
+            + ", transitions=" + std::to_string(kino.transition_checks)
+            + ", goal_attempts=" + std::to_string(kino.goal_connection_attempts)
+            + ", open_peak=" + std::to_string(kino.open_peak) + ")"
+        );
+    }
     const std::vector<KinodynamicAstar::State>& seed_states_raw = kino.states;
     const auto kinodynamic_done = std::chrono::steady_clock::now();
 
@@ -703,6 +724,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     RCLCPP_INFO(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
         "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, seed_length=%.2f m, raw_states=%zu, "
+        "kino[exp=%d labels=%d dominated=%d transitions=%d goal=%d open=%zu], "
         "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
         "normalized_scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
@@ -711,7 +733,10 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         std::chrono::duration<double, std::milli>(dijkstra_done - plan_start).count(),
         std::chrono::duration<double, std::milli>(kinodynamic_done - dijkstra_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
-        seed_path_length, seed_states_raw.size(), segment_count, variable_count,
+        seed_path_length, seed_states_raw.size(),
+        kino.expansions, kino.generated_labels, kino.dominated_labels,
+        kino.transition_checks, kino.goal_connection_attempts, kino.open_peak,
+        segment_count, variable_count,
         static_cast<int>(opt.optimizer_status_string().size()), opt.optimizer_status_string().data(),
         opt.accepted_iterations, opt.function_evaluations,
         opt.final_normalized_scaled_grad_max_block_norm, opt.final_grad_inf_norm

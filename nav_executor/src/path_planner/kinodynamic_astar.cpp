@@ -1,10 +1,11 @@
 #include <nav_executor/path_planner/kinodynamic_astar.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
+#include <iomanip>
 #include <optional>
 #include <queue>
+#include <sstream>
 #include <unordered_map>
 
 namespace nav_executor {
@@ -14,49 +15,34 @@ namespace {
 constexpr double EPS = 1e-9;
 constexpr double FORWARD_SPEED_EPS = 1e-4;
 
-double cross_2d(const Eigen::Vector2d& lhs, const Eigen::Vector2d& rhs) {
-    return lhs.x() * rhs.y() - lhs.y() * rhs.x();
-}
-
-struct StateKey {
-    uint64_t packed = 0;
-    bool operator==(const StateKey& other) const { return packed == other.packed; }
+struct SpeedSquaredInterval {
+    double min = 0.0;
+    double max = 0.0;
 };
 
-struct StateKeyHash {
-    size_t operator()(const StateKey& key) const {
+struct PoseKey {
+    uint64_t packed = 0;
+    bool operator==(const PoseKey& other) const { return packed == other.packed; }
+};
+
+struct PoseKeyHash {
+    size_t operator()(const PoseKey& key) const {
         return std::hash<uint64_t>{}(key.packed);
     }
 };
 
-int64_t quantize_component(const double value, const double resolution) {
-    return static_cast<int64_t>(std::llround(value / std::max(resolution, EPS)));
-}
-
-StateKey make_key(const KinodynamicAstar::State& state, const KinodynamicAstar::Params& params) {
-    double theta = std::atan2(state.velocity.y(), state.velocity.x());
-    if (theta < 0.0) theta += 2.0 * M_PI;
-    const int64_t ix = quantize_component(state.position.x(), params.dedup_xy);
-    const int64_t iy = quantize_component(state.position.y(), params.dedup_xy);
-    const int64_t theta_bins = std::max<int64_t>(
-        1, std::llround(2.0 * M_PI / std::max(params.dedup_theta, EPS))
-    );
-    const int64_t it = quantize_component(theta, params.dedup_theta) % theta_bins;
-    const int64_t iv = quantize_component(state.velocity.norm(), params.dedup_speed);
-    return {
-        .packed = (static_cast<uint64_t>(ix) & 0xFFFFULL) << 48
-            | (static_cast<uint64_t>(iy) & 0xFFFFULL) << 32
-            | (static_cast<uint64_t>(it) & 0xFFFFULL) << 16
-            | (static_cast<uint64_t>(iv) & 0xFFFFULL),
-    };
-}
+struct SpatialPrimitive {
+    double curvature = 0.0;
+    double length = 0.0;
+};
 
 struct SearchNode {
-    KinodynamicAstar::State state;
+    KinodynamicAstar::Pose pose;
+    SpeedSquaredInterval reachable_speed;
     double g = 0.0;
-    double f = 0.0;
     int parent = -1;
-    Eigen::Vector2d applied_acceleration = Eigen::Vector2d::Zero();
+    SpatialPrimitive incoming;
+    bool active = true;
 };
 
 struct OpenEntry {
@@ -65,343 +51,401 @@ struct OpenEntry {
     bool operator>(const OpenEntry& other) const { return f > other.f; }
 };
 
-struct GoalShot {
-    std::vector<KinodynamicAstar::State> states;
-    std::vector<double> durations;
+struct PropagationResult {
+    KinodynamicAstar::Pose pose;
+    SpeedSquaredInterval reachable_speed;
 };
 
-using ShotCoefficients = Eigen::Matrix<double, 6, 2>;
-using Polynomial = std::vector<double>;
+struct RouteEdge {
+    double curvature = 0.0;
+    double length = 0.0;
+    KinodynamicAstar::SpeedRange endpoint_speed_range;
+    bool terminal_stop = false;
+};
 
-Polynomial polynomial_multiply(const Polynomial& lhs, const Polynomial& rhs) {
-    Polynomial result(lhs.size() + rhs.size() - 1, 0.0);
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        for (size_t j = 0; j < rhs.size(); ++j) result[i + j] += lhs[i] * rhs[j];
-    }
-    return result;
+enum class SpeedPropagationFailure {
+    NONE,
+    INVALID_ENDPOINT_RANGE,
+    INITIAL_DYNAMICALLY_INFEASIBLE,
+    EMPTY_REACHABLE_INTERVAL,
+    ENDPOINT_RANGE_UNREACHABLE,
+    TERMINAL_STOP_UNREACHABLE,
+};
+
+struct SpeedPropagationTrace {
+    SpeedPropagationFailure failure = SpeedPropagationFailure::NONE;
+    double dynamic_speed_squared_cap = 0.0;
+    double endpoint_speed_squared_cap = 0.0;
+    SpeedSquaredInterval admissible_initial;
+    SpeedSquaredInterval dynamically_reachable;
+    SpeedSquaredInterval endpoint_allowed;
+};
+
+double wrap_positive(double angle) {
+    angle = std::fmod(angle, 2.0 * M_PI);
+    if (angle < 0.0) angle += 2.0 * M_PI;
+    return angle;
 }
 
-Polynomial polynomial_add(
-    const Polynomial& lhs,
-    const Polynomial& rhs,
-    const double rhs_scale = 1.0
-) {
-    Polynomial result(std::max(lhs.size(), rhs.size()), 0.0);
-    for (size_t i = 0; i < lhs.size(); ++i) result[i] += lhs[i];
-    for (size_t i = 0; i < rhs.size(); ++i) result[i] += rhs_scale * rhs[i];
-    return result;
+int64_t quantize_component(const double value, const double resolution) {
+    return static_cast<int64_t>(std::llround(value / std::max(resolution, EPS)));
 }
 
-double binomial(const int n, const int k) {
-    if (k < 0 || k > n) return 0.0;
-    double result = 1.0;
-    for (int i = 1; i <= k; ++i) {
-        result *= static_cast<double>(n - k + i) / static_cast<double>(i);
-    }
-    return result;
-}
-
-std::vector<double> interval_bernstein_coefficients(
-    const Polynomial& polynomial,
-    const double interval_begin,
-    const double interval_end
-) {
-    const int degree = static_cast<int>(polynomial.size()) - 1;
-    const double span = interval_end - interval_begin;
-    Polynomial local(static_cast<size_t>(degree + 1), 0.0);
-    for (int local_order = 0; local_order <= degree; ++local_order) {
-        double shifted_coefficient = 0.0;
-        for (int global_order = local_order; global_order <= degree; ++global_order) {
-            shifted_coefficient += polynomial[static_cast<size_t>(global_order)]
-                * binomial(global_order, local_order)
-                * std::pow(interval_begin, global_order - local_order);
-        }
-        local[static_cast<size_t>(local_order)] = shifted_coefficient
-            * std::pow(span, local_order);
-    }
-
-    std::vector<double> bernstein(static_cast<size_t>(degree + 1), 0.0);
-    for (int control = 0; control <= degree; ++control) {
-        for (int order = 0; order <= control; ++order) {
-            bernstein[static_cast<size_t>(control)] +=
-                binomial(control, order) / binomial(degree, order)
-                * local[static_cast<size_t>(order)];
-        }
-    }
-    return bernstein;
-}
-
-bool polynomial_nonpositive_on_interval(
-    const Polynomial& polynomial,
-    const double interval_begin,
-    const double interval_end
-) {
-    constexpr double CERTIFICATION_TOLERANCE = 1e-9;
-    const auto coefficients = interval_bernstein_coefficients(
-        polynomial, interval_begin, interval_end
+PoseKey make_key(const KinodynamicAstar::Pose& pose, const KinodynamicAstar::Params& params) {
+    const int64_t ix = quantize_component(pose.position.x(), params.dedup_xy);
+    const int64_t iy = quantize_component(pose.position.y(), params.dedup_xy);
+    const int64_t theta_bins = std::max<int64_t>(
+        1, std::llround(2.0 * M_PI / std::max(params.dedup_theta, EPS))
     );
-    return std::all_of(coefficients.begin(), coefficients.end(), [](const double value) {
-        return value <= CERTIFICATION_TOLERANCE;
-    });
+    const int64_t it = quantize_component(
+        wrap_positive(pose.theta), params.dedup_theta
+    ) % theta_bins;
+    return {
+        .packed = (static_cast<uint64_t>(ix) & 0xFFFFFFULL) << 40
+            | (static_cast<uint64_t>(iy) & 0xFFFFFFULL) << 16
+            | (static_cast<uint64_t>(it) & 0xFFFFULL),
+    };
 }
 
-ShotCoefficients make_goal_shot_coefficients(
-    const KinodynamicAstar::State& start,
-    const Eigen::Vector2d& goal,
-    const double duration
+std::optional<SpeedSquaredInterval> intersect_intervals(
+    const SpeedSquaredInterval& lhs,
+    const SpeedSquaredInterval& rhs
 ) {
-    const Eigen::Vector2d displacement = goal - start.position;
-    const double t2 = duration * duration;
-    const double t3 = t2 * duration;
-    const double t4 = t3 * duration;
-    const double t5 = t4 * duration;
-    ShotCoefficients coefficients = ShotCoefficients::Zero();
-    coefficients.row(0) = start.position.transpose();
-    coefficients.row(1) = start.velocity.transpose();
-    coefficients.row(3) = (10.0 * displacement / t3 - 6.0 * start.velocity / t2).transpose();
-    coefficients.row(4) = (-15.0 * displacement / t4 + 8.0 * start.velocity / t3).transpose();
-    coefficients.row(5) = (6.0 * displacement / t5 - 3.0 * start.velocity / t4).transpose();
-    return coefficients;
+    SpeedSquaredInterval result {
+        .min = std::max(lhs.min, rhs.min),
+        .max = std::min(lhs.max, rhs.max),
+    };
+    if (result.min > result.max + EPS) return std::nullopt;
+    if (result.min > result.max) result.min = result.max;
+    return result;
 }
 
-KinodynamicAstar::State evaluate_goal_shot(
-    const ShotCoefficients& coefficients,
-    const double time,
-    Eigen::Vector2d& acceleration
+bool contains_interval(
+    const SpeedSquaredInterval& outer,
+    const SpeedSquaredInterval& inner
 ) {
-    KinodynamicAstar::State state;
-    double power = 1.0;
-    for (int order = 0; order < 6; ++order) {
-        state.position += coefficients.row(order).transpose() * power;
-        power *= time;
-    }
-    power = 1.0;
-    for (int order = 1; order < 6; ++order) {
-        state.velocity += static_cast<double>(order)
-            * coefficients.row(order).transpose() * power;
-        power *= time;
-    }
-    acceleration.setZero();
-    power = 1.0;
-    for (int order = 2; order < 6; ++order) {
-        acceleration += static_cast<double>(order * (order - 1))
-            * coefficients.row(order).transpose() * power;
-        power *= time;
-    }
-    return state;
+    return outer.min <= inner.min + EPS && outer.max + EPS >= inner.max;
 }
 
-bool goal_shot_dynamically_feasible(
-    const ShotCoefficients& coefficients,
-    const double duration,
-    const int interval_count,
-    const Eigen::Vector2d& goal_displacement,
+bool contains_value(const SpeedSquaredInterval& interval, const double value) {
+    return value >= interval.min - EPS && value <= interval.max + EPS;
+}
+
+const char* propagation_failure_string(const SpeedPropagationFailure failure) {
+    switch (failure) {
+        case SpeedPropagationFailure::NONE:
+            return "none";
+        case SpeedPropagationFailure::INVALID_ENDPOINT_RANGE:
+            return "invalid endpoint speed range";
+        case SpeedPropagationFailure::INITIAL_DYNAMICALLY_INFEASIBLE:
+            return "input speed exceeds curvature-dependent dynamic cap";
+        case SpeedPropagationFailure::EMPTY_REACHABLE_INTERVAL:
+            return "spatial dynamics produced an empty reachable interval";
+        case SpeedPropagationFailure::ENDPOINT_RANGE_UNREACHABLE:
+            return "reachable interval does not intersect endpoint speed range";
+        case SpeedPropagationFailure::TERMINAL_STOP_UNREACHABLE:
+            return "zero terminal speed is unreachable over this edge";
+    }
+    return "unknown";
+}
+
+std::string speed_interval_string(const SpeedSquaredInterval& interval) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3)
+           << '[' << std::sqrt(std::max(interval.min, 0.0))
+           << ',' << std::sqrt(std::max(interval.max, 0.0)) << "] m/s";
+    return stream.str();
+}
+
+std::string speed_range_string(const KinodynamicAstar::SpeedRange& range) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3)
+           << '[' << range.min << ',' << range.max << "] m/s";
+    return stream.str();
+}
+
+KinodynamicAstar::Pose advance_pose(
+    const KinodynamicAstar::Pose& from,
+    const double curvature,
+    const double length
+) {
+    KinodynamicAstar::Pose to = from;
+    const Eigen::Vector2d tangent(std::cos(from.theta), std::sin(from.theta));
+    const Eigen::Vector2d normal(-tangent.y(), tangent.x());
+    if (std::abs(curvature) <= EPS) {
+        to.position += length * tangent;
+        return to;
+    }
+    const double angle = curvature * length;
+    to.position += std::sin(angle) / curvature * tangent
+        + (1.0 - std::cos(angle)) / curvature * normal;
+    to.theta = std::atan2(std::sin(from.theta + angle), std::cos(from.theta + angle));
+    return to;
+}
+
+double dynamic_speed_squared_cap(
+    const double curvature,
     const KinodynamicAstar::Params::StateLimits& limits
 ) {
-    Polynomial velocity_x(5, 0.0);
-    Polynomial velocity_y(5, 0.0);
-    Polynomial acceleration_x(4, 0.0);
-    Polynomial acceleration_y(4, 0.0);
-    for (int order = 1; order < 6; ++order) {
-        velocity_x[static_cast<size_t>(order - 1)] = static_cast<double>(order)
-            * coefficients(order, 0);
-        velocity_y[static_cast<size_t>(order - 1)] = static_cast<double>(order)
-            * coefficients(order, 1);
-    }
-    for (int order = 2; order < 6; ++order) {
-        acceleration_x[static_cast<size_t>(order - 2)]
-            = static_cast<double>(order * (order - 1)) * coefficients(order, 0);
-        acceleration_y[static_cast<size_t>(order - 2)]
-            = static_cast<double>(order * (order - 1)) * coefficients(order, 1);
-    }
-
-    const Polynomial speed_squared = polynomial_add(
-        polynomial_multiply(velocity_x, velocity_x),
-        polynomial_multiply(velocity_y, velocity_y)
+    double cap = limits.speed_max * limits.speed_max;
+    const double abs_curvature = std::abs(curvature);
+    if (abs_curvature <= EPS) return cap;
+    cap = std::min(
+        cap,
+        limits.angular_velocity_max * limits.angular_velocity_max
+            / (abs_curvature * abs_curvature)
     );
-    const Polynomial acceleration_squared = polynomial_add(
-        polynomial_multiply(acceleration_x, acceleration_x),
-        polynomial_multiply(acceleration_y, acceleration_y)
-    );
-    const Polynomial cross = polynomial_add(
-        polynomial_multiply(velocity_x, acceleration_y),
-        polynomial_multiply(velocity_y, acceleration_x),
-        -1.0
-    );
-    const Polynomial cross_squared = polynomial_multiply(cross, cross);
-    Polynomial speed_limit = speed_squared;
-    speed_limit[0] -= limits.speed_max * limits.speed_max;
-    Polynomial acceleration_limit = acceleration_squared;
-    acceleration_limit[0] -= limits.acceleration_max * limits.acceleration_max;
-    const Polynomial lateral_limit = polynomial_add(
-        cross_squared,
-        speed_squared,
-        -limits.lateral_acceleration_max * limits.lateral_acceleration_max
-    );
-    const Polynomial angular_limit = polynomial_add(
-        cross_squared,
-        polynomial_multiply(speed_squared, speed_squared),
-        -limits.angular_velocity_max * limits.angular_velocity_max
-    );
-    Polynomial goal_projection(5, 0.0);
-    for (size_t order = 0; order < goal_projection.size(); ++order) {
-        goal_projection[order] = velocity_x[order] * goal_displacement.x()
-            + velocity_y[order] * goal_displacement.y();
-    }
-
-    const double interval_duration = duration / static_cast<double>(interval_count);
-    for (int interval = 0; interval < interval_count; ++interval) {
-        const double begin = interval_duration * static_cast<double>(interval);
-        const double end = interval_duration * static_cast<double>(interval + 1);
-        const auto projection_bounds = interval_bernstein_coefficients(
-            goal_projection, begin, end
-        );
-        const bool final_interval = interval + 1 == interval_count;
-        bool strictly_forward = true;
-        for (size_t control = 0; control < projection_bounds.size(); ++control) {
-            // 终点 v=0 且 a=0，因此四次速度投影的最后两个 Bernstein
-            // 控制系数必为零；其余控制系数严格为正即可保证 t<T 时持续前进。
-            const bool terminal_zero_control = final_interval
-                && control + 2 >= projection_bounds.size();
-            if (terminal_zero_control) {
-                strictly_forward = projection_bounds[control] >= -1e-9;
-            } else if (projection_bounds[control] <= 1e-10) {
-                strictly_forward = false;
-            }
-            if (!strictly_forward) break;
-        }
-        if (!polynomial_nonpositive_on_interval(speed_limit, begin, end)
-            || !polynomial_nonpositive_on_interval(acceleration_limit, begin, end)
-            || !polynomial_nonpositive_on_interval(lateral_limit, begin, end)
-            || !polynomial_nonpositive_on_interval(angular_limit, begin, end)
-            || !strictly_forward) {
-            return false;
-        }
-    }
-    return true;
+    cap = std::min(cap, limits.lateral_acceleration_max / abs_curvature);
+    cap = std::min(cap, limits.acceleration_max / abs_curvature);
+    return std::max(cap, 0.0);
 }
 
-bool dynamically_feasible(
-    const KinodynamicAstar::State& state,
-    const Eigen::Vector2d& acceleration,
-    const KinodynamicAstar::Params::StateLimits& limits,
-    const bool allow_zero_speed
+// 在固定曲率弧长上使用全部剩余切向加速度时，速度平方的可达极值。
+// dz/ds = ±2*sqrt(a_max² - (|kappa|*z)²)，对 z 可解析积分。
+double propagate_speed_extreme(
+    const double initial_speed_squared,
+    const double length,
+    const double curvature,
+    const double acceleration_max,
+    const double speed_squared_cap,
+    const bool accelerate
 ) {
-    const double speed = state.velocity.norm();
-    if ((!allow_zero_speed && speed < FORWARD_SPEED_EPS)
-        || speed > limits.speed_max + EPS
-        || acceleration.norm() > limits.acceleration_max + EPS) {
-        return false;
-    }
-    if (speed < FORWARD_SPEED_EPS) return allow_zero_speed;
-    const double lateral_acceleration = std::abs(cross_2d(state.velocity, acceleration)) / speed;
-    const double angular_velocity = lateral_acceleration / speed;
-    return lateral_acceleration <= limits.lateral_acceleration_max + EPS
-        && angular_velocity <= limits.angular_velocity_max + EPS;
-}
-
-bool constant_acceleration_dynamically_feasible(
-    const Eigen::Vector2d& initial_velocity,
-    const Eigen::Vector2d& acceleration,
-    const double duration,
-    const KinodynamicAstar::Params::StateLimits& limits
-) {
-    const double acceleration_squared = acceleration.squaredNorm();
-    const double closest_time = acceleration_squared > EPS
-        ? std::clamp(
-            -initial_velocity.dot(acceleration) / acceleration_squared,
+    const double initial = std::clamp(initial_speed_squared, 0.0, speed_squared_cap);
+    const double abs_curvature = std::abs(curvature);
+    if (abs_curvature <= EPS) {
+        return std::clamp(
+            initial + (accelerate ? 1.0 : -1.0) * 2.0 * acceleration_max * length,
             0.0,
-            duration
-        )
-        : 0.0;
-    KinodynamicAstar::State closest_state;
-    closest_state.velocity = initial_velocity + closest_time * acceleration;
-    KinodynamicAstar::State initial_state;
-    initial_state.velocity = initial_velocity;
-    return dynamically_feasible(initial_state, acceleration, limits, false)
-        && dynamically_feasible(closest_state, acceleration, limits, false);
+            speed_squared_cap
+        );
+    }
+
+    const double normal_acceleration_cap = acceleration_max / abs_curvature;
+    const double ratio = std::clamp(
+        abs_curvature * initial / acceleration_max, 0.0, 1.0
+    );
+    const double initial_angle = std::asin(ratio);
+    const double final_angle = std::clamp(
+        initial_angle + (accelerate ? 1.0 : -1.0) * 2.0 * abs_curvature * length,
+        0.0,
+        0.5 * M_PI
+    );
+    const double result = normal_acceleration_cap * std::sin(final_angle);
+    return std::clamp(result, 0.0, speed_squared_cap);
 }
 
-std::optional<GoalShot> try_goal_shot(
-    const KinodynamicAstar::State& start,
-    const Eigen::Vector2d& goal,
-    const KinodynamicAstar::Params& params,
-    const KinodynamicAstar::TransitionFeasibleFn& transition_feasible
+std::optional<SpeedSquaredInterval> propagate_speed_interval(
+    const SpeedSquaredInterval& initial,
+    const double length,
+    const double curvature,
+    const KinodynamicAstar::SpeedRange& environmental_speed,
+    const KinodynamicAstar::Params::StateLimits& limits,
+    const bool terminal_stop,
+    SpeedPropagationTrace* const trace = nullptr
 ) {
-    const double distance = (goal - start.position).norm();
-    const double speed = start.velocity.norm();
-    const Eigen::Vector2d goal_displacement = goal - start.position;
-    const double stopping_distance = speed * speed
-        / (2.0 * params.state_limits.acceleration_max);
-    if (distance > stopping_distance + speed * params.primitive_duration
-            + params.goal_tolerance) {
+    const double dynamic_cap = dynamic_speed_squared_cap(curvature, limits);
+    const double environmental_max = environmental_speed.max;
+    const double endpoint_cap = std::min(
+        dynamic_cap, std::max(environmental_max, 0.0) * std::max(environmental_max, 0.0)
+    );
+    if (trace) {
+        trace->dynamic_speed_squared_cap = dynamic_cap;
+        trace->endpoint_speed_squared_cap = endpoint_cap;
+    }
+    if (!std::isfinite(environmental_speed.min)
+        || !std::isfinite(environmental_speed.max)
+        || environmental_speed.min > environmental_speed.max
+        || environmental_speed.max < 0.0
+        || (endpoint_cap <= 0.0 && !terminal_stop)) {
+        if (trace) trace->failure = SpeedPropagationFailure::INVALID_ENDPOINT_RANGE;
         return std::nullopt;
     }
 
-    const double minimum_duration = std::max({
-        params.primitive_duration,
-        1.6 * speed / params.state_limits.acceleration_max,
-        distance / params.state_limits.speed_max,
-    });
-    constexpr std::array<double, 8> DURATION_SCALES {
-        1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0,
-    };
-    const double primitive_substep = params.primitive_duration
-        / static_cast<double>(std::max(params.collision_substeps, 1));
-    constexpr double GOAL_SHOT_SPATIAL_STEP = 0.03;
-    constexpr double GOAL_SHOT_TIME_STEP = 0.01;
-    const double verification_step = std::min({
-        primitive_substep,
-        GOAL_SHOT_TIME_STEP,
-        GOAL_SHOT_SPATIAL_STEP / params.state_limits.speed_max,
-    });
-    for (const double scale : DURATION_SCALES) {
-        const double duration = minimum_duration * scale;
-        const int sample_count = std::max(
-            params.collision_substeps,
-            static_cast<int>(std::ceil(duration / verification_step))
-        );
-        const double dt = duration / static_cast<double>(sample_count);
-        const ShotCoefficients coefficients = make_goal_shot_coefficients(start, goal, duration);
-        if (!goal_shot_dynamically_feasible(
-                coefficients,
-                duration,
-                sample_count,
-                goal_displacement,
-                params.state_limits
-            )) {
-            continue;
-        }
-        GoalShot shot;
-        shot.states.reserve(static_cast<size_t>(sample_count));
-        shot.durations.assign(static_cast<size_t>(sample_count), dt);
-        KinodynamicAstar::State previous = start;
-        bool feasible = true;
-        for (int sample = 1; sample <= sample_count; ++sample) {
-            Eigen::Vector2d acceleration;
-            KinodynamicAstar::State state = evaluate_goal_shot(
-                coefficients, dt * static_cast<double>(sample), acceleration
-            );
-            const bool final_sample = sample == sample_count;
-            if (final_sample) {
-                state.position = goal;
-                state.velocity.setZero();
-            }
-            const bool advances_toward_goal = final_sample
-                || state.velocity.dot(goal_displacement) > FORWARD_SPEED_EPS * distance;
-            if (!dynamically_feasible(
-                    state, acceleration, params.state_limits, final_sample
-                ) || !advances_toward_goal
-                || !transition_feasible(previous, state)) {
-                feasible = false;
-                break;
-            }
-            shot.states.push_back(state);
-            previous = state;
-        }
-        if (feasible) return shot;
+    const auto admissible_initial = intersect_intervals(
+        initial, SpeedSquaredInterval {0.0, dynamic_cap}
+    );
+    if (!admissible_initial) {
+        if (trace) trace->failure = SpeedPropagationFailure::INITIAL_DYNAMICALLY_INFEASIBLE;
+        return std::nullopt;
     }
-    return std::nullopt;
+    if (trace) trace->admissible_initial = *admissible_initial;
+
+    SpeedSquaredInterval reachable {
+        .min = propagate_speed_extreme(
+            admissible_initial->min,
+            length,
+            curvature,
+            limits.acceleration_max,
+            dynamic_cap,
+            false
+        ),
+        .max = propagate_speed_extreme(
+            admissible_initial->max,
+            length,
+            curvature,
+            limits.acceleration_max,
+            dynamic_cap,
+            true
+        ),
+    };
+    if (trace) trace->dynamically_reachable = reachable;
+    if (reachable.min > reachable.max + EPS) {
+        if (trace) trace->failure = SpeedPropagationFailure::EMPTY_REACHABLE_INTERVAL;
+        return std::nullopt;
+    }
+
+    const double minimum_speed = terminal_stop
+        ? 0.0 : std::max(environmental_speed.min, FORWARD_SPEED_EPS);
+    const SpeedSquaredInterval allowed {
+        .min = minimum_speed * minimum_speed,
+        .max = endpoint_cap,
+    };
+    if (trace) trace->endpoint_allowed = allowed;
+    auto intersection = intersect_intervals(reachable, allowed);
+    if (!intersection) {
+        if (trace) trace->failure = SpeedPropagationFailure::ENDPOINT_RANGE_UNREACHABLE;
+        return std::nullopt;
+    }
+    if (!terminal_stop) return intersection;
+    if (!contains_value(*intersection, 0.0)) {
+        if (trace) trace->failure = SpeedPropagationFailure::TERMINAL_STOP_UNREACHABLE;
+        return std::nullopt;
+    }
+    return SpeedSquaredInterval {0.0, 0.0};
+}
+
+std::optional<PropagationResult> propagate_primitive(
+    const KinodynamicAstar::Pose& start_pose,
+    const SpeedSquaredInterval& start_speed,
+    const SpatialPrimitive& primitive,
+    const KinodynamicAstar::Params& params,
+    const KinodynamicAstar::TransitionConstraintFn& transition_constraint,
+    KinodynamicAstar::Result& diagnostics,
+    const bool terminal_stop
+) {
+    const int substeps = std::max(
+        1,
+        static_cast<int>(std::ceil(
+            primitive.length / params.collision_check_resolution
+        ))
+    );
+    const double substep_length = primitive.length / static_cast<double>(substeps);
+    KinodynamicAstar::Pose pose = start_pose;
+    SpeedSquaredInterval speed = start_speed;
+    for (int substep = 0; substep < substeps; ++substep) {
+        const KinodynamicAstar::Pose previous = pose;
+        pose = advance_pose(previous, primitive.curvature, substep_length);
+        ++diagnostics.transition_checks;
+        const auto environmental_speed = transition_constraint(previous, pose);
+        if (!environmental_speed) return std::nullopt;
+        const bool final_substep = terminal_stop && substep + 1 == substeps;
+        const auto propagated = propagate_speed_interval(
+            speed,
+            substep_length,
+            primitive.curvature,
+            *environmental_speed,
+            params.state_limits,
+            final_substep
+        );
+        if (!propagated) return std::nullopt;
+        speed = *propagated;
+    }
+    return PropagationResult {.pose = pose, .reachable_speed = speed};
+}
+
+std::optional<SpatialPrimitive> make_goal_connection(
+    const KinodynamicAstar::Pose& start,
+    const Eigen::Vector2d& goal,
+    const KinodynamicAstar::Params& params
+) {
+    const Eigen::Vector2d displacement = goal - start.position;
+    const double distance = displacement.norm();
+    if (distance <= EPS) return std::nullopt;
+
+    const Eigen::Vector2d tangent(std::cos(start.theta), std::sin(start.theta));
+    const Eigen::Vector2d normal(-tangent.y(), tangent.x());
+    const double local_x = displacement.dot(tangent);
+    const double local_y = displacement.dot(normal);
+
+    SpatialPrimitive connection;
+    if (std::abs(local_y) <= 1e-8) {
+        if (local_x <= 0.0) return std::nullopt;
+        connection.length = local_x;
+    } else {
+        connection.curvature = 2.0 * local_y / displacement.squaredNorm();
+        const double heading_change = 2.0 * std::atan2(local_y, local_x);
+        connection.length = heading_change / connection.curvature;
+    }
+    if (!std::isfinite(connection.length) || connection.length <= EPS
+        || connection.length > params.goal_connection_max_length
+        || std::abs(connection.curvature) > params.curvature_max + EPS) {
+        return std::nullopt;
+    }
+    return connection;
+}
+
+std::vector<double> curvature_samples(const KinodynamicAstar::Params& params) {
+    if (params.curvature_samples <= 1) return {0.0};
+    std::vector<double> samples;
+    samples.reserve(static_cast<size_t>(params.curvature_samples));
+    for (int index = 0; index < params.curvature_samples; ++index) {
+        const double fraction = static_cast<double>(index)
+            / static_cast<double>(params.curvature_samples - 1);
+        const double centered = 2.0 * fraction - 1.0;
+        samples.push_back(params.curvature_max * centered * centered * centered);
+    }
+    return samples;
+}
+
+std::optional<SpeedSquaredInterval> predecessor_interval(
+    const SpeedSquaredInterval& target,
+    const RouteEdge& edge,
+    const KinodynamicAstar::Params::StateLimits& limits
+) {
+    const double cap = dynamic_speed_squared_cap(edge.curvature, limits);
+    SpeedSquaredInterval result {
+        .min = propagate_speed_extreme(
+            target.min, edge.length, edge.curvature, limits.acceleration_max, cap, false
+        ),
+        .max = propagate_speed_extreme(
+            target.max, edge.length, edge.curvature, limits.acceleration_max, cap, true
+        ),
+    };
+    if (result.min > result.max + EPS) return std::nullopt;
+    return result;
+}
+
+std::string route_edge_context(
+    const size_t edge_index,
+    const size_t edge_count,
+    const KinodynamicAstar::Pose& from,
+    const KinodynamicAstar::Pose& to,
+    const RouteEdge& edge
+) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3)
+           << "edge=" << edge_index << '/' << edge_count
+           << " from=(" << from.position.x() << ',' << from.position.y() << ')'
+           << " to=(" << to.position.x() << ',' << to.position.y() << ')'
+           << " length=" << edge.length << " m"
+           << " curvature=" << edge.curvature << " 1/m"
+           << " endpoint_range=" << speed_range_string(edge.endpoint_speed_range)
+           << " terminal=" << edge.terminal_stop;
+    return stream.str();
+}
+
+std::string propagation_trace_string(const SpeedPropagationTrace& trace) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3)
+           << "reason=" << propagation_failure_string(trace.failure)
+           << " dynamic_cap="
+           << std::sqrt(std::max(trace.dynamic_speed_squared_cap, 0.0)) << " m/s"
+           << " endpoint_cap="
+           << std::sqrt(std::max(trace.endpoint_speed_squared_cap, 0.0)) << " m/s"
+           << " admissible_input=" << speed_interval_string(trace.admissible_initial)
+           << " dynamic_reachable=" << speed_interval_string(trace.dynamically_reachable)
+           << " endpoint_allowed=" << speed_interval_string(trace.endpoint_allowed);
+    return stream.str();
 }
 
 } // anonymous namespace
@@ -410,40 +454,56 @@ KinodynamicAstar::Result KinodynamicAstar::search(
     const State& start,
     const Eigen::Vector2d& goal_position,
     const DijkstraCostToGoal& dijkstra,
-    const TransitionFeasibleFn& transition_feasible
+    const TransitionConstraintFn& transition_constraint
 ) const {
     Result result;
     if (!dijkstra.ready()) {
         result.error = "Dijkstra field not built";
         return result;
     }
-    if (!dynamically_feasible(
-            start, Eigen::Vector2d::Zero(), params_.state_limits, false
-        )) {
-        result.error = "start state is not a feasible forward flat state";
+    const double start_speed = start.velocity.norm();
+    if (!start.position.allFinite() || !start.velocity.allFinite()
+        || start_speed < FORWARD_SPEED_EPS
+        || start_speed > params_.state_limits.speed_max + EPS) {
+        result.error = "start state is not a feasible forward state";
         return result;
     }
 
-    const auto heuristic = [&](const State& state) {
-        const double distance_cost = dijkstra.at_map(state.position);
-        if (std::isinf(distance_cost)) return DijkstraCostToGoal::UNREACHABLE;
-        const double travel_time = distance_cost / params_.state_limits.speed_max;
-        const double stop_time = state.velocity.norm() / params_.state_limits.acceleration_max;
-        return params_.heuristic_weight * std::max(travel_time, stop_time);
+    const auto heuristic = [&](const Pose& pose) {
+        const double cost = dijkstra.at_map(pose.position);
+        return std::isinf(cost)
+            ? DijkstraCostToGoal::UNREACHABLE
+            : params_.heuristic_weight * cost;
     };
 
     std::vector<SearchNode> nodes;
     nodes.reserve(4096);
-    std::unordered_map<StateKey, double, StateKeyHash> best_g;
+    std::unordered_map<PoseKey, std::vector<int>, PoseKeyHash> labels_by_pose;
+    labels_by_pose.reserve(4096);
     std::priority_queue<OpenEntry, std::vector<OpenEntry>, std::greater<>> open;
-    nodes.push_back({.state = start, .g = 0.0, .f = heuristic(start)});
-    best_g[make_key(start, params_)] = 0.0;
-    open.push({nodes.front().f, 0});
 
-    const int substeps = std::max(params_.collision_substeps, 1);
-    const double sub_dt = params_.primitive_duration / static_cast<double>(substeps);
+    Pose start_pose {
+        .position = start.position,
+        .theta = std::atan2(start.velocity.y(), start.velocity.x()),
+    };
+    const SpeedSquaredInterval start_interval {
+        start_speed * start_speed, start_speed * start_speed,
+    };
+    const double start_f = heuristic(start_pose);
+    nodes.push_back({
+        .pose = start_pose,
+        .reachable_speed = start_interval,
+        .g = 0.0,
+        .incoming = {},
+    });
+    labels_by_pose[make_key(start_pose, params_)].push_back(0);
+    open.push({start_f, 0});
+    result.generated_labels = 1;
+    result.open_peak = 1;
+
+    const std::vector<double> curvatures = curvature_samples(params_);
     int goal_node_index = -1;
-    GoalShot goal_shot;
+    SpatialPrimitive goal_connection;
 
     while (!open.empty()) {
         if (result.expansions >= params_.max_expansions) {
@@ -452,102 +512,105 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         }
         const OpenEntry entry = open.top();
         open.pop();
+        if (entry.node_index < 0
+            || !nodes[static_cast<size_t>(entry.node_index)].active) {
+            continue;
+        }
         const SearchNode current = nodes[static_cast<size_t>(entry.node_index)];
-        const auto best = best_g.find(make_key(current.state, params_));
-        if (best != best_g.end() && current.g > best->second + EPS) continue;
         ++result.expansions;
 
-        if (const auto shot = try_goal_shot(
-                current.state, goal_position, params_, transition_feasible
-            )) {
-            goal_node_index = entry.node_index;
-            goal_shot = *shot;
-            result.success = true;
-            break;
+        if ((goal_position - current.pose.position).norm() <= params_.goal_tolerance) {
+            ++result.goal_connection_attempts;
+            const auto connection = make_goal_connection(
+                current.pose, goal_position, params_
+            );
+            if (connection) {
+                const auto propagated = propagate_primitive(
+                    current.pose,
+                    current.reachable_speed,
+                    *connection,
+                    params_,
+                    transition_constraint,
+                    result,
+                    true
+                );
+                if (propagated
+                    && (propagated->pose.position - goal_position).norm() <= 1e-6) {
+                    goal_node_index = entry.node_index;
+                    goal_connection = *connection;
+                    result.success = true;
+                    break;
+                }
+            }
         }
 
-        const double speed = current.state.velocity.norm();
-        const Eigen::Vector2d tangent = current.state.velocity / speed;
-        const Eigen::Vector2d normal(-tangent.y(), tangent.x());
-        for (int tangential_index = 0;
-             tangential_index < params_.tangential_accel_samples;
-             ++tangential_index) {
-            const double tangential_fraction = params_.tangential_accel_samples <= 1
-                ? 0.5
-                : static_cast<double>(tangential_index)
-                    / static_cast<double>(params_.tangential_accel_samples - 1);
-            const double tangential_acceleration = params_.state_limits.acceleration_max
-                * (2.0 * tangential_fraction - 1.0);
-            const double normal_acceleration_max = std::min({
-                speed * params_.state_limits.angular_velocity_max,
-                params_.state_limits.lateral_acceleration_max,
-                std::sqrt(std::max(
-                    0.0,
-                    params_.state_limits.acceleration_max
-                        * params_.state_limits.acceleration_max
-                        - tangential_acceleration * tangential_acceleration
-                )),
-            });
-            const int normal_samples = normal_acceleration_max <= EPS
-                ? 1 : params_.normal_accel_samples;
-            for (int normal_index = 0; normal_index < normal_samples; ++normal_index) {
-                const double normal_fraction = normal_samples <= 1
-                    ? 0.5
-                    : static_cast<double>(normal_index)
-                        / static_cast<double>(normal_samples - 1);
-                const double normal_acceleration = normal_acceleration_max
-                    * (2.0 * normal_fraction - 1.0);
-                const Eigen::Vector2d acceleration = tangential_acceleration * tangent
-                    + normal_acceleration * normal;
+        for (const double curvature : curvatures) {
+            const SpatialPrimitive primitive {
+                .curvature = curvature,
+                .length = params_.primitive_length,
+            };
+            const auto propagated = propagate_primitive(
+                current.pose,
+                current.reachable_speed,
+                primitive,
+                params_,
+                transition_constraint,
+                result,
+                false
+            );
+            if (!propagated) continue;
+            const double h = heuristic(propagated->pose);
+            if (std::isinf(h)) continue;
 
-                State state = current.state;
-                bool feasible = true;
-                for (int substep = 0; substep < substeps; ++substep) {
-                    const State previous = state;
-                    if (!constant_acceleration_dynamically_feasible(
-                            previous.velocity,
-                            acceleration,
-                            sub_dt,
-                            params_.state_limits
-                        )) {
-                        feasible = false;
-                        break;
-                    }
-                    state.position += state.velocity * sub_dt
-                        + 0.5 * acceleration * sub_dt * sub_dt;
-                    state.velocity += acceleration * sub_dt;
-                    if (!dynamically_feasible(
-                            state, acceleration, params_.state_limits, false
-                        ) || !transition_feasible(previous, state)) {
-                        feasible = false;
-                        break;
-                    }
+            const double new_g = current.g + primitive.length;
+            const PoseKey key = make_key(propagated->pose, params_);
+            auto& pose_labels = labels_by_pose[key];
+            bool dominated = false;
+            for (const int label_index : pose_labels) {
+                const SearchNode& incumbent = nodes[static_cast<size_t>(label_index)];
+                if (!incumbent.active) continue;
+                if (incumbent.g <= new_g + EPS
+                    && contains_interval(
+                        incumbent.reachable_speed, propagated->reachable_speed
+                    )) {
+                    dominated = true;
+                    break;
                 }
-                if (!feasible) continue;
-
-                const double h = heuristic(state);
-                if (std::isinf(h)) continue;
-                const double new_g = current.g + params_.primitive_duration;
-                const StateKey key = make_key(state, params_);
-                const auto incumbent = best_g.find(key);
-                if (incumbent != best_g.end() && new_g >= incumbent->second - EPS) continue;
-
-                best_g[key] = new_g;
-                const int node_index = static_cast<int>(nodes.size());
-                nodes.push_back({
-                    .state = state,
-                    .g = new_g,
-                    .f = new_g + h,
-                    .parent = entry.node_index,
-                    .applied_acceleration = acceleration,
-                });
-                open.push({new_g + h, node_index});
             }
+            if (dominated) {
+                ++result.dominated_labels;
+                continue;
+            }
+
+            for (const int label_index : pose_labels) {
+                SearchNode& incumbent = nodes[static_cast<size_t>(label_index)];
+                if (!incumbent.active) continue;
+                if (new_g <= incumbent.g + EPS
+                    && contains_interval(
+                        propagated->reachable_speed, incumbent.reachable_speed
+                    )) {
+                    incumbent.active = false;
+                    ++result.dominated_labels;
+                }
+            }
+
+            const int node_index = static_cast<int>(nodes.size());
+            nodes.push_back({
+                .pose = propagated->pose,
+                .reachable_speed = propagated->reachable_speed,
+                .g = new_g,
+                .parent = entry.node_index,
+                .incoming = primitive,
+            });
+            pose_labels.push_back(node_index);
+            open.push({new_g + h, node_index});
+            ++result.generated_labels;
+            result.open_peak = std::max(result.open_peak, open.size());
         }
     }
 
     if (goal_node_index < 0) {
-        if (result.error.empty()) result.error = "no feasible kinodynamic path";
+        if (result.error.empty()) result.error = "no feasible spatial-kinodynamic path";
         result.success = false;
         return result;
     }
@@ -558,22 +621,213 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         reversed_indices.push_back(index);
     }
     std::reverse(reversed_indices.begin(), reversed_indices.end());
-    result.states.push_back(start);
-    State replay = start;
+
+    std::vector<SpatialPrimitive> primitives;
+    primitives.reserve(reversed_indices.size());
     for (size_t i = 1; i < reversed_indices.size(); ++i) {
-        const SearchNode& node = nodes[static_cast<size_t>(reversed_indices[i])];
+        primitives.push_back(
+            nodes[static_cast<size_t>(reversed_indices[i])].incoming
+        );
+    }
+    primitives.push_back(goal_connection);
+
+    std::vector<Pose> route_poses {start_pose};
+    std::vector<RouteEdge> route_edges;
+    std::vector<SpeedSquaredInterval> forward_intervals {start_interval};
+    Pose replay_pose = start_pose;
+    SpeedSquaredInterval replay_speed = start_interval;
+    bool reconstruction_failed = false;
+    for (size_t primitive_index = 0;
+         primitive_index < primitives.size() && !reconstruction_failed;
+         ++primitive_index) {
+        const SpatialPrimitive& primitive = primitives[primitive_index];
+        const int substeps = std::max(
+            1,
+            static_cast<int>(std::ceil(
+                primitive.length / params_.collision_check_resolution
+            ))
+        );
+        const double substep_length = primitive.length / static_cast<double>(substeps);
         for (int substep = 0; substep < substeps; ++substep) {
-            replay.position += replay.velocity * sub_dt
-                + 0.5 * node.applied_acceleration * sub_dt * sub_dt;
-            replay.velocity += node.applied_acceleration * sub_dt;
-            result.states.push_back(replay);
-            result.durations.push_back(sub_dt);
+            const Pose previous = replay_pose;
+            replay_pose = advance_pose(previous, primitive.curvature, substep_length);
+            const auto environmental_speed = transition_constraint(previous, replay_pose);
+            const bool terminal_stop = primitive_index + 1 == primitives.size()
+                && substep + 1 == substeps;
+            if (!environmental_speed) {
+                reconstruction_failed = true;
+                break;
+            }
+            const auto propagated = propagate_speed_interval(
+                replay_speed,
+                substep_length,
+                primitive.curvature,
+                *environmental_speed,
+                params_.state_limits,
+                terminal_stop
+            );
+            if (!propagated) {
+                reconstruction_failed = true;
+                break;
+            }
+            replay_speed = *propagated;
+            route_edges.push_back({
+                .curvature = primitive.curvature,
+                .length = substep_length,
+                .endpoint_speed_range = *environmental_speed,
+                .terminal_stop = terminal_stop,
+            });
+            route_poses.push_back(replay_pose);
+            forward_intervals.push_back(replay_speed);
         }
     }
-    result.states.insert(result.states.end(), goal_shot.states.begin(), goal_shot.states.end());
-    result.durations.insert(
-        result.durations.end(), goal_shot.durations.begin(), goal_shot.durations.end()
-    );
+    if (reconstruction_failed || route_edges.empty()) {
+        result.success = false;
+        result.error = "failed to reconstruct spatial-kinodynamic route";
+        return result;
+    }
+    route_poses.back().position = goal_position;
+
+    const size_t sample_count = route_poses.size();
+    std::vector<SpeedSquaredInterval> backward_intervals(sample_count);
+    backward_intervals.back() = {0.0, 0.0};
+    for (size_t reverse_index = sample_count - 1; reverse_index > 0; --reverse_index) {
+        const size_t edge_index = reverse_index - 1;
+        const auto predecessor = predecessor_interval(
+            backward_intervals[reverse_index],
+            route_edges[edge_index],
+            params_.state_limits
+        );
+        if (!predecessor) {
+            result.success = false;
+            result.error = "backward speed reachability failed: "
+                + route_edge_context(
+                    edge_index,
+                    route_edges.size(),
+                    route_poses[edge_index],
+                    route_poses[edge_index + 1],
+                    route_edges[edge_index]
+                )
+                + " target=" + speed_interval_string(backward_intervals[reverse_index]);
+            return result;
+        }
+        const auto feasible = intersect_intervals(
+            *predecessor, forward_intervals[edge_index]
+        );
+        if (!feasible) {
+            result.success = false;
+            result.error = "forward/backward speed envelopes do not intersect: "
+                + route_edge_context(
+                    edge_index,
+                    route_edges.size(),
+                    route_poses[edge_index],
+                    route_poses[edge_index + 1],
+                    route_edges[edge_index]
+                )
+                + " forward=" + speed_interval_string(forward_intervals[edge_index])
+                + " predecessor=" + speed_interval_string(*predecessor)
+                + " target=" + speed_interval_string(backward_intervals[reverse_index]);
+            return result;
+        }
+        backward_intervals[edge_index] = *feasible;
+    }
+    if (!contains_value(backward_intervals.front(), start_speed * start_speed)) {
+        result.success = false;
+        result.error = "selected route cannot preserve the requested start speed";
+        return result;
+    }
+
+    std::vector<double> selected_speed_squared(sample_count, 0.0);
+    selected_speed_squared.front() = start_speed * start_speed;
+    for (size_t edge_index = 0; edge_index < route_edges.size(); ++edge_index) {
+        const RouteEdge& edge = route_edges[edge_index];
+        SpeedPropagationTrace trace;
+        auto reachable = propagate_speed_interval(
+            {selected_speed_squared[edge_index], selected_speed_squared[edge_index]},
+            edge.length,
+            edge.curvature,
+            edge.endpoint_speed_range,
+            params_.state_limits,
+            edge.terminal_stop,
+            &trace
+        );
+        if (!reachable) {
+            result.success = false;
+            result.error = "speed profile reconstruction failed: "
+                + route_edge_context(
+                    edge_index,
+                    route_edges.size(),
+                    route_poses[edge_index],
+                    route_poses[edge_index + 1],
+                    edge
+                )
+                + " selected_input=" + speed_interval_string({
+                    selected_speed_squared[edge_index],
+                    selected_speed_squared[edge_index],
+                })
+                + " forward=" + speed_interval_string(forward_intervals[edge_index])
+                + " backward_current=" + speed_interval_string(
+                    backward_intervals[edge_index]
+                )
+                + " backward_next=" + speed_interval_string(
+                    backward_intervals[edge_index + 1]
+                )
+                + ' ' + propagation_trace_string(trace);
+            return result;
+        }
+        reachable = intersect_intervals(*reachable, backward_intervals[edge_index + 1]);
+        if (!reachable) {
+            result.success = false;
+            result.error = "speed profile has no backward-feasible successor: "
+                + route_edge_context(
+                    edge_index,
+                    route_edges.size(),
+                    route_poses[edge_index],
+                    route_poses[edge_index + 1],
+                    edge
+                )
+                + " selected_input=" + speed_interval_string({
+                    selected_speed_squared[edge_index],
+                    selected_speed_squared[edge_index],
+                })
+                + " dynamic_endpoint=" + speed_interval_string(trace.dynamically_reachable)
+                + " endpoint_allowed=" + speed_interval_string(trace.endpoint_allowed)
+                + " backward_next=" + speed_interval_string(
+                    backward_intervals[edge_index + 1]
+                );
+            return result;
+        }
+        selected_speed_squared[edge_index + 1] = reachable->max;
+    }
+    selected_speed_squared.back() = 0.0;
+
+    result.states.reserve(sample_count);
+    result.durations.reserve(route_edges.size());
+    for (size_t sample = 0; sample < sample_count; ++sample) {
+        const double speed = std::sqrt(std::max(selected_speed_squared[sample], 0.0));
+        result.states.push_back({
+            .position = route_poses[sample].position,
+            .velocity = speed * Eigen::Vector2d(
+                std::cos(route_poses[sample].theta),
+                std::sin(route_poses[sample].theta)
+            ),
+        });
+        if (sample == 0) continue;
+        const double previous_speed = std::sqrt(
+            std::max(selected_speed_squared[sample - 1], 0.0)
+        );
+        const double speed_sum = previous_speed + speed;
+        if (speed_sum <= FORWARD_SPEED_EPS) {
+            result.success = false;
+            result.error = "speed profile contains a zero-speed spatial edge";
+            result.states.clear();
+            result.durations.clear();
+            return result;
+        }
+        result.durations.push_back(
+            2.0 * route_edges[sample - 1].length / speed_sum
+        );
+    }
     return result;
 }
 

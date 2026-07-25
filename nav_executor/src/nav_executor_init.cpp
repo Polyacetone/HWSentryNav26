@@ -450,13 +450,13 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.acceleration_max"),
             .lateral_acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.lateral_acceleration_max"),
         },
-        .tangential_accel_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.tangential_accel_samples")),
-        .normal_accel_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.normal_accel_samples")),
-        .primitive_duration = declare_parameter<double>("path_planner.kinodynamic.primitive_duration"),
-        .collision_substeps = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.collision_substeps")),
+        .curvature_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.curvature_samples")),
+        .curvature_max = declare_parameter<double>("path_planner.kinodynamic.curvature_max"),
+        .primitive_length = declare_parameter<double>("path_planner.kinodynamic.primitive_length"),
+        .collision_check_resolution = declare_parameter<double>("path_planner.kinodynamic.collision_check_resolution"),
+        .goal_connection_max_length = declare_parameter<double>("path_planner.kinodynamic.goal_connection_max_length"),
         .dedup_xy = declare_parameter<double>("path_planner.kinodynamic.dedup_xy"),
         .dedup_theta = declare_parameter<double>("path_planner.kinodynamic.dedup_theta"),
-        .dedup_speed = declare_parameter<double>("path_planner.kinodynamic.dedup_speed"),
         .heuristic_weight = declare_parameter<double>("path_planner.kinodynamic.heuristic_weight"),
         .goal_tolerance = declare_parameter<double>("path_planner.kinodynamic.goal_tolerance"),
         .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.max_expansions")),
@@ -557,17 +557,21 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(c.kinodynamic.state_limits.angular_velocity_max)
         && positive_finite(c.kinodynamic.state_limits.acceleration_max)
         && positive_finite(c.kinodynamic.state_limits.lateral_acceleration_max)
-        && positive_finite(c.kinodynamic.primitive_duration)
+        && positive_finite(c.kinodynamic.curvature_max)
+        && positive_finite(c.kinodynamic.primitive_length)
+        && positive_finite(c.kinodynamic.collision_check_resolution)
+        && positive_finite(c.kinodynamic.goal_connection_max_length)
         && positive_finite(c.kinodynamic.dedup_xy)
         && positive_finite(c.kinodynamic.dedup_theta)
-        && positive_finite(c.kinodynamic.dedup_speed),
-        "kinodynamic limits, duration, and dedup resolutions must be finite and positive"
+        && positive_finite(c.kinodynamic.heuristic_weight)
+        && positive_finite(c.kinodynamic.goal_tolerance),
+        "kinodynamic limits, spatial primitive, heuristic, and dedup values must be finite and positive"
     );
     require_parameter(
-        c.kinodynamic.tangential_accel_samples > 0
-        && c.kinodynamic.normal_accel_samples > 0
-        && c.kinodynamic.collision_substeps > 0 && c.kinodynamic.max_expansions > 0,
-        "kinodynamic sample counts and max_expansions must be positive"
+        c.kinodynamic.curvature_samples > 0
+        && c.kinodynamic.curvature_samples % 2 == 1
+        && c.kinodynamic.max_expansions > 0,
+        "kinodynamic curvature_samples must be positive and odd, and max_expansions must be positive"
     );
     require_parameter(
         positive_finite(c.minco.trajectory_limits.velocity_max),
