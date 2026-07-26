@@ -20,6 +20,7 @@
 #include <interfaces/msg/chassis_cmd.hpp>
 #include <interfaces/msg/chassis_status.hpp>
 #include <interfaces/msg/comp_stage.hpp>
+#include <interfaces/msg/idle_chassis_mode_override.hpp>
 #include <interfaces/msg/nav_executor_diag.hpp>
 
 #include <nav_executor/common/environment/world_context.hpp>
@@ -80,6 +81,7 @@ private:
     rclcpp::Subscription<interfaces::msg::SpinCmd>::SharedPtr spin_cmd_sub_;
     rclcpp::Subscription<interfaces::msg::ChassisStatus>::SharedPtr chassis_status_sub_;
     rclcpp::Subscription<interfaces::msg::CompStage>::SharedPtr comp_stage_sub_;
+    rclcpp::Subscription<interfaces::msg::IdleChassisModeOverride>::SharedPtr idle_chassis_mode_override_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr global_path_pub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
@@ -137,6 +139,7 @@ private:
     double rfr_pwr_limit_ = 90.0;
     double remaining_energy_supercap_filtered_ = 1400.0;
     double remaining_energy_buffercap_filtered_ = 0.0;
+    uint8_t idle_chassis_mode_override_ = 0;
 
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;

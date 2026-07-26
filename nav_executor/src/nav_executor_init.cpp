@@ -189,6 +189,22 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         [this](const interfaces::msg::CompStage::SharedPtr msg) { comp_stage_ = msg->game_progress; }
     );
 
+    idle_chassis_mode_override_sub_ = create_subscription<interfaces::msg::IdleChassisModeOverride>(
+        declare_parameter<std::string>("node.topics.idle_chassis_mode_override_sub"), 1,
+        [this](const interfaces::msg::IdleChassisModeOverride::SharedPtr msg) {
+            const uint8_t mode = msg->mode_override;
+            if (mode != 0 && (mode < 200 || mode > 207)) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Ignoring invalid IDLE chassis mode override: %u (expected 0 or 200-207)",
+                    static_cast<unsigned int>(mode)
+                );
+                return;
+            }
+            idle_chassis_mode_override_ = mode;
+        }
+    );
+
     spin_cmd_sub_ = create_subscription<interfaces::msg::SpinCmd>(
         declare_parameter<std::string>("node.topics.spin_cmd_sub"), 1,
         [this](const interfaces::msg::SpinCmd::SharedPtr msg) { spin_cmd_callback(msg); }

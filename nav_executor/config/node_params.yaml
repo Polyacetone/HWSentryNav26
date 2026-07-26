@@ -11,6 +11,7 @@
         local_cost_maps_sub: "/map_server/local_cost_maps"
         chassis_status_sub: "/serial_bridge/chassis_status"
         comp_stage_sub: "/serial_bridge/comp_stage"
+        idle_chassis_mode_override_sub: "/decision/idle_chassis_mode_override"
         spin_cmd_sub: "/decision/spin_cmd"
         global_path_pub: "/nav_executor/global_path"
         chassis_cmd_pub: "/nav_executor/chassis_cmd"

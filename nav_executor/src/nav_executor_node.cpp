@@ -254,7 +254,7 @@ void NavExecutorNode::control_tick() {
     ein.environment.prediction_dt = prediction_dt_;
 
     last_control_chassis_state_sequence_ = chassis_state_sequence_;
-    const ExecutorOutput out = executor_->update(ein);
+    ExecutorOutput out = executor_->update(ein);
 
     previous_motion_feedback_.goal_reached = out.goal_reached;
     previous_motion_feedback_.goal_reached_path = out.goal_reached ? task_output.command.active_path : nullptr;
@@ -263,6 +263,10 @@ void NavExecutorNode::control_tick() {
     previous_motion_feedback_.lethal_path = out.mpc_lethal ? task_output.command.active_path : nullptr;
     previous_motion_feedback_.motion_state = out.motion_state;
     previous_motion_feedback_.step_phase = out.step_phase;
+
+    if (out.motion_state == MotionState::IDLE) {
+        out.mode = idle_chassis_mode_override_;
+    }
 
     if (out.valid) {
         interfaces::msg::ChassisCmd cmd;
