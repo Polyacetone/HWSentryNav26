@@ -45,6 +45,7 @@
       sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
       sor_std_mul: 2.0 # SOR保留阈值=均值+sor_std_mul*标准差
       cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
+      min_obstacle_cluster_cells: 3 # 障碍物连通域最小格数（<=1 关闭）；滤除噪声散点，避免膨胀与跟踪在数百个孤立格上做无效工作
       object_tracker: # 基于目标的动态障碍物跟踪与预测参数
         morph_close_kernel_size: 5 # 形态学闭运算核大小（0或1=关闭）
         min_blob_area: 3 # 最小连通域面积（像素），滤除噪声小斑块
@@ -56,7 +57,7 @@
         min_hits_to_confirm: 3 # 航迹连续匹配此次数后才进入运动预测；未确认障碍仍会静态保底写入未来代价图
         local_grid_decay: 0.8 # 未匹配时局部栅格衰减因子，越小形状消失越快
         local_grid_render_threshold: 0.3 # 局部栅格渲染阈值（0~1），低于此值不渲染
-        prediction_steps: 30 # 未来预测步数
+        prediction_steps: 20 # 未来预测步数；与 2.0 s 规划/MPC 时域及 0.1 s 预测步长对齐
         prediction_dt: 0.1 # 预测步长（s），prediction_steps × prediction_dt = 总预测时长
         prediction_velocity_decay_tau: 1.6 # 预测渲染速度指数衰减时间常数（s），越小越保守，<=0表示恒速外推
         prediction_max_speed: 2.4 # 预测渲染速度上限（m/s），抑制噪声导致的过大外推，<=0表示不限制

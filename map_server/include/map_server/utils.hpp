@@ -90,6 +90,14 @@ cv::Mat inflate_cost_map(
     const MapInflationParams& params
 );
 
+/// Inflate only connected-component neighborhoods whose support can reach a
+/// non-zero output. Falls back to the full-map transform when the aggregate
+/// neighborhood area is not smaller than the source map.
+cv::Mat inflate_cost_map_bounded(
+    const cv::Mat& source,
+    const MapInflationParams& params
+);
+
 InflatedDirectionField inflate_direction_field(
     const TerrainMapData& data,
     const MapInflationParams& params

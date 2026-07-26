@@ -113,23 +113,12 @@ ObjectTracker::PredictionResult ObjectTracker::update(const cv::Mat& obstacle_ma
     const std::vector<bool> detections_with_motion_prediction = update_tracks(detections, assignment);
 
     PredictionResult result;
-    result.motion_track_count = static_cast<size_t>(std::count_if(
-        tracks_.begin(),
-        tracks_.end(),
-        [](const Track& track) { return track.confirmed; }
-    ));
     result.static_fallback_mask = build_static_fallback_mask(
         obstacle_mask,
         detections,
         detections_with_motion_prediction
     );
-    result.future_masks.resize(static_cast<size_t>(params_.prediction_steps));
-
-    // 未来预测 = 运动预测 + 当前帧未被覆盖的静态障碍保底。
-    for (int i = 0; i < params_.prediction_steps; i++) {
-        cv::Mat motion_prediction = render_motion_prediction(static_cast<double>(i + 1) * params_.prediction_dt);
-        cv::max(motion_prediction, result.static_fallback_mask, result.future_masks[static_cast<size_t>(i)]);
-    }
+    result.motion_predictions = build_motion_predictions();
     return result;
 }
 
@@ -402,28 +391,44 @@ void ObjectTracker::rasterize_local_grid(
     }
 }
 
-cv::Mat ObjectTracker::render_motion_prediction(double t_future) const {
-    cv::Mat prediction = cv::Mat::zeros(height_, width_, CV_8UC1);
+std::vector<ObjectTracker::MotionPrediction> ObjectTracker::build_motion_predictions() const {
+    std::vector<MotionPrediction> predictions;
+    predictions.reserve(tracks_.size());
     const double inv_res = 1.0 / resolution_;
     for (const auto& track: tracks_) {
         if (!track.confirmed) continue;
+
+        MotionPrediction prediction;
+        cv::compare(
+            track.local_grid,
+            params_.local_grid_render_threshold,
+            prediction.footprint_mask,
+            cv::CMP_GT
+        );
+        prediction.future_centroids_px.reserve(static_cast<size_t>(params_.prediction_steps));
+
         Eigen::Vector2d velocity = track.x.tail<2>();
         const double speed = velocity.norm();
         if (params_.prediction_max_speed > 0.0 && speed > params_.prediction_max_speed) {
             velocity *= params_.prediction_max_speed / speed;
         }
 
-        const double prediction_time = params_.prediction_velocity_decay_tau > 0.0
-            ? params_.prediction_velocity_decay_tau * (1.0 - std::exp(-t_future / params_.prediction_velocity_decay_tau))
-            : t_future;
-        const Eigen::Vector2d pred_m = track.x.head<2>() + velocity * prediction_time;
-        const Eigen::Vector2i centroid_px(
-            static_cast<int>(std::round(pred_m.x() * inv_res)),
-            static_cast<int>(std::round(pred_m.y() * inv_res))
-        );
-        rasterize_local_grid(prediction, track.local_grid, centroid_px, 255);
+        for (int step = 0; step < params_.prediction_steps; ++step) {
+            const double t_future = static_cast<double>(step + 1) * params_.prediction_dt;
+            const double prediction_time = params_.prediction_velocity_decay_tau > 0.0
+                ? params_.prediction_velocity_decay_tau * (
+                    1.0 - std::exp(-t_future / params_.prediction_velocity_decay_tau)
+                )
+                : t_future;
+            const Eigen::Vector2d pred_m = track.x.head<2>() + velocity * prediction_time;
+            prediction.future_centroids_px.emplace_back(
+                static_cast<int>(std::round(pred_m.x() * inv_res)),
+                static_cast<int>(std::round(pred_m.y() * inv_res))
+            );
+        }
+        predictions.push_back(std::move(prediction));
     }
-    return prediction;
+    return predictions;
 }
 
 cv::Mat ObjectTracker::build_static_fallback_mask(

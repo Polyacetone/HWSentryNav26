@@ -19,6 +19,10 @@ constexpr uint8_t TERRAIN_LABEL_COUNT = static_cast<uint8_t>(TerrainType::STEP_H
 constexpr size_t MAX_OVERLAP_SAMPLES = 8;
 constexpr double MAX_DIRECTION_NON_BODY_MAGNITUDE_CAP = 0.9;
 
+// 每个膨胀区域的固定调用开销，折算为等价的整图格数。经实测标定：在 560×300 的
+// 地图上使该回退阈值与分区/整图路径的实际耗时交叉点（约 800 个连通域）吻合。
+constexpr size_t PER_REGION_INFLATION_OVERHEAD_CELLS = 48;
+
 void validate_common_inflation_params(const MapInflationParams& params) {
     if (!std::isfinite(params.resolution) || params.resolution <= 0.0) {
         throw std::invalid_argument("map inflation resolution must be finite and positive");
@@ -200,6 +204,65 @@ cv::Mat inflate_cost_map(
         }
     }
     return out;
+}
+
+cv::Mat inflate_cost_map_bounded(
+    const cv::Mat& source,
+    const MapInflationParams& params
+) {
+    CV_Assert(source.type() == CV_8UC1);
+    validate_common_inflation_params(params);
+
+    const int cutoff_radius_px = static_cast<int>(std::round(
+        params.cutoff_radius_m / params.resolution
+    ));
+    cv::Mat labels;
+    cv::Mat stats;
+    cv::Mat centroids;
+    const int label_count = cv::connectedComponentsWithStats(
+        source, labels, stats, centroids, 8, CV_32S
+    );
+
+    std::vector<cv::Rect> inflation_regions;
+    inflation_regions.reserve(static_cast<size_t>(std::max(0, label_count - 1)));
+    size_t estimated_cell_cost = 0;
+    const cv::Rect map_bounds(0, 0, source.cols, source.rows);
+    const size_t map_cell_count = static_cast<size_t>(source.rows)
+        * static_cast<size_t>(source.cols);
+
+    for (int label = 1; label < label_count; ++label) {
+        const cv::Rect component_bounds(
+            stats.at<int>(label, cv::CC_STAT_LEFT),
+            stats.at<int>(label, cv::CC_STAT_TOP),
+            stats.at<int>(label, cv::CC_STAT_WIDTH),
+            stats.at<int>(label, cv::CC_STAT_HEIGHT)
+        );
+        const cv::Rect inflation_region(
+            component_bounds.x - cutoff_radius_px,
+            component_bounds.y - cutoff_radius_px,
+            component_bounds.width + 2 * cutoff_radius_px,
+            component_bounds.height + 2 * cutoff_radius_px
+        );
+        const cv::Rect clipped_region = inflation_region & map_bounds;
+        if (clipped_region.empty()) continue;
+
+        // 面积之和会重复计入重叠区域，因此本身已是保守上界；再加上每个区域固有的
+        // 调用开销（阈值化 / 距离变换的启动成本），否则连通域很多时估计会偏低。
+        estimated_cell_cost += static_cast<size_t>(clipped_region.area())
+            + PER_REGION_INFLATION_OVERHEAD_CELLS;
+        if (estimated_cell_cost >= map_cell_count) {
+            return inflate_cost_map(source, params);
+        }
+        inflation_regions.push_back(clipped_region);
+    }
+
+    cv::Mat result = source.clone();
+    for (const cv::Rect& region : inflation_regions) {
+        const cv::Mat inflated_region = inflate_cost_map(source(region), params);
+        cv::Mat result_region = result(region);
+        cv::max(result_region, inflated_region, result_region);
+    }
+    return result;
 }
 
 InflatedDirectionField inflate_direction_field(

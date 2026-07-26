@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <map_server/object_tracker.hpp>
+#include <map_server/prediction_cost_map_renderer.hpp>
 #include <map_server/utils.hpp>
 
 namespace map_server {
@@ -53,6 +54,7 @@ private:
         int sor_num_neighbors;
         double sor_std_mul;
         int cell_obstacle_point_threshold;
+        int min_obstacle_cluster_cells;
     } local_map_params_;
     bool bypass_dynamic_obstacle_;
     bool enable_prediction_with_cloud_;
@@ -81,6 +83,7 @@ private:
     // 目标跟踪预测
     ObjectTrackerParams tracker_params_;
     std::unique_ptr<ObjectTracker> object_tracker_;
+    std::unique_ptr<PredictionCostMapRenderer> prediction_renderer_;
     std::chrono::steady_clock::time_point last_tracker_update_time_;
 
     void timer_callback();
@@ -140,7 +143,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         },
         .sor_num_neighbors = (int)declare_parameter<int>("local_map.sor_num_neighbors"),
         .sor_std_mul = declare_parameter<double>("local_map.sor_std_mul"),
-        .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold")
+        .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
+        .min_obstacle_cluster_cells = (int)declare_parameter<int>("local_map.min_obstacle_cluster_cells")
     };
 
     enable_debug_ = declare_parameter<bool>("debug.enable");
@@ -324,7 +328,9 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
 
     // 动态障碍物分析
     cv::Mat obstacle_mask = create_obstacle_mask(denoised_dynamic_points);
-    cv::Mat local_cost_map = map_utils::inflate_cost_map(obstacle_mask, map_inflation_params_);
+    cv::Mat local_cost_map = map_utils::inflate_cost_map_bounded(
+        obstacle_mask, map_inflation_params_
+    );
 
     // 根据当前模式（是否有全局点云）选择 prediction 开关
     const bool use_prediction = global_kdtree_
@@ -332,9 +338,12 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         : enable_prediction_without_cloud_;
 
     if (use_prediction) {
-        // 目标跟踪预测
+        // 目标跟踪预测。跟踪器与渲染器共享地图几何与 prediction_steps，一并惰性构造。
         if (!object_tracker_) {
             object_tracker_ = std::make_unique<ObjectTracker>(map_size_x_, map_size_y_, map_resolution_, tracker_params_);
+            prediction_renderer_ = std::make_unique<PredictionCostMapRenderer>(
+                map_size_x_, map_size_y_, tracker_params_.prediction_steps, map_inflation_params_
+            );
             last_tracker_update_time_ = std::chrono::steady_clock::now();
         }
         const auto now_time = std::chrono::steady_clock::now();
@@ -345,20 +354,20 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         auto prediction_result = object_tracker_->update(obstacle_mask, dt);
         const auto tracker_update_end = std::chrono::steady_clock::now();
 
-        // 膨胀预测栅格
-        const auto tracker_inflate_begin = std::chrono::steady_clock::now();
-        for (size_t i = 0; i < prediction_result.future_masks.size(); i++) {
-            prediction_result.future_masks[i] = map_utils::inflate_cost_map(prediction_result.future_masks[i], map_inflation_params_);
-        }
-        const auto tracker_inflate_end = std::chrono::steady_clock::now();
+        // 静态层只膨胀一次；每条运动航迹的局部形状只膨胀一次，再平移合成各预测帧。
+        const auto tracker_render_begin = std::chrono::steady_clock::now();
+        const std::vector<cv::Mat> future_cost_maps = prediction_renderer_->render(
+            prediction_result
+        );
+        const auto tracker_render_end = std::chrono::steady_clock::now();
 
         RCLCPP_DEBUG(
             get_logger(),
-            "ObjectTracker timing: update=%.3f ms, inflate=%.3f ms, tracks=%zu, motion_tracks=%zu, fallback_cells=%d, obstacle_cells=%d, dt=%.3f s",
+            "ObjectTracker timing: update=%.3f ms, render=%.3f ms, tracks=%zu, motion_tracks=%zu, fallback_cells=%d, obstacle_cells=%d, dt=%.3f s",
             std::chrono::duration<double, std::milli>(tracker_update_end - tracker_update_begin).count(),
-            std::chrono::duration<double, std::milli>(tracker_inflate_end - tracker_inflate_begin).count(),
+            std::chrono::duration<double, std::milli>(tracker_render_end - tracker_render_begin).count(),
             object_tracker_->track_count(),
-            prediction_result.motion_track_count,
+            prediction_result.motion_predictions.size(),
             cv::countNonZero(prediction_result.static_fallback_mask),
             cv::countNonZero(obstacle_mask),
             dt
@@ -367,10 +376,10 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         // 打包发布代价地图序列（含预测帧）
         interfaces::msg::CostMaps cm;
         cm.prediction_dt = tracker_params_.prediction_dt;
-        cm.maps.resize(prediction_result.future_masks.size() + 1);
+        cm.maps.resize(future_cost_maps.size() + 1);
         fill_occupancy_grid(local_cost_map, msg->header.stamp, cm.maps[0]);
-        for (size_t i = 0; i < prediction_result.future_masks.size(); i++) {
-            fill_occupancy_grid(prediction_result.future_masks[i], msg->header.stamp, cm.maps[i + 1]);
+        for (size_t i = 0; i < future_cost_maps.size(); i++) {
+            fill_occupancy_grid(future_cost_maps[i], msg->header.stamp, cm.maps[i + 1]);
         }
         local_cost_maps_pub_->publish(cm);
     } else {
@@ -577,6 +586,8 @@ small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(
     return dynamic_points;
 }
 
+// 逐格点数阈值只做单元格内的时间/密度判定，无法区分“成片的障碍物”与“散落的噪声格”。
+// 后续的膨胀与目标跟踪都按连通域组织工作量，因此在这里把不具备空间连续性的格子剔除。
 cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const {
     cv::Mat counts = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
     cv::Mat mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
@@ -601,6 +612,33 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
         cell = (cell < 255) ? (cell + 1) : 255;
         if (cell >= local_map_params_.cell_obstacle_point_threshold) {
             mask.at<uint8_t>(map_y, map_x) = 255;
+        }
+    }
+    if (local_map_params_.min_obstacle_cluster_cells <= 1) return mask;
+
+    cv::Mat labels;
+    cv::Mat stats;
+    cv::Mat centroids;
+    const int label_count = cv::connectedComponentsWithStats(
+        mask, labels, stats, centroids, 8, CV_32S
+    );
+    // 面积过滤而非形态学开运算：开运算会侵蚀细长的真实障碍物，而面积判定只针对
+    // 孤立小斑块，语义上正好对应“不具备空间连续性”。
+    std::vector<uint8_t> label_kept(static_cast<size_t>(std::max(1, label_count)), 0);
+    bool dropped_any = false;
+    for (int label = 1; label < label_count; label++) {
+        const bool kept = stats.at<int>(label, cv::CC_STAT_AREA)
+            >= local_map_params_.min_obstacle_cluster_cells;
+        label_kept[static_cast<size_t>(label)] = kept ? 1 : 0;
+        dropped_any = dropped_any || !kept;
+    }
+    if (!dropped_any) return mask;
+
+    for (int y = 0; y < map_size_y_; y++) {
+        const int* label_row = labels.ptr<int>(y);
+        uint8_t* mask_row = mask.ptr<uint8_t>(y);
+        for (int x = 0; x < map_size_x_; x++) {
+            if (!label_kept[static_cast<size_t>(label_row[x])]) mask_row[x] = 0;
         }
     }
     return mask;

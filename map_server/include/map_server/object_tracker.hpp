@@ -25,10 +25,14 @@ struct ObjectTrackerParams {
 
 class ObjectTracker {
 public:
+    struct MotionPrediction {
+        cv::Mat footprint_mask; // CV_8UC1，局部坐标系中的二值目标形状
+        std::vector<Eigen::Vector2i> future_centroids_px;
+    };
+
     struct PredictionResult {
-        std::vector<cv::Mat> future_masks; // 未来 prediction_steps 步的预测占据栅格
         cv::Mat static_fallback_mask; // 当前帧未被运动预测覆盖的静态保底障碍物
-        size_t motion_track_count = 0; // 参与运动预测的航迹数
+        std::vector<MotionPrediction> motion_predictions;
     };
 
     ObjectTracker(int width, int height, double resolution, const ObjectTrackerParams& params);
@@ -70,7 +74,7 @@ private:
     std::vector<bool> update_tracks(const std::vector<Detection>& detections, const std::vector<int>& assignment);
     cv::Mat shift_local_grid(const cv::Mat& local_grid, double dx_px, double dy_px) const;
     void rasterize_local_grid(cv::Mat& mask, const cv::Mat& local_grid, const Eigen::Vector2i& centroid_px, uint8_t value) const;
-    cv::Mat render_motion_prediction(double t_future) const;
+    std::vector<MotionPrediction> build_motion_predictions() const;
     cv::Mat build_static_fallback_mask(
         const cv::Mat& obstacle_mask,
         const std::vector<Detection>& detections,
