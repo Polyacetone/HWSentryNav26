@@ -17,6 +17,38 @@ double wrap_angle(double a) {
     return std::atan2(std::sin(a), std::cos(a));
 }
 
+const char* qp_status_string(const AdmmQpSolver::Status status) {
+    switch (status) {
+        case AdmmQpSolver::Status::SOLVED: return "SOLVED";
+        case AdmmQpSolver::Status::MAX_ITERATIONS: return "MAX_ITERATIONS";
+        case AdmmQpSolver::Status::NUMERICAL_FAILURE: return "NUMERICAL_FAILURE";
+    }
+    return "UNKNOWN";
+}
+
+const char* polish_status_string(const AdmmQpSolver::PolishStatus status) {
+    switch (status) {
+        case AdmmQpSolver::PolishStatus::DISABLED: return "disabled";
+        case AdmmQpSolver::PolishStatus::NOT_RUN: return "not_run(status_not_solved)";
+        case AdmmQpSolver::PolishStatus::ACCEPTED: return "accepted";
+        case AdmmQpSolver::PolishStatus::REJECTED: return "rejected";
+    }
+    return "unknown";
+}
+
+const char* speed_profile_selection_string(
+    const SpeedProfileOptimizer::Diagnostics::Selection selection
+) {
+    using Selection = SpeedProfileOptimizer::Diagnostics::Selection;
+    switch (selection) {
+        case Selection::QP_SOLVED: return "QP_SOLVED";
+        case Selection::QP_MAX_ITERATIONS_VALIDATED:
+            return "QP_MAX_ITERATIONS_VALIDATED";
+        case Selection::REACHABLE_FALLBACK: return "REACHABLE_FALLBACK";
+    }
+    return "UNKNOWN";
+}
+
 // kinodynamic 前向平坦状态序列 → MINCO 平坦边界状态 + 段时长。
 struct MincoSeed {
     std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
@@ -684,28 +716,46 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto& speed_diagnostics = speed_result.diagnostics;
     RCLCPP_DEBUG(
         logger_,
-        "Speed profile: nodes=%d vars=%d constraints=%d windows=%d iterations=%d "
-        "residual=(%.3g,%.3g) violation=%.3g rho_updates=%d time=%.2f ms "
-        "travel=%.2f s cost=(speed=%.3g,step=%.3g) fallback=%s polish=%s/%s",
+        "Speed profile: status=%s selection=%s nodes=%d vars=%d constraints=%d windows=%d "
+        "iterations=%d residual=(%.3g/%.3g,%.3g/%.3g) violation=%.3g/%.3g "
+        "rho=%.3g updates=%d time=%.2f ms travel=%.2f s "
+        "cost=(speed=%.3g,step=%.3g) polish=%s",
+        qp_status_string(speed_diagnostics.solver_status),
+        speed_profile_selection_string(speed_diagnostics.selection),
         speed_diagnostics.node_count,
         speed_diagnostics.variable_count,
         speed_diagnostics.constraint_count,
         speed_diagnostics.soft_window_node_count,
         speed_diagnostics.iterations,
         speed_diagnostics.primal_residual,
+        speed_diagnostics.primal_tolerance,
         speed_diagnostics.dual_residual,
+        speed_diagnostics.dual_tolerance,
         speed_diagnostics.max_constraint_violation,
+        speed_diagnostics.constraint_tolerance,
+        speed_diagnostics.final_rho,
         speed_diagnostics.rho_updates,
         speed_diagnostics.factorization_ms + speed_diagnostics.iteration_ms,
         speed_diagnostics.result_total_time,
         speed_diagnostics.speed_reward_cost,
         speed_diagnostics.traversal_window_cost,
-        speed_diagnostics.used_fallback ? "yes" : "no",
-        speed_diagnostics.polish_attempted ? "attempted" : "skipped",
-        speed_diagnostics.polish_accepted ? "accepted" : "rejected"
+        polish_status_string(speed_diagnostics.polish_status)
     );
-    if (speed_diagnostics.used_fallback) {
-        result.warnings.emplace_back("using validated reachable speed-profile fallback");
+    if (!speed_diagnostics.solver_error.empty()
+        || !speed_diagnostics.candidate_rejection.empty()) {
+        RCLCPP_DEBUG(
+            logger_, "Speed profile detail: solver='%s' candidate='%s'",
+            speed_diagnostics.solver_error.c_str(),
+            speed_diagnostics.candidate_rejection.c_str()
+        );
+    }
+    if (speed_diagnostics.selection
+        == SpeedProfileOptimizer::Diagnostics::Selection::REACHABLE_FALLBACK) {
+        std::string warning = "using validated reachable speed-profile fallback";
+        if (!speed_diagnostics.candidate_rejection.empty()) {
+            warning += ": " + speed_diagnostics.candidate_rejection;
+        }
+        result.warnings.push_back(std::move(warning));
     }
     size_t speed_window_violation_count = 0;
     double worst_speed_window_violation = 0.0;

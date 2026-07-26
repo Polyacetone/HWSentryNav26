@@ -671,14 +671,28 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
     result.diagnostics.primal_residual = qp_result.primal_residual;
     result.diagnostics.dual_residual = qp_result.dual_residual;
     result.diagnostics.max_constraint_violation = qp_result.max_constraint_violation;
+    result.diagnostics.primal_tolerance = qp_result.primal_tolerance;
+    result.diagnostics.dual_tolerance = qp_result.dual_tolerance;
+    result.diagnostics.constraint_tolerance = qp_result.constraint_tolerance;
+    result.diagnostics.final_rho = qp_result.final_rho;
     result.diagnostics.factorization_ms = qp_result.factorization_ms;
     result.diagnostics.iteration_ms = qp_result.iteration_ms;
-    result.diagnostics.polish_attempted = qp_result.polish_attempted;
-    result.diagnostics.polish_accepted = qp_result.polish_accepted;
+    result.diagnostics.solver_status = qp_result.status;
+    result.diagnostics.polish_status = qp_result.polish_status;
+    result.diagnostics.solver_error = qp_result.error;
 
     PathSpeedProfile selected = seed_profile;
-    if (qp_result.status == AdmmQpSolver::Status::SOLVED
-        && qp_result.solution.size() >= static_cast<Eigen::Index>(nodes.size())) {
+    const bool candidate_status = qp_result.status == AdmmQpSolver::Status::SOLVED
+        || qp_result.status == AdmmQpSolver::Status::MAX_ITERATIONS;
+    if (!candidate_status) {
+        result.diagnostics.candidate_rejection = qp_result.error.empty()
+            ? "QP solver did not produce an admissible candidate status"
+            : qp_result.error;
+    } else if (qp_result.solution.size() != qp.linear.size()) {
+        result.diagnostics.candidate_rejection = "QP solution dimension does not match the problem";
+    } else if (!qp_result.solution.allFinite()) {
+        result.diagnostics.candidate_rejection = "QP solution contains non-finite values";
+    } else {
         std::vector<double> optimized_squared(nodes.size());
         for (size_t i = 0; i < nodes.size(); ++i) {
             optimized_squared[i] = std::max(
@@ -692,11 +706,12 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
                 initial_speed_squared, validation_error
             )) {
             selected = std::move(optimized);
+            result.diagnostics.selection = qp_result.status == AdmmQpSolver::Status::SOLVED
+                ? Diagnostics::Selection::QP_SOLVED
+                : Diagnostics::Selection::QP_MAX_ITERATIONS_VALIDATED;
         } else {
-            result.diagnostics.used_fallback = true;
+            result.diagnostics.candidate_rejection = validation_error;
         }
-    } else {
-        result.diagnostics.used_fallback = true;
     }
 
     result.diagnostics.result_total_time = selected.total_time();

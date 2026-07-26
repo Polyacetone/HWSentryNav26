@@ -35,6 +35,13 @@ public:
         NUMERICAL_FAILURE,
     };
 
+    enum class PolishStatus {
+        DISABLED,
+        NOT_RUN,
+        ACCEPTED,
+        REJECTED,
+    };
+
     struct Result {
         Status status = Status::NUMERICAL_FAILURE;
         Eigen::VectorXd solution;
@@ -46,8 +53,11 @@ public:
         double objective = 0.0;
         double factorization_ms = 0.0;
         double iteration_ms = 0.0;
-        bool polish_attempted = false;
-        bool polish_accepted = false;
+        double primal_tolerance = 0.0;
+        double dual_tolerance = 0.0;
+        double constraint_tolerance = 0.0;
+        double final_rho = 0.0;
+        PolishStatus polish_status = PolishStatus::NOT_RUN;
         std::string error;
     };
 

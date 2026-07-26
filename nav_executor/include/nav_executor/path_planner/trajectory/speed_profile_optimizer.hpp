@@ -51,6 +51,12 @@ public:
     };
 
     struct Diagnostics {
+        enum class Selection {
+            QP_SOLVED,
+            QP_MAX_ITERATIONS_VALIDATED,
+            REACHABLE_FALLBACK,
+        };
+
         int node_count = 0;
         int variable_count = 0;
         int constraint_count = 0;
@@ -64,11 +70,17 @@ public:
         double primal_residual = 0.0;
         double dual_residual = 0.0;
         double max_constraint_violation = 0.0;
+        double primal_tolerance = 0.0;
+        double dual_tolerance = 0.0;
+        double constraint_tolerance = 0.0;
+        double final_rho = 0.0;
         double factorization_ms = 0.0;
         double iteration_ms = 0.0;
-        bool polish_attempted = false;
-        bool polish_accepted = false;
-        bool used_fallback = false;
+        AdmmQpSolver::Status solver_status = AdmmQpSolver::Status::NUMERICAL_FAILURE;
+        AdmmQpSolver::PolishStatus polish_status = AdmmQpSolver::PolishStatus::NOT_RUN;
+        Selection selection = Selection::REACHABLE_FALLBACK;
+        std::string solver_error;
+        std::string candidate_rejection;
         std::vector<StepWindowViolation> step_violations;
     };
 

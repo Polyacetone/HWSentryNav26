@@ -206,6 +206,11 @@ AdmmQpSolver::Result AdmmQpSolver::solve(
     const Eigen::VectorXd& initial_guess
 ) const {
     Result result;
+    result.constraint_tolerance = params_.constraint_tolerance;
+    result.final_rho = params_.rho;
+    result.polish_status = params_.enable_polish
+        ? PolishStatus::NOT_RUN
+        : PolishStatus::DISABLED;
     if (!finite_problem(problem)
         || initial_guess.size() != problem.linear.size()
         || !initial_guess.allFinite()) {
@@ -266,16 +271,16 @@ AdmmQpSolver::Result AdmmQpSolver::solve(
         result.max_constraint_violation = max_constraint_violation(
             ax, problem.lower, problem.upper
         );
-        const double primal_tolerance = params_.absolute_tolerance
+        result.primal_tolerance = params_.absolute_tolerance
             + params_.relative_tolerance * std::max(
                 ax.lpNorm<Eigen::Infinity>(), y.lpNorm<Eigen::Infinity>()
             );
-        const double dual_tolerance = params_.absolute_tolerance
+        result.dual_tolerance = params_.absolute_tolerance
             + params_.relative_tolerance * (
                 rho * problem.constraint_matrix.transpose() * dual
             ).lpNorm<Eigen::Infinity>();
-        if (result.primal_residual <= primal_tolerance
-            && result.dual_residual <= dual_tolerance
+        if (result.primal_residual <= result.primal_tolerance
+            && result.dual_residual <= result.dual_tolerance
             && result.max_constraint_violation <= params_.constraint_tolerance) {
             result.status = Status::SOLVED;
             break;
@@ -311,12 +316,12 @@ AdmmQpSolver::Result AdmmQpSolver::solve(
         result.error = "ADMM reached the iteration limit";
     }
     result.solution = x;
+    result.final_rho = rho;
 
     if (result.status == Status::SOLVED && params_.enable_polish) {
-        result.polish_attempted = true;
-        result.polish_accepted = try_polish(
+        result.polish_status = try_polish(
             problem, params_.constraint_tolerance, result.solution
-        );
+        ) ? PolishStatus::ACCEPTED : PolishStatus::REJECTED;
     }
     result.objective = objective_value(problem, result.solution);
     result.max_constraint_violation = max_constraint_violation(
