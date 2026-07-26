@@ -5,7 +5,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
@@ -65,6 +67,12 @@ struct PlanResult {
     AnnotatedPath::ConstPtr path; // 仅 kind==PATH 有效
     Eigen::Vector2d goal_pos = Eigen::Vector2d::Zero(); // fixed 短路时的保持点
 
+    // 仅 kind==FAILED 时填充，由 TaskManager 在确认结果仍有效后统一记录。
+    std::string failure_reason;
+
+    // 可执行但存在降级项；仅在结果被 TaskManager 接纳后记录。
+    std::vector<std::string> warnings;
+
     std::vector<Eigen::Vector2d> debug_rough_path;
 };
 
@@ -106,7 +114,7 @@ struct PlannerConfig {
     GeometryValidationParams geometry_validation;
     SpeedProfileOptimizer::Params speed_profile;
 
-    bool enable_debug;
+    bool enable_diagnostics;
 };
 
 // 独立线程规划 worker：控制线程 submit()（latest-wins）提交请求，worker 被 cv 唤醒后读取快照做规划，产出不可变 AnnotatedPath。

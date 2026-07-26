@@ -194,8 +194,7 @@ cv::Mat inflate_cost_map(
             if (d <= robot_r) {
                 out_row[x] = 255;
             } else if (d <= cutoff_r) {
-                const float v = 255.0f * static_cast<float>(
-                    std::exp(-params.decay_alpha * static_cast<double>(d - robot_r)));
+                const float v = 255.0f * static_cast<float>(std::exp(-params.decay_alpha * static_cast<double>(d - robot_r)));
                 out_row[x] = static_cast<uint8_t>(std::clamp(v, 0.0f, 255.0f));
             }
         }

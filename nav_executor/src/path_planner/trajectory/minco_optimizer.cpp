@@ -928,32 +928,6 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         return evaluate(ws, x, g);
     };
 
-    if (params_.debug_check_gradient) {
-        Eigen::VectorXd g_analytic(vars.size());
-        evaluate(ws, vars, g_analytic);
-        double max_abs_err = 0.0;
-        double max_rel_err = 0.0;
-        const double h = 1e-6;
-        Eigen::VectorXd dummy(vars.size());
-        for (int i = 0; i < vars.size(); ++i) {
-            Eigen::VectorXd vp = vars, vm = vars;
-            vp(i) += h;
-            vm(i) -= h;
-            const double cp = evaluate(ws, vp, dummy);
-            const double cm = evaluate(ws, vm, dummy);
-            const double num = (cp - cm) / (2.0 * h);
-            const double abs_err = std::abs(num - g_analytic(i));
-            if (abs_err > max_abs_err) {
-                max_abs_err = abs_err;
-                result.grad_check_worst_index = i;
-            }
-            max_rel_err = std::max(max_rel_err, abs_err / (std::abs(num) + 1.0));
-        }
-        result.grad_check_max_abs_err = max_abs_err;
-        result.grad_check_max_rel_err = max_rel_err;
-        result.grad_check_num_time_vars = n;
-    }
-
     Eigen::VectorXd seed_vars;
     if (params_.debug_diagnostics) {
         seed_vars = vars;

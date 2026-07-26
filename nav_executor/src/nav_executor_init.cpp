@@ -69,10 +69,14 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     );
     minco_debug_velocity_min_ = 0.0;
     minco_debug_velocity_max_ = planner_config.minco.trajectory_limits.velocity_max;
-    planner_ = std::make_unique<PathPlanner>(planner_config, step_routing_mask_, get_logger());
+    planner_ = std::make_unique<PathPlanner>(
+        planner_config, step_routing_mask_, get_logger().get_child("planner")
+    );
     planner_->start();
 
-    task_ = std::make_unique<TaskManager>(load_task_params(), planner_.get(), get_logger());
+    task_ = std::make_unique<TaskManager>(
+        load_task_params(), planner_.get(), get_logger().get_child("task")
+    );
 
     route_tracker_params_ = {
         .initial_search_distance = declare_parameter<double>("task_manager.route_tracker.initial_search_distance"),
@@ -538,7 +542,6 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .runup_body_norm_hi = declare_parameter<double>("path_planner.minco.runup.body_norm_hi"),
         .runup_saturation_length = declare_parameter<double>("path_planner.minco.runup.saturation_length"),
         .runup_transition_distance = declare_parameter<double>("path_planner.minco.runup.transition_distance"),
-        .debug_check_gradient = enable_debug_,
         .debug_diagnostics = enable_debug_,
     };
 
@@ -806,7 +809,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
             }
         }
     }
-    c.enable_debug = enable_debug_;
+    c.enable_diagnostics = enable_debug_;
     return c;
 }
 

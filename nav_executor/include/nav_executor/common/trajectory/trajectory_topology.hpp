@@ -16,8 +16,8 @@ struct TrajectorySelfIntersection {
     int second_segment;
 };
 
-// 检测前向轨迹的一般自交。
-[[nodiscard]] std::optional<TrajectorySelfIntersection> find_disallowed_self_intersection(
+// 基于带几何误差界的自适应折线，保守检测可能的自交。
+[[nodiscard]] std::optional<TrajectorySelfIntersection> find_possible_self_intersection(
     const MincoTrajectory& trajectory,
     const TrajectoryTopologyParams& params
 );

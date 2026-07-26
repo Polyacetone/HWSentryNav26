@@ -83,7 +83,6 @@ public:
         double runup_body_norm_hi = 0.95;
         double runup_saturation_length = 0.05; // 前向地形暴露积分达到该弧长后基本饱和
         double runup_transition_distance = 0.1; // run_up 外侧的平滑弧长过渡带
-        bool debug_check_gradient = false;    // 若开：optimize 起始处对比解析梯度 vs 有限差分并记录
         bool debug_diagnostics = false;       // 若开：记录 seed/final 分项代价、路点位移、收敛状态
     };
 
@@ -139,12 +138,6 @@ public:
 
         // 失败诊断（success=false 时填充，供调用方日志）。
         std::string error;
-
-        // 梯度自检结果（debug_check_gradient=true 时填充；否则为负表示未做）。
-        double grad_check_max_abs_err = -1.0;
-        double grad_check_max_rel_err = -1.0;
-        int grad_check_worst_index = -1;
-        int grad_check_num_time_vars = 0;
 
         // 分项与 block 梯度诊断（debug_diagnostics=true 时填充）。
         bool diagnostics_valid = false;

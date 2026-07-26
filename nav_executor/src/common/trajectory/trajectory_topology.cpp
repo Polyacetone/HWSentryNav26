@@ -176,7 +176,7 @@ std::vector<TrajectoryEdge> flatten_trajectory(
 
 } // anonymous namespace
 
-std::optional<TrajectorySelfIntersection> find_disallowed_self_intersection(
+std::optional<TrajectorySelfIntersection> find_possible_self_intersection(
     const MincoTrajectory& trajectory,
     const TrajectoryTopologyParams& params
 ) {

@@ -299,7 +299,6 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
 
     // 预处理点云，累积并下采样
     local_map_cloud_queue_.push_front(preprocess_cloud(msg));
-    RCLCPP_DEBUG(get_logger(), "Inserted local cloud into queue with %zu points", local_map_cloud_queue_.front()->points.size());
     if (local_map_cloud_queue_.size() > local_map_params_.cloud_accumulate_frames) {
         local_map_cloud_queue_.pop_back();
     }
@@ -307,13 +306,11 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
     for (const auto& cloud : local_map_cloud_queue_) {
         accumulated.points.insert(accumulated.points.end(), cloud->points.begin(), cloud->points.end());
     }
-    RCLCPP_DEBUG(get_logger(), "Accumulated local cloud has %zu points", accumulated.points.size());
     if (local_map_params_.downsample_voxel_size > 0.0) {
         accumulated = *small_gicp::voxelgrid_sampling(
             accumulated,
             local_map_params_.downsample_voxel_size
         );
-        RCLCPP_DEBUG(get_logger(), "Downsampled local cloud has %zu points", accumulated.points.size());
     }
 
     // 先提取动态障碍物点，再进行离群点过滤
@@ -324,7 +321,6 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         dynamic_points = extract_dynamic_points_without_global_map(accumulated);
     }
     const small_gicp::PointCloud denoised_dynamic_points = remove_statistical_outliers(dynamic_points);
-    RCLCPP_DEBUG(get_logger(), "Identified %zu dynamic obstacle points", denoised_dynamic_points.points.size());
 
     // 动态障碍物分析
     cv::Mat obstacle_mask = create_obstacle_mask(denoised_dynamic_points);
@@ -548,15 +544,6 @@ small_gicp::PointCloud MapServerNode::remove_statistical_outliers(const small_gi
         }
     }
 
-    RCLCPP_DEBUG(
-        get_logger(),
-        "SOR kept %zu / %zu points (mean=%.4f, std=%.4f, threshold=%.4f)",
-        filtered.points.size(),
-        cloud.size(),
-        mean,
-        stddev,
-        threshold
-    );
     return filtered;
 }
 
@@ -587,13 +574,6 @@ small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(
         }
     }
 
-    RCLCPP_DEBUG(
-        get_logger(),
-        "Fallback normal filter kept %zu / %zu points (|nz| <= %.3f)",
-        dynamic_points.points.size(),
-        cloud_with_normals_ptr->size(),
-        max_abs_nz
-    );
     return dynamic_points;
 }
 

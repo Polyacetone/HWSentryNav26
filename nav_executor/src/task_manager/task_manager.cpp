@@ -106,12 +106,12 @@ void TaskManager::poll_planner_result(const bool preemptible) {
     if (!result) return;
 
     if (!current_goal_ || result->goal_id != current_goal_->id) {
-        RCLCPP_INFO(logger_, "Discard plan result: goal changed (result goal_id mismatch)");
+        RCLCPP_DEBUG(logger_, "Discard plan result: goal changed (result goal_id mismatch)");
         return;
     }
 
     if (result->plan_generation != plan_generation_) {
-        RCLCPP_INFO(
+        RCLCPP_DEBUG(
             logger_,
             "Discard plan result: stale generation (result=%lu current=%lu)",
             static_cast<unsigned long>(result->plan_generation),
@@ -121,7 +121,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
     }
 
     if (!preemptible) {
-        RCLCPP_INFO(logger_, "Discard plan result: system became non-preemptible");
+        RCLCPP_DEBUG(logger_, "Discard plan result: system became non-preemptible");
         return;
     }
 
@@ -131,9 +131,16 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             hold_goal_.reset();
             needs_plan_ = false;
             in_cooldown_ = false;
+            last_failure_reason_.reset();
             // 缓存调试路径（即便 enable_debug=false 也是空 vector，无开销）
             last_debug_rough_path_ = std::move(result->debug_rough_path);
             RCLCPP_INFO(logger_, "Accepted new path for goal #%lu", static_cast<unsigned long>(result->goal_id));
+            for (const std::string& warning : result->warnings) {
+                RCLCPP_WARN(
+                    logger_, "Accepted path for goal #%lu with warning: %s",
+                    static_cast<unsigned long>(result->goal_id), warning.c_str()
+                );
+            }
             break;
 
         case PlanResult::Kind::COMPLETE_NO_PLAN_NEEDED:
@@ -141,6 +148,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             hold_goal_.reset();
             needs_plan_ = false;
             in_cooldown_ = false;
+            last_failure_reason_.reset();
             current_goal_.reset();
             RCLCPP_INFO(logger_, "Goal complete (no plan needed)");
             break;
@@ -150,6 +158,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             hold_goal_ = result->goal_pos;
             needs_plan_ = false;
             in_cooldown_ = false;
+            last_failure_reason_.reset();
             RCLCPP_INFO(logger_, "Goal near → enter FIXED hold directly");
             break;
 
@@ -159,7 +168,25 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             needs_plan_ = false;
             in_cooldown_ = true;
             cooldown_start_ = std::chrono::steady_clock::now();
-            RCLCPP_WARN(logger_, "Plan failed → cooldown retry");
+            if (last_failure_generation_ != result->plan_generation
+                || !last_failure_reason_
+                || *last_failure_reason_ != result->failure_reason) {
+                last_failure_generation_ = result->plan_generation;
+                last_failure_reason_ = result->failure_reason;
+                RCLCPP_WARN(
+                    logger_, "Plan failed for goal #%lu: %s; cooldown retry",
+                    static_cast<unsigned long>(result->goal_id),
+                    result->failure_reason.empty()
+                        ? "unspecified failure" : result->failure_reason.c_str()
+                );
+            } else {
+                RCLCPP_DEBUG(
+                    logger_, "Repeated plan failure for goal #%lu: %s",
+                    static_cast<unsigned long>(result->goal_id),
+                    result->failure_reason.empty()
+                        ? "unspecified failure" : result->failure_reason.c_str()
+                );
+            }
             break;
     }
 }
@@ -225,7 +252,7 @@ void TaskManager::ingest_goal_reached(const bool goal_reached, const AnnotatedPa
     if (!goal_reached) return;
 
     if (!reached_path || reached_path != active_path_) {
-        RCLCPP_INFO(logger_, "goal_reached on superseded path → ignore event");
+        RCLCPP_DEBUG(logger_, "goal_reached on superseded path → ignore event");
         return;
     }
 
@@ -235,7 +262,7 @@ void TaskManager::ingest_goal_reached(const bool goal_reached, const AnnotatedPa
     if (!valid) {
         // 旧路径按旧任务语义自然完结：只清 path，不动 current_goal_。
         active_path_.reset();
-        RCLCPP_INFO(logger_, "goal_reached on stale path → drop path only, keep current goal");
+        RCLCPP_DEBUG(logger_, "goal_reached on stale path → drop path only, keep current goal");
         return;
     }
 

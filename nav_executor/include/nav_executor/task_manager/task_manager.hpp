@@ -117,6 +117,8 @@ private:
     // 失败冷却元数据
     bool in_cooldown_ = false;
     std::chrono::steady_clock::time_point cooldown_start_;
+    uint64_t last_failure_generation_ = 0;
+    std::optional<std::string> last_failure_reason_;
 
     uint64_t next_goal_id_ = 1;
     ReplanReason last_replan_reason_ = ReplanReason::NONE;
