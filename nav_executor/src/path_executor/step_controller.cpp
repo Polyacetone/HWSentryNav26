@@ -13,21 +13,21 @@ double approach(const double current, const double target, const double max_step
     return current + std::clamp(target - current, -max_step, max_step);
 }
 
-StepPhase phase_in_segment(const StepPlanSegment& segment, const double current_u) {
-    if (current_u + U_EPSILON >= segment.commit_u) return StepPhase::COMMITTED;
-    if (current_u + U_EPSILON >= segment.active_u) return StepPhase::ARMED;
+StepPhase phase_in_segment(const StepPlanSegment& segment, const double path_progress) {
+    if (path_progress + U_EPSILON >= segment.commit_arc_length) return StepPhase::COMMITTED;
+    if (path_progress + U_EPSILON >= segment.active_arc_length) return StepPhase::ARMED;
     return StepPhase::PREPARING;
 }
 } // anonymous namespace
 
-StepPhaseObservation classify_step_phase(const AnnotatedPath& path, const double current_u) {
+StepPhaseObservation classify_step_phase(const AnnotatedPath& path, const double path_progress) {
     for (size_t i = 0; i < path.step_segments.size(); ++i) {
         const StepPlanSegment& segment = path.step_segments[i];
-        if (current_u + U_EPSILON < segment.prepare_u) break;
-        if (current_u >= segment.release_u) continue;
+        if (path_progress + U_EPSILON < segment.prepare_arc_length) break;
+        if (path_progress >= segment.release_arc_length) continue;
         if (!is_step_mode(segment.chassis_command.mode)) continue;
         return {
-            .phase = phase_in_segment(segment, current_u),
+            .phase = phase_in_segment(segment, path_progress),
             .segment_index = i,
         };
     }
@@ -68,35 +68,35 @@ void StepController::set_path(AnnotatedPath::ConstPtr path) {
 
 // ═══════════════════════ 台阶段查询 ═══════════════════════
 
-std::optional<size_t> StepController::find_active_segment_index(const double current_u) const {
+std::optional<size_t> StepController::find_active_segment_index(const double path_progress) const {
     if (!path_) return std::nullopt;
     for (size_t i = next_step_segment_index_; i < path_->step_segments.size(); ++i) {
         const StepPlanSegment& segment = path_->step_segments[i];
-        if (current_u + U_EPSILON < segment.prepare_u) {
+        if (path_progress + U_EPSILON < segment.prepare_arc_length) {
             break;
         }
-        if (current_u < segment.release_u) {
+        if (path_progress < segment.release_arc_length) {
             return i;
         }
     }
     return std::nullopt;
 }
 
-const StepPlanSegment* StepController::active_segment(const double current_u) const {
+const StepPlanSegment* StepController::active_segment(const double path_progress) const {
     if (!path_) return nullptr;
     if (held_step_segment_index_.has_value()) {
         const auto& segment = path_->step_segments[*held_step_segment_index_];
-        if (current_u < segment.release_u) {
+        if (path_progress < segment.release_arc_length) {
             return &segment;
         }
     }
-    const auto index = find_active_segment_index(current_u);
+    const auto index = find_active_segment_index(path_progress);
     if (!index) return nullptr;
     return &path_->step_segments[*index];
 }
 
-const StepPlanSegment* StepController::current_command_segment(const double current_u) const {
-    const StepPlanSegment* const segment = active_segment(current_u);
+const StepPlanSegment* StepController::current_command_segment(const double path_progress) const {
+    const StepPlanSegment* const segment = active_segment(path_progress);
     if (!segment) return nullptr;
     if (!is_step_mode(segment->chassis_command.mode)) return nullptr;
     return segment;
@@ -104,7 +104,7 @@ const StepPlanSegment* StepController::current_command_segment(const double curr
 
 // ═══════════════════════ 台阶段激活跟踪 ═══════════════════════
 
-void StepController::update_active_segment(const double current_u) {
+void StepController::update_active_segment(const double path_progress) {
     if (!path_) {
         next_step_segment_index_ = 0;
         held_step_segment_index_ = std::nullopt;
@@ -114,11 +114,11 @@ void StepController::update_active_segment(const double current_u) {
 
     if (held_step_segment_index_.has_value()) {
         const auto& segment = path_->step_segments[*held_step_segment_index_];
-        if (current_u >= segment.release_u) {
+        if (path_progress >= segment.release_arc_length) {
             RCLCPP_DEBUG(
                 logger_,
-                "Step segment #%zu released (current_u=%.3f >= release_u=%.3f)",
-                *held_step_segment_index_, current_u, segment.release_u
+                "Step segment #%zu released (progress=%.3f >= release=%.3f)",
+                *held_step_segment_index_, path_progress, segment.release_arc_length
             );
             next_step_segment_index_ = *held_step_segment_index_ + 1;
             held_step_segment_index_ = std::nullopt;
@@ -129,11 +129,11 @@ void StepController::update_active_segment(const double current_u) {
     }
 
     while (next_step_segment_index_ < path_->step_segments.size()
-        && current_u >= path_->step_segments[next_step_segment_index_].release_u) {
+        && path_progress >= path_->step_segments[next_step_segment_index_].release_arc_length) {
         ++next_step_segment_index_;
     }
 
-    const auto next_index = find_active_segment_index(current_u);
+    const auto next_index = find_active_segment_index(path_progress);
     if (!next_index) {
         target_profile_ = normal_profile_;
         return;
@@ -150,8 +150,8 @@ void StepController::update_active_segment(const double current_u) {
         *held_step_segment_index_,
         segment.terrain_label,
         segment.direction == StepDirection::UP ? "UP" : "DOWN",
-        segment.prepare_u, segment.active_u, segment.commit_u,
-        segment.step_enter_u, segment.step_exit_u, segment.release_u,
+        segment.prepare_arc_length, segment.active_arc_length, segment.commit_arc_length,
+        segment.step_enter_arc_length, segment.step_exit_arc_length, segment.release_arc_length,
         segment.chassis_command.mode
     );
 }
@@ -200,36 +200,36 @@ void StepController::tick_profile_blend() {
 
 // ═══════════════════════ 台阶模式查询 ═══════════════════════
 
-const StepChassisCommand* StepController::current_chassis_command(const double current_u) const {
-    const StepPlanSegment* const segment = current_command_segment(current_u);
+const StepChassisCommand* StepController::current_chassis_command(const double path_progress) const {
+    const StepPlanSegment* const segment = current_command_segment(path_progress);
     return segment ? &segment->chassis_command : nullptr;
 }
 
-StepPhaseObservation StepController::observe_step_phase(const double current_u) const {
+StepPhaseObservation StepController::observe_step_phase(const double path_progress) const {
     if (!path_) return {};
 
     std::optional<size_t> index;
     if (held_step_segment_index_) {
         const StepPlanSegment& held = path_->step_segments[*held_step_segment_index_];
-        if (current_u < held.release_u) index = held_step_segment_index_;
+        if (path_progress < held.release_arc_length) index = held_step_segment_index_;
     }
-    if (!index) index = find_active_segment_index(current_u);
+    if (!index) index = find_active_segment_index(path_progress);
     if (!index) return {};
 
     const StepPlanSegment& segment = path_->step_segments[*index];
     if (!is_step_mode(segment.chassis_command.mode)) return {};
     return {
-        .phase = phase_in_segment(segment, current_u),
+        .phase = phase_in_segment(segment, path_progress),
         .segment_index = index,
     };
 }
 
-uint8_t StepController::compute_step_distance_cm(const MincoTrajectory& path, const double current_u) const {
-    const StepPlanSegment* const segment = current_command_segment(current_u);
+uint8_t StepController::compute_step_distance_cm(const double path_progress) const {
+    const StepPlanSegment* const segment = current_command_segment(path_progress);
     if (!segment) return 0;
-    if (current_u >= segment->step_enter_u) return 0;
+    if (path_progress >= segment->step_enter_arc_length) return 0;
 
-    const double distance = path.arc_length_between(current_u, segment->step_enter_u);
+    const double distance = segment->step_enter_arc_length - path_progress;
     const double adjusted_distance = distance + step_dist_offset_;
     const int64_t rounded_cm = std::lround(adjusted_distance * 100.0);
     return static_cast<uint8_t>(std::clamp<int64_t>(rounded_cm, 0, 255));

@@ -157,14 +157,14 @@ void NavExecutorNode::control_tick() {
     );
 
     // TaskManager 必须使用本周期 route 位置判断 commit，而不能只依赖上一周期 FSM。
-    // 这样规划结果恰好在跨过 commit_u 的控制周期到达时，也不会获得路径执行权。
+    // 这样规划结果恰好在跨过 commit 弧长的控制周期到达时，也不会获得路径执行权。
     previous_motion_feedback_.motion_state = executor_->motion_state();
     const bool route_tracked = active_path_before_update && route_estimate
         && route_estimate->path == active_path_before_update
         && route_estimate->status == RouteTrackingStatus::TRACKED;
     const StepExecutionPreview step_preview = executor_->preview_step_execution(
         active_path_before_update,
-        route_tracked ? route_estimate->tau : 0.0,
+        route_tracked ? route_estimate->arc_length : 0.0,
         route_tracked
     );
     previous_motion_feedback_.step_phase = step_preview.phase;
@@ -196,7 +196,7 @@ void NavExecutorNode::control_tick() {
     const bool route_monitoring_state = pending_mpc_lethal
         || (previous_motion_feedback_.preemptible
             && (previous_state == MotionState::FOLLOW
-                || previous_state == MotionState::STOPPING
+                || previous_state == MotionState::PREPARE_SPIN
                 || previous_state == MotionState::IDLE
                 || previous_state == MotionState::STEPPING));
     if (active_path_before_update && route_estimate && route_monitoring_state) {
@@ -324,7 +324,7 @@ void NavExecutorNode::publish_diagnostics(
         debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
     }
     if (active_path) {
-        debug_minco_trajectory_pub_->publish(trajectory_to_marker(active_path->trajectory));
+        debug_minco_trajectory_pub_->publish(trajectory_to_marker(*active_path));
     }
     if (executor_output.mpc_path_map) {
         debug_mpc_path_pub_->publish(path_to_nav_msg(*executor_output.mpc_path_map));
@@ -427,7 +427,7 @@ nav_msgs::msg::Path NavExecutorNode::trajectory_to_nav_msg(const MincoTrajectory
     msg.header.stamp = now();
     msg.header.frame_id = "map";
     for (double arc_length = 0.0; arc_length < trajectory.total_arc_length(); arc_length += path_publish_sample_resolution_) {
-        const TrajSample sample = trajectory.eval(trajectory.tau_at_arc_length(arc_length));
+        const TrajSample sample = trajectory.eval_arc_length(arc_length);
         geometry_msgs::msg::PoseStamped pose;
         pose.header = msg.header;
         pose.pose.position.x = sample.p.x();
@@ -447,7 +447,7 @@ nav_msgs::msg::Path NavExecutorNode::trajectory_to_nav_msg(const MincoTrajectory
     return msg;
 }
 
-visualization_msgs::msg::Marker NavExecutorNode::trajectory_to_marker(const MincoTrajectory& trajectory) const {
+visualization_msgs::msg::Marker NavExecutorNode::trajectory_to_marker(const AnnotatedPath& path) const {
     visualization_msgs::msg::Marker msg;
     msg.header.frame_id = "map";
     msg.header.stamp = now();
@@ -458,19 +458,21 @@ visualization_msgs::msg::Marker NavExecutorNode::trajectory_to_marker(const Minc
     msg.pose.orientation.w = 1.0;
     msg.scale.x = 0.15;
 
-    const auto append_sample = [&](const TrajSample& sample) {
+    const MincoTrajectory& trajectory = path.trajectory;
+    const auto append_sample = [&](const TrajSample& sample, const double progress) {
         geometry_msgs::msg::Point point;
         point.x = sample.p.x();
         point.y = sample.p.y();
         msg.points.push_back(point);
         msg.colors.push_back(velocity_color(
-            trajectory.longitudinal_velocity(sample), minco_debug_velocity_min_, minco_debug_velocity_max_
+            path.speed_profile.eval_arc_length(progress).velocity,
+            minco_debug_velocity_min_, minco_debug_velocity_max_
         ));
     };
     for (double arc_length = 0.0; arc_length < trajectory.total_arc_length(); arc_length += path_publish_sample_resolution_) {
-        append_sample(trajectory.eval(trajectory.tau_at_arc_length(arc_length)));
+        append_sample(trajectory.eval_arc_length(arc_length), arc_length);
     }
-    append_sample(trajectory.eval(1.0));
+    append_sample(trajectory.eval(1.0), trajectory.total_arc_length());
     return msg;
 }
 

@@ -323,6 +323,7 @@ StateVec MPCSolver::make_initial_state(
 
 std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow(
     const MincoTrajectory& global_trajectory,
+    const PathSpeedProfile& speed_profile,
     const Eigen::Vector3d& chassis_pose_map,
     const ChassisMotionState& chassis_state,
     const double current_path_progress,
@@ -395,7 +396,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         : effective_capability;
 
     const FollowProblem problem(
-        global_trajectory, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
+        global_trajectory, speed_profile, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
         nominal_capability, effective_capability.command_envelope.velocity,
         step_constraint_schedule
     );
@@ -410,9 +411,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     } else {
         ControlVec initial_control = ControlVec::Zero();
         initial_control(iu::PATH_SPEED_CMD) = std::clamp(
-            global_trajectory.nominal_path_speed(
-                global_trajectory.eval_arc_length(path_progress0)
-            ),
+            speed_profile.eval_arc_length(path_progress0).velocity,
             effective_capability.command_envelope.velocity.min,
             effective_capability.command_envelope.velocity.max
         );
@@ -489,10 +488,10 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         diagnostics.reference_path_progress.push_back(path_progress);
         diagnostics.reference_path_speed.push_back(path_speed);
         diagnostics.trajectory_nominal_velocity.push_back(
-            global_trajectory.longitudinal_velocity(sample)
+            speed_profile.eval_arc_length(path_progress).velocity
         );
         diagnostics.trajectory_nominal_angular_velocity.push_back(
-            global_trajectory.angular_velocity(sample)
+            sample.kappa * speed_profile.eval_arc_length(path_progress).velocity
         );
         diagnostics.reference_velocity.push_back(path_speed);
         diagnostics.reference_angular_velocity.push_back(

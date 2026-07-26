@@ -76,7 +76,6 @@ std::optional<RouteEstimate> RouteTracker::update(
     );
     const double arc_length = projection.arc_length;
 
-    const double tau = geometry.tau_at_arc_length(arc_length);
     const TrajSample reference = geometry.eval_arc_length(arc_length);
     const Eigen::Vector2d reference_position = reference.p;
     const double tracking_error = projection.tracking_error;
@@ -90,7 +89,6 @@ std::optional<RouteEstimate> RouteTracker::update(
         .status = tracking_error <= params_.max_tracking_error
             ? RouteTrackingStatus::TRACKED
             : RouteTrackingStatus::LOST,
-        .tau = tau,
         .arc_length = arc_length,
         .path_speed = path_speed,
         .remaining_length = std::max(0.0, total_len - arc_length),

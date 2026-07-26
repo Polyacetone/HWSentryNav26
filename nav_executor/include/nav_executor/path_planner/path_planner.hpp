@@ -17,6 +17,7 @@
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <nav_executor/path_planner/step_annotator.hpp>
 #include <nav_executor/path_planner/step_routing_mask.hpp>
+#include <nav_executor/path_planner/speed_profile_optimizer.hpp>
 
 namespace nav_executor {
 
@@ -74,13 +75,8 @@ struct PlannerConfig {
         double yaw_penalty;
     } start_yaw_relaxation;
 
-    struct TrajectoryValidationParams {
+    struct GeometryValidationParams {
         int samples_per_segment;
-        double velocity_tolerance;
-        double omega_tolerance;
-        double acceleration_tolerance;
-        double lateral_acceleration_tolerance;
-        double traversal_velocity_target_tolerance;
         double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只打印日志不进行拒绝
         double self_intersection_flatness_tolerance;
         double self_intersection_max_edge_length;
@@ -107,7 +103,8 @@ struct PlannerConfig {
     MincoOptimizer::Params minco;
 
     StepDetectionParams step_detection;
-    TrajectoryValidationParams trajectory_validation;
+    GeometryValidationParams geometry_validation;
+    SpeedProfileOptimizer::Params speed_profile;
 
     bool enable_debug;
 };

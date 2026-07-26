@@ -46,7 +46,10 @@ private:
     MPCParams load_mpc_params();
     FsmParams load_fsm_params();
     PathExecutorParams load_executor_params();
-    PlannerConfig load_planner_config(const SignedVelocityBounds& forward_velocity_bounds);
+    PlannerConfig load_planner_config(
+        const CapabilityProfile& normal_profile,
+        const std::array<CapabilityProfile, 3>& step_profiles
+    );
     TaskManagerParams load_task_params();
     ProfileBlendParams load_blend_params();
     CapabilityProfile load_capability_profile(const std::string& prefix);
@@ -62,7 +65,7 @@ private:
     void try_init_step_mask();
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     nav_msgs::msg::Path trajectory_to_nav_msg(const MincoTrajectory& trajectory) const;
-    visualization_msgs::msg::Marker trajectory_to_marker(const MincoTrajectory& trajectory) const;
+    visualization_msgs::msg::Marker trajectory_to_marker(const AnnotatedPath& path) const;
     void publish_diagnostics(
         const TaskDiagnostics& diag,
         const ExecutorOutput& executor_output,

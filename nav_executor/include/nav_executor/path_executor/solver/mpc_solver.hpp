@@ -4,6 +4,7 @@
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
 #include <nav_executor/path_executor/solver/lpv_observer.hpp>
 #include <nav_executor/common/minco_trajectory.hpp>
+#include <nav_executor/common/path_speed_profile.hpp>
 #include <nav_executor/path_executor/solver/follow_problem.hpp>
 #include <nav_executor/path_executor/solver/stop_problem.hpp>
 #include <nav_executor/path_executor/solver/hold_problem.hpp>
@@ -56,6 +57,7 @@ public:
 
     std::expected<FollowSolveResult, std::string> solve_follow(
         const MincoTrajectory& global_trajectory,
+        const PathSpeedProfile& speed_profile,
         const Eigen::Vector3d& chassis_pose_map,
         const ChassisMotionState& chassis_state,
         double current_path_progress,

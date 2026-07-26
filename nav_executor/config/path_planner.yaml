@@ -93,16 +93,37 @@
           curvature_relative_threshold: 1.0e-8 # sy > eps*||s||*||y|| 才接受曲率对
           history_acceptance_ratio: 0.25 # 低模型可信度的 accepted step 不写入历史
         min_segment_time: 0.05 # 每段轨迹最短时长（秒），防止时长归零导致数值问题
-        output_validation:
-          samples_per_segment: 20 # 最终验收时每段采多少个点做约束检查
-          trajectory_velocity_tolerance: 0.2 # 轨迹速度硬约束的允许超限容差（m/s）
-          angular_velocity_tolerance: 0.8 # 角速度硬约束的允许超限容差（rad/s）
-          acceleration_tolerance: 0.4 # 加速度硬约束的允许超限容差（m/s²）
-          lateral_acceleration_tolerance: 0.4 # 侧向加速度硬约束的允许超限容差（m/s²）
-          traversal_velocity_target_tolerance: 0.2 # 台阶速度目标的允许超限容差，只打印日志不进行拒绝（m/s）
-          traversal_angle_tolerance: 0.4 # 台阶方向角的允许偏差，只打印日志不进行拒绝（rad）
-          self_intersection_flatness_tolerance: 0.001 # 自适应 Bezier 细分相对弦的最大几何误差 (m)
-          self_intersection_max_edge_length: 0.02 # 自交验收折线边的最大长度 (m)
+      geometry_validation:
+        samples_per_segment: 20 # 每段空间曲线的有限性、碰撞与地形检查采样数
+        traversal_angle_tolerance: 0.4 # 台阶方向角允许偏差，只记录软诊断（rad）
+        self_intersection_flatness_tolerance: 0.001 # 自适应 Bezier 细分相对弦的最大几何误差 (m)
+        self_intersection_max_edge_length: 0.02 # 自交验收折线边的最大长度 (m)
+
+      speed_profile:
+        discretization:
+          max_spacing: 0.15 # 平坦区域最大弧长节点间隔 (m)
+          step_max_spacing: 0.05 # capability blend 与台阶区域最大节点间隔 (m)
+          curvature_refine_threshold: 0.15 # 区间曲率变化超过该值时递归细分 (1/m)
+        objective:
+          traversal_window: 20.0 # 台阶平方速度窗松弛的弧长积分权重
+          global_speed_reward: 0.05 # 无更重要目标时提高平方速度的小权重
+          velocity_scale: 2.2 # QP 内部平方速度无量纲缩放 (m/s)
+        solver:
+          max_iterations: 4000
+          absolute_tolerance: 1.0e-5
+          relative_tolerance: 1.0e-4
+          constraint_tolerance: 1.0e-5
+          rho: 0.5
+          sigma: 1.0e-6
+          relaxation: 1.6
+          rho_update_interval: 25
+          enable_polish: true
+        validation:
+          sample_spacing: 0.025 # 独立物理验收网格间隔 (m)
+          velocity_tolerance: 0.02 # 速度硬包络容差 (m/s)
+          acceleration_tolerance: 0.05 # 切向加速度容差 (m/s²)
+          angular_velocity_tolerance: 0.05 # 角速度容差 (rad/s)
+          lateral_acceleration_tolerance: 0.05 # 侧向加速度容差 (m/s²)
 
       step:
         detection: # 物理边界固定按原始格点 direction magnitude > 0.95 判定

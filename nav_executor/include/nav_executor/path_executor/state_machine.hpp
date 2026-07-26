@@ -11,13 +11,12 @@ namespace nav_executor {
 
 // ═══════════════════════════ 参数 ═══════════════════════════
 
-// 正常模式切换（Follow ↔ Spin ↔ Idle/Fixed）速度门槛
-struct TransitionParams {
-    double follow_to_spin_vel_max;   // →SPIN: |v| 须低于
-    double spin_to_follow_omega_max; // →FOLLOW: |ω| 须低于
-    double to_idle_vel_max;          // →IDLE/FIXED: |v| 须低于
-    double to_idle_omega_max;        // →IDLE/FIXED: |ω| 须低于
-    double stopping_timeout;         // STOPPING 状态超时 (s)，超过强制切出
+// 下位机 SPIN 控制器接管前的安全互锁门槛。
+struct PrepareSpinParams {
+    double command_velocity_max;
+    double command_omega_max;
+    double measured_velocity_max;
+    double measured_omega_max;
 };
 
 // 危险恢复参数
@@ -52,7 +51,7 @@ struct StuckParams {
 };
 
 struct FsmParams {
-    TransitionParams transition;
+    PrepareSpinParams prepare_spin;
     RecoveryParams recovery;
     StuckParams stuck;
 };
@@ -70,13 +69,13 @@ enum class StepPhase : uint8_t {
     // MPC lethal 检查，并沿用普通 FOLLOW 的 no-progress 策略。
     PREPARING = 1,
 
-    // 已向下位机发送可撤销的台阶提示，但尚未越过 commit_u。
+    // 已向下位机发送可撤销的台阶提示，但尚未越过 commit 弧长。
     // 本阶段仍可打断；一旦当前路径失效或目标改变，应立即取消台阶模式并减速，
     // 新路径就绪后可以直接从当前运动状态接管。
     ARMED = 2,
 
-    // 已越过 commit_u，当前台阶路径不可再被普通任务或重规划结果替换。
-    // 保持台阶模式直到 release_u，并使用 committed 阶段专属的监控策略。
+    // 已越过 commit 弧长，当前台阶路径不可再被普通任务或重规划结果替换。
+    // 保持台阶模式直到 release 弧长，并使用 committed 阶段专属的监控策略。
     COMMITTED = 3,
 };
 
@@ -99,7 +98,7 @@ enum class MotionState : uint8_t {
     IDLE = 1,             // 无路径且不旋转
     FOLLOW = 2,           // 跟随全局路径
     SPIN = 3,             // 小陀螺
-    STOPPING = 4,         // 模式间平滑减速
+    PREPARE_SPIN = 4,     // NORMAL 模式下制动，准备向下位机 SPIN 控制器交权
     HAZARD_RECOVERY = 5,  // 危险恢复
     STUCK_REVERSE = 6,    // 倒车脱困
     FIXED = 7,            // 固定保持目标点
@@ -132,10 +131,13 @@ struct FsmInput {
 
     // 底盘不可控（FLIGHT/JUMP/STEP 物理过程），不响应速度指令
     bool command_blocked = false;
+    bool command_state_tracked = false;
 
     Eigen::Vector2d chassis_pos_map = Eigen::Vector2d::Zero();
-    double velocity = 0.0;
-    double omega = 0.0;
+    double command_velocity = 0.0;
+    double command_omega = 0.0;
+    double measured_velocity = 0.0;
+    double measured_omega = 0.0;
     std::chrono::steady_clock::time_point stamp;
 };
 
@@ -166,7 +168,7 @@ private:
     FsmOutput on_follow(const FsmInput& in);
     FsmOutput on_stepping(const FsmInput& in);
     FsmOutput on_spin(const FsmInput& in);
-    FsmOutput on_stopping(const FsmInput& in);
+    FsmOutput on_prepare_spin(const FsmInput& in);
     FsmOutput on_stuck_reverse(const FsmInput& in);
     FsmOutput on_hazard_recovery(const FsmInput& in);
 
@@ -181,15 +183,14 @@ private:
         uint64_t path_epoch,
         std::optional<size_t> segment_index
     );
-    FsmOutput route_to_terminal(const FsmInput& in);
+    FsmOutput route_to_requested_state(const FsmInput& in);
+    FsmOutput route_to_normal_state(const FsmInput& in);
     FsmOutput exit_reverse(const FsmInput& in, double displacement, double mature_elapsed);
     FsmOutput finish_recovery_chain(const FsmInput& in);
     [[nodiscard]] bool should_start_resume_hazard_recovery(const FsmInput& in) const;
 
-    // 目标终态类型（仅用于选择 STOPPING 退出速度门槛）
-    enum class Terminal : uint8_t { IDLE, FIXED, SPIN, FOLLOW };
-    [[nodiscard]] Terminal terminal_target(const FsmInput& in) const;
-    [[nodiscard]] bool stopping_ready(const FsmInput& in, Terminal target) const;
+    [[nodiscard]] bool spin_authorized(const FsmInput& in) const;
+    [[nodiscard]] bool prepare_spin_ready(const FsmInput& in) const;
 
     FsmParams params_;
     rclcpp::Logger logger_;
@@ -198,8 +199,6 @@ private:
     StepPhase step_phase_ = StepPhase::NONE;
     uint64_t step_path_epoch_ = 0;
     std::optional<size_t> step_segment_index_;
-
-    std::chrono::steady_clock::time_point stopping_start_time_;
 
     // 恢复链结束后是否应发出 one-shot executor_replan_event
     bool replan_after_recovery_ = false;

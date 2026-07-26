@@ -22,14 +22,14 @@
           timeout: 6.0 # 无进度超时 (s)
 
       # ═══════════════════════════════════════════════
-      #  StateMachine — 状态机转换阈值
+      #  StateMachine — SPIN 控制权交接互锁
       # ═══════════════════════════════════════════════
       state_machine:
-        follow_to_spin_vel_max: 0.3 # →SPIN: |v| 须低于此值 (m/s)
-        spin_to_follow_omega_max: 0.8 # →FOLLOW: |ω| 须低于此值 (rad/s)
-        to_idle_vel_max: 0.3 # →IDLE/FIXED: |v| 须低于此值 (m/s)
-        to_idle_omega_max: 0.8 # →IDLE/FIXED: |ω| 须低于此值 (rad/s)
-        stopping_timeout: 1.0 # STOPPING 状态超时 (s)，超过强制切出
+        prepare_spin:
+          command_velocity_max: 0.3 # MPC command state 的线速度门槛 (m/s)
+          command_omega_max: 0.8 # MPC command state 的角速度门槛 (rad/s)
+          measured_velocity_max: 0.3 # 底盘实测线速度门槛 (m/s)
+          measured_omega_max: 0.8 # 底盘实测角速度门槛 (rad/s)
 
       # ═══════════════════════════════════════════════
       #  Recovery — 恢复行为
@@ -72,7 +72,7 @@
         max_iters: 20 # FDDP 求解器最大迭代次数
         progress:
           progress_reward: 0.5 # 每米路径推进线性奖励，防止零速局部最优
-          speed_tracking_weight: 2.0 # 路径速度偏离 MINCO 名义速度的残差权重
+          speed_tracking_weight: 2.0 # 路径速度偏离规划期全局速度剖面的残差权重
           speed_smoothness_weight: 1.5 # 相邻路径速度变化残差权重
           overshoot_weight: 2.0 # 路径进度超过总弧长的残差权重
         rollout_safety:

@@ -26,7 +26,6 @@ enum class RouteTrackingStatus : uint8_t {
 struct RouteEstimate {
     AnnotatedPath::ConstPtr path;
     RouteTrackingStatus status = RouteTrackingStatus::LOST;
-    double tau = 0.0;
     double arc_length = 0.0;
     double path_speed = 0.0;
     double remaining_length = 0.0;

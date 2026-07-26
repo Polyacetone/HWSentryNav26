@@ -4,6 +4,7 @@
 #include <optional>
 
 #include <nav_executor/common/minco_trajectory.hpp>
+#include <nav_executor/common/path_speed_profile.hpp>
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
 #include <nav_executor/path_executor/solver/lpv_model.hpp>
 #include <nav_executor/path_executor/solver/bilinear_sampling.hpp>
@@ -17,6 +18,7 @@ class FollowProblemT {
 public:
     FollowProblemT(
         MincoTrajectory trajectory,
+        PathSpeedProfile speed_profile,
         const MPCParams& params,
         const std::vector<CostMapGridView>& per_step_cost_grids,
         const GridInfo& cost_info,
@@ -58,6 +60,7 @@ private:
     const CostMapGridView& cost_grid_for_step(int k) const;
 
     MincoTrajectory trajectory_;
+    PathSpeedProfile speed_profile_;
     const MPCParams& p_;
     const std::vector<CostMapGridView>& step_cost_grids_;
     GridInfo cost_info_;

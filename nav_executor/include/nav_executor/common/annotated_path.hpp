@@ -7,6 +7,7 @@
 
 #include <nav_executor/common/chassis_defs.hpp>
 #include <nav_executor/common/minco_trajectory.hpp>
+#include <nav_executor/common/path_speed_profile.hpp>
 #include <nav_executor/path_planner/nav_map.hpp>
 #include <nav_executor/path_executor/solver/mpc_types.hpp>
 
@@ -14,12 +15,12 @@ namespace nav_executor {
 
 // 规划期生成、运行期只读的台阶区段。
 struct StepPlanSegment {
-    double prepare_u = 0.0; // 开始渐变 capability 的位置。
-    double active_u = 0.0; // STEPPING/ARMED 起点：开始给底盘发送可撤销的台阶提示。
-    double commit_u = 0.0; // STEPPING/COMMITTED 起点：锁定当前路径，同时是 runup 约束开始处。
-    double step_enter_u = 0.0; // 物理台阶边缘入口。
-    double step_exit_u = 0.0; // 物理台阶边缘出口。
-    double release_u = 1.0; // STEPPING 父状态退出并统一释放台阶段的位置。
+    double prepare_arc_length = 0.0; // 开始渐变 capability 的位置。
+    double active_arc_length = 0.0; // STEPPING/ARMED 起点。
+    double commit_arc_length = 0.0; // STEPPING/COMMITTED 与 runup 起点。
+    double step_enter_arc_length = 0.0; // 物理台阶边缘入口。
+    double step_exit_arc_length = 0.0; // 物理台阶边缘出口。
+    double release_arc_length = 0.0; // STEPPING 父状态退出位置。
     Eigen::Vector2d step_enter_pos_map = Eigen::Vector2d::Zero();
     Eigen::Vector2d step_exit_pos_map = Eigen::Vector2d::Zero();
     Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
@@ -37,6 +38,7 @@ struct AnnotatedPath {
     explicit AnnotatedPath(MincoTrajectory trajectory_in) : trajectory(std::move(trajectory_in)) {}
 
     MincoTrajectory trajectory;
+    PathSpeedProfile speed_profile;
 
     Eigen::Vector2d goal_pos = Eigen::Vector2d::Zero();
     bool goal_fixed = false;

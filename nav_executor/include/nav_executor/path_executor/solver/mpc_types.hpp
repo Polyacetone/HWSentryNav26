@@ -254,36 +254,35 @@ struct MPCHoldParams {
     int max_iters;
 };
 
-// 路径台阶约束。仅供 MPC 按预测弧长换算出的 tau 查询，不携带底盘模式或 FSM 语义。
+// 路径台阶约束。所有边界均为累计弧长，不携带底盘模式或 FSM 语义。
 //
 // 锚点语义（沿路径 u 从小到大）：
-//   commit_u ≤ step_enter_u ≤ exit_u
-//   - commit_u：上位机视角的台阶起点（物理边缘上游回退 run_up）。速度窗/方向对齐等
-//     “助跑期建立约束”自 commit_u 起施加，实现起跳前的提前达速与对齐。
-//   - step_enter_u：物理台阶边缘（真实起跳点）。这是“助跑是否还来得及”的物理截止点，
+//   commit_arc_length ≤ step_enter_arc_length ≤ exit_arc_length
+//   - commit_arc_length：上位机视角的台阶起点（物理边缘上游回退 run_up）。
+//   - step_enter_arc_length：物理台阶边缘（真实起跳点）。这是物理截止点，
 //     可达包络/入口速度地板以此为参考终点，可行性因子 f 也以此判定。
 struct StepTraversalConstraint {
     TraversalVelocityWindow velocity_window;
-    double commit_u = 0.0;
-    double step_enter_u = 0.0;
-    double exit_u = 1.0;
-    double gate_start_u = 0.0;
-    double gate_end_u = 1.0;
+    double commit_arc_length = 0.0;
+    double step_enter_arc_length = 0.0;
+    double exit_arc_length = 0.0;
+    double gate_start_arc_length = 0.0;
+    double gate_end_arc_length = 0.0;
     Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();
 
     bool operator==(const StepTraversalConstraint&) const = default;
 };
 
-// 按路径 u 查询的不可变台阶约束表。规划期负责保证 gate 区间不重叠。
+// 按路径累计弧长查询的不可变台阶约束表。
 class StepConstraintSchedule {
 public:
     explicit StepConstraintSchedule(std::vector<StepTraversalConstraint> constraints)
         : constraints_(std::move(constraints)) {}
 
-    [[nodiscard]] const StepTraversalConstraint* constraint_at(const double path_u) const {
+    [[nodiscard]] const StepTraversalConstraint* constraint_at(const double path_progress) const {
         for (const auto& constraint : constraints_) {
-            if (path_u < constraint.gate_start_u) break;
-            if (path_u <= constraint.gate_end_u) return &constraint;
+            if (path_progress < constraint.gate_start_arc_length) break;
+            if (path_progress <= constraint.gate_end_arc_length) return &constraint;
         }
         return nullptr;
     }

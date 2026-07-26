@@ -67,9 +67,6 @@ public:
     // 按累计弧长 s∈[0,total_arc_length] 求值；弧长是跟随层唯一的路径进度坐标。
     [[nodiscard]] TrajSample eval_arc_length(double arc_length) const;
 
-    [[nodiscard]] double longitudinal_velocity(const TrajSample& s) const;
-    [[nodiscard]] double angular_velocity(const TrajSample& s) const;
-    [[nodiscard]] double nominal_path_speed(const TrajSample& s) const;
     [[nodiscard]] double heading_rate_per_arc_length(const TrajSample& s) const;
     [[nodiscard]] ControlPointBlock segment_bezier_control_points(int segment_index) const;
 

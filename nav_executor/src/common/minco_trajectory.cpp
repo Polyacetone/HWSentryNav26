@@ -240,23 +240,8 @@ TrajSample MincoTrajectory::eval_arc_length(const double arc_length) const {
     return eval(tau_at_arc_length(arc_length));
 }
 
-double MincoTrajectory::longitudinal_velocity(const TrajSample& s) const {
-    return nominal_path_speed(s);
-}
-
-double MincoTrajectory::angular_velocity(const TrajSample& s) const {
-    if (total_time_ <= MIN_SEGMENT_DURATION) return 0.0;
-    return s.dtheta_dtau / total_time_;
-}
-
-double MincoTrajectory::nominal_path_speed(const TrajSample& s) const {
-    if (total_time_ <= MIN_SEGMENT_DURATION) return 0.0;
-    return s.ds_dtau / total_time_;
-}
-
 double MincoTrajectory::heading_rate_per_arc_length(const TrajSample& s) const {
-    const double path_speed = nominal_path_speed(s);
-    return path_speed > TANGENT_EPS ? angular_velocity(s) / path_speed : 0.0;
+    return s.kappa;
 }
 
 MincoTrajectory::ControlPointBlock MincoTrajectory::segment_bezier_control_points(

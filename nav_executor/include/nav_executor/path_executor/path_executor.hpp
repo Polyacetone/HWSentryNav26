@@ -82,6 +82,9 @@ struct ExecutorOutput {
     ObserverDiagnostics observer_diagnostics;
     std::optional<std::vector<Eigen::Vector2d>> mpc_path_map;
     std::optional<MPCDiagnostics> mpc_diagnostics;
+
+    // 仅供 PathExecutor 内部维护 MPC command state，不属于外部诊断契约。
+    bool mpc_generated_command = false;
 };
 
 struct StepExecutionPreview {
@@ -108,7 +111,7 @@ public:
     [[nodiscard]] StepPhase step_phase() const { return control_fsm_->step_phase(); }
     [[nodiscard]] StepExecutionPreview preview_step_execution(
         const AnnotatedPath::ConstPtr& path,
-        double current_u,
+        double path_progress,
         bool route_tracked
     ) const;
 
@@ -121,7 +124,7 @@ public:
                 return is_step_phase_precommit(control_fsm_->step_phase());
             case MotionState::FOLLOW:
             case MotionState::IDLE:
-            case MotionState::STOPPING:
+            case MotionState::PREPARE_SPIN:
             case MotionState::FIXED:
                 return true;
             default:
@@ -133,7 +136,7 @@ private:
     ExecutorOutput execute_idle();
     ExecutorOutput execute_follow(const ExecutorInput& input, bool check_lethal_status);
     ExecutorOutput execute_spin(const ExecutorInput& input);
-    ExecutorOutput execute_stop(const ExecutorInput& input);
+    ExecutorOutput execute_prepare_spin(const ExecutorInput& input);
     ExecutorOutput execute_recovery(const ExecutorInput& input);
     ExecutorOutput execute_stuck_reverse();
     ExecutorOutput execute_fixed(const ExecutorInput& input);
@@ -142,13 +145,15 @@ private:
     void reset_mpc_observer(
         ObserverResetReason reason = ObserverResetReason::EXPLICIT_REQUEST
     );
-    void resynchronize_command_state(const ChassisMotionState& chassis_state);
+    void reanchor_mpc_command_state(const ChassisMotionState& chassis_state);
+    void invalidate_mpc_command_history(ObserverResetReason reason);
     void apply_held_command(ExecutorOutput& output) const;
     void remember_command_output(
         const ExecutorOutput& output,
         std::chrono::steady_clock::time_point stamp
     );
     void on_state_transition(MotionState prev, MotionState next, bool allow_warm_start_reset);
+    [[nodiscard]] static bool state_uses_mpc(MotionState state);
 
     std::unique_ptr<StateMachine> control_fsm_;
     std::shared_ptr<MPCSolver> mpc_controller_;
@@ -166,8 +171,10 @@ private:
 
     bool last_spin_high_priority_ = false;
     MotionState last_motion_state_ = MotionState::IDLE;
-    Eigen::Vector2d last_cmd_ = Eigen::Vector2d::Zero();
-    Eigen::Vector2d last_cmd_rate_ = Eigen::Vector2d::Zero();
+    enum class MpcCommandHistory : uint8_t { TRACKED, NEEDS_REANCHOR };
+    Eigen::Vector2d mpc_command_state_ = Eigen::Vector2d::Zero();
+    Eigen::Vector2d mpc_command_rate_ = Eigen::Vector2d::Zero();
+    MpcCommandHistory mpc_command_history_ = MpcCommandHistory::NEEDS_REANCHOR;
     std::optional<std::chrono::steady_clock::time_point> last_update_stamp_;
     std::optional<std::chrono::steady_clock::time_point> last_command_output_stamp_;
     std::optional<uint64_t> last_observer_state_sequence_;

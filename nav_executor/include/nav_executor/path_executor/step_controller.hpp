@@ -47,15 +47,15 @@ public:
     void set_path(AnnotatedPath::ConstPtr path);
     void clear();
 
-    void update_active_segment(double current_u);
+    void update_active_segment(double path_progress);
 
-    [[nodiscard]] std::optional<size_t> find_active_segment_index(double current_u) const;
-    [[nodiscard]] const StepPlanSegment* active_segment(double current_u) const;
-    [[nodiscard]] const StepPlanSegment* current_command_segment(double current_u) const;
-    [[nodiscard]] StepPhaseObservation observe_step_phase(double current_u) const;
+    [[nodiscard]] std::optional<size_t> find_active_segment_index(double path_progress) const;
+    [[nodiscard]] const StepPlanSegment* active_segment(double path_progress) const;
+    [[nodiscard]] const StepPlanSegment* current_command_segment(double path_progress) const;
+    [[nodiscard]] StepPhaseObservation observe_step_phase(double path_progress) const;
 
-    [[nodiscard]] const StepChassisCommand* current_chassis_command(double current_u) const;
-    [[nodiscard]] uint8_t compute_step_distance_cm(const MincoTrajectory& path, double current_u) const;
+    [[nodiscard]] const StepChassisCommand* current_chassis_command(double path_progress) const;
+    [[nodiscard]] uint8_t compute_step_distance_cm(double path_progress) const;
 
     void tick_profile_blend();
     [[nodiscard]] const CapabilityProfile& effective_capability() const {

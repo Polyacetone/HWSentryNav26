@@ -16,7 +16,6 @@ using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 struct ReferenceFrame {
     TrajSample sample;
     double path_progress = 0.0;
-    double tau = 0.0;
     double nominal_path_speed = 0.0;
     Eigen::Vector2d tangent = Eigen::Vector2d::UnitX();
 };
@@ -28,6 +27,7 @@ struct FrozenStepGate {
 
 ReferenceFrame reference_frame(
     const MincoTrajectory& trajectory,
+    const PathSpeedProfile& speed_profile,
     const double requested_path_progress,
     const double tangent_blend_speed_scale
 ) {
@@ -36,9 +36,10 @@ ReferenceFrame reference_frame(
     reference.path_progress = std::clamp(
         requested_path_progress, 0.0, total_length
     );
-    reference.tau = trajectory.tau_at_arc_length(reference.path_progress);
-    reference.sample = trajectory.eval(reference.tau);
-    reference.nominal_path_speed = trajectory.nominal_path_speed(reference.sample);
+    reference.sample = trajectory.eval_arc_length(reference.path_progress);
+    reference.nominal_path_speed = speed_profile.eval_arc_length(
+        reference.path_progress
+    ).velocity;
 
     const double translational_speed = reference.nominal_path_speed;
     const Eigen::Vector2d heading_axis(
@@ -69,6 +70,7 @@ FollowResidualVec follow_residual_impl(
     const StateVec& x,
     const ControlVec& u,
     const MincoTrajectory& trajectory,
+    const PathSpeedProfile& speed_profile,
     const MPCParams& params,
     const CostMapGridView& cost_grid,
     const GridInfo& cost_info,
@@ -100,7 +102,7 @@ FollowResidualVec follow_residual_impl(
     const double domega_cmd = MPC_DT * u(iu::W_CMD_RATE);
 
     const ReferenceFrame reference = reference_frame(
-        trajectory, x(ix::PATH_PROGRESS), tracking.tangent_blend_speed_scale
+        trajectory, speed_profile, x(ix::PATH_PROGRESS), tracking.tangent_blend_speed_scale
     );
     const Eigen::Vector2d position_error(px - reference.sample.p.x(), py - reference.sample.p.y());
     const Eigen::Vector2d normal(-reference.tangent.y(), reference.tangent.x());
@@ -139,11 +141,11 @@ FollowResidualVec follow_residual_impl(
 
     const StepTraversalConstraint* const step = frozen_step_gate
         ? frozen_step_gate->constraint
-        : (step_schedule ? step_schedule->constraint_at(reference.tau) : nullptr);
+        : (step_schedule ? step_schedule->constraint_at(reference.path_progress) : nullptr);
     if (step) {
         const double gate = frozen_step_gate
             ? frozen_step_gate->gate
-            : step_window_gate(reference.tau, *step);
+            : step_window_gate(reference.path_progress, *step);
         if (gate > 0.0) {
             const Eigen::Vector2d& direction = step->dir_map;
             const double cross = std::cos(theta) * direction.y() - std::sin(theta) * direction.x();
@@ -176,11 +178,13 @@ using FollowTerminalResidualVec = Eigen::Matrix<double, FOLLOW_TERMINAL_RESIDUAL
 FollowTerminalResidualVec follow_terminal_residual_impl(
     const StateVec& x,
     const MincoTrajectory& trajectory,
+    const PathSpeedProfile& speed_profile,
     const MPCParams& params
 ) {
     const auto& weights = params.follow.terminal_weights;
     const ReferenceFrame reference = reference_frame(
         trajectory,
+        speed_profile,
         x(ix::PATH_PROGRESS),
         params.follow.tracking_weights.tangent_blend_speed_scale
     );
@@ -207,6 +211,7 @@ FollowTerminalResidualVec follow_terminal_residual_impl(
 template<int Horizon>
 FollowProblemT<Horizon>::FollowProblemT(
     MincoTrajectory trajectory,
+    PathSpeedProfile speed_profile,
     const MPCParams& params,
     const std::vector<CostMapGridView>& per_step_cost_grids,
     const GridInfo& cost_info,
@@ -218,6 +223,7 @@ FollowProblemT<Horizon>::FollowProblemT(
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule
 ):
     trajectory_(std::move(trajectory)),
+    speed_profile_(std::move(speed_profile)),
     p_(params),
     step_cost_grids_(per_step_cost_grids),
     cost_info_(cost_info),
@@ -290,7 +296,7 @@ double FollowProblemT<Horizon>::running_cost_value_only(
     double*
 ) const {
     const FollowResidualVec residual = follow_residual_impl(
-        x, u, trajectory_, p_, cost_grid_for_step(k), cost_info_,
+        x, u, trajectory_, speed_profile_, p_, cost_grid_for_step(k), cost_info_,
         command_capability_.command_dynamics, model_, step_constraint_schedule_
     );
     double cost = residual_cost(residual);
@@ -320,17 +326,18 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     const double path_progress = std::clamp(
         x(ix::PATH_PROGRESS), 0.0, total_length_
     );
-    const double tau = trajectory_.tau_at_arc_length(path_progress);
     FrozenStepGate frozen_step_gate;
     frozen_step_gate.constraint = step_constraint_schedule_
-        ? step_constraint_schedule_->constraint_at(tau)
+        ? step_constraint_schedule_->constraint_at(path_progress)
         : nullptr;
     if (frozen_step_gate.constraint) {
-        frozen_step_gate.gate = step_window_gate(tau, *frozen_step_gate.constraint);
+        frozen_step_gate.gate = step_window_gate(
+            path_progress, *frozen_step_gate.constraint
+        );
     }
     auto residual_fn = [&](const StateVec& state, const ControlVec& control) {
         return follow_residual_impl(
-            state, control, trajectory_, p_, cost_grid, cost_info_,
+            state, control, trajectory_, speed_profile_, p_, cost_grid, cost_info_,
             command_capability_.command_dynamics, model_, step_constraint_schedule_,
             &frozen_step_gate
         );
@@ -353,7 +360,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 
 template<int Horizon>
 double FollowProblemT<Horizon>::terminal_cost(const StateVec& x) const {
-    double cost = residual_cost(follow_terminal_residual_impl(x, trajectory_, p_));
+    double cost = residual_cost(follow_terminal_residual_impl(x, trajectory_, speed_profile_, p_));
     cost += p_.follow.terminal_weights.remaining_progress
         * positive_part(total_length_ - x(ix::PATH_PROGRESS));
     return cost;
@@ -366,7 +373,7 @@ void FollowProblemT<Horizon>::terminal_cost_derivatives(
     MatXX& lfxx
 ) const {
     auto residual_fn = [&](const StateVec& state) {
-        return follow_terminal_residual_impl(state, trajectory_, p_);
+        return follow_terminal_residual_impl(state, trajectory_, speed_profile_, p_);
     };
     gauss_newton_terminal_derivatives<FOLLOW_TERMINAL_RESIDUAL_DIM>(
         residual_fn, x, lfx, lfxx

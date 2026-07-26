@@ -27,7 +27,7 @@ PathExecutor::PathExecutor(
 
 StepExecutionPreview PathExecutor::preview_step_execution(
     const AnnotatedPath::ConstPtr& path,
-    const double current_u,
+    const double path_progress,
     const bool route_tracked
 ) const {
     const MotionState state = control_fsm_->state();
@@ -44,8 +44,8 @@ StepExecutionPreview PathExecutor::preview_step_execution(
 
     const bool same_path = path == bound_path_;
     const StepPhaseObservation observed = same_path
-        ? step_controller_.observe_step_phase(current_u)
-        : classify_step_phase(*path, current_u);
+        ? step_controller_.observe_step_phase(path_progress)
+        : classify_step_phase(*path, path_progress);
 
     StepPhase effective_phase = observed.phase;
     const bool same_lifecycle = state == MotionState::STEPPING
@@ -69,9 +69,8 @@ StepExecutionPreview PathExecutor::preview_step_execution(
 // ═══════════════════════ 辅助 ════════════════════════════════
 
 void PathExecutor::sync_mpc_context(const ExecutorInput& input, const bool allow_observer_update) {
-    mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
+    mpc_controller_->set_command_state(mpc_command_state_, mpc_command_rate_);
     if (!allow_observer_update) {
-        reset_mpc_observer(ObserverResetReason::CONTROL_UNAVAILABLE);
         return;
     }
 
@@ -93,15 +92,32 @@ void PathExecutor::reset_mpc_observer(const ObserverResetReason reason) {
     last_observer_state_sequence_.reset();
 }
 
-void PathExecutor::resynchronize_command_state(const ChassisMotionState& chassis_state) {
-    last_cmd_ = {chassis_state.velocity, chassis_state.omega};
-    last_cmd_rate_.setZero();
-    last_command_output_ = ExecutorOutput {};
-    has_last_command_output_ = false;
-    last_command_output_stamp_.reset();
-    mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
+void PathExecutor::reanchor_mpc_command_state(const ChassisMotionState& chassis_state) {
+    mpc_command_state_ = {chassis_state.velocity, chassis_state.omega};
+    mpc_command_rate_.setZero();
+    mpc_controller_->set_command_state(mpc_command_state_, mpc_command_rate_);
     mpc_controller_->reset_warm_start();
     reset_mpc_observer(ObserverResetReason::COMMAND_RESYNCHRONIZED);
+}
+
+void PathExecutor::invalidate_mpc_command_history(const ObserverResetReason reason) {
+    if (mpc_command_history_ == MpcCommandHistory::NEEDS_REANCHOR) return;
+    mpc_command_history_ = MpcCommandHistory::NEEDS_REANCHOR;
+    mpc_controller_->reset_warm_start();
+    reset_mpc_observer(reason);
+}
+
+bool PathExecutor::state_uses_mpc(const MotionState state) {
+    switch (state) {
+        case MotionState::FOLLOW:
+        case MotionState::STEPPING:
+        case MotionState::PREPARE_SPIN:
+        case MotionState::HAZARD_RECOVERY:
+        case MotionState::FIXED:
+            return true;
+        default:
+            return false;
+    }
 }
 
 void PathExecutor::apply_held_command(ExecutorOutput& output) const {
@@ -136,7 +152,7 @@ void PathExecutor::remember_command_output(
 
 ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     if (!last_command_output_stamp_) {
-        resynchronize_command_state(input.observation.chassis_state);
+        mpc_command_history_ = MpcCommandHistory::NEEDS_REANCHOR;
     } else {
         const double command_output_interval = std::chrono::duration<double>(
             input.observation.stamp - *last_command_output_stamp_
@@ -148,7 +164,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
                 command_output_interval,
                 params_.command_history_timeout
             );
-            resynchronize_command_state(input.observation.chassis_state);
+            invalidate_mpc_command_history(ObserverResetReason::COMMAND_RESYNCHRONIZED);
         }
     }
     if (last_update_stamp_) {
@@ -156,9 +172,8 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
             input.observation.stamp - *last_update_stamp_
         ).count();
         if (interval > 1.5 * MPC_DT) {
-            last_cmd_rate_.setZero();
-            mpc_controller_->reset_warm_start();
-            reset_mpc_observer(ObserverResetReason::CONTROL_UPDATE_GAP);
+            mpc_command_rate_.setZero();
+            invalidate_mpc_command_history(ObserverResetReason::CONTROL_UPDATE_GAP);
         }
     }
     last_update_stamp_ = input.observation.stamp;
@@ -187,11 +202,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         out.motion_state = MotionState::DEAD;
         out.valid = true;
 
-        last_cmd_ = Eigen::Vector2d::Zero();
-        last_cmd_rate_ = Eigen::Vector2d::Zero();
-        mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
-        mpc_controller_->reset_warm_start();
-        reset_mpc_observer(ObserverResetReason::CONTROL_UNAVAILABLE);
+        invalidate_mpc_command_history(ObserverResetReason::CONTROL_UNAVAILABLE);
         safety_monitor_.reset_stuck();
         safety_monitor_.reset_recovery();
         out.observer_diagnostics = mpc_controller_->observer_diagnostics();
@@ -203,10 +214,13 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         RCLCPP_DEBUG(logger_, "Chassis entered mature control state: resetting Luenberger observer");
         reset_mpc_observer(ObserverResetReason::EXPLICIT_REQUEST);
     }
-    if (command_blocked) mpc_controller_->reset_warm_start();
+    if (command_blocked) {
+        invalidate_mpc_command_history(ObserverResetReason::CONTROL_UNAVAILABLE);
+    }
 
     const MotionState prev_state = last_motion_state_;
     const bool observer_update_allowed = chassis_controllable
+        && mpc_command_history_ == MpcCommandHistory::TRACKED
         && has_last_command_output_
         && last_command_output_.mode == chassis_mode::NORMAL;
     sync_mpc_context(input, observer_update_allowed);
@@ -236,20 +250,20 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         );
     }
 
-    double current_u = 0.0;
+    double current_progress = 0.0;
     if (has_path) {
-        current_u = input.route->tau;
+        current_progress = input.route->arc_length;
         if (prev_state == MotionState::FOLLOW || prev_state == MotionState::STEPPING) {
-            step_controller_.update_active_segment(current_u);
+            step_controller_.update_active_segment(current_progress);
         }
     }
 
     const StepPhaseObservation step_observation = has_path
-        ? step_controller_.observe_step_phase(current_u)
+        ? step_controller_.observe_step_phase(current_progress)
         : StepPhaseObservation {};
     const StepExecutionPreview current_step_preview = preview_step_execution(
         input.intent.active_path,
-        current_u,
+        current_progress,
         has_path
     );
 
@@ -286,6 +300,8 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     fsm_input.step_segment_index = step_observation.segment_index;
     fsm_input.resumed_from_stopped = resumed_from_stopped;
     fsm_input.command_blocked = command_blocked;
+    fsm_input.command_state_tracked =
+        mpc_command_history_ == MpcCommandHistory::TRACKED;
     fsm_input.spin_requested = input.intent.spin_requested;
     fsm_input.spin_high_priority = input.intent.spin_high_priority;
     last_spin_high_priority_ = input.intent.spin_high_priority;
@@ -297,8 +313,12 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
             *input.environment.masked_global_cost_map, *input.environment.masked_direction_map, input.observation.chassis_pose_map.head<2>()
         );
     fsm_input.is_hazard_now = is_hazard_now;
+    const double published_command_velocity = has_last_command_output_
+        ? last_command_output_.velocity
+        : 0.0;
     fsm_input.is_stuck = !command_blocked && safety_monitor_.check_stuck(
-        input.observation.chassis_pose_map.head<2>(), last_cmd_.x(), input.observation.stamp
+        input.observation.chassis_pose_map.head<2>(), published_command_velocity,
+        input.observation.stamp
     );
     fsm_input.is_recovery_safe = !command_blocked
         && input.environment.final_cost_map && input.environment.masked_direction_map
@@ -306,14 +326,21 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
             *input.environment.final_cost_map, *input.environment.masked_direction_map, input.observation.chassis_pose_map.head<2>(), input.observation.stamp
         );
     fsm_input.chassis_pos_map = input.observation.chassis_pose_map.head<2>();
-    fsm_input.velocity = last_cmd_.x();
-    fsm_input.omega = last_cmd_.y();
+    fsm_input.command_velocity = mpc_command_state_.x();
+    fsm_input.command_omega = mpc_command_state_.y();
+    fsm_input.measured_velocity = input.observation.chassis_state.velocity;
+    fsm_input.measured_omega = input.observation.chassis_state.omega;
     fsm_input.stamp = input.observation.stamp;
 
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
     const MotionState state = fsm_output.state;
     on_state_transition(prev_state, state, !command_blocked);
     last_motion_state_ = state;
+
+    if (!command_blocked && state_uses_mpc(state)
+        && mpc_command_history_ == MpcCommandHistory::NEEDS_REANCHOR) {
+        reanchor_mpc_command_state(input.observation.chassis_state);
+    }
 
     ExecutorOutput output;
     if (command_blocked) {
@@ -323,7 +350,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
             case MotionState::IDLE: output = execute_idle(); break;
             case MotionState::FOLLOW: output = execute_follow(input, true); break;
             case MotionState::SPIN: output = execute_spin(input); break;
-            case MotionState::STOPPING: output = execute_stop(input); break;
+            case MotionState::PREPARE_SPIN: output = execute_prepare_spin(input); break;
             case MotionState::HAZARD_RECOVERY: output = execute_recovery(input); break;
             case MotionState::STUCK_REVERSE: output = execute_stuck_reverse(); break;
             case MotionState::FIXED: output = execute_fixed(input); break;
@@ -345,8 +372,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     }
 
     // 台阶计划在 commit 前被打断时，取消 mode 的优先级高于 MPC 输出是否成功。
-    // 正常情况下 STOPPING/恢复控制器会给出平滑减速；若求解失败，仍发送零速 NORMAL
-    // 作为一次确定的取消指令，避免下位机继续持有上一帧台阶提示。
+    // 台阶取消必须确定地撤销下位机台阶模式；必要时使用零速 NORMAL fallback。
     if (fsm_output.step_cancelled) {
         output.mode = chassis_mode::NORMAL;
         output.step_dist_cm = 0;
@@ -390,21 +416,25 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     mpc_lethal_pending_ = false;
 
     if (output.valid) {
-        const Eigen::Vector2d command(output.velocity, output.omega);
-        last_cmd_rate_ = (command - last_cmd_) / MPC_DT;
-        last_cmd_ = command;
-        mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
         remember_command_output(output, input.observation.stamp);
-        const bool reset_warm_start = !command_blocked
-            && (state == MotionState::IDLE || state == MotionState::SPIN || state == MotionState::STUCK_REVERSE);
-        if (reset_warm_start) {
+        if (output.mpc_generated_command && !command_blocked) {
+            const Eigen::Vector2d command(output.velocity, output.omega);
+            mpc_command_rate_ = (command - mpc_command_state_) / MPC_DT;
+            mpc_command_state_ = command;
+            mpc_command_history_ = MpcCommandHistory::TRACKED;
+            mpc_controller_->set_command_state(
+                mpc_command_state_, mpc_command_rate_
+            );
+        } else {
+            invalidate_mpc_command_history(ObserverResetReason::CONTROL_UNAVAILABLE);
             mpc_controller_->reset_warm_start();
         }
     } else {
-        last_cmd_rate_.setZero();
-        mpc_controller_->set_command_state(last_cmd_, last_cmd_rate_);
-        mpc_controller_->reset_warm_start();
-        reset_mpc_observer(ObserverResetReason::CONTROL_OUTPUT_INVALID);
+        mpc_command_rate_.setZero();
+        invalidate_mpc_command_history(ObserverResetReason::CONTROL_OUTPUT_INVALID);
+        mpc_controller_->set_command_state(
+            mpc_command_state_, mpc_command_rate_
+        );
     }
 
     output.observer_diagnostics = mpc_controller_->observer_diagnostics();
@@ -485,6 +515,7 @@ void assign_hold_output(ExecutorOutput& out, const MPCSolver::SolveResult& resul
     out.mode = chassis_mode::NORMAL;
     out.mpc_path_map = result.diagnostics.applied_prediction.path_map;
     out.mpc_diagnostics = result.diagnostics;
+    out.mpc_generated_command = true;
     out.valid = true;
 }
 
@@ -510,13 +541,14 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     }
 
     if (!input.route || input.route->status != RouteTrackingStatus::TRACKED) return out;
-    const double u0 = input.route->tau;
+    const double path_progress = input.route->arc_length;
     const MincoTrajectory& path = input.intent.active_path->trajectory;
 
     step_controller_.tick_profile_blend();
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_follow(
-        path, input.observation.chassis_pose_map, input.observation.chassis_state,
+        path, input.intent.active_path->speed_profile,
+        input.observation.chassis_pose_map, input.observation.chassis_state,
         input.route->arc_length, input.route->path_speed,
         *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
         step_controller_.effective_capability(),
@@ -529,7 +561,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
             MPCSolverMode::FOLLOW,
             result.error(),
             input.observation.chassis_state,
-            last_cmd_,
+            mpc_command_state_,
             mpc_controller_->params().follow.ancillary_feedback.enable
         );
         return out;
@@ -560,7 +592,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
 
     if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
         out.mode = chassis_mode::NORMAL;
-    } else if (const StepChassisCommand* const chassis_command = step_controller_.current_chassis_command(u0);
+    } else if (const StepChassisCommand* const chassis_command = step_controller_.current_chassis_command(path_progress);
                chassis_command && step_phase_activates_chassis_mode(control_fsm_->step_phase())) {
         out.mode = chassis_command->mode;
     } else {
@@ -569,8 +601,9 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
 
     out.mpc_path_map = diagnostics.applied_prediction.path_map;
     out.mpc_diagnostics = diagnostics;
+    out.mpc_generated_command = true;
 
-    out.step_dist_cm = step_controller_.compute_step_distance_cm(path, u0);
+    out.step_dist_cm = step_controller_.compute_step_distance_cm(path_progress);
     out.valid = true;
 
     return out;
@@ -585,9 +618,9 @@ ExecutorOutput PathExecutor::execute_spin(const ExecutorInput& input) {
     return out;
 }
 
-// ═══════════════════ STOPPING ════════════════════════════════
+// ═══════════════════ PREPARE_SPIN ════════════════════════════
 
-ExecutorOutput PathExecutor::execute_stop(const ExecutorInput& input) {
+ExecutorOutput PathExecutor::execute_prepare_spin(const ExecutorInput& input) {
     ExecutorOutput out;
     if (!input.environment.final_cost_map) return out;
 
@@ -601,7 +634,7 @@ ExecutorOutput PathExecutor::execute_stop(const ExecutorInput& input) {
             MPCSolverMode::STOP,
             result.error(),
             input.observation.chassis_state,
-            last_cmd_
+            mpc_command_state_
         );
         return out;
     }
@@ -645,7 +678,7 @@ ExecutorOutput PathExecutor::execute_recovery(const ExecutorInput& input) {
             MPCSolverMode::HOLD,
             result.error(),
             input.observation.chassis_state,
-            last_cmd_
+            mpc_command_state_
         );
         return out;
     }
@@ -681,7 +714,7 @@ ExecutorOutput PathExecutor::execute_fixed(const ExecutorInput& input) {
             MPCSolverMode::HOLD,
             result.error(),
             input.observation.chassis_state,
-            last_cmd_
+            mpc_command_state_
         );
         return out;
     }

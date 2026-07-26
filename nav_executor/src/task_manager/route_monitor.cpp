@@ -72,40 +72,30 @@ std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, 
         : std::max(1, static_cast<int>(std::ceil(lookahead_distance / resolution)) + 1);
     if (samples <= 0) return stats;
 
-    auto advance_path_u = [&](const double distance) {
-        double u = std::clamp(in.route.tau, 0.0, 1.0);
-        double travelled = 0.0;
-        while (u < 1.0 && travelled < distance) {
-            const Eigen::Vector2d d1 = path.tangent(u);
-            const double speed = d1.norm();
-            if (speed < 1e-12) {
-                u = std::min(1.0, u + 1e-3);
-                continue;
-            }
-            const double du = resolution / speed;
-            const double next_u = std::min(1.0, u + du);
-            travelled += (path.position(next_u) - path.position(u)).norm();
-            u = next_u;
-        }
-        return u;
-    };
-
-    double previous_u = std::clamp(in.route.tau, 0.0, 1.0);
+    double previous_progress = std::clamp(
+        in.route.arc_length, 0.0, path.total_arc_length()
+    );
     for (int i = 0; i < samples; ++i) {
         const double t = samples == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(samples - 1);
-        const double u = advance_path_u(lookahead_distance * t);
+        const double progress = std::min(
+            path.total_arc_length(), in.route.arc_length + lookahead_distance * t
+        );
 
         if (using_predicted) {
             const CostMap* const cost_map =
                 in.per_step_dynamic_cost_maps[static_cast<size_t>(i)];
             if (!cost_map) return std::nullopt;
             for (const StepPlanSegment& segment : in.active_path->step_segments) {
-                const double overlap_begin = std::max(previous_u, segment.step_enter_u);
-                const double overlap_end = std::min(u, segment.step_exit_u);
+                const double overlap_begin = std::max(
+                    previous_progress, segment.step_enter_arc_length
+                );
+                const double overlap_end = std::min(
+                    progress, segment.step_exit_arc_length
+                );
                 if (overlap_begin > overlap_end) continue;
 
-                const double field_sample_u = 0.5 * (overlap_begin + overlap_end);
-                const Eigen::Vector2d pos = path.position(field_sample_u);
+                const double field_sample_progress = 0.5 * (overlap_begin + overlap_end);
+                const Eigen::Vector2d pos = path.eval_arc_length(field_sample_progress).p;
                 const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
                 if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
                 const bool blocked_dynamic =
@@ -113,13 +103,13 @@ std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, 
                 stats.step_sample_count++;
                 if (blocked_dynamic) stats.blocked_step_sample_count++;
             }
-            previous_u = u;
+            previous_progress = progress;
             continue;
         }
 
-        previous_u = u;
+        previous_progress = progress;
         if (!in.base_direction_map) return std::nullopt;
-        const Eigen::Vector2d pos = path.position(u);
+        const Eigen::Vector2d pos = path.eval_arc_length(progress).p;
         const Eigen::Vector2d dir_grid =
             in.base_direction_map->map_coord_to_grid(pos);
         if (!in.base_direction_map->is_valid_coord(dir_grid)) return std::nullopt;
@@ -169,20 +159,6 @@ bool check_step_blocked(const RouteMonitorInput& in, const MincoTrajectory& path
     return false;
 }
 
-double advance_path_u_by_distance(const MincoTrajectory& path, double start_u, const double distance) {
-    constexpr double resolution = 0.05;
-    double u = std::clamp(start_u, 0.0, 1.0);
-    double travelled = 0.0;
-    while (u < 1.0 && travelled < distance) {
-        const double speed = path.tangent(u).norm();
-        if (speed < 1e-12) break;
-        const double next_u = std::min(1.0, u + resolution / speed);
-        travelled += (path.position(next_u) - path.position(u)).norm();
-        u = next_u;
-    }
-    return u;
-}
-
 std::optional<ReplanReason> check_performance(const RouteMonitorInput& in, rclcpp::Logger logger) {
     const AnnotatedPath& path = *in.active_path;
     if (!path.planning_performance.high_performance && in.current_performance.high_performance) {
@@ -191,12 +167,14 @@ std::optional<ReplanReason> check_performance(const RouteMonitorInput& in, rclcp
     }
     if (!path.planning_performance.high_performance || in.current_performance.high_performance) return std::nullopt;
 
-    const double lookahead_u = advance_path_u_by_distance(
-        path.trajectory, in.route.tau, in.performance.lookahead_distance
+    const double lookahead_progress = std::min(
+        path.trajectory.total_arc_length(),
+        in.route.arc_length + in.performance.lookahead_distance
     );
     for (const StepPlanSegment& segment : path.step_segments) {
         if (!segment.requires_high_performance) continue;
-        if (segment.prepare_u <= in.route.tau || segment.prepare_u > lookahead_u) continue;
+        if (segment.prepare_arc_length <= in.route.arc_length
+            || segment.prepare_arc_length > lookahead_progress) continue;
         RCLCPP_WARN(logger, "RouteMonitor: high-performance crossing ahead is no longer available");
         return ReplanReason::PERFORMANCE_DEGRADED;
     }

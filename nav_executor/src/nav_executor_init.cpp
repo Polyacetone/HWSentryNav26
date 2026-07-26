@@ -64,7 +64,8 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     step_routing_mask_ = std::make_shared<StepRoutingMask>(step_params);
 
     const PlannerConfig planner_config = load_planner_config(
-        mpc_params.follow.normal_profile.command_envelope.velocity
+        mpc_params.follow.normal_profile,
+        mpc_params.follow.capability_profiles
     );
     minco_debug_velocity_min_ = 0.0;
     minco_debug_velocity_max_ = planner_config.minco.trajectory_limits.velocity_max;
@@ -348,12 +349,11 @@ ProfileBlendParams NavExecutorNode::load_blend_params() {
 
 FsmParams NavExecutorNode::load_fsm_params() {
     FsmParams fsm;
-    fsm.transition = {
-        .follow_to_spin_vel_max = declare_parameter<double>("path_executor.state_machine.follow_to_spin_vel_max"),
-        .spin_to_follow_omega_max = declare_parameter<double>("path_executor.state_machine.spin_to_follow_omega_max"),
-        .to_idle_vel_max = declare_parameter<double>("path_executor.state_machine.to_idle_vel_max"),
-        .to_idle_omega_max = declare_parameter<double>("path_executor.state_machine.to_idle_omega_max"),
-        .stopping_timeout = declare_parameter<double>("path_executor.state_machine.stopping_timeout"),
+    fsm.prepare_spin = {
+        .command_velocity_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.command_velocity_max"),
+        .command_omega_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.command_omega_max"),
+        .measured_velocity_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.measured_velocity_max"),
+        .measured_omega_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.measured_omega_max"),
     };
     fsm.recovery = {
         .hazard_cost_threshold = declare_parameter<double>("path_executor.recovery.hazard.cost_threshold"),
@@ -382,6 +382,13 @@ FsmParams NavExecutorNode::load_fsm_params() {
         .reverse_displacement = declare_parameter<double>("path_executor.recovery.stuck.reverse_displacement"),
         .reverse_timeout = declare_parameter<double>("path_executor.recovery.stuck.reverse_timeout"),
     };
+    require_parameter(
+        positive_finite(fsm.prepare_spin.command_velocity_max)
+        && positive_finite(fsm.prepare_spin.command_omega_max)
+        && positive_finite(fsm.prepare_spin.measured_velocity_max)
+        && positive_finite(fsm.prepare_spin.measured_omega_max),
+        "PREPARE_SPIN command and measured thresholds must be finite and positive"
+    );
     return fsm;
 }
 
@@ -429,7 +436,8 @@ PathExecutorParams NavExecutorNode::load_executor_params() {
 // ═══════════════════════ Planner 参数 ════════════════════════
 
 PlannerConfig NavExecutorNode::load_planner_config(
-    const SignedVelocityBounds& forward_velocity_bounds
+    const CapabilityProfile& normal_profile,
+    const std::array<CapabilityProfile, 3>& step_profiles
 ) {
     PlannerConfig c;
     c.occupied_threshold = static_cast<int>(declare_parameter<int>("path_planner.traversability.occupied_threshold"));
@@ -448,7 +456,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
             "path_planner.planner.start_yaw_relaxation.yaw_penalty"
         ),
     };
-    c.forward_velocity_bounds = forward_velocity_bounds;
+    c.forward_velocity_bounds = normal_profile.command_envelope.velocity;
 
     c.dijkstra = {
         .obstacle_weight = declare_parameter<double>("path_planner.dijkstra.obstacle_weight"),
@@ -542,20 +550,51 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .fsm_release_distance = declare_parameter<double>("path_planner.step.execution.fsm_release_distance"),
         .gate_transition_distance = declare_parameter<double>("path_planner.step.mpc_constraints.gate_transition_distance"),
     };
-    c.trajectory_validation = {
-        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.output_validation.samples_per_segment")),
-        .velocity_tolerance = declare_parameter<double>("path_planner.minco.output_validation.trajectory_velocity_tolerance"),
-        .omega_tolerance = declare_parameter<double>("path_planner.minco.output_validation.angular_velocity_tolerance"),
-        .acceleration_tolerance = declare_parameter<double>("path_planner.minco.output_validation.acceleration_tolerance"),
-        .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.minco.output_validation.lateral_acceleration_tolerance"),
-        .traversal_velocity_target_tolerance = declare_parameter<double>("path_planner.minco.output_validation.traversal_velocity_target_tolerance"),
-        .traversal_angle_tolerance = declare_parameter<double>("path_planner.minco.output_validation.traversal_angle_tolerance"),
+    c.geometry_validation = {
+        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.geometry_validation.samples_per_segment")),
+        .traversal_angle_tolerance = declare_parameter<double>("path_planner.geometry_validation.traversal_angle_tolerance"),
         .self_intersection_flatness_tolerance = declare_parameter<double>(
-            "path_planner.minco.output_validation.self_intersection_flatness_tolerance"
+            "path_planner.geometry_validation.self_intersection_flatness_tolerance"
         ),
         .self_intersection_max_edge_length = declare_parameter<double>(
-            "path_planner.minco.output_validation.self_intersection_max_edge_length"
+            "path_planner.geometry_validation.self_intersection_max_edge_length"
         ),
+    };
+    c.speed_profile = {
+        .discretization = {
+            .max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.max_spacing"),
+            .step_max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.step_max_spacing"),
+            .curvature_refine_threshold = declare_parameter<double>("path_planner.speed_profile.discretization.curvature_refine_threshold"),
+        },
+        .objective = {
+            .traversal_window = declare_parameter<double>("path_planner.speed_profile.objective.traversal_window"),
+            .global_speed_reward = declare_parameter<double>("path_planner.speed_profile.objective.global_speed_reward"),
+            .velocity_scale = declare_parameter<double>("path_planner.speed_profile.objective.velocity_scale"),
+        },
+        .validation = {
+            .sample_spacing = declare_parameter<double>("path_planner.speed_profile.validation.sample_spacing"),
+            .velocity_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.velocity_tolerance"),
+            .acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.acceleration_tolerance"),
+            .angular_velocity_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.angular_velocity_tolerance"),
+            .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.lateral_acceleration_tolerance"),
+        },
+        .solver = {
+            .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.speed_profile.solver.max_iterations")),
+            .absolute_tolerance = declare_parameter<double>("path_planner.speed_profile.solver.absolute_tolerance"),
+            .relative_tolerance = declare_parameter<double>("path_planner.speed_profile.solver.relative_tolerance"),
+            .constraint_tolerance = declare_parameter<double>("path_planner.speed_profile.solver.constraint_tolerance"),
+            .rho = declare_parameter<double>("path_planner.speed_profile.solver.rho"),
+            .sigma = declare_parameter<double>("path_planner.speed_profile.solver.sigma"),
+            .relaxation = declare_parameter<double>("path_planner.speed_profile.solver.relaxation"),
+            .rho_update_interval = static_cast<int>(declare_parameter<int>("path_planner.speed_profile.solver.rho_update_interval")),
+            .enable_polish = declare_parameter<bool>("path_planner.speed_profile.solver.enable_polish"),
+        },
+        .normal_profile = normal_profile,
+        .step_profiles = step_profiles,
+        .trajectory_velocity_max = c.minco.trajectory_limits.velocity_max,
+        .trajectory_acceleration_max = c.minco.trajectory_limits.acceleration_max,
+        .trajectory_angular_velocity_max = c.minco.trajectory_limits.angular_velocity_max,
+        .trajectory_lateral_acceleration_max = c.minco.trajectory_limits.lateral_acceleration_max,
     };
     require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in [0, 255]");
     require_parameter(
@@ -691,8 +730,8 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "MINCO terrain_gate or motion_speed_scale is invalid"
     );
     require_parameter(
-        c.trajectory_validation.samples_per_segment > 0,
-        "trajectory validation samples_per_segment must be positive"
+        c.geometry_validation.samples_per_segment > 0,
+        "geometry validation samples_per_segment must be positive"
     );
     require_parameter(
         c.step_detection.detect_dot_threshold > 0.0
@@ -705,15 +744,38 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "step detection/execution parameters are invalid"
     );
     require_parameter(
-        nonnegative_finite(c.trajectory_validation.velocity_tolerance)
-        && nonnegative_finite(c.trajectory_validation.omega_tolerance)
-        && nonnegative_finite(c.trajectory_validation.acceleration_tolerance)
-        && nonnegative_finite(c.trajectory_validation.lateral_acceleration_tolerance)
-        && nonnegative_finite(c.trajectory_validation.traversal_velocity_target_tolerance)
-        && nonnegative_finite(c.trajectory_validation.traversal_angle_tolerance)
-        && positive_finite(c.trajectory_validation.self_intersection_flatness_tolerance)
-        && positive_finite(c.trajectory_validation.self_intersection_max_edge_length),
-        "trajectory validation tolerances must be finite and non-negative"
+        nonnegative_finite(c.geometry_validation.traversal_angle_tolerance)
+        && positive_finite(c.geometry_validation.self_intersection_flatness_tolerance)
+        && positive_finite(c.geometry_validation.self_intersection_max_edge_length),
+        "geometry validation tolerances are invalid"
+    );
+    const auto& speed_profile = c.speed_profile;
+    require_parameter(
+        positive_finite(speed_profile.discretization.max_spacing)
+        && positive_finite(speed_profile.discretization.step_max_spacing)
+        && speed_profile.discretization.step_max_spacing <= speed_profile.discretization.max_spacing
+        && positive_finite(speed_profile.discretization.curvature_refine_threshold)
+        && nonnegative_finite(speed_profile.objective.traversal_window)
+        && nonnegative_finite(speed_profile.objective.global_speed_reward)
+        && positive_finite(speed_profile.objective.velocity_scale)
+        && positive_finite(speed_profile.validation.sample_spacing)
+        && nonnegative_finite(speed_profile.validation.velocity_tolerance)
+        && nonnegative_finite(speed_profile.validation.acceleration_tolerance)
+        && nonnegative_finite(speed_profile.validation.angular_velocity_tolerance)
+        && nonnegative_finite(speed_profile.validation.lateral_acceleration_tolerance),
+        "speed profile discretization, objective, or validation parameters are invalid"
+    );
+    require_parameter(
+        speed_profile.solver.max_iterations > 0
+        && positive_finite(speed_profile.solver.absolute_tolerance)
+        && positive_finite(speed_profile.solver.relative_tolerance)
+        && positive_finite(speed_profile.solver.constraint_tolerance)
+        && positive_finite(speed_profile.solver.rho)
+        && positive_finite(speed_profile.solver.sigma)
+        && speed_profile.solver.relaxation >= 1.0
+        && speed_profile.solver.relaxation < 2.0
+        && speed_profile.solver.rho_update_interval > 0,
+        "speed profile solver parameters are invalid"
     );
 
     require_parameter(

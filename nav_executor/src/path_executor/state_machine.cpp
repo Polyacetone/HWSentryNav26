@@ -25,7 +25,7 @@ FsmOutput StateMachine::update(const FsmInput& input) {
         case MotionState::FOLLOW: return on_follow(input);
         case MotionState::STEPPING: return on_stepping(input);
         case MotionState::SPIN: return on_spin(input);
-        case MotionState::STOPPING: return on_stopping(input);
+        case MotionState::PREPARE_SPIN: return on_prepare_spin(input);
         case MotionState::STUCK_REVERSE: return on_stuck_reverse(input);
         case MotionState::HAZARD_RECOVERY: return on_hazard_recovery(input);
         default: return { .state = active_state_ };
@@ -108,41 +108,34 @@ void StateMachine::synchronize_step_phase(
     step_phase_ = observed_phase;
 }
 
-StateMachine::Terminal StateMachine::terminal_target(const FsmInput& in) const {
-    const bool should_spin = in.spin_requested
+bool StateMachine::spin_authorized(const FsmInput& in) const {
+    return in.spin_requested
         && (in.spin_high_priority || (!in.route_tracked && !in.has_hold_goal));
-    if (should_spin) return Terminal::SPIN;
-    if (in.route_tracked) return Terminal::FOLLOW;
-    if (in.has_hold_goal) return Terminal::FIXED;
-    return Terminal::IDLE;
 }
 
-bool StateMachine::stopping_ready(const FsmInput& in, const Terminal target) const {
-    const auto& t = params_.transition;
-    switch (target) {
-        case Terminal::IDLE:
-        case Terminal::FIXED:
-            return std::abs(in.velocity) < t.to_idle_vel_max && std::abs(in.omega) < t.to_idle_omega_max;
-        case Terminal::SPIN:
-            return std::abs(in.velocity) < t.follow_to_spin_vel_max && std::abs(in.omega) < t.to_idle_omega_max;
-        case Terminal::FOLLOW:
-            return true;
-    }
-    return false;
+bool StateMachine::prepare_spin_ready(const FsmInput& in) const {
+    const PrepareSpinParams& limits = params_.prepare_spin;
+    return !in.command_blocked && in.command_state_tracked
+        && std::abs(in.command_velocity) < limits.command_velocity_max
+        && std::abs(in.command_omega) < limits.command_omega_max
+        && std::abs(in.measured_velocity) < limits.measured_velocity_max
+        && std::abs(in.measured_omega) < limits.measured_omega_max;
 }
 
-FsmOutput StateMachine::route_to_terminal(const FsmInput& in) {
-    switch (terminal_target(in)) {
-        case Terminal::SPIN:   return transition_to(MotionState::SPIN);
-        case Terminal::FOLLOW: return transition_to(MotionState::FOLLOW);
-        case Terminal::FIXED:  return transition_to(MotionState::FIXED);
-        case Terminal::IDLE:   return transition_to(MotionState::IDLE);
-    }
+FsmOutput StateMachine::route_to_normal_state(const FsmInput& in) {
+    if (in.route_tracked) return transition_to(MotionState::FOLLOW);
+    if (in.has_hold_goal) return transition_to(MotionState::FIXED);
     return transition_to(MotionState::IDLE);
 }
 
+FsmOutput StateMachine::route_to_requested_state(const FsmInput& in) {
+    return spin_authorized(in)
+        ? transition_to(MotionState::PREPARE_SPIN)
+        : route_to_normal_state(in);
+}
+
 FsmOutput StateMachine::finish_recovery_chain(const FsmInput& in) {
-    FsmOutput out = route_to_terminal(in);
+    FsmOutput out = route_to_requested_state(in);
     if (replan_after_recovery_) {
         replan_after_recovery_ = false;
         out.executor_replan_event = true;
@@ -191,6 +184,10 @@ FsmOutput StateMachine::on_idle(const FsmInput& in) {
         RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY (is hazard)");
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
+    if (in.spin_requested && in.spin_high_priority) {
+        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (high-priority spin requested)");
+        return transition_to(MotionState::PREPARE_SPIN);
+    }
     if (in.route_tracked) {
         RCLCPP_INFO(logger_, "FSM -> FOLLOW (has path)");
         return transition_to(MotionState::FOLLOW);
@@ -200,8 +197,8 @@ FsmOutput StateMachine::on_idle(const FsmInput& in) {
         return transition_to(MotionState::FIXED);
     }
     if (in.spin_requested) {
-        RCLCPP_INFO(logger_, "FSM -> SPIN (spin requested)");
-        return transition_to(MotionState::SPIN);
+        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (spin requested)");
+        return transition_to(MotionState::PREPARE_SPIN);
     }
     return { .state = MotionState::IDLE };
 }
@@ -222,20 +219,17 @@ FsmOutput StateMachine::on_fixed(const FsmInput& in) {
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (is stuck)");
         return transition_to(MotionState::STUCK_REVERSE);
     }
+    if (in.spin_requested && in.spin_high_priority) {
+        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (high-priority spin requested)");
+        return transition_to(MotionState::PREPARE_SPIN);
+    }
     if (in.route_tracked) {
         RCLCPP_INFO(logger_, "FSM -> FOLLOW (has path)");
         return transition_to(MotionState::FOLLOW);
     }
-    if (in.spin_requested && in.spin_high_priority) {
-        stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING (spin requested)");
-        return transition_to(MotionState::STOPPING);
-    }
-    // hold_goal 消失（任务被清空）→ 平滑退出
     if (!in.has_hold_goal) {
-        stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING (no hold goal)");
-        return transition_to(MotionState::STOPPING);
+        RCLCPP_INFO(logger_, "FSM -> IDLE (no hold goal)");
+        return transition_to(MotionState::IDLE);
     }
     return { .state = MotionState::FIXED };
 }
@@ -268,23 +262,19 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
         return transition_to(MotionState::STUCK_REVERSE);
     }
 
-    // path 被顶层清空（RouteMonitor 判 invalid 或消费）→ 平滑停止后回落。
-    if (!in.route_tracked) {
-        stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING (no path)");
-        return transition_to(MotionState::STOPPING);
+    if (in.spin_requested && in.spin_high_priority) {
+        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (high-priority spin requested)");
+        return transition_to(MotionState::PREPARE_SPIN);
     }
 
-    if (in.spin_requested && in.spin_high_priority) {
-        stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING (spin requested)");
-        return transition_to(MotionState::STOPPING);
+    if (!in.route_tracked) {
+        RCLCPP_INFO(logger_, "FSM routing after path loss");
+        return route_to_requested_state(in);
     }
 
     if (in.reach_goal) {
-        stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING (goal reached)");
-        FsmOutput out = transition_to(MotionState::STOPPING);
+        RCLCPP_INFO(logger_, "FSM -> IDLE (goal reached)");
+        FsmOutput out = transition_to(MotionState::IDLE);
         out.goal_reached = true;
         return out;
     }
@@ -316,14 +306,12 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
     }
 
     // PREPARING/ARMED 中 active_path 一旦被任务层清除，旧台阶计划立即失去执行权。
-    // 直接进入 STOPPING，避免先回 FOLLOW 后因无路径产生一周期空命令。
     if (is_step_phase_precommit(step_phase_) && !in.has_active_path) {
-        stopping_start_time_ = in.stamp;
         RCLCPP_INFO(
-            logger_, "FSM -> STOPPING (STEPPING/%s path cancelled)",
+            logger_, "FSM routing after STEPPING/%s path cancellation",
             step_phase_str(step_phase_)
         );
-        FsmOutput out = transition_to(MotionState::STOPPING);
+        FsmOutput out = route_to_requested_state(in);
         out.step_cancelled = true;
         return out;
     }
@@ -342,23 +330,21 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
     // commit 前保持与 FOLLOW 一致的外部打断能力。
     if (is_step_phase_precommit(step_phase_)) {
         if (in.spin_requested && in.spin_high_priority) {
-            stopping_start_time_ = in.stamp;
             RCLCPP_INFO(
-                logger_, "FSM -> STOPPING (spin requested during STEPPING/%s)",
+                logger_, "FSM -> PREPARE_SPIN (spin requested during STEPPING/%s)",
                 step_phase_str(step_phase_)
             );
-            FsmOutput out = transition_to(MotionState::STOPPING);
+            FsmOutput out = transition_to(MotionState::PREPARE_SPIN);
             out.step_cancelled = true;
             return out;
         }
 
         if (in.reach_goal) {
-            stopping_start_time_ = in.stamp;
             RCLCPP_INFO(
-                logger_, "FSM -> STOPPING (goal reached during STEPPING/%s)",
+                logger_, "FSM -> IDLE (goal reached during STEPPING/%s)",
                 step_phase_str(step_phase_)
             );
-            FsmOutput out = transition_to(MotionState::STOPPING);
+            FsmOutput out = transition_to(MotionState::IDLE);
             out.goal_reached = true;
             out.step_cancelled = true;
             return out;
@@ -368,9 +354,8 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
     if (!in.has_active_path) {
         // 仅 release 后的本周期抢占或已在 precommit 产生的硬失效允许走到这里。
         // 无论来源如何，都不能回 FOLLOW 后在无路径条件下产生空命令。
-        stopping_start_time_ = in.stamp;
-        RCLCPP_WARN(logger_, "STEPPING/COMMITTED active path removed; forcing STOPPING");
-        FsmOutput out = transition_to(MotionState::STOPPING);
+        RCLCPP_WARN(logger_, "STEPPING/COMMITTED active path removed; routing to current request");
+        FsmOutput out = route_to_requested_state(in);
         out.step_cancelled = true;
         return out;
     }
@@ -401,38 +386,31 @@ FsmOutput StateMachine::on_spin(const FsmInput& in) {
     const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.route_tracked && !in.has_hold_goal));
 
     if (!keep_spinning) {
-        stopping_start_time_ = in.stamp;
-        RCLCPP_INFO(logger_, "FSM -> STOPPING (spin completed)");
-        return transition_to(MotionState::STOPPING);
+        RCLCPP_INFO(logger_, "FSM leaving SPIN for NORMAL control");
+        return route_to_normal_state(in);
     }
 
     return { .state = MotionState::SPIN };
 }
 
-// ═══════════════════════════ STOPPING ═══════════════════════
+// ═══════════════════════════ PREPARE_SPIN ═══════════════════
 
-FsmOutput StateMachine::on_stopping(const FsmInput& in) {
-    const Terminal target = terminal_target(in);
-
-    // 新任务（有 path）→ 立即跟随，无需等待减速。
-    if (target == Terminal::FOLLOW) {
-        RCLCPP_INFO(logger_, "FSM -> FOLLOW (new task)");
-        return transition_to(MotionState::FOLLOW);
+FsmOutput StateMachine::on_prepare_spin(const FsmInput& in) {
+    if (in.is_hazard_now) {
+        replan_after_recovery_ = false;
+        RCLCPP_WARN(logger_, "PREPARE_SPIN cancelled by hazard; entering HAZARD_RECOVERY");
+        return transition_to(MotionState::HAZARD_RECOVERY);
     }
-
-    const bool timeout = std::chrono::duration<double>(in.stamp - stopping_start_time_).count()
-        > params_.transition.stopping_timeout;
-
-    if (stopping_ready(in, target) || timeout) {
-        switch (target) {
-            case Terminal::FIXED: RCLCPP_INFO(logger_, "FSM -> FIXED"); return transition_to(MotionState::FIXED);
-            case Terminal::SPIN: RCLCPP_INFO(logger_, "FSM -> SPIN");  return transition_to(MotionState::SPIN);
-            case Terminal::IDLE: RCLCPP_INFO(logger_, "FSM -> IDLE");  return transition_to(MotionState::IDLE);
-            case Terminal::FOLLOW: return transition_to(MotionState::FOLLOW);
-        }
+    if (!spin_authorized(in)) {
+        RCLCPP_INFO(logger_, "PREPARE_SPIN cancelled; returning to NORMAL target");
+        return route_to_normal_state(in);
     }
-
-    return { .state = MotionState::STOPPING };
+    if (prepare_spin_ready(in)) {
+        RCLCPP_INFO(logger_, "PREPARE_SPIN ready; transferring control to SPIN");
+        // SPIN 的唯一入口：任何请求来源都必须先经过本状态的物理互锁。
+        return transition_to(MotionState::SPIN);
+    }
+    return { .state = MotionState::PREPARE_SPIN };
 }
 
 // ═══════════════════════════ STUCK_REVERSE ══════════════════
