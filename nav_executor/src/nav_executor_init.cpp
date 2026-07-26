@@ -581,17 +581,6 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .angular_velocity_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.angular_velocity_tolerance"),
             .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.lateral_acceleration_tolerance"),
         },
-        .solver = {
-            .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.speed_profile.solver.max_iterations")),
-            .absolute_tolerance = declare_parameter<double>("path_planner.speed_profile.solver.absolute_tolerance"),
-            .relative_tolerance = declare_parameter<double>("path_planner.speed_profile.solver.relative_tolerance"),
-            .constraint_tolerance = declare_parameter<double>("path_planner.speed_profile.solver.constraint_tolerance"),
-            .rho = declare_parameter<double>("path_planner.speed_profile.solver.rho"),
-            .sigma = declare_parameter<double>("path_planner.speed_profile.solver.sigma"),
-            .relaxation = declare_parameter<double>("path_planner.speed_profile.solver.relaxation"),
-            .rho_update_interval = static_cast<int>(declare_parameter<int>("path_planner.speed_profile.solver.rho_update_interval")),
-            .enable_polish = declare_parameter<bool>("path_planner.speed_profile.solver.enable_polish"),
-        },
         .normal_profile = normal_profile,
         .step_profiles = step_profiles,
         .trajectory_velocity_max = c.minco.trajectory_limits.velocity_max,
@@ -768,19 +757,6 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && nonnegative_finite(speed_profile.validation.lateral_acceleration_tolerance),
         "speed profile discretization, objective, or validation parameters are invalid"
     );
-    require_parameter(
-        speed_profile.solver.max_iterations > 0
-        && positive_finite(speed_profile.solver.absolute_tolerance)
-        && positive_finite(speed_profile.solver.relative_tolerance)
-        && positive_finite(speed_profile.solver.constraint_tolerance)
-        && positive_finite(speed_profile.solver.rho)
-        && positive_finite(speed_profile.solver.sigma)
-        && speed_profile.solver.relaxation >= 1.0
-        && speed_profile.solver.relaxation < 2.0
-        && speed_profile.solver.rho_update_interval > 0,
-        "speed profile solver parameters are invalid"
-    );
-
     require_parameter(
         positive_finite(c.forward_velocity_bounds.min)
             && c.forward_velocity_bounds.min < c.forward_velocity_bounds.max

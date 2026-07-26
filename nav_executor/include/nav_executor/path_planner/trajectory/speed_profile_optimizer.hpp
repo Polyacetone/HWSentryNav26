@@ -2,12 +2,12 @@
 
 #include <array>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
 
 #include <nav_executor/common/trajectory/annotated_path.hpp>
-#include <nav_executor/path_planner/numerics/admm_qp_solver.hpp>
 
 namespace nav_executor {
 
@@ -32,7 +32,6 @@ public:
             double lateral_acceleration_tolerance;
         } validation;
 
-        AdmmQpSolver::Params solver;
         CapabilityProfile normal_profile;
         std::array<CapabilityProfile, 3> step_profiles;
         double trajectory_velocity_max;
@@ -52,35 +51,22 @@ public:
 
     struct Diagnostics {
         enum class Selection {
-            QP_SOLVED,
-            QP_MAX_ITERATIONS_VALIDATED,
-            REACHABLE_FALLBACK,
+            OPTIMAL,
+            SEED_OPTIMAL_NO_WINDOW,
+            FALLBACK,
         };
 
         int node_count = 0;
-        int variable_count = 0;
-        int constraint_count = 0;
-        int soft_window_node_count = 0;
-        int iterations = 0;
-        int rho_updates = 0;
+        // 软速度窗约束条数；同一节点被多个台阶段覆盖时会重复计数。
+        int soft_window_constraint_count = 0;
         double seed_total_time = 0.0;
         double result_total_time = 0.0;
         double speed_reward_cost = 0.0;
         double traversal_window_cost = 0.0;
-        double primal_residual = 0.0;
-        double dual_residual = 0.0;
-        double max_constraint_violation = 0.0;
-        double primal_tolerance = 0.0;
-        double dual_tolerance = 0.0;
-        double constraint_tolerance = 0.0;
-        double final_rho = 0.0;
-        double factorization_ms = 0.0;
-        double iteration_ms = 0.0;
-        AdmmQpSolver::Status solver_status = AdmmQpSolver::Status::NUMERICAL_FAILURE;
-        AdmmQpSolver::PolishStatus polish_status = AdmmQpSolver::PolishStatus::NOT_RUN;
-        Selection selection = Selection::REACHABLE_FALLBACK;
-        std::string solver_error;
-        std::string candidate_rejection;
+        int max_breakpoints = 0;
+        double solve_ms = 0.0;
+        Selection selection = Selection::FALLBACK;
+        std::string fallback_reason;
         std::vector<StepWindowViolation> step_violations;
     };
 

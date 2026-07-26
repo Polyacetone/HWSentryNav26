@@ -57,87 +57,146 @@ struct BlockSampleStats {
     int blocked_step_sample_count = 0;
 };
 
-std::optional<BlockSampleStats> sample_block_stats(const RouteMonitorInput& in, const MincoTrajectory& path) {
-    const auto& p = in.step_block;
-    const double lookahead_distance = std::max(0.0, p.lookahead_distance);
-    const bool using_predicted = !in.per_step_dynamic_cost_maps.empty();
-    const double map_limited_resolution = in.base_direction_map
-        ? std::min(p.sample_resolution, in.base_direction_map->resolution * 0.5)
-        : p.sample_resolution;
-    const double resolution = map_limited_resolution;
+// 沿当前路径向前的空间采样栅格，两种采样模式共用。
+struct BlockSampleGrid {
+    int count = 1;
+    double base_progress = 0.0;
+    double span = 0.0;
+    double total_arc_length = 0.0;
+
+    [[nodiscard]] double progress_at(const int index) const {
+        const double fraction = count <= 1
+            ? 0.0
+            : static_cast<double>(index) / static_cast<double>(count - 1);
+        return std::min(total_arc_length, base_progress + span * fraction);
+    }
+};
+
+BlockSampleGrid build_block_sample_grid(
+    const RouteMonitorInput& in,
+    const MincoTrajectory& path,
+    const double resolution
+) {
+    BlockSampleGrid grid;
+    grid.total_arc_length = path.total_arc_length();
+    grid.base_progress = std::clamp(in.route.arc_length, 0.0, grid.total_arc_length);
+    grid.span = std::max(0.0, in.step_block.lookahead_distance);
+    grid.count = resolution > 0.0
+        ? std::max(1, static_cast<int>(std::ceil(grid.span / resolution)) + 1)
+        : 1;
+    return grid;
+}
+
+// per_step_dynamic_cost_maps[i] 是 t = (i+1) * prediction_dt 时刻的预测帧。取时间上
+// 最近的一帧；超出预测时域的样本没有判定依据，返回空。
+std::optional<size_t> prediction_frame_index(
+    const size_t frame_count,
+    const double prediction_dt,
+    const double arrival_time
+) {
+    const long long nearest = std::llround(arrival_time / prediction_dt) - 1;
+    if (nearest >= static_cast<long long>(frame_count)) return std::nullopt;
+    return static_cast<size_t>(std::max<long long>(0, nearest));
+}
+
+// 台阶样本按空间步进枚举，读取哪一预测帧由计划到达时刻决定，因此采样间距与预测
+// 步长互不耦合。超出预测时域的台阶不计入分母。
+std::optional<BlockSampleStats> sample_predicted_block_stats(
+    const RouteMonitorInput& in,
+    const MincoTrajectory& path
+) {
+    // 台阶区间由 step_segments 的弧长边界给出，与格点无关，故采样间距不受地图分辨率约束。
+    const BlockSampleGrid grid = build_block_sample_grid(
+        in, path, in.step_block.sample_resolution
+    );
+    const PathSpeedProfile& speed_profile = in.active_path->speed_profile;
+    const double route_time = speed_profile.eval_arc_length(grid.base_progress).time;
 
     BlockSampleStats stats;
-    const int samples = using_predicted
-        ? static_cast<int>(in.per_step_dynamic_cost_maps.size())
-        : std::max(1, static_cast<int>(std::ceil(lookahead_distance / resolution)) + 1);
-    if (samples <= 0) return stats;
+    double previous_progress = grid.base_progress;
+    for (int i = 0; i < grid.count; ++i) {
+        const double progress = grid.progress_at(i);
+        for (const StepPlanSegment& segment : in.active_path->step_segments) {
+            const double overlap_begin = std::max(
+                previous_progress, segment.step_enter_arc_length
+            );
+            const double overlap_end = std::min(progress, segment.step_exit_arc_length);
+            if (overlap_begin > overlap_end) continue;
 
-    double previous_progress = std::clamp(
-        in.route.arc_length, 0.0, path.total_arc_length()
-    );
-    for (int i = 0; i < samples; ++i) {
-        const double t = samples == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(samples - 1);
-        const double progress = std::min(
-            path.total_arc_length(), in.route.arc_length + lookahead_distance * t
-        );
-
-        if (using_predicted) {
-            const CostMap* const cost_map =
-                in.per_step_dynamic_cost_maps[static_cast<size_t>(i)];
+            const double sample_progress = 0.5 * (overlap_begin + overlap_end);
+            const double arrival_time = std::max(
+                0.0, speed_profile.eval_arc_length(sample_progress).time - route_time
+            );
+            const auto frame_index = prediction_frame_index(
+                in.per_step_dynamic_cost_maps.size(), in.prediction_dt, arrival_time
+            );
+            if (!frame_index) continue;
+            const CostMap* const cost_map = in.per_step_dynamic_cost_maps[*frame_index];
             if (!cost_map) return std::nullopt;
-            for (const StepPlanSegment& segment : in.active_path->step_segments) {
-                const double overlap_begin = std::max(
-                    previous_progress, segment.step_enter_arc_length
-                );
-                const double overlap_end = std::min(
-                    progress, segment.step_exit_arc_length
-                );
-                if (overlap_begin > overlap_end) continue;
 
-                const double field_sample_progress = 0.5 * (overlap_begin + overlap_end);
-                const Eigen::Vector2d pos = path.eval_arc_length(field_sample_progress).p;
-                const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
-                if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
-                const bool blocked_dynamic =
-                    cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
-                stats.step_sample_count++;
-                if (blocked_dynamic) stats.blocked_step_sample_count++;
+            const Eigen::Vector2d pos = path.eval_arc_length(sample_progress).p;
+            const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
+            if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
+
+            stats.step_sample_count++;
+            if (cost_map->interpolate(cost_grid) >= in.step_block.obstacle_cost_threshold) {
+                stats.blocked_step_sample_count++;
             }
-            previous_progress = progress;
-            continue;
         }
-
         previous_progress = progress;
-        if (!in.base_direction_map) return std::nullopt;
-        const Eigen::Vector2d pos = path.eval_arc_length(progress).p;
-        const Eigen::Vector2d dir_grid =
-            in.base_direction_map->map_coord_to_grid(pos);
-        if (!in.base_direction_map->is_valid_coord(dir_grid)) return std::nullopt;
-        if (!in.base_direction_map->is_terrain_body_at(dir_grid)) continue;
+    }
+    return stats;
+}
+
+// 无预测序列时退化为当前帧判定：样本取方向场的台阶物理本体格。
+// 前置条件：base_direction_map 非空。
+std::optional<BlockSampleStats> sample_current_block_stats(
+    const RouteMonitorInput& in,
+    const MincoTrajectory& path
+) {
+    const DirectionMap& direction_map = *in.base_direction_map;
+    // 本体判定读取原始格点，采样间距必须细于半个格宽，否则会漏过整格台阶。
+    const BlockSampleGrid grid = build_block_sample_grid(
+        in, path, std::min(in.step_block.sample_resolution, direction_map.resolution * 0.5)
+    );
+
+    BlockSampleStats stats;
+    for (int i = 0; i < grid.count; ++i) {
+        const Eigen::Vector2d pos = path.eval_arc_length(grid.progress_at(i)).p;
+        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(pos);
+        if (!direction_map.is_valid_coord(dir_grid)) return std::nullopt;
+        if (!direction_map.is_terrain_body_at(dir_grid)) continue;
 
         bool blocked_dynamic = false;
         if (in.current_dynamic_cost_map) {
             const Eigen::Vector2d cost_grid = in.current_dynamic_cost_map->map_coord_to_grid(pos);
             if (!in.current_dynamic_cost_map->is_valid_coord(cost_grid)) return std::nullopt;
-            blocked_dynamic = in.current_dynamic_cost_map->interpolate(cost_grid) >= p.obstacle_cost_threshold;
+            blocked_dynamic = in.current_dynamic_cost_map->interpolate(cost_grid)
+                >= in.step_block.obstacle_cost_threshold;
         }
 
         stats.step_sample_count++;
         if (blocked_dynamic) stats.blocked_step_sample_count++;
     }
-
     return stats;
 }
 
 bool check_step_blocked(const RouteMonitorInput& in, const MincoTrajectory& path, rclcpp::Logger logger) {
     const auto& p = in.step_block;
     if (!p.enable) return false;
-    if (in.per_step_dynamic_cost_maps.empty() && !in.base_direction_map) return false;
 
-    const auto stats = sample_block_stats(in, path);
+    // 预测模式需要完整的预测帧序列与计划速度剖面：帧索引由计划到达时刻推出。
+    const bool using_predicted = !in.per_step_dynamic_cost_maps.empty()
+        && in.prediction_dt > 0.0
+        && !in.active_path->speed_profile.empty();
+    if (!using_predicted && !in.base_direction_map) return false;
+
+    const auto stats = using_predicted
+        ? sample_predicted_block_stats(in, path)
+        : sample_current_block_stats(in, path);
     if (!stats || stats->step_sample_count == 0) return false;
 
-    if (in.per_step_dynamic_cost_maps.empty()) {
+    if (!using_predicted) {
         if (stats->blocked_step_sample_count > 0) {
             RCLCPP_WARN(
                 logger, "RouteMonitor: blocked step ahead within %.2f m (blocked_step_samples=%d/%d)",

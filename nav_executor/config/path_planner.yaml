@@ -107,17 +107,7 @@
         objective:
           traversal_window: 20.0 # 台阶平方速度窗松弛的弧长积分权重
           global_speed_reward: 0.05 # 无更重要目标时提高平方速度的小权重
-          velocity_scale: 2.2 # QP 内部平方速度无量纲缩放 (m/s)
-        solver:
-          max_iterations: 4000
-          absolute_tolerance: 1.0e-5
-          relative_tolerance: 1.0e-4
-          constraint_tolerance: 1.0e-5
-          rho: 0.5
-          sigma: 1.0e-6
-          relaxation: 1.6
-          rho_update_interval: 25
-          enable_polish: true
+          velocity_scale: 2.2 # 平方速度目标的无量纲归一参考速度 (m/s)，保持两类目标权重比例
         validation:
           sample_spacing: 0.025 # 独立物理验收网格间隔 (m)
           velocity_tolerance: 0.02 # 速度硬包络容差 (m/s)

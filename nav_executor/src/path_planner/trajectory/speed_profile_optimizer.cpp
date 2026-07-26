@@ -6,7 +6,7 @@
 #include <numeric>
 #include <optional>
 
-#include <Eigen/SparseCore>
+#include <nav_executor/path_planner/numerics/piecewise_quadratic_chain_solver.hpp>
 
 namespace nav_executor {
 
@@ -22,7 +22,6 @@ struct NodeLimit {
 
 struct SoftWindowNode {
     size_t node_index = 0;
-    size_t segment_index = 0;
     double integration_weight = 0.0;
     TraversalVelocityWindow target;
 };
@@ -361,8 +360,7 @@ std::vector<SoftWindowNode> collect_soft_windows(
     const std::vector<StepPlanSegment>& segments
 ) {
     std::vector<SoftWindowNode> windows;
-    for (size_t segment_index = 0; segment_index < segments.size(); ++segment_index) {
-        const StepPlanSegment& segment = segments[segment_index];
+    for (const StepPlanSegment& segment : segments) {
         for (size_t node_index = 0; node_index < nodes.size(); ++node_index) {
             if (nodes[node_index] + EPS < segment.commit_arc_length
                 || nodes[node_index] - EPS > segment.step_exit_arc_length) {
@@ -374,7 +372,6 @@ std::vector<SoftWindowNode> collect_soft_windows(
                 ? 0.5 * (nodes[node_index + 1] - nodes[node_index]) : 0.0;
             windows.push_back({
                 .node_index = node_index,
-                .segment_index = segment_index,
                 .integration_weight = left + right,
                 .target = segment.traversal_constraint.velocity_window,
             });
@@ -383,94 +380,41 @@ std::vector<SoftWindowNode> collect_soft_windows(
     return windows;
 }
 
-SparseQpProblem build_qp(
+ChainProblem build_chain_problem(
     const SpeedProfileOptimizer::Params& params,
     const std::vector<double>& nodes,
     const std::vector<NodeLimit>& limits,
     const std::vector<SoftWindowNode>& windows,
     const double initial_speed_squared
 ) {
-    const int node_count = static_cast<int>(nodes.size());
-    const int variable_count = node_count + 2 * static_cast<int>(windows.size());
     const double speed_squared_scale = params.objective.velocity_scale
         * params.objective.velocity_scale;
-
-    std::vector<Eigen::Triplet<double>> quadratic_triplets;
-    Eigen::VectorXd linear = Eigen::VectorXd::Zero(variable_count);
-    for (int i = 0; i < node_count; ++i) {
-        const double left = i > 0 ? 0.5 * (nodes[static_cast<size_t>(i)] - nodes[static_cast<size_t>(i - 1)]) : 0.0;
-        const double right = i + 1 < node_count ? 0.5 * (nodes[static_cast<size_t>(i + 1)] - nodes[static_cast<size_t>(i)]) : 0.0;
-        linear(i) = -params.objective.global_speed_reward * (left + right);
+    ChainProblem problem;
+    problem.linear_reward.resize(nodes.size());
+    problem.node_upper.resize(nodes.size());
+    problem.step_limit.resize(nodes.size() - 1);
+    problem.initial_value = initial_speed_squared / speed_squared_scale;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const double left = i > 0 ? 0.5 * (nodes[i] - nodes[i - 1]) : 0.0;
+        const double right = i + 1 < nodes.size()
+            ? 0.5 * (nodes[i + 1] - nodes[i]) : 0.0;
+        problem.linear_reward[i] = params.objective.global_speed_reward * (left + right);
+        problem.node_upper[i] = limits[i].speed_squared_upper / speed_squared_scale;
+        if (i + 1 < nodes.size()) {
+            problem.step_limit[i] = 2.0 * limits[i].acceleration
+                * (nodes[i + 1] - nodes[i]) / speed_squared_scale;
+        }
     }
-    for (size_t window_index = 0; window_index < windows.size(); ++window_index) {
-        const double diagonal = 2.0 * params.objective.traversal_window
-            * windows[window_index].integration_weight;
-        quadratic_triplets.emplace_back(
-            node_count + 2 * static_cast<int>(window_index),
-            node_count + 2 * static_cast<int>(window_index), diagonal
-        );
-        quadratic_triplets.emplace_back(
-            node_count + 2 * static_cast<int>(window_index) + 1,
-            node_count + 2 * static_cast<int>(window_index) + 1, diagonal
-        );
+    problem.soft_windows.reserve(windows.size());
+    for (const SoftWindowNode& window : windows) {
+        problem.soft_windows.push_back({
+            .node_index = window.node_index,
+            .lower = window.target.min * window.target.min / speed_squared_scale,
+            .upper = window.target.max * window.target.max / speed_squared_scale,
+            .weight = params.objective.traversal_window * window.integration_weight,
+        });
     }
-    Eigen::SparseMatrix<double> quadratic(variable_count, variable_count);
-    quadratic.setFromTriplets(quadratic_triplets.begin(), quadratic_triplets.end());
-
-    const int row_count = variable_count + (node_count - 1)
-        + 2 * static_cast<int>(windows.size());
-    Eigen::VectorXd lower = Eigen::VectorXd::Constant(row_count, -INF);
-    Eigen::VectorXd upper = Eigen::VectorXd::Constant(row_count, INF);
-    std::vector<Eigen::Triplet<double>> constraint_triplets;
-    int row = 0;
-    for (int i = 0; i < node_count; ++i, ++row) {
-        constraint_triplets.emplace_back(row, i, 1.0);
-        lower(row) = 0.0;
-        upper(row) = limits[static_cast<size_t>(i)].speed_squared_upper
-            / speed_squared_scale;
-    }
-    lower(0) = initial_speed_squared / speed_squared_scale;
-    upper(0) = lower(0);
-    lower(node_count - 1) = 0.0;
-    upper(node_count - 1) = 0.0;
-    for (int i = node_count; i < variable_count; ++i, ++row) {
-        constraint_triplets.emplace_back(row, i, 1.0);
-        lower(row) = 0.0;
-    }
-    for (int i = 0; i + 1 < node_count; ++i, ++row) {
-        const double distance = nodes[static_cast<size_t>(i + 1)]
-            - nodes[static_cast<size_t>(i)];
-        const double scale = speed_squared_scale
-            / (2.0 * params.trajectory_acceleration_max * distance);
-        constraint_triplets.emplace_back(row, i, -scale);
-        constraint_triplets.emplace_back(row, i + 1, scale);
-        const double normalized_limit = limits[static_cast<size_t>(i)].acceleration
-            / params.trajectory_acceleration_max;
-        lower(row) = -normalized_limit;
-        upper(row) = normalized_limit;
-    }
-    for (size_t window_index = 0; window_index < windows.size(); ++window_index) {
-        const SoftWindowNode& window = windows[window_index];
-        const int lower_slack = node_count + 2 * static_cast<int>(window_index);
-        const int upper_slack = lower_slack + 1;
-        constraint_triplets.emplace_back(row, static_cast<int>(window.node_index), 1.0);
-        constraint_triplets.emplace_back(row, lower_slack, 1.0);
-        lower(row) = window.target.min * window.target.min / speed_squared_scale;
-        ++row;
-        constraint_triplets.emplace_back(row, static_cast<int>(window.node_index), 1.0);
-        constraint_triplets.emplace_back(row, upper_slack, -1.0);
-        upper(row) = window.target.max * window.target.max / speed_squared_scale;
-        ++row;
-    }
-    Eigen::SparseMatrix<double> constraints(row_count, variable_count);
-    constraints.setFromTriplets(constraint_triplets.begin(), constraint_triplets.end());
-    return {
-        .quadratic = std::move(quadratic),
-        .linear = std::move(linear),
-        .constraint_matrix = std::move(constraints),
-        .lower = std::move(lower),
-        .upper = std::move(upper),
-    };
+    return problem;
 }
 
 bool validate_profile(
@@ -638,79 +582,55 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
     }
 
     const std::vector<SoftWindowNode> windows = collect_soft_windows(nodes, step_segments);
-    const SparseQpProblem qp = build_qp(
-        params_, nodes, limits, windows, initial_speed_squared
-    );
-    const double speed_squared_scale = params_.objective.velocity_scale
-        * params_.objective.velocity_scale;
-    Eigen::VectorXd initial = Eigen::VectorXd::Zero(qp.linear.size());
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        initial(static_cast<Eigen::Index>(i)) = (*seed_squared)[i] / speed_squared_scale;
-    }
-    for (size_t i = 0; i < windows.size(); ++i) {
-        const double z = (*seed_squared)[windows[i].node_index] / speed_squared_scale;
-        initial(static_cast<Eigen::Index>(nodes.size() + 2 * i)) = std::max(
-            windows[i].target.min * windows[i].target.min / speed_squared_scale - z,
-            0.0
-        );
-        initial(static_cast<Eigen::Index>(nodes.size() + 2 * i + 1)) = std::max(
-            z - windows[i].target.max * windows[i].target.max / speed_squared_scale,
-            0.0
-        );
-    }
-
-    const AdmmQpSolver qp_solver(params_.solver);
-    const AdmmQpSolver::Result qp_result = qp_solver.solve(qp, initial);
     result.diagnostics.node_count = static_cast<int>(nodes.size());
-    result.diagnostics.variable_count = static_cast<int>(qp.linear.size());
-    result.diagnostics.constraint_count = static_cast<int>(qp.lower.size());
-    result.diagnostics.soft_window_node_count = static_cast<int>(windows.size());
-    result.diagnostics.iterations = qp_result.iterations;
-    result.diagnostics.rho_updates = qp_result.rho_updates;
+    result.diagnostics.soft_window_constraint_count = static_cast<int>(windows.size());
     result.diagnostics.seed_total_time = seed_profile.total_time();
-    result.diagnostics.primal_residual = qp_result.primal_residual;
-    result.diagnostics.dual_residual = qp_result.dual_residual;
-    result.diagnostics.max_constraint_violation = qp_result.max_constraint_violation;
-    result.diagnostics.primal_tolerance = qp_result.primal_tolerance;
-    result.diagnostics.dual_tolerance = qp_result.dual_tolerance;
-    result.diagnostics.constraint_tolerance = qp_result.constraint_tolerance;
-    result.diagnostics.final_rho = qp_result.final_rho;
-    result.diagnostics.factorization_ms = qp_result.factorization_ms;
-    result.diagnostics.iteration_ms = qp_result.iteration_ms;
-    result.diagnostics.solver_status = qp_result.status;
-    result.diagnostics.polish_status = qp_result.polish_status;
-    result.diagnostics.solver_error = qp_result.error;
 
     PathSpeedProfile selected = seed_profile;
-    const bool candidate_status = qp_result.status == AdmmQpSolver::Status::SOLVED
-        || qp_result.status == AdmmQpSolver::Status::MAX_ITERATIONS;
-    if (!candidate_status) {
-        result.diagnostics.candidate_rejection = qp_result.error.empty()
-            ? "QP solver did not produce an admissible candidate status"
-            : qp_result.error;
-    } else if (qp_result.solution.size() != qp.linear.size()) {
-        result.diagnostics.candidate_rejection = "QP solution dimension does not match the problem";
-    } else if (!qp_result.solution.allFinite()) {
-        result.diagnostics.candidate_rejection = "QP solution contains non-finite values";
+    if (windows.empty()) {
+        result.diagnostics.selection = Diagnostics::Selection::SEED_OPTIMAL_NO_WINDOW;
     } else {
-        std::vector<double> optimized_squared(nodes.size());
-        for (size_t i = 0; i < nodes.size(); ++i) {
-            optimized_squared[i] = std::max(
-                qp_result.solution(static_cast<Eigen::Index>(i)) * speed_squared_scale,
-                0.0
-            );
-        }
-        PathSpeedProfile optimized = make_profile(nodes, limits, optimized_squared);
-        if (validate_profile(
-                params_, geometry, step_segments, optimized,
-                initial_speed_squared, validation_error
+        const ChainProblem problem = build_chain_problem(
+            params_, nodes, limits, windows, initial_speed_squared
+        );
+        const PiecewiseQuadraticChainSolver::Result optimized_result =
+            PiecewiseQuadraticChainSolver::solve(problem);
+        result.diagnostics.max_breakpoints = optimized_result.max_breakpoints;
+        result.diagnostics.solve_ms = optimized_result.solve_ms;
+
+        if (optimized_result.status != PiecewiseQuadraticChainSolver::Status::OPTIMAL) {
+            result.diagnostics.fallback_reason = optimized_result.error.empty()
+                ? "chain solver did not return an optimal result"
+                : optimized_result.error;
+        } else if (optimized_result.value.size() != nodes.size()) {
+            result.diagnostics.fallback_reason =
+                "chain solution dimension does not match the node count";
+        } else if (!std::all_of(
+                optimized_result.value.begin(), optimized_result.value.end(),
+                [](const double value) { return std::isfinite(value); }
             )) {
-            selected = std::move(optimized);
-            result.diagnostics.selection = qp_result.status == AdmmQpSolver::Status::SOLVED
-                ? Diagnostics::Selection::QP_SOLVED
-                : Diagnostics::Selection::QP_MAX_ITERATIONS_VALIDATED;
+            result.diagnostics.fallback_reason = "chain solution contains non-finite values";
         } else {
-            result.diagnostics.candidate_rejection = validation_error;
+            const double speed_squared_scale = params_.objective.velocity_scale
+                * params_.objective.velocity_scale;
+            std::vector<double> optimized_squared(nodes.size());
+            std::transform(
+                optimized_result.value.begin(), optimized_result.value.end(),
+                optimized_squared.begin(),
+                [speed_squared_scale](const double value) {
+                    return std::max(value * speed_squared_scale, 0.0);
+                }
+            );
+            PathSpeedProfile optimized = make_profile(nodes, limits, optimized_squared);
+            if (validate_profile(
+                    params_, geometry, step_segments, optimized,
+                    initial_speed_squared, validation_error
+                )) {
+                selected = std::move(optimized);
+                result.diagnostics.selection = Diagnostics::Selection::OPTIMAL;
+            } else {
+                result.diagnostics.fallback_reason = validation_error;
+            }
         }
     }
 

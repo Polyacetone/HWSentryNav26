@@ -48,7 +48,9 @@ struct RouteMonitorInput {
 
     const CostMap* masked_global_cost_map = nullptr;
     const CostMap* current_dynamic_cost_map = nullptr;
+    // per_step_dynamic_cost_maps[i] 对应 t = (i+1) * prediction_dt 的预测帧。
     std::vector<const CostMap*> per_step_dynamic_cost_maps;
+    double prediction_dt = 0.0;
 
     const DirectionMap* base_direction_map = nullptr;
 
