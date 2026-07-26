@@ -22,16 +22,16 @@
 #include <interfaces/msg/comp_stage.hpp>
 #include <interfaces/msg/nav_executor_diag.hpp>
 
-#include <nav_executor/common/world_context.hpp>
-#include <nav_executor/common/route_tracker.hpp>
+#include <nav_executor/common/environment/world_context.hpp>
+#include <nav_executor/common/tracking/route_tracker.hpp>
 #include <nav_executor/task_manager/task_manager.hpp>
 #include <nav_executor/path_executor/path_executor.hpp>
-#include <nav_executor/path_executor/step_controller.hpp>
+#include <nav_executor/path_executor/state/step_controller.hpp>
 #include <nav_executor/task_manager/route_monitor.hpp>
 #include <nav_executor/path_planner/path_planner.hpp>
-#include <nav_executor/path_planner/nav_map.hpp>
-#include <nav_executor/path_planner/step_routing_mask.hpp>
-#include <nav_executor/path_executor/solver/mpc_solver.hpp>
+#include <nav_executor/common/environment/nav_map.hpp>
+#include <nav_executor/path_planner/search/step_routing_mask.hpp>
+#include <nav_executor/path_executor/mpc/mpc_solver.hpp>
 
 namespace nav_executor {
 

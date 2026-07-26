@@ -8,14 +8,14 @@
 #include <rclcpp/logger.hpp>
 
 #include <nav_executor/common/chassis_defs.hpp>
-#include <nav_executor/common/route_tracker.hpp>
-#include <nav_executor/path_executor/state_machine.hpp>
-#include <nav_executor/path_executor/step_controller.hpp>
-#include <nav_executor/path_executor/progress_monitor.hpp>
-#include <nav_executor/path_executor/safety_monitor.hpp>
-#include <nav_executor/common/annotated_path.hpp>
-#include <nav_executor/path_planner/nav_map.hpp>
-#include <nav_executor/path_executor/solver/mpc_solver.hpp>
+#include <nav_executor/common/tracking/route_tracker.hpp>
+#include <nav_executor/path_executor/state/state_machine.hpp>
+#include <nav_executor/path_executor/state/step_controller.hpp>
+#include <nav_executor/path_executor/monitoring/progress_monitor.hpp>
+#include <nav_executor/path_executor/monitoring/safety_monitor.hpp>
+#include <nav_executor/common/trajectory/annotated_path.hpp>
+#include <nav_executor/common/environment/nav_map.hpp>
+#include <nav_executor/path_executor/mpc/mpc_solver.hpp>
 
 namespace nav_executor {
 

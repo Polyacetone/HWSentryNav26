@@ -1,5 +1,5 @@
 #include <nav_executor/path_executor/path_executor.hpp>
-#include <nav_executor/path_executor/recovery_helpers.hpp>
+#include <nav_executor/path_executor/monitoring/recovery_helpers.hpp>
 #include <rclcpp/logging.hpp>
 
 namespace nav_executor {

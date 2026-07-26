@@ -5,9 +5,9 @@
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
 
-#include <nav_executor/common/annotated_path.hpp>
-#include <nav_executor/common/route_tracker.hpp>
-#include <nav_executor/path_planner/nav_map.hpp>
+#include <nav_executor/common/trajectory/annotated_path.hpp>
+#include <nav_executor/common/tracking/route_tracker.hpp>
+#include <nav_executor/common/environment/nav_map.hpp>
 
 namespace nav_executor {
 

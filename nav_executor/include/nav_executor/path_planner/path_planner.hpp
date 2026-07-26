@@ -10,14 +10,14 @@
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
 
-#include <nav_executor/common/annotated_path.hpp>
-#include <nav_executor/path_planner/dijkstra_cost_to_goal.hpp>
-#include <nav_executor/path_planner/kinodynamic_astar.hpp>
-#include <nav_executor/path_planner/minco_optimizer.hpp>
-#include <nav_executor/path_planner/nav_map.hpp>
-#include <nav_executor/path_planner/step_annotator.hpp>
-#include <nav_executor/path_planner/step_routing_mask.hpp>
-#include <nav_executor/path_planner/speed_profile_optimizer.hpp>
+#include <nav_executor/common/trajectory/annotated_path.hpp>
+#include <nav_executor/path_planner/search/dijkstra_cost_to_goal.hpp>
+#include <nav_executor/path_planner/search/kinodynamic_astar.hpp>
+#include <nav_executor/path_planner/trajectory/minco_optimizer.hpp>
+#include <nav_executor/common/environment/nav_map.hpp>
+#include <nav_executor/path_planner/trajectory/step_annotator.hpp>
+#include <nav_executor/path_planner/search/step_routing_mask.hpp>
+#include <nav_executor/path_planner/trajectory/speed_profile_optimizer.hpp>
 
 namespace nav_executor {
 

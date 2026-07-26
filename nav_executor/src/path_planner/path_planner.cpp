@@ -7,7 +7,7 @@
 
 #include <rclcpp/logging.hpp>
 
-#include <nav_executor/common/trajectory_topology.hpp>
+#include <nav_executor/common/trajectory/trajectory_topology.hpp>
 
 namespace nav_executor {
 

@@ -1,5 +1,5 @@
 #include <nav_executor/task_manager/route_monitor.hpp>
-#include <nav_executor/path_executor/recovery_helpers.hpp>
+#include <nav_executor/path_executor/monitoring/recovery_helpers.hpp>
 
 #include <algorithm>
 #include <cmath>
