@@ -153,21 +153,13 @@ class SimConfig:
     TOPIC_LOCAL_COST_MAPS: str = "/map_server/local_cost_maps"
     TOPIC_GLOBAL_DIRECTION_MAP: str = "/map_server/global_direction_map"
 
-    # --- 障碍物判定（cost map）---
-    # cost map 值域按工程惯例认为是 0~255（OccupancyGrid 的 int8 通过 uint8 解释）
-    OBSTACLE_COST_THRESHOLD: int = 200  # >= 该值认为是障碍物/发生接触
-    OBSTACLE_PUSH_COST_THRESHOLD: int = 250  # 当前位置 cost >= 该值则被“挤开”
-    OBSTACLE_PUSH_SPEED_MPS: float = 0.6  # 被推开速度（m/s）
-    ROBOT_INSCRIBED_RADIUS_M: float = 0.30  # 机器人内切圆半径（用于碰撞点采样）
-    COLLISION_LOOKAHEAD_M: float = 0.05  # 前/后碰撞点额外外扩（m）
-
-    # --- 台阶判定（direction map）---
-    # direction 场 max mag 从旧版 ~1.414 (dx/dy ∈ [-1,1]) 变为新版 1.0 (angle+mag)
-    # 旧阈值 ×0.7 适配新 range
-    STEP_NORM_THRESHOLD: float = 0.63  # direction 向量模长 >= 该值认为在台阶区域
-    STEP_STUCK_HEADING_ERR_RAD: float = math.radians(30.0)  # 与台阶方向场夹角过大则卡住
-    STEP_STUCK_MIN_SPEED_MPS: float = 0.4  # 速度过小则卡住（仅在尝试前进时）
-    STEP_RELEASE_NORM_THRESHOLD: float = 0.42  # 离开台阶区域的判定阈值（略小于进入阈值）
+    # --- 接触判定（cost map / direction map）---
+    ROBOT_INSCRIBED_RADIUS_M: float = 0.30  # 机器人内切圆半径（前/后接触探针基准）
+    COLLISION_LOOKAHEAD_M: float = 0.05  # 接触探针额外外扩（m），吸收单拍检测延迟
+    COLLISION_RESTITUTION: float = 0.3  # 回弹系数：回弹速度 = -e × 入射速度
+    MIN_IMPACT_SPEED_MPS: float = 0.05  # 入射速度低于该值不产生回弹（贴合停靠）
+    STEP_ENTRY_HEADING_ERR_RAD: float = math.radians(30.0)  # 与台阶方向夹角超过该值则无法通行
+    LETHAL_ESCAPE_SPEED_MPS: float = 0.6  # 机体中心陷入致命格时的脱困平移速度（m/s）
 
     # --- 小陀螺漂移 ---
     SPIN_DRIFT_SPEED_MPS: float = 0.05  # 小陀螺位置漂移速度（m/s）
@@ -626,6 +618,15 @@ class CostMap2D:
             return None
         return float(self.interpolate_grid(gx, gy))
 
+    def cell_cost_at_map(self, x: float, y: float) -> int:
+        """最近格 cost；越界返回 255（与 C++ CostMap::interpolate 的越界语义一致）。
+
+        致命性判定必须走这里而不是 cost_at_map：双线性插值会在 255 平台边界上
+        产出连续过渡值，使触发点依赖于接近方向。
+        """
+        gx, gy = self.map_coord_to_grid(x, y)
+        return self.at(int(math.floor(gx)), int(math.floor(gy)))
+
     def gradient_grid(self, gx: float, gy: float) -> np.ndarray:
         samples = 2
         x = int(gx)
@@ -720,11 +721,33 @@ class DirectionMap2D:
 
         return (1 - dx) * (1 - dy) * v00 + dx * (1 - dy) * v10 + (1 - dx) * dy * v01 + dx * dy * v11
 
+    # 本体格 iff 最近格 raw 模长 > 该阈值（与 C++ TERRAIN_BODY_MAGNITUDE_THRESHOLD 一致）。
+    # 膨胀格模长被 direction_non_body_magnitude_cap 压到 <= 229/255 ≈ 0.898，
+    # 地形本体格固定为 255/255 = 1.0，因此二者可严格区分。
+    # 注意：膨胀格同样会被写入地形 label，故 label 不能用于区分本体。
+    BODY_MAGNITUDE_THRESHOLD = 0.95
+
     def direction_at_map(self, x: float, y: float) -> Optional[np.ndarray]:
         gx, gy = self.map_coord_to_grid(x, y)
         if not self.is_valid_grid_coord_d(gx, gy):
             return None
         return self.interpolate_grid(gx, gy)
+
+    def body_direction_at_map(self, x: float, y: float) -> Optional[np.ndarray]:
+        """若该点落在地形本体格上，返回其方向向量；否则返回 None。"""
+        gx, gy = self.map_coord_to_grid(x, y)
+        vec = self.at(int(math.floor(gx)), int(math.floor(gy)))
+        if float(np.linalg.norm(vec)) <= self.BODY_MAGNITUDE_THRESHOLD:
+            return None
+        return vec
+
+    def terrain_label_at_map(self, x: float, y: float) -> int:
+        gx, gy = self.map_coord_to_grid(x, y)
+        xi = int(math.floor(gx))
+        yi = int(math.floor(gy))
+        if 0 <= xi < self.width and 0 <= yi < self.height:
+            return int(self.terrain[yi, xi])
+        return 0
 
 
 # =============================================================================
@@ -934,10 +957,11 @@ class WheelLegLqrFollowSimNode(Node):
 
         self._v_applied = 0.0
         self._w_applied = 0.0
-        self._w_prev = 0.0
 
-        # environment interaction state
-        self._step_stuck = False
+        # 接触状态：法向符号（0=无接触，+1=前缘接触，-1=后缘接触）
+        self._contact_normal_sign = 0.0
+        self._in_lethal_contact = False
+        self._was_on_step_body = False
 
         self._global_cost_map: Optional[CostMap2D] = None
         self._local_cost_map: Optional[CostMap2D] = None
@@ -1119,43 +1143,145 @@ class WheelLegLqrFollowSimNode(Node):
             return None
         return best_dir / n
 
-    def _collision_flags(self, x: float, y: float, yaw: float) -> tuple[bool, bool, Optional[float]]:
-        r = float(self.cfg.ROBOT_INSCRIBED_RADIUS_M + self.cfg.COLLISION_LOOKAHEAD_M)
-        fx = x + r * math.cos(yaw)
-        fy = y + r * math.sin(yaw)
-        rx = x - r * math.cos(yaw)
-        ry = y - r * math.sin(yaw)
+    def _is_lethal(self, x: float, y: float) -> bool:
+        """该点是否落在实心障碍上（cost == 255，含地图外）。"""
+        if self._global_cost_map is None and self._local_cost_map is None:
+            return False
+        for cost_map in (self._global_cost_map, self._local_cost_map):
+            if cost_map is not None and cost_map.cell_cost_at_map(x, y) >= 255:
+                return True
+        return False
 
-        c_front = self._cost_at(fx, fy)
-        c_rear = self._cost_at(rx, ry)
-        c_center = self._cost_at(x, y)
+    def _probe_point(self, x: float, y: float, yaw: float, direction_sign: float) -> tuple[float, float]:
+        """沿运动方向的接触探针位置（车体前缘或后缘）。"""
+        r = float(self.cfg.ROBOT_INSCRIBED_RADIUS_M + self.cfg.COLLISION_LOOKAHEAD_M) * direction_sign
+        return (x + r * math.cos(yaw), y + r * math.sin(yaw))
 
-        thr = float(self.cfg.OBSTACLE_COST_THRESHOLD)
-        front_hit = (c_front is not None) and (float(c_front) >= thr)
-        rear_hit = (c_rear is not None) and (float(c_rear) >= thr)
-        return front_hit, rear_hit, c_center
+    def _step_blocks_entry(self, x: float, y: float, yaw: float, direction_sign: float) -> bool:
+        """车体前缘是否顶在一段无法以当前朝向通行的台阶本体上。
 
-    def _step_info(self, x: float, y: float) -> tuple[float, float]:
-        # returns: (step_norm, heading_err)
-        # - step_norm: 台阶方向场模长
-        # - heading_err: 与台阶方向夹角（前后等价，取更小者）
+        通行判据只看朝向与台阶方向场的夹角（前后等价）：夹角 <= 30° 视为正对，
+        允许通行；超过则视为侧向撞上台阶立面。
+        """
         if self._direction_map is None:
-            return 0.0, 0.0
-        vec = self._direction_map.direction_at_map(x, y)
+            return False
+
+        px, py = self._probe_point(x, y, yaw, direction_sign)
+        vec = self._direction_map.body_direction_at_map(px, py)
         if vec is None:
-            return 0.0, 0.0
+            return False
 
-        vx = float(vec[0])
-        vy = float(vec[1])
-        n = float(math.hypot(vx, vy))
-        if n <= 1e-9:
-            return n, 0.0
-
-        step_yaw = math.atan2(vy, vx)
-        yaw = wrap_to_pi(self.dyn.theta)
+        step_yaw = math.atan2(float(vec[1]), float(vec[0]))
         e1 = abs(angle_diff(yaw, step_yaw))
         e2 = abs(angle_diff(yaw, wrap_to_pi(step_yaw + math.pi)))
-        return n, float(min(e1, e2))
+        return min(e1, e2) > float(self.cfg.STEP_ENTRY_HEADING_ERR_RAD)
+
+    def _on_step_body(self, x: float, y: float, yaw: float, direction_sign: float) -> bool:
+        if self._direction_map is None:
+            return False
+        px, py = self._probe_point(x, y, yaw, direction_sign)
+        return self._direction_map.body_direction_at_map(px, py) is not None
+
+    # ------------------------
+    # contact resolution
+    # ------------------------
+
+    def _resolve_contact(self, x_before: float, y_before: float) -> None:
+        """在 plant 状态上求解与实心障碍/不可通行台阶的接触。
+
+        约束必须施加于 plant 速度而非 LQR 参考：参考只是期望值，清零参考后闭环仍
+        需数百毫秒才衰减，期间车体会以接近原速穿进障碍。
+
+        行为：
+          - 首次接触（上升沿）时施加回弹冲量 v ← -e·v_impact；
+          - 接触持续期间对 plant 速度做单侧约束，禁止指向障碍侧，从而既不穿透，
+            也允许车辆自行退开后重新接近（真实撞墙手感）；
+          - 台阶的回弹只在“进入台阶本体”的上升沿判定一次夹角，但阻挡逐拍复判，
+            因此原地转正朝向后即可放行。
+        """
+        v_now = float(self.dyn.v)
+        yaw = wrap_to_pi(float(self.dyn.theta))
+        direction_sign = 1.0 if v_now >= 0.0 else -1.0
+
+        x_now = float(self.dyn.x)
+        y_now = float(self.dyn.y)
+
+        probe_x, probe_y = self._probe_point(x_now, y_now, yaw, direction_sign)
+        lethal_contact = self._is_lethal(probe_x, probe_y)
+
+        on_step_body = self._on_step_body(x_now, y_now, yaw, direction_sign)
+        step_entry_edge = on_step_body and not self._was_on_step_body
+        self._was_on_step_body = on_step_body
+        step_contact = on_step_body and self._step_blocks_entry(x_now, y_now, yaw, direction_sign)
+
+        if not (lethal_contact or step_contact):
+            self._contact_normal_sign = 0.0
+            self._in_lethal_contact = False
+            return
+
+        # 接触面法向：约束禁止的速度符号。前缘接触 → 禁止正向。
+        self._contact_normal_sign = direction_sign
+
+        # 回弹冲量只在接触上升沿施加：实心障碍看接触上升沿，台阶看进入本体的上升沿。
+        impulse_edge = (lethal_contact and not self._in_lethal_contact) or (step_contact and step_entry_edge)
+        self._in_lethal_contact = lethal_contact
+
+        if impulse_edge and abs(v_now) >= float(self.cfg.MIN_IMPACT_SPEED_MPS):
+            rebound = -float(self.cfg.COLLISION_RESTITUTION) * v_now
+            self._apply_velocity_override(rebound)
+            self.get_logger().info(
+                f"contact bounce: {'lethal' if lethal_contact else 'step'} "
+                f"v_impact={v_now:+.2f} -> v={rebound:+.2f} m/s"
+            )
+        elif direction_sign * float(self.dyn.v) > 0.0:
+            # 接触持续中且仍在向障碍侧运动：单侧约束到零
+            self._apply_velocity_override(0.0)
+
+        # 回退本拍产生的穿透位移
+        self.dyn.world_pose[0] = x_before
+        self.dyn.world_pose[1] = y_before
+
+    def _apply_velocity_override(self, v_new: float) -> None:
+        """强制改写 plant 速度，并同步参考量以避免 LQR 立即对抗。
+
+        s_ref 必须重锚到当前 s：否则 s_ref 中残留的位置误差会让 LQR 在下一拍
+        重新把速度拉回障碍方向，表现为接触面上的高频抖动。
+        """
+        self.dyn.state[self.dyn.IDX_DS] = float(v_new)
+        self._v_applied = float(v_new)
+        self._s_ref = float(self.dyn.s)
+
+    def _escape_if_embedded(self) -> None:
+        """机体中心落在实心障碍内时沿代价下降方向平移脱困。
+
+        这是非物理的兜底机制，仅用于处理初始位姿落在障碍内或被动态障碍完全包住
+        的情形；正常接触由 _resolve_contact 处理。
+        """
+        if not self._is_lethal(self.dyn.x, self.dyn.y):
+            return
+
+        escape_dir: Optional[np.ndarray] = None
+        grad = self._gradient_at(self.dyn.x, self.dyn.y)
+        if grad is not None:
+            away = -grad
+            n = float(np.linalg.norm(away))
+            if n > 1e-6:
+                escape_dir = away / n
+        if escape_dir is None:
+            # 梯度为零（255 平台内部）：搜索一个代价更低的方向
+            step = 0.05
+            if self._global_cost_map is not None:
+                step = max(step, float(self._global_cost_map.resolution))
+            elif self._local_cost_map is not None:
+                step = max(step, float(self._local_cost_map.resolution))
+            escape_dir = self._find_escape_dir(self.dyn.x, self.dyn.y, step)
+        if escape_dir is None:
+            return
+
+        disp = float(self.cfg.LETHAL_ESCAPE_SPEED_MPS) * float(self._dt_lqr)
+        self.dyn.world_pose[0] += float(escape_dir[0]) * disp
+        self.dyn.world_pose[1] += float(escape_dir[1]) * disp
+        self._apply_velocity_override(0.0)
 
     # ------------------------
     # cmd processing
@@ -1225,7 +1351,6 @@ class WheelLegLqrFollowSimNode(Node):
             self._spin_fast = False
             self._v_target = 0.0
             self._w_target = 0.0
-            self._theta_target = float(self._theta_target)
 
         if spin_mode:
             # set spin target continuously
@@ -1234,44 +1359,18 @@ class WheelLegLqrFollowSimNode(Node):
             self._v_target = 0.0
             self._w_target = float(spin_w * last_sign)
 
-        # ----- environment constraints (台阶/障碍物) -----
+        # ----- 指令参考整形 -----
+        # 环境约束不在这里施加：接触是被控对象与世界的相互作用，只能作用在 plant
+        # 状态上（见 _resolve_contact）。此处仅做纯指令层的限幅。
         v_des = float(self._v_target)
         w_des = float(self._w_target)
 
-        x0 = float(self.dyn.x)
-        y0 = float(self.dyn.y)
-        yaw0 = wrap_to_pi(float(self.dyn.theta))
-
-        step_norm, step_heading_err = self._step_info(x0, y0)
-        on_step = step_norm >= float(self.cfg.STEP_NORM_THRESHOLD)
-
-        # step stuck state machine
-        if self._step_stuck:
-            if step_norm < float(self.cfg.STEP_RELEASE_NORM_THRESHOLD):
-                self._step_stuck = False
-
-        entered_stuck = False
-        if (not self._step_stuck) and on_step and (v_des > 0.0):
-            if (step_heading_err > float(self.cfg.STEP_STUCK_HEADING_ERR_RAD)) or (abs(float(self.dyn.v)) < float(self.cfg.STEP_STUCK_MIN_SPEED_MPS)):
-                self._step_stuck = True
-                entered_stuck = True
-
-        if self._step_stuck:
-            # 卡台阶：立即停住，之后只允许倒车，且不响应角速度
-            spin_mode = False
-            v_des = float(min(v_des, 0.0))
-            w_des = 0.0
-            if entered_stuck:
-                self._v_applied = 0.0
-                self._w_applied = 0.0
-                self.dyn.state[self.dyn.IDX_DS] = 0.0
-                self.dyn.state[self.dyn.IDX_DPHI] = 0.0
-
-        front_hit, rear_hit, center_cost = self._collision_flags(x0, y0, yaw0)
-        if front_hit and v_des > 0.0:
-            v_des = 0.0
-        if rear_hit and v_des < 0.0:
-            v_des = 0.0
+        # 处于接触约束中时，不允许参考继续指向障碍侧，否则 LQR 会持续输出顶墙力矩。
+        if self._contact_normal_sign != 0.0:
+            if self._contact_normal_sign > 0.0:
+                v_des = min(v_des, 0.0)
+            else:
+                v_des = max(v_des, 0.0)
 
         # capture previous applied omega for trapezoidal integration
         w_prev = float(self._w_applied)
@@ -1283,31 +1382,8 @@ class WheelLegLqrFollowSimNode(Node):
         # enforce max speed / max omega / product after rate-limit
         self._v_applied, self._w_applied = self._clamp_v_w_product(self._v_applied, self._w_applied)
 
-        # collision hard clamp after rate-limit (避免 1ms 内继续向障碍物“渗透”)
-        if front_hit and self._v_applied > 0.0:
-            self._v_applied = 0.0
-        if rear_hit and self._v_applied < 0.0:
-            self._v_applied = 0.0
-        if self._step_stuck:
-            self._w_applied = 0.0
-
-        # dt 级预测：防止单步穿透障碍物（尤其是薄障碍/高速度时）
-        if self._v_applied != 0.0:
-            pred_x = x0 + float(self._v_applied) * math.cos(yaw0) * float(self._dt_lqr)
-            pred_y = y0 + float(self._v_applied) * math.sin(yaw0) * float(self._dt_lqr)
-            next_front, next_rear, next_center_cost = self._collision_flags(pred_x, pred_y, yaw0)
-            thr = float(self.cfg.OBSTACLE_COST_THRESHOLD)
-            center_block = (next_center_cost is not None) and (float(next_center_cost) >= thr)
-            if self._v_applied > 0.0 and (next_front or center_block):
-                self._v_applied = 0.0
-            if self._v_applied < 0.0 and (next_rear or center_block):
-                self._v_applied = 0.0
-
         # update theta reference by trapezoidal integration of applied omega
         self._theta_target = wrap_to_pi(self._theta_target + 0.5 * (w_prev + self._w_applied) * self._dt_lqr)
-
-        # remember previous omega
-        self._w_prev = float(self._w_applied)
 
         # update s reference
         # Use current LQR response state s as the baseline to avoid s_ref runaway
@@ -1325,6 +1401,10 @@ class WheelLegLqrFollowSimNode(Node):
         noise = self._rng.normal(0.0, 1.0, size=4) * std
         u_disturb = bias + noise
 
+        # 记录积分前位姿，供接触求解在穿透时回退
+        x_before = float(self.dyn.x)
+        y_before = float(self.dyn.y)
+
         # step plant
         self.dyn.step_lqr(
             s_ref=self._s_ref,
@@ -1335,30 +1415,11 @@ class WheelLegLqrFollowSimNode(Node):
             u_disturb=u_disturb,
         )
 
-        # obstacle push-out (若当前位置代价过高，则沿“下降梯度”方向挤开)
-        cost_now = self._cost_at(self.dyn.x, self.dyn.y)
-        if cost_now is not None and float(cost_now) >= float(self.cfg.OBSTACLE_PUSH_COST_THRESHOLD):
-            grad = self._gradient_at(self.dyn.x, self.dyn.y)
-            push_dir: Optional[np.ndarray] = None
-            if grad is not None:
-                away = -grad
-                n = float(np.linalg.norm(away))
-                if n > 1e-6:
-                    push_dir = away / n
-            if push_dir is None:
-                # 梯度过小/平台区域：尝试找一个更低 cost 的方向
-                step = 0.0
-                if self._global_cost_map is not None:
-                    step = float(self._global_cost_map.resolution)
-                elif self._local_cost_map is not None:
-                    step = float(self._local_cost_map.resolution)
-                step = max(0.05, step)
-                push_dir = self._find_escape_dir(self.dyn.x, self.dyn.y, step)
+        # 接触求解（作用于 plant 状态，必须在 step_lqr 之后）
+        self._resolve_contact(x_before, y_before)
 
-            if push_dir is not None:
-                disp = float(self.cfg.OBSTACLE_PUSH_SPEED_MPS) * float(self._dt_lqr)
-                self.dyn.world_pose[0] += float(push_dir[0]) * disp
-                self.dyn.world_pose[1] += float(push_dir[1]) * disp
+        # 机体中心陷入实心障碍时的脱困平移（初始位姿非法 / 被动态障碍包住）
+        self._escape_if_embedded()
 
         # spin drift (小陀螺模式位置缓慢漂移)
         if spin_mode and float(self.cfg.SPIN_DRIFT_SPEED_MPS) > 0.0:
