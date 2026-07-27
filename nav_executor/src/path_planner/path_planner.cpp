@@ -21,7 +21,8 @@ const char* speed_profile_selection_string(
     using Selection = SpeedProfileOptimizer::Diagnostics::Selection;
     switch (selection) {
         case Selection::OPTIMAL: return "OPTIMAL";
-        case Selection::SEED_OPTIMAL_NO_WINDOW: return "SEED_OPTIMAL_NO_WINDOW";
+        case Selection::SEED_OPTIMAL_NO_SOFT_CONSTRAINT:
+            return "SEED_OPTIMAL_NO_SOFT_CONSTRAINT";
         case Selection::FALLBACK: return "FALLBACK";
     }
     return "UNKNOWN";
@@ -486,7 +487,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     KinodynamicAstar::State strict_start;
     strict_start.position = start_map;
     // A* 原语要求严格正的前向速度，因此起点参考速度不低于最低可跟踪速度。
-    const TrajectoryLimits& limits = config_.minco.limits;
+    const MincoOptimizer::Limits& limits = config_.minco.limits;
     const double start_reference_speed = std::clamp(
         req.current_velocity, limits.min_trackable_speed, limits.velocity_max
     );
@@ -668,16 +669,19 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto& speed_diagnostics = speed_result.diagnostics;
     RCLCPP_DEBUG(
         logger_,
-        "Speed profile: selection=%s nodes=%d windows=%d breakpoints=%d "
-        "solve=%.3f ms travel=%.2f s cost=(speed=%.3g,step=%.3g)",
+        "Speed profile: selection=%s nodes=%d constraints=(step=%d,lateral=%d) "
+        "breakpoints=%d solve=%.3f ms travel=%.2f s "
+        "cost=(speed=%.3g,step=%.3g,lateral=%.3g)",
         speed_profile_selection_string(speed_diagnostics.selection),
         speed_diagnostics.node_count,
-        speed_diagnostics.soft_window_constraint_count,
+        speed_diagnostics.traversal_window_constraint_count,
+        speed_diagnostics.lateral_acceleration_constraint_count,
         speed_diagnostics.max_breakpoints,
         speed_diagnostics.solve_ms,
         speed_diagnostics.result_total_time,
         speed_diagnostics.speed_reward_cost,
-        speed_diagnostics.traversal_window_cost
+        speed_diagnostics.traversal_window_cost,
+        speed_diagnostics.lateral_acceleration_cost
     );
     if (speed_diagnostics.selection
         == SpeedProfileOptimizer::Diagnostics::Selection::FALLBACK) {

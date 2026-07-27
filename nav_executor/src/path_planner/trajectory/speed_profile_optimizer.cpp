@@ -26,10 +26,18 @@ struct NodeLimit {
     double acceleration = 0.0;
 };
 
-struct SoftWindowNode {
+struct TraversalWindowNode {
     size_t node_index = 0;
     double integration_weight = 0.0;
+    double gate = 0.0;
     TraversalVelocityWindow target;
+};
+
+struct LateralAccelerationNode {
+    size_t node_index = 0;
+    double integration_weight = 0.0;
+    double curvature = 0.0;
+    double speed_squared_upper = 0.0;
 };
 
 // 逐点动力学包络，全部由同一份真实几何曲率导出。
@@ -124,29 +132,11 @@ CapabilityProfile capability_at(
     return effective.value_or(params.normal_profile);
 }
 
-// 该弧长处生效的最终规划能力：全局轨迹包络与 capability 的逐项交集。
-TrajectoryLimits effective_limits(
-    const SpeedProfileOptimizer::Params& params,
-    const std::vector<StepPlanSegment>& segments,
-    const double progress
-) {
-    const CapabilityProfile capability = capability_at(params, segments, progress);
-    const auto& envelope = capability.command_envelope;
-    const auto& dynamics = capability.command_dynamics;
-    TrajectoryLimits limits = params.limits;
-    limits.velocity_max = std::min(limits.velocity_max, envelope.velocity.max);
-    limits.acceleration_max = std::min(limits.acceleration_max, dynamics.velocity_rate_max);
-    limits.angular_velocity_max = std::min(
-        limits.angular_velocity_max,
-        std::min(envelope.angular_velocity.max, -envelope.angular_velocity.min)
+double angular_velocity_magnitude_max(const CapabilityProfile& capability) {
+    return std::min(
+        capability.command_envelope.angular_velocity.max,
+        -capability.command_envelope.angular_velocity.min
     );
-    limits.angular_acceleration_max = std::min(
-        limits.angular_acceleration_max, dynamics.angular_velocity_rate_max
-    );
-    limits.lateral_acceleration_max = std::min(
-        limits.lateral_acceleration_max, dynamics.lateral_acceleration_max
-    );
-    return limits;
 }
 
 LocalEnvelope local_envelope(
@@ -155,21 +145,24 @@ LocalEnvelope local_envelope(
     const TrajSample& sample,
     const double progress
 ) {
-    const TrajectoryLimits limits = effective_limits(params, segments, progress);
+    const CapabilityProfile capability = capability_at(params, segments, progress);
+    const auto& command = capability.command_envelope;
+    const auto& dynamics = capability.command_dynamics;
     const double curvature = std::abs(sample.kappa);
     const double curvature_rate = std::abs(sample.kappa_rate);
-    const double angular_budget = ANGULAR_ACCELERATION_SHARE * limits.angular_acceleration_max;
+    const double angular_budget = ANGULAR_ACCELERATION_SHARE
+        * dynamics.angular_velocity_rate_max;
 
     LocalEnvelope envelope;
-    envelope.speed_squared_upper = limits.velocity_max * limits.velocity_max;
-    envelope.acceleration_upper = limits.acceleration_max;
+    envelope.speed_squared_upper = command.velocity.max * command.velocity.max;
+    envelope.acceleration_upper = dynamics.velocity_rate_max;
     if (curvature > EPS) {
-        // |κ|√z ≤ ω_max 与 |κ|z ≤ a_lat_max
-        envelope.speed_squared_upper = std::min({
+        // |κ|√z ≤ ω_max。侧向加速度与 MPC 一致，作为软约束单独进入目标函数。
+        const double angular_velocity_max = angular_velocity_magnitude_max(capability);
+        envelope.speed_squared_upper = std::min(
             envelope.speed_squared_upper,
-            limits.angular_velocity_max * limits.angular_velocity_max / (curvature * curvature),
-            limits.lateral_acceleration_max / curvature,
-        });
+            angular_velocity_max * angular_velocity_max / (curvature * curvature)
+        );
         // |κ|·|dz/ds|/2 ≤ SHARE·α_max，其中 dz/ds = 2·a_t
         envelope.acceleration_upper = std::min(
             envelope.acceleration_upper, angular_budget / curvature
@@ -385,17 +378,17 @@ PathSpeedProfile make_profile(
     return PathSpeedProfile(std::move(states));
 }
 
-std::vector<SoftWindowNode> collect_soft_windows(
+std::vector<TraversalWindowNode> collect_traversal_windows(
     const std::vector<double>& nodes,
     const std::vector<StepPlanSegment>& segments
 ) {
-    std::vector<SoftWindowNode> windows;
+    std::vector<TraversalWindowNode> windows;
     for (const StepPlanSegment& segment : segments) {
         for (size_t node_index = 0; node_index < nodes.size(); ++node_index) {
-            if (nodes[node_index] + EPS < segment.commit_arc_length
-                || nodes[node_index] - EPS > segment.step_exit_arc_length) {
-                continue;
-            }
+            const double gate = step_window_gate(
+                nodes[node_index], segment.traversal_constraint
+            );
+            if (gate <= 0.0) continue;
             const double left = node_index > 0
                 ? 0.5 * (nodes[node_index] - nodes[node_index - 1]) : 0.0;
             const double right = node_index + 1 < nodes.size()
@@ -403,6 +396,7 @@ std::vector<SoftWindowNode> collect_soft_windows(
             windows.push_back({
                 .node_index = node_index,
                 .integration_weight = left + right,
+                .gate = gate,
                 .target = segment.traversal_constraint.velocity_window,
             });
         }
@@ -410,11 +404,45 @@ std::vector<SoftWindowNode> collect_soft_windows(
     return windows;
 }
 
+std::vector<LateralAccelerationNode> collect_lateral_acceleration_nodes(
+    const SpeedProfileOptimizer::Params& params,
+    const MincoTrajectory& geometry,
+    const std::vector<StepPlanSegment>& segments,
+    const std::vector<double>& nodes
+) {
+    std::vector<LateralAccelerationNode> constraints;
+    if (params.objective.lateral_acceleration == 0.0) return constraints;
+
+    constraints.reserve(nodes.size());
+    for (size_t node_index = 0; node_index < nodes.size(); ++node_index) {
+        const double curvature = std::abs(
+            geometry.eval_arc_length(nodes[node_index]).kappa
+        );
+        if (curvature <= EPS) continue;
+        const CapabilityProfile capability = capability_at(
+            params, segments, nodes[node_index]
+        );
+        const double left = node_index > 0
+            ? 0.5 * (nodes[node_index] - nodes[node_index - 1]) : 0.0;
+        const double right = node_index + 1 < nodes.size()
+            ? 0.5 * (nodes[node_index + 1] - nodes[node_index]) : 0.0;
+        constraints.push_back({
+            .node_index = node_index,
+            .integration_weight = left + right,
+            .curvature = curvature,
+            .speed_squared_upper =
+                capability.command_dynamics.lateral_acceleration_max / curvature,
+        });
+    }
+    return constraints;
+}
+
 ChainProblem build_chain_problem(
     const SpeedProfileOptimizer::Params& params,
     const std::vector<double>& nodes,
     const std::vector<NodeLimit>& limits,
-    const std::vector<SoftWindowNode>& windows,
+    const std::vector<TraversalWindowNode>& windows,
+    const std::vector<LateralAccelerationNode>& lateral_constraints,
     const double initial_speed_squared
 ) {
     const double speed_squared_scale = params.objective.velocity_scale
@@ -435,20 +463,33 @@ ChainProblem build_chain_problem(
                 * (nodes[i + 1] - nodes[i]) / speed_squared_scale;
         }
     }
-    problem.soft_windows.reserve(windows.size());
-    for (const SoftWindowNode& window : windows) {
+    problem.soft_windows.reserve(windows.size() + lateral_constraints.size());
+    for (const TraversalWindowNode& window : windows) {
         problem.soft_windows.push_back({
             .node_index = window.node_index,
             .lower = window.target.min * window.target.min / speed_squared_scale,
             .upper = window.target.max * window.target.max / speed_squared_scale,
-            .weight = params.objective.traversal_window * window.integration_weight,
+            .weight = params.objective.traversal_window * window.integration_weight
+                * window.gate * window.gate,
+        });
+    }
+    for (const LateralAccelerationNode& constraint : lateral_constraints) {
+        // q=z/scale²。将 (|κ|z-a_lat,max)² 的物理违规准确换算到 q 空间。
+        const double acceleration_per_q = constraint.curvature * speed_squared_scale;
+        problem.soft_windows.push_back({
+            .node_index = constraint.node_index,
+            .lower = 0.0,
+            .upper = constraint.speed_squared_upper / speed_squared_scale,
+            .weight = params.objective.lateral_acceleration
+                * constraint.integration_weight
+                * acceleration_per_q * acceleration_per_q,
         });
     }
     return problem;
 }
 
-// 独立速度剖面证书：在与优化解耦的密网格上核验完整动力学，包括未做等分近似的
-// 真实角加速度 dω/dt = κ'v² + κ·a_t。
+// 独立速度剖面证书：在与优化解耦的密网格上核验全部硬约束，包括未做等分近似的
+// 真实角加速度 dω/dt = κ'v² + κ·a_t。侧向加速度与台阶速度窗是软约束，不作拒绝。
 bool validate_profile(
     const SpeedProfileOptimizer::Params& params,
     const MincoTrajectory& geometry,
@@ -489,14 +530,18 @@ bool validate_profile(
             / static_cast<double>(samples);
         const SpeedProfileState state = profile.eval_arc_length(progress);
         const TrajSample sample = geometry.eval_arc_length(progress);
-        const TrajectoryLimits limits = effective_limits(params, segments, progress);
+        const CapabilityProfile capability = capability_at(params, segments, progress);
+        const auto& dynamics = capability.command_dynamics;
         const auto exceeds = [](const double value, const double limit, const double tolerance) {
             return std::abs(value) > limit + tolerance;
         };
 
         // 起点速度是不可修改的当前事实，只能以最大减速度收敛到局部包络。
+        const double initial_deceleration_max = capability_at(
+            params, segments, 0.0
+        ).command_dynamics.velocity_rate_max;
         const double reachable_upper = std::sqrt(std::max(
-            initial_speed_squared - 2.0 * params.limits.acceleration_max * progress, 0.0
+            initial_speed_squared - 2.0 * initial_deceleration_max * progress, 0.0
         ));
         const double velocity_upper = std::max(
             std::sqrt(local_envelope(params, segments, sample, progress).speed_squared_upper),
@@ -508,7 +553,7 @@ bool validate_profile(
             return false;
         }
         if (exceeds(
-                state.acceleration, limits.acceleration_max,
+                state.acceleration, dynamics.velocity_rate_max,
                 params.validation.acceleration_tolerance
             )) {
             error = "speed profile violates tangential acceleration at s="
@@ -516,7 +561,7 @@ bool validate_profile(
             return false;
         }
         if (exceeds(
-                sample.kappa * state.velocity, limits.angular_velocity_max,
+                sample.kappa * state.velocity, angular_velocity_magnitude_max(capability),
                 params.validation.angular_velocity_tolerance
             )) {
             error = "speed profile violates angular velocity at s=" + std::to_string(progress);
@@ -525,19 +570,10 @@ bool validate_profile(
         if (exceeds(
                 sample.kappa_rate * state.velocity * state.velocity
                     + sample.kappa * state.acceleration,
-                limits.angular_acceleration_max,
+                dynamics.angular_velocity_rate_max,
                 params.validation.angular_acceleration_tolerance
             )) {
             error = "speed profile violates angular acceleration at s="
-                + std::to_string(progress);
-            return false;
-        }
-        if (exceeds(
-                sample.kappa * state.velocity * state.velocity,
-                limits.lateral_acceleration_max,
-                params.validation.lateral_acceleration_tolerance
-            )) {
-            error = "speed profile violates lateral acceleration at s="
                 + std::to_string(progress);
             return false;
         }
@@ -620,17 +656,24 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
         return result;
     }
 
-    const std::vector<SoftWindowNode> windows = collect_soft_windows(nodes, step_segments);
+    const std::vector<TraversalWindowNode> windows = collect_traversal_windows(
+        nodes, step_segments
+    );
+    const std::vector<LateralAccelerationNode> lateral_constraints =
+        collect_lateral_acceleration_nodes(params_, geometry, step_segments, nodes);
     result.diagnostics.node_count = static_cast<int>(nodes.size());
-    result.diagnostics.soft_window_constraint_count = static_cast<int>(windows.size());
+    result.diagnostics.traversal_window_constraint_count = static_cast<int>(windows.size());
+    result.diagnostics.lateral_acceleration_constraint_count =
+        static_cast<int>(lateral_constraints.size());
     result.diagnostics.seed_total_time = seed_profile.total_time();
 
     PathSpeedProfile selected = seed_profile;
-    if (windows.empty()) {
-        result.diagnostics.selection = Diagnostics::Selection::SEED_OPTIMAL_NO_WINDOW;
+    if (windows.empty() && lateral_constraints.empty()) {
+        result.diagnostics.selection =
+            Diagnostics::Selection::SEED_OPTIMAL_NO_SOFT_CONSTRAINT;
     } else {
         const ChainProblem problem = build_chain_problem(
-            params_, nodes, limits, windows, initial_speed_squared
+            params_, nodes, limits, windows, lateral_constraints, initial_speed_squared
         );
         const PiecewiseQuadraticChainSolver::Result optimized_result =
             PiecewiseQuadraticChainSolver::solve(problem);
@@ -682,7 +725,7 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
         result.diagnostics.speed_reward_cost -= params_.objective.global_speed_reward
             * (nodes[i + 1] - nodes[i]) * 0.5 * (z0 + z1) / scale_squared;
     }
-    for (const SoftWindowNode& window : windows) {
+    for (const TraversalWindowNode& window : windows) {
         const double velocity = selected.eval_arc_length(nodes[window.node_index]).velocity;
         const double z = velocity * velocity / scale_squared;
         const double lower = window.target.min * window.target.min / scale_squared;
@@ -690,6 +733,18 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
         const double violation = z < lower ? lower - z : (z > upper ? z - upper : 0.0);
         result.diagnostics.traversal_window_cost += params_.objective.traversal_window
             * window.integration_weight * violation * violation;
+    }
+    for (const LateralAccelerationNode& constraint : lateral_constraints) {
+        const double velocity = selected.eval_arc_length(
+            nodes[constraint.node_index]
+        ).velocity;
+        const double acceleration = constraint.curvature * velocity * velocity;
+        const double acceleration_upper = constraint.curvature
+            * constraint.speed_squared_upper;
+        const double violation = std::max(acceleration - acceleration_upper, 0.0);
+        result.diagnostics.lateral_acceleration_cost +=
+            params_.objective.lateral_acceleration
+            * constraint.integration_weight * violation * violation;
     }
     result.diagnostics.step_violations = step_violations(step_segments, selected);
     result.profile = std::move(selected);

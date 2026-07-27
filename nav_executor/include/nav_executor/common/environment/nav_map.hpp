@@ -42,13 +42,15 @@ struct SignedAngularVelocityBounds {
     double max;
 };
 
-// 下位机对控制指令实施的硬限幅。它约束 command，而不是规划轨迹或预测状态。
+// Follow 的统一运动能力来源。MPC 将其作为 command 硬边界；速度剖面将同一边界
+// 映射到理想路径运动学，避免规划参考超出执行层能力。
 struct CommandEnvelope {
     SignedVelocityBounds velocity;
     SignedAngularVelocityBounds angular_velocity;
 };
 
-// 速度指令变化率是 MPC 的硬约束；侧向加速度当前仍作为软约束使用。
+// 速度/角速度指令变化率在 MPC 中是硬约束，并映射为速度剖面的切向/角加速度硬约束；
+// 侧向加速度在两层中均作为软约束。
 struct CommandDynamicsLimits {
     double velocity_rate_max;
     double angular_velocity_rate_max;

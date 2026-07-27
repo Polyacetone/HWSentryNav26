@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -23,6 +24,32 @@ struct StepTraversalConstraint {
 
     bool operator==(const StepTraversalConstraint&) const = default;
 };
+
+// 台阶软约束沿累计弧长使用同一梯形窗；规划期速度剖面与运行期 MPC 共同调用。
+inline double step_window_gate(
+    const double path_progress,
+    const StepTraversalConstraint& constraint
+) {
+    if (path_progress >= constraint.commit_arc_length
+        && path_progress <= constraint.exit_arc_length) return 1.0;
+    if (path_progress <= constraint.gate_start_arc_length
+        || path_progress >= constraint.gate_end_arc_length) return 0.0;
+    const auto smoothstep = [](double value) {
+        value = std::clamp(value, 0.0, 1.0);
+        return value * value * (3.0 - 2.0 * value);
+    };
+    if (path_progress < constraint.commit_arc_length) {
+        const double width = constraint.commit_arc_length
+            - constraint.gate_start_arc_length;
+        return width > 1e-9
+            ? smoothstep(
+                (path_progress - constraint.gate_start_arc_length) / width
+            ) : 1.0;
+    }
+    const double width = constraint.gate_end_arc_length - constraint.exit_arc_length;
+    return width > 1e-9
+        ? smoothstep((constraint.gate_end_arc_length - path_progress) / width) : 1.0;
+}
 
 class StepConstraintSchedule {
 public:

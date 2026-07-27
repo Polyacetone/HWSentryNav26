@@ -33,26 +33,6 @@ inline double clamp_lpv_rho(double rho, double rho_clip) {
     return std::clamp(rho, -rho_clip, rho_clip);
 }
 
-// 约束窗软门控：沿累计弧长的梯形窗。
-//
-// 门控值随预测 path_u 逐步取值（因此约束跟随轨迹前移），但其对 path_u 的梯度被刻意
-// 冻结（不并入雅可比）：门控只调度「约束是否施加」，速度窗/航向对齐的梯度分别落在
-// V / THETA 上，避免优化器为逃出门控而移动 path_u 造成的病态与不连续。
-inline double step_window_gate(double path_progress, const StepTraversalConstraint& m) {
-    if (path_progress >= m.commit_arc_length && path_progress <= m.exit_arc_length) return 1.0;
-    if (path_progress <= m.gate_start_arc_length || path_progress >= m.gate_end_arc_length) return 0.0;
-    auto smoothstep = [](double t) {
-        t = std::clamp(t, 0.0, 1.0);
-        return t * t * (3.0 - 2.0 * t);
-    };
-    if (path_progress < m.commit_arc_length) {
-        const double w = m.commit_arc_length - m.gate_start_arc_length;
-        return w > 1e-9 ? smoothstep((path_progress - m.gate_start_arc_length) / w) : 1.0;
-    }
-    const double w = m.gate_end_arc_length - m.exit_arc_length;
-    return w > 1e-9 ? smoothstep((m.gate_end_arc_length - path_progress) / w) : 1.0;
-}
-
 inline double lpv_schedule_z(double leg_h, double leg_psi) {
     return leg_h * std::cos(leg_psi);
 }

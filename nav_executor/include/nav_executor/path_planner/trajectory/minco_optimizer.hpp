@@ -1,12 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include <Eigen/Core>
 
 #include <nav_executor/common/trajectory/minco_trajectory.hpp>
-#include <nav_executor/common/trajectory/trajectory_limits.hpp>
 #include <nav_executor/path_planner/numerics/lbfgs_minimizer.hpp>
 #include <nav_executor/path_planner/trajectory/minco_minjerk.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
@@ -30,6 +30,27 @@ namespace nav_executor {
 //                 + 膨胀方向场对齐 + 禁止方向 + 助跑区 κ² ]
 class MincoOptimizer {
 public:
+    struct Limits {
+        double velocity_max;              // 参数化速度幅值上限 (m/s)
+        double angular_velocity_max;      // 曲率包络参考角速度上限 (rad/s)
+        double angular_acceleration_max;  // 曲率变化率包络参考角加速度上限 (rad/s²)
+        double lateral_acceleration_max;  // 曲率包络参考侧向加速度上限 (m/s²)
+        double min_trackable_speed;       // 曲率包络采用的最低可稳定跟踪速度 (m/s)
+        double directed_speed_min;        // 沿种子方向的参数化速度分量下限 (m/s)
+
+        [[nodiscard]] double curvature_max() const {
+            return std::min(
+                angular_velocity_max / min_trackable_speed,
+                lateral_acceleration_max / (min_trackable_speed * min_trackable_speed)
+            );
+        }
+
+        [[nodiscard]] double curvature_rate_max() const {
+            return angular_acceleration_max
+                / (min_trackable_speed * min_trackable_speed);
+        }
+    };
+
     struct Weights {
         double energy = 1.0;                  // min-jerk 能量
         double time = 16.0;                   // 归一化参数总长（弧长代理）
@@ -68,7 +89,7 @@ public:
 
     struct Params {
         Weights weights;
-        TrajectoryLimits limits;
+        Limits limits;
         TerrainGate terrain_gate;
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;

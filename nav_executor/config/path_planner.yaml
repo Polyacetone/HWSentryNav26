@@ -41,19 +41,17 @@
         goal_tolerance: 0.3 # 进入该欧氏距离后尝试恒曲率几何终点连接（米）
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
 
-      trajectory_limits: # MINCO 形状优化与速度剖面共用的规划限值来源。
-        velocity_max: 3.0 # 路径速度幅值上限（m/s）
-        acceleration_max: 1.5 # 切向加速度上限（m/s²）
-        angular_velocity_max: 6.0 # 角速度上限（rad/s）
-        angular_acceleration_max: 7.0 # 角加速度上限（rad/s²）
-        lateral_acceleration_max: 2.0 # 侧向加速度上限（m/s²）
-        min_trackable_speed: 0.6 # 经实验降额的最低可稳定跟踪速度（m/s），曲率包络在此速度取等号
-        directed_speed_min: 0.05 # 有向正则性下限：速度沿种子方向分量的最小值（m/s）
-
       minco:
+        trajectory_limits:
+          velocity_max: 3.0 # 参数化速度幅值上限（m/s），保持 τ 与弧长量级可比
+          angular_velocity_max: 6.0 # 计算几何曲率包络的参考角速度上限（rad/s）
+          angular_acceleration_max: 7.0 # 计算曲率变化率包络的参考角加速度上限（rad/s²）
+          lateral_acceleration_max: 2.0 # 计算几何曲率包络的参考侧向加速度上限（m/s²）
+          min_trackable_speed: 0.6 # 曲率包络采用的最低可稳定跟踪速度（m/s）
+          directed_speed_min: 0.05 # 速度沿种子方向分量的最小值（m/s）
         penalty_weights:
-          energy: 0.6 # 平滑性权重：最小化 jerk（加加速度），越大轨迹越平滑柔和
-          time: 20.0 # 归一化参数总长权重（弧长代理），越大轨迹越短
+          energy: 1.0 # 平滑性权重：最小化 jerk（加加速度），越大轨迹越平滑柔和
+          time: 16.0 # 归一化参数总长权重（弧长代理），越大轨迹越短
           obstacle: 1000.0 # 障碍物权重：撞墙的惩罚，越大越不可能穿墙
           parameterization_velocity: 100.0 # ‖p_τ‖ 不超过速度上限，保持 τ 与弧长量级可比
           directed_regularity: 1000.0 # 有向正则性：排除内部零速点、尖点与逆向
@@ -108,6 +106,7 @@
           curvature_refine_threshold: 0.15 # 区间曲率变化超过该值时递归细分 (1/m)
         objective:
           traversal_window: 20.0 # 台阶平方速度窗松弛的弧长积分权重
+          lateral_acceleration: 18.0 # 侧向加速度超限的弧长积分权重；阈值来自当前 capability
           global_speed_reward: 0.05 # 无更重要目标时提高平方速度的小权重
           velocity_scale: 2.2 # 平方速度目标的无量纲归一参考速度 (m/s)，保持两类目标权重比例
         validation:
@@ -116,7 +115,6 @@
           acceleration_tolerance: 0.05 # 切向加速度容差 (m/s²)
           angular_velocity_tolerance: 0.05 # 角速度容差 (rad/s)
           angular_acceleration_tolerance: 0.10 # 角加速度容差 (rad/s²)
-          lateral_acceleration_tolerance: 0.05 # 侧向加速度容差 (m/s²)
 
       step:
         detection: # 物理边界固定按原始格点 direction magnitude > 0.95 判定

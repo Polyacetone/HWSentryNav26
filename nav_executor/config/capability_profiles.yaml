@@ -10,8 +10,6 @@
         lateral_acceleration: 0.10
 
       # 普通规划与跟随使用三种非负速度能力；停车和保持使用独立双向能力。
-      # 前向能力的速度下限为 0：允许 FOLLOW 输出零速但禁止负速度。台阶最低通过速度
-      # 由 terrain_traversal 的 velocity_target 在台阶约束窗内单独给出。
       profiles:
         low:
           command_envelope:
@@ -39,7 +37,7 @@
             lateral_acceleration_max: 2.0
         bidirectional:
           command_envelope:
-            velocity: { min: -1.2, max: 2.2 }
+            velocity: { min: -1.2, max: 1.2 }
             angular_velocity: { min: -6.0, max: 6.0 }
           command_dynamics:
             velocity_rate_max: 1.8

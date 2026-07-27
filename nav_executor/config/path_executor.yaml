@@ -102,9 +102,8 @@
           r_omega: 0.01 # 角速度正则
           r_dv: 0.8 # 线速度平滑
           r_domega: 0.2 # 角速度平滑
-          # jerk 残差使用相邻指令变化率之差除以 MPC_DT，抑制逐拍加速度反向。
-          r_jerk_v: 0.02
-          r_jerk_omega: 0.005
+          r_jerk_v: 0.02 # 线速度指令增量平滑
+          r_jerk_omega: 0.005 # 角速度指令增量平滑
         command_dynamics_weights:
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         traversal_target_weights:
@@ -115,7 +114,7 @@
           velocity_command_smoothness: 0.1 # 台阶内部线速度指令增量平滑
           velocity_predicted_smoothness: 0.8 # 台阶内部预测车身速度增量平滑
         environment_weights:
-          obstacle: 3.0 # 避障权重（全局+局部融合代价）
+          obstacle: 8.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
           position: 0.6 # horizon 末端相对对应参考点的位置权重
           heading: 0.6 # horizon 末端航向权重
@@ -137,12 +136,12 @@
           r_omega: 0.2 # 角速度正则
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
-          r_jerk_v: 0.02
-          r_jerk_omega: 0.005
+          r_jerk_v: 0.02 # 线速度指令增量平滑
+          r_jerk_omega: 0.005 # 角速度指令增量平滑
         command_dynamics_weights:
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
-          obstacle: 3.0 # 避障惩罚（台阶区域已转为障碍物）
+          obstacle: 8.0 # 避障惩罚（台阶区域已转为障碍物）
         terminal_weights:
           obstacle_terminal: 1.0 # 终端避障惩罚（防止停在障碍上）
 
@@ -164,12 +163,12 @@
           r_omega: 0.01 # 角速度正则
           r_dv: 0.2 # 线速度指令平滑
           r_domega: 0.1 # 角速度指令平滑
-          r_jerk_v: 0.02
-          r_jerk_omega: 0.005
+          r_jerk_v: 0.02 # 线速度指令增量平滑
+          r_jerk_omega: 0.005 # 角速度指令增量平滑
         command_dynamics_weights:
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         environment_weights:
-          obstacle: 3.0 # 全程避障惩罚
+          obstacle: 8.0 # 全程避障惩罚
         terminal_weights:
           q_goal_xy_terminal: 3.0 # 终端目标点吸引
           obstacle_terminal: 1.0 # 终端避障惩罚

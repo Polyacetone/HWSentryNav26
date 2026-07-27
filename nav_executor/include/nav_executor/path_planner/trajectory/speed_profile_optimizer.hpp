@@ -6,15 +6,15 @@
 #include <vector>
 
 #include <nav_executor/common/trajectory/annotated_path.hpp>
-#include <nav_executor/common/trajectory/trajectory_limits.hpp>
 
 namespace nav_executor {
 
-// 固定几何上的唯一运动时标。以 z(s)=v(s)² 为决策变量，逐点约束：
+// 固定几何上的唯一运动时标。能力边界与 MPC Follow 共用 CapabilityProfile，
+// 以 z(s)=v(s)² 为决策变量施加硬约束：
 //   角速度      |κ|·√z ≤ ω_max
-//   侧向加速度  |κ|·z  ≤ a_lat_max
 //   切向加速度  |dz/ds|/2 ≤ a_t_max
 //   角加速度    |κ'·z + κ·(dz/ds)/2| ≤ α_max
+// 侧向加速度 |κ|·z ≤ a_lat_max 和台阶速度窗与 MPC 一致，均为软约束。
 // 角加速度项使“在很短距离内把角速度建立起来”成为不可行，因此紧凑回头弯会被减速或拒绝。
 class SpeedProfileOptimizer {
 public:
@@ -26,6 +26,7 @@ public:
         } discretization;
         struct Objective {
             double traversal_window;
+            double lateral_acceleration;
             double global_speed_reward;
             double velocity_scale;
         } objective;
@@ -35,12 +36,10 @@ public:
             double acceleration_tolerance;
             double angular_velocity_tolerance;
             double angular_acceleration_tolerance;
-            double lateral_acceleration_tolerance;
         } validation;
 
         CapabilityProfile normal_profile;
         std::array<CapabilityProfile, 3> step_profiles;
-        TrajectoryLimits limits;
     };
 
     struct StepWindowViolation {
@@ -55,17 +54,19 @@ public:
     struct Diagnostics {
         enum class Selection {
             OPTIMAL,
-            SEED_OPTIMAL_NO_WINDOW,
+            SEED_OPTIMAL_NO_SOFT_CONSTRAINT,
             FALLBACK,
         };
 
         int node_count = 0;
-        // 软速度窗约束条数；同一节点被多个台阶段覆盖时会重复计数。
-        int soft_window_constraint_count = 0;
+        // 同一节点被多个台阶段覆盖时，台阶速度窗会重复计数。
+        int traversal_window_constraint_count = 0;
+        int lateral_acceleration_constraint_count = 0;
         double seed_total_time = 0.0;
         double result_total_time = 0.0;
         double speed_reward_cost = 0.0;
         double traversal_window_cost = 0.0;
+        double lateral_acceleration_cost = 0.0;
         int max_breakpoints = 0;
         double solve_ms = 0.0;
         Selection selection = Selection::FALLBACK;
