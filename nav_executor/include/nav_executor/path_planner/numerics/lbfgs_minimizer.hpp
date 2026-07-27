@@ -35,7 +35,12 @@ public:
         int max_iterations = 200;
         int max_function_evaluations = 400;
         int history_size = 8;
-        double gradient_tolerance = 1e-5; // 归一化、缩放后的 max-block 梯度阈值
+        // 一阶最优性阈值：max_block ‖D_b g_b‖₂ / max(1, |f|)。
+        // D_b 是调用方提供的变量物理尺度，与算法内部的目标归一化无关。
+        double first_order_tolerance = 1e-5;
+        // 连续 accepted step 的 raw 目标相对改善均不超过该值时，按实际收益收敛。
+        double relative_cost_tolerance = 1e-5;
+        int cost_convergence_window = 10;
         double scaled_step_tolerance = 1e-8;
         TrustRegionOptions trust_region;
         double curvature_relative_threshold = 1e-8;
@@ -43,7 +48,8 @@ public:
     };
 
     enum class Status {
-        CONVERGED,
+        FIRST_ORDER_CONVERGED,
+        COST_CONVERGED,
         MAX_ITERATIONS,
         MAX_EVALUATIONS,
         TRUST_REGION_TOO_SMALL,
@@ -57,7 +63,8 @@ public:
         double cost = 0.0; // 当前有限 incumbent 的 raw cost
         double initial_grad_inf_norm = 0.0; // raw gradient
         double grad_inf_norm = 0.0;         // raw gradient
-        double normalized_scaled_grad_max_block_norm = 0.0;
+        double scaled_grad_max_block_norm = 0.0;
+        double first_order_optimality = 0.0;
         double objective_scale = 1.0;
 
         int accepted_iterations = 0;
@@ -81,6 +88,8 @@ public:
         double last_actual_reduction = 0.0;    // 归一化目标
         double last_predicted_reduction = 0.0; // 归一化目标
         double last_reduction_ratio = 0.0;
+        double last_relative_cost_reduction = 0.0; // raw 目标，以上一个 accepted cost 归一
+        int consecutive_small_cost_reductions = 0;
     };
 
     using CostFunction = std::function<double(const Eigen::VectorXd& x, Eigen::VectorXd& grad)>;

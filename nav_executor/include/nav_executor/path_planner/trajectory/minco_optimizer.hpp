@@ -36,8 +36,8 @@ public:
         double obstacle = 1000.0;             // 障碍罚
         double parameterization_velocity = 100.0; // ‖p_τ‖ ≤ velocity_max
         double directed_regularity = 1000.0;  // p_τ·t̂_seed ≥ directed_speed_min
-        double curvature = 400.0;             // |κ| ≤ κ_max
-        double curvature_rate = 200.0;        // |dκ/ds| ≤ κ'_max
+        double curvature = 400.0;             // |κ| 无量纲 Huber 违规的弧长积分
+        double curvature_rate = 200.0;        // |dκ/ds| 无量纲 Huber 违规的弧长积分
         double traversal_alignment = 200.0;
         double prohibited_traversal = 1000.0;
         double runup_curvature = 100.0;       // 台阶场及其助跑区内的 κ² 正则
@@ -57,7 +57,9 @@ public:
         double max_virtual_time_scale = 20.0;
         int max_function_evaluations = 4000;
         int history_size = 8;
-        double gradient_tolerance = 1e-5;
+        double first_order_tolerance = 1e-5;
+        double relative_cost_tolerance = 1e-5;
+        int cost_convergence_window = 10;
         double scaled_step_tolerance = 1e-8;
         LbfgsMinimizer::TrustRegionOptions trust_region;
         double curvature_relative_threshold = 1e-8;
@@ -109,7 +111,8 @@ public:
         int rejected_trials = 0;
         int nonfinite_trials = 0;
         double final_grad_inf_norm = 0.0; // raw mixed-coordinate gradient，仅作兼容诊断
-        double final_normalized_scaled_grad_max_block_norm = 0.0;
+        double final_scaled_grad_max_block_norm = 0.0;
+        double final_first_order_optimality = 0.0;
 
         double initial_radius = 0.0;
         double final_radius = 0.0;
@@ -121,6 +124,8 @@ public:
         int history_updates = 0;
         int history_skips = 0;
         int history_resets = 0;
+        double last_relative_cost_reduction = 0.0;
+        int consecutive_small_cost_reductions = 0;
 
         [[nodiscard]] std::string_view optimizer_status_string() const noexcept {
             return LbfgsMinimizer::status_string(optimizer_status);

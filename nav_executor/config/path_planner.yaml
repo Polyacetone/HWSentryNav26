@@ -57,8 +57,8 @@
           obstacle: 1000.0 # 障碍物权重：撞墙的惩罚，越大越不可能穿墙
           parameterization_velocity: 100.0 # ‖p_τ‖ 不超过速度上限，保持 τ 与弧长量级可比
           directed_regularity: 1000.0 # 有向正则性：排除内部零速点、尖点与逆向
-          curvature: 400.0 # 真实几何曲率 |κ| 超限惩罚
-          curvature_rate: 200.0 # 曲率变化率 |dκ/ds| 超限惩罚，抑制极短距离内建立大角速度
+          curvature: 400.0 # 真实几何曲率无量纲 Huber 违规的弧长积分
+          curvature_rate: 200.0 # 曲率变化率无量纲 Huber 违规的弧长积分，抑制极短距离内建立大角速度
           traversal_alignment: 1600.0 # 过台阶时让车身顺着台阶方向走的对齐惩罚
           prohibited_traversal: 1000.0 # 往台阶禁止方向（如逆行）走的惩罚
           runup_curvature: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 κ² 正则
@@ -78,7 +78,9 @@
           max_virtual_time_scale: 20.0 # softplus Jacobian 很小时 virtual-time scale 的上限
           max_function_evaluations: 4000 # 含初始评估及所有 rejected trial
           history_size: 8 # 保留的 L-BFGS (s,y) 对数
-          gradient_tolerance: 1.0e-5 # normalized scaled max-block gradient 收敛阈值
+          first_order_tolerance: 1.0e-5 # max_block ‖D_b g_b‖₂ / max(1,|f|) 一阶最优性阈值
+          relative_cost_tolerance: 1.0e-5 # accepted step 的相对目标改善低于此值时计入实际收益收敛窗口
+          cost_convergence_window: 10 # 连续多少次低收益 accepted step 后返回 COST_CONVERGED
           scaled_step_tolerance: 1.0e-8 # 归一化 block 步长停滞阈值
           trust_region:
             initial_radius: 0.5 # trust-region 初始半径（米）

@@ -576,18 +576,23 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         RCLCPP_DEBUG(
             logger_,
             "MINCO optimizer: status=%.*s accepted=%d evals=%d trials=%d rejected=%d nonfinite=%d | "
-            "raw |grad|_inf %.3g -> %.3g (pos=%.3g, virtual_time=%.3g), normalized_scaled_max_block=%.3g | "
+            "raw |grad|_inf %.3g -> %.3g (pos=%.3g, virtual_time=%.3g), "
+            "scaled_max_block=%.3g, first_order=%.3g | "
             "radius initial=%.3g final=%.3g range=[%.3g,%.3g] shrink=%d expand=%d boundary=%d | "
-            "history update=%d skip=%d reset=%d",
+            "history update=%d skip=%d reset=%d | cost_tail relative=%.3g count=%d/%d",
             static_cast<int>(status.size()), status.data(),
             opt.accepted_iterations, opt.function_evaluations, opt.trial_evaluations,
             opt.rejected_trials, opt.nonfinite_trials,
             opt.initial_grad_inf_norm, opt.final_grad_inf_norm,
             opt.final_grad_pos_inf_norm, opt.final_grad_time_inf_norm,
-            opt.final_normalized_scaled_grad_max_block_norm,
+            opt.final_scaled_grad_max_block_norm,
+            opt.final_first_order_optimality,
             opt.initial_radius, opt.final_radius, opt.min_radius, opt.max_radius,
             opt.radius_shrinks, opt.radius_expansions, opt.boundary_steps,
-            opt.history_updates, opt.history_skips, opt.history_resets
+            opt.history_updates, opt.history_skips, opt.history_resets,
+            opt.last_relative_cost_reduction,
+            opt.consecutive_small_cost_reductions,
+            config_.minco.optimizer.cost_convergence_window
         );
         RCLCPP_DEBUG(
             logger_,
@@ -749,7 +754,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, seed_length=%.2f m, raw_states=%zu, "
         "kino[root=%s root_cost=%.2f exp=%d labels=%d dominated=%d transitions=%d goal=%d open=%zu], "
         "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
-        "normalized_scaled_grad=%.3g, raw_grad=%.3g",
+        "first_order=%.3g, scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : "", result.path->step_segments.size(),
@@ -764,7 +769,9 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         segment_count, variable_count,
         static_cast<int>(opt.optimizer_status_string().size()), opt.optimizer_status_string().data(),
         opt.accepted_iterations, opt.function_evaluations,
-        opt.final_normalized_scaled_grad_max_block_norm, opt.final_grad_inf_norm
+        opt.final_first_order_optimality,
+        opt.final_scaled_grad_max_block_norm,
+        opt.final_grad_inf_norm
     );
 
     return result;

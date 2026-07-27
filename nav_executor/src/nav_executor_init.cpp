@@ -549,7 +549,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .max_virtual_time_scale = declare_parameter<double>("path_planner.minco.optimizer.max_virtual_time_scale"),
             .max_function_evaluations = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.max_function_evaluations")),
             .history_size = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.history_size")),
-            .gradient_tolerance = declare_parameter<double>("path_planner.minco.optimizer.gradient_tolerance"),
+            .first_order_tolerance = declare_parameter<double>("path_planner.minco.optimizer.first_order_tolerance"),
+            .relative_cost_tolerance = declare_parameter<double>("path_planner.minco.optimizer.relative_cost_tolerance"),
+            .cost_convergence_window = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.cost_convergence_window")),
             .scaled_step_tolerance = declare_parameter<double>("path_planner.minco.optimizer.scaled_step_tolerance"),
             .trust_region = {
                 .initial_radius = declare_parameter<double>("path_planner.minco.optimizer.trust_region.initial_radius"),
@@ -692,7 +694,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
     require_parameter(
         minco_optimizer.max_function_evaluations > 0
         && minco_optimizer.history_size > 0
-        && positive_finite(minco_optimizer.gradient_tolerance)
+        && positive_finite(minco_optimizer.first_order_tolerance)
+        && positive_finite(minco_optimizer.relative_cost_tolerance)
+        && minco_optimizer.cost_convergence_window > 0
         && positive_finite(minco_optimizer.scaled_step_tolerance),
         "MINCO optimizer limits and convergence tolerances are invalid"
     );
