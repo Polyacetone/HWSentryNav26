@@ -68,7 +68,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         mpc_params.follow.capability_profiles
     );
     minco_debug_velocity_min_ = 0.0;
-    minco_debug_velocity_max_ = planner_config.minco.trajectory_limits.velocity_max;
+    minco_debug_velocity_max_ = planner_config.minco.limits.velocity_max;
     planner_ = std::make_unique<PathPlanner>(
         planner_config, step_routing_mask_, get_logger().get_child("planner")
     );
@@ -82,23 +82,39 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         .initial_search_distance = declare_parameter<double>("task_manager.route_tracker.initial_search_distance"),
         .max_tracking_error = declare_parameter<double>("task_manager.route_tracker.max_tracking_error"),
         .prediction_time_limit = declare_parameter<double>("task_manager.route_tracker.prediction_time_limit"),
+        .hypothesis_spacing = declare_parameter<double>("task_manager.route_tracker.hypothesis_spacing"),
+        .max_hypotheses = static_cast<int>(declare_parameter<int>("task_manager.route_tracker.max_hypotheses")),
+        .hypothesis_prune_ratio = declare_parameter<double>("task_manager.route_tracker.hypothesis_prune_ratio"),
+        .position_scale = declare_parameter<double>("task_manager.route_tracker.position_scale"),
+        .heading_scale = declare_parameter<double>("task_manager.route_tracker.heading_scale"),
+        .velocity_scale = declare_parameter<double>("task_manager.route_tracker.velocity_scale"),
+        .transition_scale = declare_parameter<double>("task_manager.route_tracker.transition_scale"),
         .path_speed_filter_alpha = declare_parameter<double>("task_manager.route_tracker.path_speed_filter_alpha"),
-        .projection = {
-            .prediction_weight = declare_parameter<double>("task_manager.route_tracker.projection_prediction_weight"),
-            .search_distance_backward = declare_parameter<double>("task_manager.route_tracker.search_distance_backward"),
-            .search_distance_forward = declare_parameter<double>("task_manager.route_tracker.search_distance_forward"),
-        },
     };
-    require_parameter(nonnegative_finite(route_tracker_params_.initial_search_distance), "route_tracker.initial_search_distance must be finite and non-negative");
-    require_parameter(positive_finite(route_tracker_params_.max_tracking_error), "route_tracker.max_tracking_error must be finite and positive");
-    require_parameter(positive_finite(route_tracker_params_.prediction_time_limit), "route_tracker.prediction_time_limit must be finite and positive");
-    require_parameter(route_tracker_params_.path_speed_filter_alpha > 0.0
+    require_parameter(
+        nonnegative_finite(route_tracker_params_.initial_search_distance)
+        && positive_finite(route_tracker_params_.max_tracking_error)
+        && positive_finite(route_tracker_params_.prediction_time_limit),
+        "route_tracker search or prediction parameters are invalid"
+    );
+    require_parameter(
+        positive_finite(route_tracker_params_.hypothesis_spacing)
+        && route_tracker_params_.max_hypotheses > 0
+        && positive_finite(route_tracker_params_.hypothesis_prune_ratio),
+        "route_tracker hypothesis parameters are invalid"
+    );
+    require_parameter(
+        positive_finite(route_tracker_params_.position_scale)
+        && positive_finite(route_tracker_params_.heading_scale)
+        && positive_finite(route_tracker_params_.velocity_scale)
+        && positive_finite(route_tracker_params_.transition_scale),
+        "route_tracker observation scales must be finite and positive"
+    );
+    require_parameter(
+        route_tracker_params_.path_speed_filter_alpha > 0.0
         && route_tracker_params_.path_speed_filter_alpha <= 1.0,
-        "route_tracker.path_speed_filter_alpha must be in (0, 1]");
-    require_parameter(positive_finite(route_tracker_params_.projection.prediction_weight)
-        && nonnegative_finite(route_tracker_params_.projection.search_distance_backward)
-        && positive_finite(route_tracker_params_.projection.search_distance_forward),
-        "route_tracker projection parameters are invalid");
+        "route_tracker.path_speed_filter_alpha must be in (0, 1]"
+    );
     route_tracker_ = std::make_unique<RouteTracker>(route_tracker_params_);
     proj_guard_params_ = {
         .cost_max = declare_parameter<double>("task_manager.route_monitor.proj_guard.cost_max"),
@@ -323,8 +339,8 @@ void NavExecutorNode::load_terrain_config() {
     };
     for (const CapabilityProfile& profile : traversal_configuration_.capability_profiles) {
         require_parameter(
-            valid_capability(profile) && profile.command_envelope.velocity.min > 0.0,
-            "forward capability profile is invalid"
+            valid_capability(profile) && profile.command_envelope.velocity.min == 0.0,
+            "forward capability profile must have a zero velocity lower bound"
         );
     }
     require_parameter(
@@ -476,8 +492,6 @@ PlannerConfig NavExecutorNode::load_planner_config(
             "path_planner.planner.start_yaw_relaxation.yaw_penalty"
         ),
     };
-    c.forward_velocity_bounds = normal_profile.command_envelope.velocity;
-
     c.dijkstra = {
         .obstacle_weight = declare_parameter<double>("path_planner.dijkstra.obstacle_weight"),
         .feasible_threshold = static_cast<int>(declare_parameter<int>("path_planner.dijkstra.feasible_threshold")),
@@ -500,33 +514,32 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .goal_tolerance = declare_parameter<double>("path_planner.kinodynamic.goal_tolerance"),
         .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.max_expansions")),
     };
+    const TrajectoryLimits trajectory_limits {
+        .velocity_max = declare_parameter<double>("path_planner.trajectory_limits.velocity_max"),
+        .acceleration_max = declare_parameter<double>("path_planner.trajectory_limits.acceleration_max"),
+        .angular_velocity_max = declare_parameter<double>("path_planner.trajectory_limits.angular_velocity_max"),
+        .angular_acceleration_max = declare_parameter<double>("path_planner.trajectory_limits.angular_acceleration_max"),
+        .lateral_acceleration_max = declare_parameter<double>("path_planner.trajectory_limits.lateral_acceleration_max"),
+        .min_trackable_speed = declare_parameter<double>("path_planner.trajectory_limits.min_trackable_speed"),
+        .directed_speed_min = declare_parameter<double>("path_planner.trajectory_limits.directed_speed_min"),
+    };
     c.minco = {
         .weights = {
             .energy = declare_parameter<double>("path_planner.minco.penalty_weights.energy"),
             .time = declare_parameter<double>("path_planner.minco.penalty_weights.time"),
             .obstacle = declare_parameter<double>("path_planner.minco.penalty_weights.obstacle"),
-            .trajectory_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.trajectory_velocity"),
-            .lateral_acc = declare_parameter<double>("path_planner.minco.penalty_weights.lateral_acceleration"),
-            .omega = declare_parameter<double>("path_planner.minco.penalty_weights.angular_velocity"),
-            .accel = declare_parameter<double>("path_planner.minco.penalty_weights.acceleration"),
+            .parameterization_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.parameterization_velocity"),
+            .directed_regularity = declare_parameter<double>("path_planner.minco.penalty_weights.directed_regularity"),
+            .curvature = declare_parameter<double>("path_planner.minco.penalty_weights.curvature"),
+            .curvature_rate = declare_parameter<double>("path_planner.minco.penalty_weights.curvature_rate"),
             .traversal_alignment = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_alignment"),
-            .traversal_velocity_target = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_velocity_target"),
             .prohibited_traversal = declare_parameter<double>("path_planner.minco.penalty_weights.prohibited_traversal"),
-            .runup_accel = declare_parameter<double>("path_planner.minco.penalty_weights.runup_acceleration"),
-            .runup_omega = declare_parameter<double>("path_planner.minco.penalty_weights.runup_angular_velocity"),
+            .runup_curvature = declare_parameter<double>("path_planner.minco.penalty_weights.runup_curvature"),
         },
-        .trajectory_limits = {
-            .velocity_max = declare_parameter<double>("path_planner.minco.trajectory_limits.velocity_max"),
-            .angular_velocity_max = declare_parameter<double>("path_planner.minco.trajectory_limits.angular_velocity_max"),
-            .acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.acceleration_max"),
-            .lateral_acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.lateral_acceleration_max"),
-        },
+        .limits = trajectory_limits,
         .terrain_gate = {
             .norm_lo = declare_parameter<double>("path_planner.minco.terrain_gate.norm_lo"),
             .norm_hi = declare_parameter<double>("path_planner.minco.terrain_gate.norm_hi"),
-            .motion_speed_scale = declare_parameter<double>(
-                "path_planner.minco.terrain_gate.motion_speed_scale"
-            ),
         },
         .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.minco.samples_per_segment")),
         .max_iterations = static_cast<int>(declare_parameter<int>("path_planner.minco.max_iterations")),
@@ -569,15 +582,16 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .fsm_release_distance = declare_parameter<double>("path_planner.step.execution.fsm_release_distance"),
         .gate_transition_distance = declare_parameter<double>("path_planner.step.mpc_constraints.gate_transition_distance"),
     };
-    c.geometry_validation = {
-        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.geometry_validation.samples_per_segment")),
-        .traversal_angle_tolerance = declare_parameter<double>("path_planner.geometry_validation.traversal_angle_tolerance"),
-        .self_intersection_flatness_tolerance = declare_parameter<double>(
-            "path_planner.geometry_validation.self_intersection_flatness_tolerance"
-        ),
-        .self_intersection_max_edge_length = declare_parameter<double>(
-            "path_planner.geometry_validation.self_intersection_max_edge_length"
-        ),
+    c.environment_validation = {
+        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.environment_validation.samples_per_segment")),
+        .traversal_angle_tolerance = declare_parameter<double>("path_planner.environment_validation.traversal_angle_tolerance"),
+    };
+    c.geometry_certificate = {
+        .max_subdivision_depth = static_cast<int>(declare_parameter<int>("path_planner.geometry_certificate.max_subdivision_depth")),
+        .observability_arc_separation = declare_parameter<double>("path_planner.geometry_certificate.observability_arc_separation"),
+        .observability_position_distance = declare_parameter<double>("path_planner.geometry_certificate.observability_position_distance"),
+        .observability_heading_angle = declare_parameter<double>("path_planner.geometry_certificate.observability_heading_angle"),
+        .observability_sample_spacing = declare_parameter<double>("path_planner.geometry_certificate.observability_sample_spacing"),
     };
     c.speed_profile = {
         .discretization = {
@@ -595,14 +609,12 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .velocity_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.velocity_tolerance"),
             .acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.acceleration_tolerance"),
             .angular_velocity_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.angular_velocity_tolerance"),
+            .angular_acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.angular_acceleration_tolerance"),
             .lateral_acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.lateral_acceleration_tolerance"),
         },
         .normal_profile = normal_profile,
         .step_profiles = step_profiles,
-        .trajectory_velocity_max = c.minco.trajectory_limits.velocity_max,
-        .trajectory_acceleration_max = c.minco.trajectory_limits.acceleration_max,
-        .trajectory_angular_velocity_max = c.minco.trajectory_limits.angular_velocity_max,
-        .trajectory_lateral_acceleration_max = c.minco.trajectory_limits.lateral_acceleration_max,
+        .limits = trajectory_limits,
     };
     require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in [0, 255]");
     require_parameter(
@@ -612,7 +624,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
     require_parameter(
         nonnegative_finite(c.start_yaw_relaxation.speed_threshold)
-            && c.start_yaw_relaxation.speed_threshold <= c.forward_velocity_bounds.max
+            && c.start_yaw_relaxation.speed_threshold <= trajectory_limits.velocity_max
             && nonnegative_finite(c.start_yaw_relaxation.root_penalty)
             && nonnegative_finite(c.start_yaw_relaxation.yaw_penalty),
         "start yaw relaxation parameters are invalid"
@@ -639,31 +651,42 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "kinodynamic curvature_samples must be positive and odd, and max_expansions must be positive"
     );
     require_parameter(
-        positive_finite(c.minco.trajectory_limits.velocity_max),
-        "MINCO velocity_max must be finite and positive"
+        positive_finite(trajectory_limits.velocity_max)
+        && positive_finite(trajectory_limits.acceleration_max)
+        && positive_finite(trajectory_limits.angular_velocity_max)
+        && positive_finite(trajectory_limits.angular_acceleration_max)
+        && positive_finite(trajectory_limits.lateral_acceleration_max),
+        "trajectory limits must be finite and positive"
+    );
+    require_parameter(
+        positive_finite(trajectory_limits.min_trackable_speed)
+        && trajectory_limits.min_trackable_speed <= trajectory_limits.velocity_max
+        && positive_finite(trajectory_limits.directed_speed_min)
+        && trajectory_limits.directed_speed_min < trajectory_limits.min_trackable_speed,
+        "min_trackable_speed and directed_speed_min must be positive and ordered below velocity_max"
+    );
+    // 曲率包络必须容纳前端几何种子，否则每条 A* 路径都会被几何证书拒绝。
+    require_parameter(
+        trajectory_limits.curvature_max() >= c.kinodynamic.curvature_max,
+        "trajectory limits derive a curvature bound tighter than the kinodynamic seed curvature"
     );
     const auto& minco_weights = c.minco.weights;
     require_parameter(
         nonnegative_finite(minco_weights.energy)
         && nonnegative_finite(minco_weights.time)
         && nonnegative_finite(minco_weights.obstacle)
-        && nonnegative_finite(minco_weights.trajectory_velocity)
-        && nonnegative_finite(minco_weights.lateral_acc)
-        && nonnegative_finite(minco_weights.omega)
-        && nonnegative_finite(minco_weights.accel)
+        && nonnegative_finite(minco_weights.parameterization_velocity)
+        && nonnegative_finite(minco_weights.directed_regularity)
+        && nonnegative_finite(minco_weights.curvature)
+        && nonnegative_finite(minco_weights.curvature_rate)
         && nonnegative_finite(minco_weights.traversal_alignment)
-        && nonnegative_finite(minco_weights.traversal_velocity_target)
         && nonnegative_finite(minco_weights.prohibited_traversal)
-        && nonnegative_finite(minco_weights.runup_accel)
-        && nonnegative_finite(minco_weights.runup_omega),
+        && nonnegative_finite(minco_weights.runup_curvature),
         "MINCO penalty weights must be finite and non-negative"
     );
     require_parameter(
-        positive_finite(c.minco.trajectory_limits.angular_velocity_max)
-        && positive_finite(c.minco.trajectory_limits.acceleration_max)
-        && positive_finite(c.minco.trajectory_limits.lateral_acceleration_max)
-        && positive_finite(c.minco.min_segment_time),
-        "MINCO limits and min_segment_time must be finite and positive"
+        positive_finite(c.minco.min_segment_time),
+        "MINCO min_segment_time must be finite and positive"
     );
     require_parameter(
         c.minco.samples_per_segment > 0 && c.minco.max_iterations > 0,
@@ -733,13 +756,8 @@ PlannerConfig NavExecutorNode::load_planner_config(
     require_parameter(
         c.minco.terrain_gate.norm_lo >= 0.0
         && c.minco.terrain_gate.norm_hi > c.minco.terrain_gate.norm_lo
-        && c.minco.terrain_gate.norm_hi <= 1.0
-        && positive_finite(c.minco.terrain_gate.motion_speed_scale),
-        "MINCO terrain_gate or motion_speed_scale is invalid"
-    );
-    require_parameter(
-        c.geometry_validation.samples_per_segment > 0,
-        "geometry validation samples_per_segment must be positive"
+        && c.minco.terrain_gate.norm_hi <= 1.0,
+        "MINCO terrain_gate thresholds are invalid"
     );
     require_parameter(
         c.step_detection.detect_dot_threshold > 0.0
@@ -752,10 +770,19 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "step detection/execution parameters are invalid"
     );
     require_parameter(
-        nonnegative_finite(c.geometry_validation.traversal_angle_tolerance)
-        && positive_finite(c.geometry_validation.self_intersection_flatness_tolerance)
-        && positive_finite(c.geometry_validation.self_intersection_max_edge_length),
-        "geometry validation tolerances are invalid"
+        c.environment_validation.samples_per_segment > 0
+        && nonnegative_finite(c.environment_validation.traversal_angle_tolerance),
+        "environment validation parameters are invalid"
+    );
+    require_parameter(
+        c.geometry_certificate.max_subdivision_depth > 0
+        && positive_finite(c.geometry_certificate.observability_arc_separation)
+        && positive_finite(c.geometry_certificate.observability_position_distance)
+        && positive_finite(c.geometry_certificate.observability_heading_angle)
+        && positive_finite(c.geometry_certificate.observability_sample_spacing)
+        && c.geometry_certificate.observability_sample_spacing
+            <= c.geometry_certificate.observability_arc_separation,
+        "geometry certificate parameters are invalid"
     );
     const auto& speed_profile = c.speed_profile;
     require_parameter(
@@ -770,15 +797,14 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && nonnegative_finite(speed_profile.validation.velocity_tolerance)
         && nonnegative_finite(speed_profile.validation.acceleration_tolerance)
         && nonnegative_finite(speed_profile.validation.angular_velocity_tolerance)
+        && nonnegative_finite(speed_profile.validation.angular_acceleration_tolerance)
         && nonnegative_finite(speed_profile.validation.lateral_acceleration_tolerance),
         "speed profile discretization, objective, or validation parameters are invalid"
     );
     require_parameter(
-        positive_finite(c.forward_velocity_bounds.min)
-            && c.forward_velocity_bounds.min < c.forward_velocity_bounds.max
-            && c.forward_velocity_bounds.max <= c.kinodynamic.state_limits.speed_max
-            && c.forward_velocity_bounds.max <= c.minco.trajectory_limits.velocity_max,
-        "FOLLOW forward capability is incompatible with planner velocity limits"
+        normal_profile.command_envelope.velocity.max <= c.kinodynamic.state_limits.speed_max
+            && normal_profile.command_envelope.velocity.max <= trajectory_limits.velocity_max,
+        "FOLLOW forward capability exceeds the planner velocity limits"
     );
     const auto overlaps = [](const double speed_max, const TraversalVelocityWindow& window) {
         return window.min <= std::min(speed_max, window.max);
@@ -792,9 +818,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
                         + mode.name + "\""
                     );
                 }
-                if (!overlaps(c.minco.trajectory_limits.velocity_max, mode.velocity_window)) {
+                if (!overlaps(trajectory_limits.velocity_max, mode.velocity_window)) {
                     throw std::invalid_argument(
-                        "MINCO trajectory velocity limits cannot represent traversal target \""
+                        "trajectory velocity limits cannot represent traversal target \""
                         + mode.name + "\""
                     );
                 }
@@ -845,7 +871,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .heading = declare_parameter<double>("mpc.follow.tracking_weights.heading"),
                 .velocity = declare_parameter<double>("mpc.follow.tracking_weights.velocity"),
                 .angular_velocity = declare_parameter<double>("mpc.follow.tracking_weights.angular_velocity"),
-                .tangent_blend_speed_scale = declare_parameter<double>("mpc.follow.tracking_weights.tangent_blend_speed_scale"),
             },
             .command_weights = {
                 .r_v = declare_parameter<double>("mpc.follow.command_weights.r_v"),
@@ -886,7 +911,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .progress_reward = declare_parameter<double>("mpc.follow.progress.progress_reward"),
                 .speed_tracking_weight = declare_parameter<double>("mpc.follow.progress.speed_tracking_weight"),
                 .speed_smoothness_weight = declare_parameter<double>("mpc.follow.progress.speed_smoothness_weight"),
-                .overshoot_weight = declare_parameter<double>("mpc.follow.progress.overshoot_weight"),
             },
             .terminal_weights = {
                 .position = declare_parameter<double>("mpc.follow.terminal_weights.position"),
@@ -894,7 +918,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .velocity = declare_parameter<double>("mpc.follow.terminal_weights.velocity"),
                 .angular_velocity = declare_parameter<double>("mpc.follow.terminal_weights.angular_velocity"),
                 .remaining_progress = declare_parameter<double>("mpc.follow.terminal_weights.remaining_progress"),
-                .overshoot = declare_parameter<double>("mpc.follow.terminal_weights.overshoot"),
             },
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },
@@ -993,8 +1016,7 @@ MPCParams NavExecutorNode::load_mpc_params() {
     require_parameter(
         nonnegative_finite(progress.progress_reward)
         && nonnegative_finite(progress.speed_tracking_weight)
-        && nonnegative_finite(progress.speed_smoothness_weight)
-        && positive_finite(progress.overshoot_weight),
+        && nonnegative_finite(progress.speed_smoothness_weight),
         "mpc.follow progress weights are invalid"
     );
     const auto& tracking = mpc_params.follow.tracking_weights;
@@ -1003,8 +1025,7 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && nonnegative_finite(tracking.lag)
         && nonnegative_finite(tracking.heading)
         && nonnegative_finite(tracking.velocity)
-        && nonnegative_finite(tracking.angular_velocity)
-        && positive_finite(tracking.tangent_blend_speed_scale),
+        && nonnegative_finite(tracking.angular_velocity),
         "mpc.follow tracking weights are invalid"
     );
     const auto& terminal = mpc_params.follow.terminal_weights;
@@ -1013,8 +1034,7 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && nonnegative_finite(terminal.heading)
         && nonnegative_finite(terminal.velocity)
         && nonnegative_finite(terminal.angular_velocity)
-        && nonnegative_finite(terminal.remaining_progress)
-        && positive_finite(terminal.overshoot),
+        && nonnegative_finite(terminal.remaining_progress),
         "mpc.follow terminal weights are invalid"
     );
     const auto& feedback = mpc_params.follow.ancillary_feedback;
@@ -1066,8 +1086,8 @@ MPCParams NavExecutorNode::load_mpc_params() {
     };
     require_parameter(
         valid_capability(mpc_params.follow.normal_profile)
-            && mpc_params.follow.normal_profile.command_envelope.velocity.min > 0.0,
-        "mpc.follow capability profile is invalid"
+            && mpc_params.follow.normal_profile.command_envelope.velocity.min == 0.0,
+        "mpc.follow capability profile must have a zero velocity lower bound"
     );
     if (feedback.enable) {
         require_parameter(

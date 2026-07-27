@@ -6,22 +6,17 @@
 
 namespace nav_executor {
 
-// 微分平坦轨迹的求值结果。车身朝向由有向运动切线导出；端点速度为零时，
-// eval 使用段内侧速度恢复朝向。切线帧始终按位置曲线定义。
+// 有向正则曲线的求值结果。规划期几何证书保证 |dp_dtau| > 0 且切线不反向，
+// 因此航向、切线帧和几何曲率在整条路径上都有唯一定义。
 struct TrajSample {
     Eigen::Vector2d p = Eigen::Vector2d::Zero();
     Eigen::Vector2d dp_dtau = Eigen::Vector2d::Zero();
     Eigen::Vector2d ddp_dtau = Eigen::Vector2d::Zero();
 
-    double theta = 0.0;
-    double dtheta_dtau = 0.0;
-
-    // 位置曲线切线帧，用于横向误差投影。
-    double phi = 0.0;       // atan2(dp_dtau.y, dp_dtau.x)；|dp_dtau|→0 时保持上一有效值意义不定
-    double sin_phi = 0.0;
-    double cos_phi = 0.0;
-    double ds_dtau = 0.0;   // |dp_dtau|，弧长对 τ 的变化率
-    double kappa = 0.0;     // 位置曲线曲率
+    double theta = 0.0;      // atan2(dp_dtau)：有向切线航向，也是车身航向
+    double ds_dtau = 0.0;    // |dp_dtau|，弧长对 τ 的变化率
+    double kappa = 0.0;      // 真实几何曲率 det(p',p'')/|p'|³，全系统唯一定义
+    double kappa_rate = 0.0; // dκ/ds，与 κ 同源；速度剖面用它约束角加速度
 };
 
 // 逐段五次多项式前向轨迹，内部节点保持速度至四阶导连续。
@@ -50,24 +45,22 @@ public:
     // 第 boundary_index 个段边界对应的 tau，合法范围 [0, segment_count()]。
     [[nodiscard]] double segment_boundary_tau(int boundary_index) const;
 
+    [[nodiscard]] double segment_duration(int segment_index) const;
+
     [[nodiscard]] double arc_length_at_tau(double tau) const;
     [[nodiscard]] double tau_at_arc_length(double arc_length) const;
     [[nodiscard]] double segment_boundary_arc_length(int boundary_index) const;
-    [[nodiscard]] int segment_index_at_arc_length(double arc_length) const;
-    // |弧长(tau1) − 弧长(tau0)|。
-    [[nodiscard]] double arc_length_between(double tau0, double tau1) const;
 
     [[nodiscard]] Eigen::Vector2d position(double tau) const { return eval(tau).p; }
     [[nodiscard]] Eigen::Vector2d tangent(double tau) const { return eval(tau).dp_dtau; }
 
-    // 按归一化 MINCO 参数求值；超出 [0, 1] 时线性外推。
+    // 按归一化 MINCO 参数求值；超出 [0, 1] 时沿端点切线线性外推。
     [[nodiscard]] TrajSample eval(double tau) const;
     // 按绝对时间 t∈[0,total_time] 求值。
     [[nodiscard]] TrajSample eval_time(double t) const;
     // 按累计弧长 s∈[0,total_arc_length] 求值；弧长是跟随层唯一的路径进度坐标。
     [[nodiscard]] TrajSample eval_arc_length(double arc_length) const;
 
-    [[nodiscard]] double heading_rate_per_arc_length(const TrajSample& s) const;
     [[nodiscard]] ControlPointBlock segment_bezier_control_points(int segment_index) const;
 
     [[nodiscard]] bool operator==(const MincoTrajectory& other) const;

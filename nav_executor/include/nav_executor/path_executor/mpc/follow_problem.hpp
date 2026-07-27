@@ -12,7 +12,9 @@
 
 namespace nav_executor {
 
-// 跟踪问题把物理状态与路径累计弧长一并优化。第三控制量是沿路径正方向的虚拟速度。
+// 路径跟踪问题。第三控制量是沿有向路径的虚拟进度速度 ṡ，硬约束在 [0, 剩余弧长/Δt]
+// 之内，因此 0 ≤ s ≤ L 且 ṡ ≥ 0 恒成立。外部有向进度估计只作为初值输入，
+// 预测状态 PATH_PROGRESS 不回写覆盖它。
 template<int Horizon>
 class FollowProblemT {
 public:
@@ -26,7 +28,6 @@ public:
         double prediction_dt,
         double schedule_rho,
         const CapabilityProfile& command_capability,
-        const SignedVelocityBounds& path_speed_bounds,
         std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule
     );
 
@@ -34,7 +35,6 @@ public:
     void dynamics_jacobians(int k, const StateVec& x, const ControlVec& u, MatXX& fx, MatXU& fu) const;
 
     double running_cost(int k, const StateVec& x, const ControlVec& u) const;
-    double running_cost_value_only(int k, const StateVec& x, const ControlVec& u, double* cached_cost_value = nullptr) const;
     void running_cost_derivatives(
         int k,
         const StateVec& x,
@@ -52,9 +52,6 @@ public:
     MPCControlBounds control_bounds(int k, const StateVec& x) const;
 
     [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
-    [[nodiscard]] const MPCParams& params() const { return p_; }
-    [[nodiscard]] const MincoTrajectory& reference_trajectory() const { return trajectory_; }
-    [[nodiscard]] const LPVDiscreteModel& discrete_model() const { return model_; }
 
 private:
     const CostMapGridView& cost_grid_for_step(int k) const;
@@ -68,7 +65,6 @@ private:
     double prediction_dt_;
     LPVDiscreteModel model_ {};
     CapabilityProfile command_capability_;
-    SignedVelocityBounds path_speed_bounds_;
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule_;
     double total_length_ = 0.0;
 };

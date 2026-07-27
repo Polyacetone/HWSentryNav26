@@ -10,9 +10,10 @@ namespace nav_executor {
 namespace {
 
 constexpr double COST_EPS = 1e-9;
-constexpr int FOLLOW_RESIDUAL_DIM = 22;
+constexpr int FOLLOW_RESIDUAL_DIM = 21;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
+// 有向路径参考点。几何证书保证切线唯一有定义，因此参考帧无需在轴向之间混合。
 struct ReferenceFrame {
     TrajSample sample;
     double path_progress = 0.0;
@@ -28,41 +29,18 @@ struct FrozenStepGate {
 ReferenceFrame reference_frame(
     const MincoTrajectory& trajectory,
     const PathSpeedProfile& speed_profile,
-    const double requested_path_progress,
-    const double tangent_blend_speed_scale
+    const double requested_path_progress
 ) {
     ReferenceFrame reference;
-    const double total_length = trajectory.total_arc_length();
     reference.path_progress = std::clamp(
-        requested_path_progress, 0.0, total_length
+        requested_path_progress, 0.0, trajectory.total_arc_length()
     );
     reference.sample = trajectory.eval_arc_length(reference.path_progress);
-    reference.nominal_path_speed = speed_profile.eval_arc_length(
-        reference.path_progress
-    ).velocity;
-
-    const double translational_speed = reference.nominal_path_speed;
-    const Eigen::Vector2d heading_axis(
+    reference.nominal_path_speed =
+        speed_profile.eval_arc_length(reference.path_progress).velocity;
+    reference.tangent = {
         std::cos(reference.sample.theta), std::sin(reference.sample.theta)
-    );
-    Eigen::Vector2d path_axis = heading_axis;
-    double axis_alignment = 1.0;
-    if (reference.sample.ds_dtau > COST_EPS) {
-        path_axis = reference.sample.dp_dtau / reference.sample.ds_dtau;
-        axis_alignment = path_axis.dot(heading_axis);
-        if (axis_alignment < 0.0) path_axis = -path_axis;
-    }
-    const double scale_squared = tangent_blend_speed_scale * tangent_blend_speed_scale;
-    const double speed_blend = translational_speed * translational_speed
-        / (translational_speed * translational_speed + scale_squared);
-    // 路径轴是模 pi 的无向轴。接近与车身轴垂直时让其权重连续退化为零，避免选取
-    // 正/反代表的符号切换污染有限差分；正常非完整轨迹上 alignment≈±1。
-    constexpr double ALIGNMENT_BLEND_SCALE = 0.1;
-    const double alignment_squared = axis_alignment * axis_alignment;
-    const double alignment_blend = alignment_squared
-        / (alignment_squared + ALIGNMENT_BLEND_SCALE * ALIGNMENT_BLEND_SCALE);
-    const double blend = speed_blend * alignment_blend;
-    reference.tangent = ((1.0 - blend) * heading_axis + blend * path_axis).normalized();
+    };
     return reference;
 }
 
@@ -102,42 +80,40 @@ FollowResidualVec follow_residual_impl(
     const double domega_cmd = MPC_DT * u(iu::W_CMD_RATE);
 
     const ReferenceFrame reference = reference_frame(
-        trajectory, speed_profile, x(ix::PATH_PROGRESS), tracking.tangent_blend_speed_scale
+        trajectory, speed_profile, x(ix::PATH_PROGRESS)
     );
-    const Eigen::Vector2d position_error(px - reference.sample.p.x(), py - reference.sample.p.y());
+    const Eigen::Vector2d position_error(
+        px - reference.sample.p.x(), py - reference.sample.p.y()
+    );
     const Eigen::Vector2d normal(-reference.tangent.y(), reference.tangent.x());
     residual(0) = tracking.contour * normal.dot(position_error);
     residual(1) = tracking.lag * reference.tangent.dot(position_error);
-
     residual(2) = tracking.heading * wrap_pi(theta - reference.sample.theta);
-    residual(3) = tracking.velocity
-        * (v_actual - path_speed_cmd);
+
+    // 速度参考使用有向投影 v·cos(θ−θ_path) − ṡ：车身朝向偏离路径时，投影速度自然
+    // 下降，虚拟进度无法在车辆走错方向时继续空跑。
+    const double projected_velocity = v_actual
+        * std::cos(wrap_pi(theta - reference.sample.theta));
+    residual(3) = tracking.velocity * (projected_velocity - path_speed_cmd);
     residual(4) = tracking.angular_velocity
-        * (omega_actual
-            - trajectory.heading_rate_per_arc_length(reference.sample) * path_speed_cmd);
+        * (omega_actual - reference.sample.kappa * path_speed_cmd);
     residual(5) = progress.speed_tracking_weight
         * (path_speed_cmd - reference.nominal_path_speed);
     residual(6) = progress.speed_smoothness_weight
         * (path_speed_cmd - x(ix::PATH_SPEED));
-    residual(7) = progress.overshoot_weight
-        * positive_part(x(ix::PATH_PROGRESS) - trajectory.total_arc_length());
 
-    residual(8) = command.r_v * v_cmd;
-    residual(9) = command.r_omega * omega_cmd;
-    residual(10) = command.r_dv * dv_cmd;
-    residual(11) = command.r_domega * domega_cmd;
-    residual(12) = command.r_jerk_v
-        * (u(iu::V_CMD_RATE) - x(ix::V_CMD_RATE)) / MPC_DT;
-    residual(13) = command.r_jerk_omega
-        * (u(iu::W_CMD_RATE) - x(ix::W_CMD_RATE)) / MPC_DT;
+    residual(7) = command.r_v * v_cmd;
+    residual(8) = command.r_omega * omega_cmd;
+    residual(9) = command.r_dv * dv_cmd;
+    residual(10) = command.r_domega * domega_cmd;
+    residual(11) = command.r_jerk_v * (u(iu::V_CMD_RATE) - x(ix::V_CMD_RATE)) / MPC_DT;
+    residual(12) = command.r_jerk_omega * (u(iu::W_CMD_RATE) - x(ix::W_CMD_RATE)) / MPC_DT;
 
-    residual(14) = dynamics_weights.lateral_acceleration
-        * positive_part(
-            std::abs(v_cmd * omega_cmd) - motion_limits.lateral_acceleration_max
-        );
+    residual(13) = dynamics_weights.lateral_acceleration
+        * positive_part(std::abs(v_cmd * omega_cmd) - motion_limits.lateral_acceleration_max);
 
-    const auto cost_sample = eval_cost_bilinear(cost_grid, cost_info, px, py);
-    residual(15) = environment.obstacle * cost_sample.value / 255.0;
+    residual(14) = environment.obstacle
+        * eval_cost_bilinear(cost_grid, cost_info, px, py).value / 255.0;
 
     const StepTraversalConstraint* const step = frozen_step_gate
         ? frozen_step_gate->constraint
@@ -148,31 +124,28 @@ FollowResidualVec follow_residual_impl(
             : step_window_gate(reference.path_progress, *step);
         if (gate > 0.0) {
             const Eigen::Vector2d& direction = step->dir_map;
-            const double cross = std::cos(theta) * direction.y() - std::sin(theta) * direction.x();
-            residual(16) = traversal_weights.direction * gate * std::abs(cross);
+            const double cross = std::cos(theta) * direction.y()
+                - std::sin(theta) * direction.x();
+            residual(15) = traversal_weights.direction * gate * std::abs(cross);
 
+            // 台阶最低冲刺速度只在台阶约束窗内生效；普通 FOLLOW 允许零速。
             const auto& target = step->velocity_window;
             const double velocity_error = v_actual < target.min
                 ? target.min - v_actual
                 : (v_actual > target.max ? v_actual - target.max : 0.0);
-            residual(17) = traversal_weights.velocity * gate * velocity_error;
-            residual(18) = traversal_weights.angular_velocity_command
-                * gate * omega_cmd;
-            residual(19) = traversal_weights.angular_velocity_predicted
-                * gate * omega_actual;
-            residual(20) = traversal_weights.velocity_command_smoothness
-                * gate * dv_cmd;
-            const double predicted_velocity_increment =
-                mpc_dynamics(x, u, model)(ix::V) - v_actual;
-            residual(21) = traversal_weights.velocity_predicted_smoothness
-                * gate * predicted_velocity_increment;
+            residual(16) = traversal_weights.velocity * gate * velocity_error;
+            residual(17) = traversal_weights.angular_velocity_command * gate * omega_cmd;
+            residual(18) = traversal_weights.angular_velocity_predicted * gate * omega_actual;
+            residual(19) = traversal_weights.velocity_command_smoothness * gate * dv_cmd;
+            residual(20) = traversal_weights.velocity_predicted_smoothness * gate
+                * (mpc_dynamics(x, u, model)(ix::V) - v_actual);
         }
     }
 
     return residual;
 }
 
-constexpr int FOLLOW_TERMINAL_RESIDUAL_DIM = 7;
+constexpr int FOLLOW_TERMINAL_RESIDUAL_DIM = 5;
 using FollowTerminalResidualVec = Eigen::Matrix<double, FOLLOW_TERMINAL_RESIDUAL_DIM, 1>;
 
 FollowTerminalResidualVec follow_terminal_residual_impl(
@@ -183,10 +156,7 @@ FollowTerminalResidualVec follow_terminal_residual_impl(
 ) {
     const auto& weights = params.follow.terminal_weights;
     const ReferenceFrame reference = reference_frame(
-        trajectory,
-        speed_profile,
-        x(ix::PATH_PROGRESS),
-        params.follow.tracking_weights.tangent_blend_speed_scale
+        trajectory, speed_profile, x(ix::PATH_PROGRESS)
     );
 
     FollowTerminalResidualVec residual = FollowTerminalResidualVec::Zero();
@@ -194,15 +164,10 @@ FollowTerminalResidualVec follow_terminal_residual_impl(
     residual(1) = weights.position * (x(ix::Y) - reference.sample.p.y());
     residual(2) = weights.heading * wrap_pi(x(ix::THETA) - reference.sample.theta);
     residual(3) = weights.velocity
-        * (x(ix::V) - x(ix::PATH_SPEED));
+        * (x(ix::V) * std::cos(wrap_pi(x(ix::THETA) - reference.sample.theta))
+            - x(ix::PATH_SPEED));
     residual(4) = weights.angular_velocity
-        * (x(ix::W)
-            - trajectory.heading_rate_per_arc_length(reference.sample)
-                * x(ix::PATH_SPEED));
-    residual(5) = weights.overshoot
-        * positive_part(x(ix::PATH_PROGRESS) - trajectory.total_arc_length());
-    residual(6) = weights.overshoot
-        * positive_part(-x(ix::PATH_PROGRESS));
+        * (x(ix::W) - reference.sample.kappa * x(ix::PATH_SPEED));
     return residual;
 }
 
@@ -219,7 +184,6 @@ FollowProblemT<Horizon>::FollowProblemT(
     const double prediction_dt,
     const double schedule_rho,
     const CapabilityProfile& command_capability,
-    const SignedVelocityBounds& path_speed_bounds,
     std::shared_ptr<const StepConstraintSchedule> step_constraint_schedule
 ):
     trajectory_(std::move(trajectory)),
@@ -231,13 +195,13 @@ FollowProblemT<Horizon>::FollowProblemT(
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     command_capability_(command_capability),
-    path_speed_bounds_(path_speed_bounds),
     step_constraint_schedule_(std::move(step_constraint_schedule)),
     total_length_(trajectory_.total_arc_length()) {}
 
 template<int Horizon>
 StateVec FollowProblemT<Horizon>::dynamics(int, const StateVec& x, const ControlVec& u) const {
     StateVec next = mpc_dynamics(x, u, model_);
+    // 硬边界 0 ≤ s ≤ L 与 ṡ ≥ 0 由 control_bounds 保证，动力学只做前向积分。
     next(ix::PATH_PROGRESS) = x(ix::PATH_PROGRESS) + MPC_DT * u(iu::PATH_SPEED_CMD);
     next(ix::PATH_SPEED) = u(iu::PATH_SPEED_CMD);
     return next;
@@ -264,13 +228,18 @@ void FollowProblemT<Horizon>::dynamics_jacobians(
 
 template<int Horizon>
 MPCControlBounds FollowProblemT<Horizon>::control_bounds(const int k, const StateVec& x) const {
+    // 虚拟进度速度允许从零开始，不复用底盘命令的正下限：参考点错位时 MPCC 可以先停车，
+    // 而不是被迫以最小速度蠕动。上界还受剩余弧长限制，使 s 恒不超过 L。
     MPCControlBounds bounds = command_rate_control_bounds(
-        x,
-        command_capability_,
-        path_speed_bounds_.min,
-        path_speed_bounds_.max,
-        k == 0 ? &p_.follow.start_command : nullptr
+        x, command_capability_, k == 0 ? &p_.follow.start_command : nullptr
     );
+    const double envelope_max = command_capability_.command_envelope.velocity.max;
+    const double remaining_rate = positive_part(total_length_ - x(ix::PATH_PROGRESS)) / MPC_DT;
+    bounds.upper(iu::PATH_SPEED_CMD) = std::min(envelope_max, remaining_rate);
+    if (remaining_rate < envelope_max) {
+        // 剩余弧长随 s 递减，因此该上界对 s 的雅可比是 −1/Δt。
+        bounds.upper_state_jacobian(iu::PATH_SPEED_CMD, ix::PATH_PROGRESS) = -1.0 / MPC_DT;
+    }
     return bounds;
 }
 
@@ -284,31 +253,16 @@ const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(const int k) 
 }
 
 template<int Horizon>
-double FollowProblemT<Horizon>::running_cost(const int k, const StateVec& x, const ControlVec& u) const {
-    return running_cost_value_only(k, x, u);
-}
-
-template<int Horizon>
-double FollowProblemT<Horizon>::running_cost_value_only(
-    const int k,
-    const StateVec& x,
-    const ControlVec& u,
-    double*
+double FollowProblemT<Horizon>::running_cost(
+    const int k, const StateVec& x, const ControlVec& u
 ) const {
     const FollowResidualVec residual = follow_residual_impl(
         x, u, trajectory_, speed_profile_, p_, cost_grid_for_step(k), cost_info_,
         command_capability_.command_dynamics, model_, step_constraint_schedule_
     );
-    double cost = residual_cost(residual);
-    const double remaining_progress = positive_part(
-        total_length_ - x(ix::PATH_PROGRESS)
-    );
-    const double requested_advance = MPC_DT * u(iu::PATH_SPEED_CMD);
-    if (remaining_progress > 0.0 && requested_advance > 0.0) {
-        const double realized_advance = std::min(requested_advance, remaining_progress);
-        cost -= p_.follow.progress.progress_reward * realized_advance / MPC_DT;
-    }
-    return cost;
+    // 进度奖励：s 的硬上界已保证不会越界，因此线性奖励无需再做剩余弧长截断。
+    return residual_cost(residual)
+        - p_.follow.progress.progress_reward * u(iu::PATH_SPEED_CMD);
 }
 
 template<int Horizon>
@@ -323,9 +277,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
 ) const {
     const auto& cost_grid = cost_grid_for_step(k);
-    const double path_progress = std::clamp(
-        x(ix::PATH_PROGRESS), 0.0, total_length_
-    );
+    const double path_progress = std::clamp(x(ix::PATH_PROGRESS), 0.0, total_length_);
     FrozenStepGate frozen_step_gate;
     frozen_step_gate.constraint = step_constraint_schedule_
         ? step_constraint_schedule_->constraint_at(path_progress)
@@ -345,25 +297,14 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     gauss_newton_running_derivatives<FOLLOW_RESIDUAL_DIM>(
         residual_fn, x, u, lx, lu, lxx, lux, luu
     );
-    const double remaining_progress = positive_part(
-        total_length_ - x(ix::PATH_PROGRESS)
-    );
-    const double requested_advance = MPC_DT * u(iu::PATH_SPEED_CMD);
-    if (remaining_progress > 0.0) {
-        if (requested_advance < remaining_progress) {
-            lu(iu::PATH_SPEED_CMD) -= p_.follow.progress.progress_reward;
-        } else {
-            lx(ix::PATH_PROGRESS) += p_.follow.progress.progress_reward / MPC_DT;
-        }
-    }
+    lu(iu::PATH_SPEED_CMD) -= p_.follow.progress.progress_reward;
 }
 
 template<int Horizon>
 double FollowProblemT<Horizon>::terminal_cost(const StateVec& x) const {
-    double cost = residual_cost(follow_terminal_residual_impl(x, trajectory_, speed_profile_, p_));
-    cost += p_.follow.terminal_weights.remaining_progress
-        * positive_part(total_length_ - x(ix::PATH_PROGRESS));
-    return cost;
+    return residual_cost(follow_terminal_residual_impl(x, trajectory_, speed_profile_, p_))
+        + p_.follow.terminal_weights.remaining_progress
+            * positive_part(total_length_ - x(ix::PATH_PROGRESS));
 }
 
 template<int Horizon>

@@ -4,14 +4,18 @@
       goal_equivalence_distance: 0.3 # goal-to-goal 去重阈值 (m)
       plan_cooldown: 0.5 # 同一 goal 失败重试冷却 (s)
 
-      route_tracker:
+      route_tracker: # 有向路径进度观测器：位置 + 航向 + 速度方向 + 历史共同判定当前所处的有向分支。
         initial_search_distance: 0.5 # 新路径仅允许在起点附近建立初始进度，覆盖规划延迟但禁止跳到后段 (m)
-        max_tracking_error: 2.0 # 机器人与局部投影参考点超过该距离时视为跟踪丢失 (m)
-        prediction_time_limit: 0.2 # 状态掉帧后最多积分这么久的速度，防止陈旧速度推动游标跨段 (s)
-        path_speed_filter_alpha: 0.4 # 前向实测路径速度一阶滤波系数
-        projection_prediction_weight: 1.0 # 相对运动预测弧长创新的权重
-        search_distance_backward: 0.2 # 相对预测进度向后校正的最大弧长 (m)
-        search_distance_forward: 0.4 # 相对预测进度向前校正的最大弧长 (m)
+        max_tracking_error: 2.0 # 机器人与有向参考点超过该距离时视为跟踪丢失 (m)
+        prediction_time_limit: 0.2 # 状态掉帧后最多积分这么久的路径速度 (s)
+        hypothesis_spacing: 0.05 # 有向进度候选的弧长间距 (m)
+        max_hypotheses: 6 # 同时保留的竞争分支上限
+        hypothesis_prune_ratio: 3.0 # 代价超过领先假设该比例裕度的分支被淘汰
+        position_scale: 0.25 # 位置观测残差归一尺度 (m)
+        heading_scale: 0.35 # 航向观测残差归一尺度 (rad)
+        velocity_scale: 0.5 # 速度方向观测残差归一尺度 (m/s)
+        transition_scale: 0.1 # 路径域运动模型的弧长转移残差尺度 (m)
+        path_speed_filter_alpha: 0.4 # 路径方向速度一阶滤波系数
 
       # ═══════════════════════════════════════════════
       #  RouteMonitor — 路径监控（投影连线 + 台阶阻塞）

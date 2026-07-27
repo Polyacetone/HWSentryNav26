@@ -5,12 +5,17 @@
 #include <utility>
 #include <vector>
 
-#include <Eigen/Core>
-
 #include <nav_executor/common/trajectory/annotated_path.hpp>
+#include <nav_executor/common/trajectory/trajectory_limits.hpp>
 
 namespace nav_executor {
 
+// 固定几何上的唯一运动时标。以 z(s)=v(s)² 为决策变量，逐点约束：
+//   角速度      |κ|·√z ≤ ω_max
+//   侧向加速度  |κ|·z  ≤ a_lat_max
+//   切向加速度  |dz/ds|/2 ≤ a_t_max
+//   角加速度    |κ'·z + κ·(dz/ds)/2| ≤ α_max
+// 角加速度项使“在很短距离内把角速度建立起来”成为不可行，因此紧凑回头弯会被减速或拒绝。
 class SpeedProfileOptimizer {
 public:
     struct Params {
@@ -29,15 +34,13 @@ public:
             double velocity_tolerance;
             double acceleration_tolerance;
             double angular_velocity_tolerance;
+            double angular_acceleration_tolerance;
             double lateral_acceleration_tolerance;
         } validation;
 
         CapabilityProfile normal_profile;
         std::array<CapabilityProfile, 3> step_profiles;
-        double trajectory_velocity_max;
-        double trajectory_acceleration_max;
-        double trajectory_angular_velocity_max;
-        double trajectory_lateral_acceleration_max;
+        TrajectoryLimits limits;
     };
 
     struct StepWindowViolation {

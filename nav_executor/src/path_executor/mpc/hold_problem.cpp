@@ -27,7 +27,7 @@ void HoldProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 
 MPCControlBounds HoldProblem::control_bounds(const int k, const StateVec& x) const {
     return command_rate_control_bounds(
-        x, p_.hold.profile, 0.0, 0.0, k == 0 ? &p_.hold.start_command : nullptr
+        x, p_.hold.profile, k == 0 ? &p_.hold.start_command : nullptr
     );
 }
 

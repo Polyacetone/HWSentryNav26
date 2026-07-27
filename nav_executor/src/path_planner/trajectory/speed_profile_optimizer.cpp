@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <numeric>
 #include <optional>
 
 #include <nav_executor/path_planner/numerics/piecewise_quadratic_chain_solver.hpp>
@@ -15,6 +14,13 @@ namespace {
 constexpr double EPS = 1e-9;
 constexpr double INF = std::numeric_limits<double>::infinity();
 
+// 角加速度 dω/dt = κ'·z + κ·(dz/ds)/2 是两个可加项。链式求解器只接受
+// 「节点上界」和「相邻差分上界」两类约束，因此把角加速度预算等分给两项：
+//   κ'·z        → 节点上界 z ≤ SHARE·α_max/|κ'|
+//   κ·(dz/ds)/2 → 差分上界，等价于把切向加速度收紧到 SHARE·α_max/|κ|
+// 等分保证两项之和恒不超过 α_max，因此独立物理验收不会因此触发 fallback。
+constexpr double ANGULAR_ACCELERATION_SHARE = 0.5;
+
 struct NodeLimit {
     double speed_squared_upper = 0.0;
     double acceleration = 0.0;
@@ -24,6 +30,12 @@ struct SoftWindowNode {
     size_t node_index = 0;
     double integration_weight = 0.0;
     TraversalVelocityWindow target;
+};
+
+// 逐点动力学包络，全部由同一份真实几何曲率导出。
+struct LocalEnvelope {
+    double speed_squared_upper = 0.0;
+    double acceleration_upper = 0.0;
 };
 
 CapabilityProfile interpolate_profile(
@@ -86,67 +98,92 @@ CapabilityProfile capability_at(
             effective = candidate;
             continue;
         }
-        effective->command_envelope.velocity.max = std::min(
-            effective->command_envelope.velocity.max,
-            candidate.command_envelope.velocity.max
+        auto& envelope = effective->command_envelope;
+        auto& dynamics = effective->command_dynamics;
+        envelope.velocity.max = std::min(
+            envelope.velocity.max, candidate.command_envelope.velocity.max
         );
-        effective->command_envelope.angular_velocity.min = std::max(
-            effective->command_envelope.angular_velocity.min,
-            candidate.command_envelope.angular_velocity.min
+        envelope.angular_velocity.min = std::max(
+            envelope.angular_velocity.min, candidate.command_envelope.angular_velocity.min
         );
-        effective->command_envelope.angular_velocity.max = std::min(
-            effective->command_envelope.angular_velocity.max,
-            candidate.command_envelope.angular_velocity.max
+        envelope.angular_velocity.max = std::min(
+            envelope.angular_velocity.max, candidate.command_envelope.angular_velocity.max
         );
-        effective->command_dynamics.velocity_rate_max = std::min(
-            effective->command_dynamics.velocity_rate_max,
-            candidate.command_dynamics.velocity_rate_max
+        dynamics.velocity_rate_max = std::min(
+            dynamics.velocity_rate_max, candidate.command_dynamics.velocity_rate_max
         );
-        effective->command_dynamics.lateral_acceleration_max = std::min(
-            effective->command_dynamics.lateral_acceleration_max,
+        dynamics.angular_velocity_rate_max = std::min(
+            dynamics.angular_velocity_rate_max,
+            candidate.command_dynamics.angular_velocity_rate_max
+        );
+        dynamics.lateral_acceleration_max = std::min(
+            dynamics.lateral_acceleration_max,
             candidate.command_dynamics.lateral_acceleration_max
         );
     }
     return effective.value_or(params.normal_profile);
 }
 
-double local_speed_squared_upper(
+// 该弧长处生效的最终规划能力：全局轨迹包络与 capability 的逐项交集。
+TrajectoryLimits effective_limits(
+    const SpeedProfileOptimizer::Params& params,
+    const std::vector<StepPlanSegment>& segments,
+    const double progress
+) {
+    const CapabilityProfile capability = capability_at(params, segments, progress);
+    const auto& envelope = capability.command_envelope;
+    const auto& dynamics = capability.command_dynamics;
+    TrajectoryLimits limits = params.limits;
+    limits.velocity_max = std::min(limits.velocity_max, envelope.velocity.max);
+    limits.acceleration_max = std::min(limits.acceleration_max, dynamics.velocity_rate_max);
+    limits.angular_velocity_max = std::min(
+        limits.angular_velocity_max,
+        std::min(envelope.angular_velocity.max, -envelope.angular_velocity.min)
+    );
+    limits.angular_acceleration_max = std::min(
+        limits.angular_acceleration_max, dynamics.angular_velocity_rate_max
+    );
+    limits.lateral_acceleration_max = std::min(
+        limits.lateral_acceleration_max, dynamics.lateral_acceleration_max
+    );
+    return limits;
+}
+
+LocalEnvelope local_envelope(
     const SpeedProfileOptimizer::Params& params,
     const std::vector<StepPlanSegment>& segments,
     const TrajSample& sample,
     const double progress
 ) {
-    const CapabilityProfile capability = capability_at(params, segments, progress);
-    double upper = std::min(
-        params.trajectory_velocity_max * params.trajectory_velocity_max,
-        capability.command_envelope.velocity.max * capability.command_envelope.velocity.max
-    );
-    const double curvature = sample.kappa;
-    const double absolute_curvature = std::abs(curvature);
-    if (absolute_curvature > EPS) {
-        const double angular_velocity_allowed = curvature > 0.0
-            ? std::min(
-                params.trajectory_angular_velocity_max,
-                capability.command_envelope.angular_velocity.max
-            )
-            : std::min(
-                params.trajectory_angular_velocity_max,
-                -capability.command_envelope.angular_velocity.min
-            );
-        upper = std::min(
-            upper,
-            angular_velocity_allowed * angular_velocity_allowed
-                / (curvature * curvature)
-        );
-        upper = std::min(
-            upper,
-            std::min(
-                params.trajectory_lateral_acceleration_max,
-                capability.command_dynamics.lateral_acceleration_max
-            ) / absolute_curvature
+    const TrajectoryLimits limits = effective_limits(params, segments, progress);
+    const double curvature = std::abs(sample.kappa);
+    const double curvature_rate = std::abs(sample.kappa_rate);
+    const double angular_budget = ANGULAR_ACCELERATION_SHARE * limits.angular_acceleration_max;
+
+    LocalEnvelope envelope;
+    envelope.speed_squared_upper = limits.velocity_max * limits.velocity_max;
+    envelope.acceleration_upper = limits.acceleration_max;
+    if (curvature > EPS) {
+        // |κ|√z ≤ ω_max 与 |κ|z ≤ a_lat_max
+        envelope.speed_squared_upper = std::min({
+            envelope.speed_squared_upper,
+            limits.angular_velocity_max * limits.angular_velocity_max / (curvature * curvature),
+            limits.lateral_acceleration_max / curvature,
+        });
+        // |κ|·|dz/ds|/2 ≤ SHARE·α_max，其中 dz/ds = 2·a_t
+        envelope.acceleration_upper = std::min(
+            envelope.acceleration_upper, angular_budget / curvature
         );
     }
-    return std::max(upper, 0.0);
+    if (curvature_rate > EPS) {
+        // |κ'|z ≤ SHARE·α_max
+        envelope.speed_squared_upper = std::min(
+            envelope.speed_squared_upper, angular_budget / curvature_rate
+        );
+    }
+    envelope.speed_squared_upper = std::max(envelope.speed_squared_upper, 0.0);
+    envelope.acceleration_upper = std::max(envelope.acceleration_upper, 0.0);
+    return envelope;
 }
 
 std::vector<double> build_nodes(
@@ -231,18 +268,19 @@ std::vector<NodeLimit> build_limits(
     const std::vector<StepPlanSegment>& segments,
     const std::vector<double>& nodes
 ) {
+    const auto envelope_at = [&](const double progress) {
+        return local_envelope(
+            params, segments, geometry.eval_arc_length(progress), progress
+        );
+    };
+
     std::vector<NodeLimit> limits(nodes.size());
     for (size_t i = 0; i < nodes.size(); ++i) {
-        limits[i].speed_squared_upper = local_speed_squared_upper(
-            params, segments, geometry.eval_arc_length(nodes[i]), nodes[i]
-        );
-        const CapabilityProfile capability = capability_at(params, segments, nodes[i]);
-        limits[i].acceleration = std::min(
-            params.trajectory_acceleration_max,
-            capability.command_dynamics.velocity_rate_max
-        );
+        const LocalEnvelope envelope = envelope_at(nodes[i]);
+        limits[i].speed_squared_upper = envelope.speed_squared_upper;
+        limits[i].acceleration = envelope.acceleration_upper;
     }
-    // 对每个区间做更密采样，将几何峰值转换为保守的端点上限。
+    // 每个区间内更密采样，把几何峰值转换为保守的端点上限与区间加速度上限。
     for (size_t i = 0; i + 1 < nodes.size(); ++i) {
         const double distance = nodes[i + 1] - nodes[i];
         const int samples = std::max(
@@ -250,23 +288,15 @@ std::vector<NodeLimit> build_limits(
         );
         double interval_upper = INF;
         double interval_acceleration = INF;
-        for (int sample_index = 0; sample_index <= samples; ++sample_index) {
+        for (int sample = 0; sample <= samples; ++sample) {
             const double progress = std::lerp(
                 nodes[i], nodes[i + 1],
-                static_cast<double>(sample_index) / static_cast<double>(samples)
+                static_cast<double>(sample) / static_cast<double>(samples)
             );
-            interval_upper = std::min(
-                interval_upper,
-                local_speed_squared_upper(
-                    params, segments, geometry.eval_arc_length(progress), progress
-                )
-            );
+            const LocalEnvelope envelope = envelope_at(progress);
+            interval_upper = std::min(interval_upper, envelope.speed_squared_upper);
             interval_acceleration = std::min(
-                interval_acceleration,
-                std::min(
-                    params.trajectory_acceleration_max,
-                    capability_at(params, segments, progress).command_dynamics.velocity_rate_max
-                )
+                interval_acceleration, envelope.acceleration_upper
             );
         }
         limits[i].speed_squared_upper = std::min(
@@ -417,6 +447,8 @@ ChainProblem build_chain_problem(
     return problem;
 }
 
+// 独立速度剖面证书：在与优化解耦的密网格上核验完整动力学，包括未做等分近似的
+// 真实角加速度 dω/dt = κ'v² + κ·a_t。
 bool validate_profile(
     const SpeedProfileOptimizer::Params& params,
     const MincoTrajectory& geometry,
@@ -456,49 +488,55 @@ bool validate_profile(
         const double progress = total_length * static_cast<double>(i)
             / static_cast<double>(samples);
         const SpeedProfileState state = profile.eval_arc_length(progress);
-        const TrajSample geometry_state = geometry.eval_arc_length(progress);
-        const CapabilityProfile capability = capability_at(params, segments, progress);
-        const double local_upper = std::sqrt(local_speed_squared_upper(
-            params, segments, geometry_state, progress
+        const TrajSample sample = geometry.eval_arc_length(progress);
+        const TrajectoryLimits limits = effective_limits(params, segments, progress);
+        const auto exceeds = [](const double value, const double limit, const double tolerance) {
+            return std::abs(value) > limit + tolerance;
+        };
+
+        // 起点速度是不可修改的当前事实，只能以最大减速度收敛到局部包络。
+        const double reachable_upper = std::sqrt(std::max(
+            initial_speed_squared - 2.0 * params.limits.acceleration_max * progress, 0.0
         ));
-        const double unavoidable_initial_upper = std::sqrt(std::max(
-            initial_speed_squared - 2.0 * params.trajectory_acceleration_max * progress,
-            0.0
-        ));
-        const double allowed_velocity = std::max(local_upper, unavoidable_initial_upper);
-        if (state.velocity > allowed_velocity + params.validation.velocity_tolerance) {
-            error = "speed profile violates a local velocity envelope at s="
+        const double velocity_upper = std::max(
+            std::sqrt(local_envelope(params, segments, sample, progress).speed_squared_upper),
+            reachable_upper
+        );
+        if (state.velocity > velocity_upper + params.validation.velocity_tolerance) {
+            error = "speed profile violates the local velocity envelope at s="
                 + std::to_string(progress);
             return false;
         }
-        const double acceleration_limit = std::min(
-            params.trajectory_acceleration_max,
-            capability.command_dynamics.velocity_rate_max
-        );
-        if (std::abs(state.acceleration)
-            > acceleration_limit + params.validation.acceleration_tolerance) {
+        if (exceeds(
+                state.acceleration, limits.acceleration_max,
+                params.validation.acceleration_tolerance
+            )) {
             error = "speed profile violates tangential acceleration at s="
                 + std::to_string(progress);
             return false;
         }
-        const double angular_velocity = geometry_state.kappa * state.velocity;
-        const double angular_limit = angular_velocity >= 0.0
-            ? std::min(params.trajectory_angular_velocity_max, capability.command_envelope.angular_velocity.max)
-            : std::min(params.trajectory_angular_velocity_max, -capability.command_envelope.angular_velocity.min);
-        if (std::abs(angular_velocity)
-            > angular_limit + params.validation.angular_velocity_tolerance) {
+        if (exceeds(
+                sample.kappa * state.velocity, limits.angular_velocity_max,
+                params.validation.angular_velocity_tolerance
+            )) {
             error = "speed profile violates angular velocity at s=" + std::to_string(progress);
             return false;
         }
-        const double lateral_acceleration = std::abs(
-            geometry_state.kappa * state.velocity * state.velocity
-        );
-        const double lateral_limit = std::min(
-            params.trajectory_lateral_acceleration_max,
-            capability.command_dynamics.lateral_acceleration_max
-        );
-        if (lateral_acceleration
-            > lateral_limit + params.validation.lateral_acceleration_tolerance) {
+        if (exceeds(
+                sample.kappa_rate * state.velocity * state.velocity
+                    + sample.kappa * state.acceleration,
+                limits.angular_acceleration_max,
+                params.validation.angular_acceleration_tolerance
+            )) {
+            error = "speed profile violates angular acceleration at s="
+                + std::to_string(progress);
+            return false;
+        }
+        if (exceeds(
+                sample.kappa * state.velocity * state.velocity,
+                limits.lateral_acceleration_max,
+                params.validation.lateral_acceleration_tolerance
+            )) {
             error = "speed profile violates lateral acceleration at s="
                 + std::to_string(progress);
             return false;
@@ -553,9 +591,10 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
     }
     const std::vector<double> nodes = build_nodes(params_, geometry, step_segments);
     std::vector<NodeLimit> limits = build_limits(params_, geometry, step_segments, nodes);
+
+    // 起点速度取当前速度在有向路径切线上的前向投影；几何证书保证切线有定义。
     const TrajSample start = geometry.eval_arc_length(0.0);
-    Eigen::Vector2d tangent(std::cos(start.theta), std::sin(start.theta));
-    if (start.dp_dtau.norm() > EPS) tangent = start.dp_dtau.normalized();
+    const Eigen::Vector2d tangent(std::cos(start.theta), std::sin(start.theta));
     const double initial_velocity = std::max(0.0, current_velocity_map.dot(tangent));
     const double initial_speed_squared = initial_velocity * initial_velocity;
     // 起点是不可修改的当前事实；局部包络从下一空间位置开始约束。
@@ -644,9 +683,7 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
             * (nodes[i + 1] - nodes[i]) * 0.5 * (z0 + z1) / scale_squared;
     }
     for (const SoftWindowNode& window : windows) {
-        const double velocity = selected.eval_arc_length(
-            nodes[window.node_index]
-        ).velocity;
+        const double velocity = selected.eval_arc_length(nodes[window.node_index]).velocity;
         const double z = velocity * velocity / scale_squared;
         const double lower = window.target.min * window.target.min / scale_squared;
         const double upper = window.target.max * window.target.max / scale_squared;

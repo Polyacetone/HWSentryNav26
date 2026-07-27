@@ -5,17 +5,12 @@
 #include <cmath>
 #include <numeric>
 
-#include <Eigen/Dense>
-
 namespace nav_executor {
 
 namespace {
 
 constexpr double MIN_SEGMENT_DURATION = 1e-6;
 constexpr double TANGENT_EPS = 1e-9;
-// ω=(ẋÿ−ẏẍ)/‖ṗ‖² 分母的速度正则尺度 (m/s)：抑制 v→0 处 0/0 发散。取较小值，
-// 使正常行驶速度（≳0.3 m/s）下的 ω 误差可忽略。
-constexpr double OMEGA_SPEED_REG = 0.05;
 
 } // anonymous namespace
 
@@ -106,6 +101,13 @@ double MincoTrajectory::segment_boundary_arc_length(const int boundary_index) co
     return arc_length_at_tau(segment_boundary_tau(boundary_index));
 }
 
+double MincoTrajectory::segment_duration(const int segment_index) const {
+    if (durations_.empty()) return 0.0;
+    return durations_[static_cast<size_t>(
+        std::clamp(segment_index, 0, segment_count() - 1)
+    )];
+}
+
 double MincoTrajectory::tau_at_arc_length(const double arc_length) const {
     if (arc_samples_.size() < 2 || total_arc_length_ <= 1e-12) return 0.0;
     const double clamped = std::clamp(arc_length, 0.0, total_arc_length_);
@@ -117,16 +119,6 @@ double MincoTrajectory::tau_at_arc_length(const double arc_length) const {
     const double span = arc_samples_[upper] - arc_samples_[lower];
     const double frac = span > 1e-12 ? (clamped - arc_samples_[lower]) / span : 0.0;
     return std::lerp(arc_taus_[lower], arc_taus_[upper], frac);
-}
-
-double MincoTrajectory::arc_length_between(const double tau0, const double tau1) const {
-    return std::abs(arc_length_at_tau(tau1) - arc_length_at_tau(tau0));
-}
-
-int MincoTrajectory::segment_index_at_arc_length(const double arc_length) const {
-    if (durations_.empty()) return 0;
-    const double tau = tau_at_arc_length(arc_length);
-    return locate_time(tau * total_time_).segment;
 }
 
 MincoTrajectory::Locator MincoTrajectory::locate_time(const double t) const {
@@ -143,13 +135,13 @@ MincoTrajectory::Locator MincoTrajectory::locate_time(const double t) const {
 }
 
 TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) const {
-    // 段内 2D 平坦多项式求值，导数对**真实时间**（局部时间即真实时间）。τ 换算在 eval 层完成。
+    // 段内 2D 平坦多项式求值，导数对**真实时间**（局部时间即真实时间）。τ 换算在此处完成。
     const CoefBlock& coef = coeffs_[static_cast<size_t>(segment)];
-    const double T = durations_[static_cast<size_t>(segment)];
 
     Eigen::Vector2d pos = Eigen::Vector2d::Zero();
     Eigen::Vector2d vel_t = Eigen::Vector2d::Zero();
     Eigen::Vector2d acc_t = Eigen::Vector2d::Zero();
+    Eigen::Vector2d jerk_t = Eigen::Vector2d::Zero();
 
     double t_pow = 1.0;                 // t^k
     for (int k = 0; k < NCOEF; ++k) {
@@ -166,46 +158,37 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
         for (int dim = 0; dim < DIM; ++dim) acc_t(dim) += static_cast<double>(k * (k - 1)) * coef(k, dim) * t_pow;
         t_pow *= local_t;
     }
+    t_pow = 1.0; // 三阶导：Σ_{k>=3} k(k-1)(k-2) c_k t^{k-3}
+    for (int k = 3; k < NCOEF; ++k) {
+        for (int dim = 0; dim < DIM; ++dim) {
+            jerk_t(dim) += static_cast<double>(k * (k - 1) * (k - 2)) * coef(k, dim) * t_pow;
+        }
+        t_pow *= local_t;
+    }
 
     // 真实时间导数 → τ 导数：τ = t/total_time ⇒ d/dτ = total_time · d/dt。
-    const double s = total_time_;
+    const double time_scale = total_time_;
     TrajSample out;
     out.p = pos;
-    out.dp_dtau = vel_t * s;
-    out.ddp_dtau = acc_t * s * s;
-
-    // 位置曲线切线帧。
+    out.dp_dtau = vel_t * time_scale;
+    out.ddp_dtau = acc_t * time_scale * time_scale;
     out.ds_dtau = out.dp_dtau.norm();
-    out.phi = std::atan2(out.dp_dtau.y(), out.dp_dtau.x());
-    out.sin_phi = std::sin(out.phi);
-    out.cos_phi = std::cos(out.phi);
-    const double cross = out.dp_dtau.x() * out.ddp_dtau.y() - out.dp_dtau.y() * out.ddp_dtau.x();
-    const double ds = out.ds_dtau;
-    out.kappa = ds > TANGENT_EPS ? cross / (ds * ds * ds) : 0.0;
-    // ── 前向平坦朝向：θ_body = atan2(运动方向)。──
-    const double speed_t = vel_t.norm();
-    Eigen::Vector2d motion_dir = vel_t;
-    if (speed_t <= TANGENT_EPS) {
-        // v=0（端点）：运动方向取自段**内侧**一小步的速度。端点 a、j 可能同时退化，
-        // 用有限步比 l'Hôpital 更稳。
-        const double h = std::max(T * 1e-3, 1e-4);
-        const double t_probe = local_t < 0.5 * T ? local_t + h : local_t - h;
-        Eigen::Vector2d v_probe = Eigen::Vector2d::Zero();
-        double tp = 1.0;
-        for (int k = 1; k < NCOEF; ++k) {
-            for (int dim = 0; dim < DIM; ++dim) v_probe(dim) += static_cast<double>(k) * coef(k, dim) * tp;
-            tp *= t_probe;
-        }
-        motion_dir = v_probe;
-        if (motion_dir.norm() <= TANGENT_EPS) motion_dir = acc_t; // 极端退化兜底
-    }
-    out.theta = std::atan2(motion_dir.y(), motion_dir.x());
+    if (out.ds_dtau <= TANGENT_EPS) return out;
 
-    // ── 角速度 ω = θ̇ = (ẋÿ − ẏẍ)/‖ṗ‖²。分母用物理速度尺度正则化，
-    //    使尖点 / 端点（v→0）处 ω→0 而非发散；高速时误差可忽略（O(reg²/s²)）。──
-    const double omega_t = (vel_t.x() * acc_t.y() - vel_t.y() * acc_t.x())
-        / (speed_t * speed_t + OMEGA_SPEED_REG * OMEGA_SPEED_REG);
-    out.dtheta_dtau = omega_t * s;
+    const Eigen::Vector2d third = jerk_t * time_scale * time_scale * time_scale;
+    const auto cross = [](const Eigen::Vector2d& a, const Eigen::Vector2d& b) {
+        return a.x() * b.y() - a.y() * b.x();
+    };
+    // 有向正则性由规划期几何证书保证，因此航向与曲率在整条路径上唯一定义。
+    out.theta = std::atan2(out.dp_dtau.y(), out.dp_dtau.x());
+    const double speed = out.ds_dtau;
+    const double speed_cubed = speed * speed * speed;
+    out.kappa = cross(out.dp_dtau, out.ddp_dtau) / speed_cubed;
+    // dκ/ds = (1/|p'|)·d/dτ[ det(p',p'')/|p'|³ ]，其中 d/dτ det(p',p'') = det(p',p''')。
+    out.kappa_rate = (
+        cross(out.dp_dtau, third) / speed_cubed
+        - 3.0 * out.kappa * out.dp_dtau.dot(out.ddp_dtau) / (speed * speed)
+    ) / speed;
     return out;
 }
 
@@ -217,16 +200,15 @@ TrajSample MincoTrajectory::eval_time(const double t) const {
         return sample_at(loc.segment, loc.local_t);
     }
 
-    // 超界线性外推：保持端点朝向/切线，位置沿端点 τ 导数线性延伸，二阶量归零。
+    // 超界外推为端点切线上的直线：位置线性延伸，航向保持，二阶量与曲率归零。
     const bool before = t < 0.0;
     const double edge_t = before ? 0.0 : total_time_;
     const Locator loc = locate_time(edge_t);
-    TrajSample edge = sample_at(loc.segment, loc.local_t);
+    const TrajSample edge = sample_at(loc.segment, loc.local_t);
 
     const double dtau = (t - edge_t) / std::max(total_time_, MIN_SEGMENT_DURATION);
     TrajSample out = edge;
     out.p = edge.p + edge.dp_dtau * dtau;
-    out.theta = edge.theta + edge.dtheta_dtau * dtau;
     out.ddp_dtau = Eigen::Vector2d::Zero();
     out.kappa = 0.0;
     return out;
@@ -238,10 +220,6 @@ TrajSample MincoTrajectory::eval(const double tau) const {
 
 TrajSample MincoTrajectory::eval_arc_length(const double arc_length) const {
     return eval(tau_at_arc_length(arc_length));
-}
-
-double MincoTrajectory::heading_rate_per_arc_length(const TrajSample& s) const {
-    return s.kappa;
 }
 
 MincoTrajectory::ControlPointBlock MincoTrajectory::segment_bezier_control_points(

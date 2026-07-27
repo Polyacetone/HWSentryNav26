@@ -41,29 +41,30 @@
         goal_tolerance: 0.3 # 进入该欧氏距离后尝试恒曲率几何终点连接（米）
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
 
+      trajectory_limits: # 全局规划包络：几何证书、MINCO 形状优化与速度剖面共用的唯一限值来源。
+        velocity_max: 3.0 # 路径速度幅值上限（m/s）
+        acceleration_max: 1.5 # 切向加速度上限（m/s²）
+        angular_velocity_max: 6.0 # 角速度上限（rad/s）
+        angular_acceleration_max: 7.0 # 角加速度上限（rad/s²）
+        lateral_acceleration_max: 2.0 # 侧向加速度上限（m/s²）
+        min_trackable_speed: 0.6 # 经实验降额的最低可稳定跟踪速度（m/s），曲率包络在此速度取等号
+        directed_speed_min: 0.05 # 有向正则性下限：速度沿种子方向分量的最小值（m/s）
+
       minco:
         penalty_weights:
           energy: 0.6 # 平滑性权重：最小化 jerk（加加速度），越大轨迹越平滑柔和
-          time: 20.0 # 时间权重：惩罚总时长，越大轨迹越短、走得越快
+          time: 20.0 # 归一化参数总长权重（弧长代理），越大轨迹越短
           obstacle: 1000.0 # 障碍物权重：撞墙的惩罚，越大越不可能穿墙
-          trajectory_velocity: 100.0 # 速度约束权重：保证整条轨迹的速度不超过上下限
-          lateral_acceleration: 100.0 # 侧向加速度约束权重：防止转弯过快导致侧滑，限制 |v·ω|
-          angular_velocity: 100.0 # 角速度约束权重：限制转向快慢，防急转
-          acceleration: 100.0 # 加速度约束权重：限制加减速的剧烈程度
+          parameterization_velocity: 100.0 # ‖p_τ‖ 不超过速度上限，保持 τ 与弧长量级可比
+          directed_regularity: 1000.0 # 有向正则性：排除内部零速点、尖点与逆向
+          curvature: 400.0 # 真实几何曲率 |κ| 超限惩罚
+          curvature_rate: 200.0 # 曲率变化率 |dκ/ds| 超限惩罚，抑制极短距离内建立大角速度
           traversal_alignment: 1600.0 # 过台阶时让车身顺着台阶方向走的对齐惩罚
-          traversal_velocity_target: 200.0 # 过台阶时让速度匹配台阶推荐速度窗口的软约束
           prohibited_traversal: 1000.0 # 往台阶禁止方向（如逆行）走的惩罚
-          runup_acceleration: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 a² 状态正则
-          runup_angular_velocity: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 ω² 状态正则
-        trajectory_limits:
-          velocity_max: 3.0 # 整条轨迹的速度幅值上限（m/s）
-          angular_velocity_max: 6.0 # 整条轨迹的角速度限制（rad/s）
-          acceleration_max: 1.5 # 整条轨迹的加速度限制（m/s²）
-          lateral_acceleration_max: 2.0 # 整条轨迹的侧向加速度限制（m/s²）
+          runup_curvature: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 κ² 正则
         terrain_gate:
           norm_lo: 0.1 # 方向场模长低于此值时不施加地形软约束
           norm_hi: 0.9 # 方向场模长高于此值时施加完整软约束
-          motion_speed_scale: 0.05 # 低速平滑速度/方向的正则尺度 (m/s)，避免地形代价在零速处断开
         samples_per_segment: 16 # 每段 MINCO 轨迹上采多少个点来施加约束和惩罚
         runup:
           body_norm_lo: 0.9 # 助跑源门控下界；非本体膨胀 cap=229/255 小于该值
@@ -93,11 +94,17 @@
           curvature_relative_threshold: 1.0e-8 # sy > eps*||s||*||y|| 才接受曲率对
           history_acceptance_ratio: 0.25 # 低模型可信度的 accepted step 不写入历史
         min_segment_time: 0.05 # 每段轨迹最短时长（秒），防止时长归零导致数值问题
-      geometry_validation:
-        samples_per_segment: 20 # 每段空间曲线的有限性、碰撞与地形检查采样数
+
+      environment_validation: # 环境验收：路径与代价地图、方向地形的关系
+        samples_per_segment: 20 # 每段空间曲线的碰撞与地形检查采样数下限
         traversal_angle_tolerance: 0.4 # 台阶方向角允许偏差，只记录软诊断（rad）
-        self_intersection_flatness_tolerance: 0.001 # 自适应 Bezier 细分相对弦的最大几何误差 (m)
-        self_intersection_max_edge_length: 0.02 # 自交验收折线边的最大长度 (m)
+
+      geometry_certificate: # 独立几何证书：Bezier 凸包区间界 + 自适应细分，固定网格间的窄尖峰也无法通过
+        max_subdivision_depth: 14 # 自适应细分最大深度；达到深度仍无法证明即拒绝
+        observability_arc_separation: 0.5 # 判定为不同分支所需的最小弧长间隔 (m)
+        observability_position_distance: 0.25 # 两分支位置差小于该值视为空间重合 (m)
+        observability_heading_angle: 0.35 # 两分支航向差小于该值视为方向相同 (rad)
+        observability_sample_spacing: 0.1 # 有向可分辨性检查的弧长采样间距 (m)
 
       speed_profile:
         discretization:
@@ -113,6 +120,7 @@
           velocity_tolerance: 0.02 # 速度硬包络容差 (m/s)
           acceleration_tolerance: 0.05 # 切向加速度容差 (m/s²)
           angular_velocity_tolerance: 0.05 # 角速度容差 (rad/s)
+          angular_acceleration_tolerance: 0.10 # 角加速度容差 (rad/s²)
           lateral_acceleration_tolerance: 0.05 # 侧向加速度容差 (m/s²)
 
       step:

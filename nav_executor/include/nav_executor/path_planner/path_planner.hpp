@@ -13,6 +13,7 @@
 #include <rclcpp/logger.hpp>
 
 #include <nav_executor/common/trajectory/annotated_path.hpp>
+#include <nav_executor/common/trajectory/geometry_certificate.hpp>
 #include <nav_executor/path_planner/search/dijkstra_cost_to_goal.hpp>
 #include <nav_executor/path_planner/search/kinodynamic_astar.hpp>
 #include <nav_executor/path_planner/trajectory/minco_optimizer.hpp>
@@ -83,11 +84,10 @@ struct PlannerConfig {
         double yaw_penalty;
     } start_yaw_relaxation;
 
-    struct GeometryValidationParams {
+    // 环境验收：几何形状本身由 GeometryCertificate 负责，这里只检查路径与地图的关系。
+    struct EnvironmentValidationParams {
         int samples_per_segment;
-        double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只打印日志不进行拒绝
-        double self_intersection_flatness_tolerance;
-        double self_intersection_max_edge_length;
+        double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只记录软诊断
     };
 
     // 可行性判定
@@ -103,15 +103,13 @@ struct PlannerConfig {
     // MINCO 种子构造：kinodynamic 状态序列的重采样间隔（米），决定 MINCO 段数
     double seed_resample_distance;
 
-    // 普通路径起点参考速度与 FOLLOW 使用同一份前向 capability 边界。
-    SignedVelocityBounds forward_velocity_bounds;
-
     DijkstraCostToGoal::Params dijkstra;
     KinodynamicAstar::Params kinodynamic;
     MincoOptimizer::Params minco;
 
     StepDetectionParams step_detection;
-    GeometryValidationParams geometry_validation;
+    EnvironmentValidationParams environment_validation;
+    GeometryCertificateParams geometry_certificate;
     SpeedProfileOptimizer::Params speed_profile;
 
     bool enable_diagnostics;

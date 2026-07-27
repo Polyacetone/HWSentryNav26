@@ -7,8 +7,6 @@
 
 #include <rclcpp/logging.hpp>
 
-#include <nav_executor/common/trajectory/trajectory_topology.hpp>
-
 namespace nav_executor {
 
 namespace {
@@ -29,18 +27,20 @@ const char* speed_profile_selection_string(
     return "UNKNOWN";
 }
 
-// kinodynamic 前向平坦状态序列 → MINCO 平坦边界状态 + 段时长。
+// kinodynamic 前向平坦状态序列 → MINCO 平坦边界状态 + 段参数长度 + 有向切向。
 struct MincoSeed {
     std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
     std::vector<double> durations;
+    std::vector<Eigen::Vector2d> tangents;         // 边界处的 A* 有向单位切向
 };
 
-struct GeometryValidationReport {
+struct EnvironmentValidationReport {
     std::optional<std::string> rejection;
     std::vector<std::string> warnings;
 };
 
 // 距离和显著转向点会保留；段时长严格累加 A* 返回的真实逐边时长。
+// tangents 记录 A* 的有向性，供 MINCO 有向正则性罚与几何证书共用。
 MincoSeed build_minco_seed(
     const std::vector<KinodynamicAstar::State>& raw,
     const double resample_distance,
@@ -68,12 +68,19 @@ MincoSeed build_minco_seed(
 
     const size_t n = selected.size();
     seed.states.resize(n);
+    seed.tangents.resize(n);
     for (size_t i = 0; i < n; ++i) {
-        const auto& s = raw[selected[i]];
-        auto& bs = seed.states[i];
-        bs.pos = s.position;
-        bs.vel = s.velocity;
-        bs.acc.setZero();
+        const KinodynamicAstar::State& state = raw[selected[i]];
+        seed.states[i].pos = state.position;
+        seed.states[i].vel = state.velocity;
+        seed.states[i].acc.setZero();
+        // A* 末状态速度为零，其有向性由前一状态给出。
+        const Eigen::Vector2d direction = state.velocity.norm() > 1e-9
+            ? state.velocity
+            : raw[selected[i] > 0 ? selected[i] - 1 : 0].velocity;
+        seed.tangents[i] = direction.norm() > 1e-9
+            ? direction.normalized()
+            : Eigen::Vector2d::UnitX();
     }
     seed.durations.resize(n - 1);
     for (size_t i = 0; i + 1 < n; ++i) {
@@ -84,146 +91,101 @@ MincoSeed build_minco_seed(
         seed.durations[i] = std::max(duration, 0.1);
     }
 
-    // 规划终点只约束位置停止；起点沿用当前运动状态。
-    seed.states.back().vel.setZero();
+    // 终点位置固定；速度剖面负责终点停止，MINCO 端点速度只需保持有向非零。
+    seed.states.back().vel = seed.tangents.back()
+        * std::max(seed.states[n - 2].vel.norm(), 1e-3);
     seed.states.back().acc.setZero();
 
     return seed;
 }
 
-GeometryValidationReport validate_path_geometry(
+// 环境验收：路径与代价地图、方向地形的关系。几何形状本身由 GeometryCertificate 负责。
+EnvironmentValidationReport validate_path_environment(
     const MincoTrajectory& trajectory,
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
     const int occupied_threshold,
     const double step_alignment_threshold,
-    const PlannerConfig::GeometryValidationParams& validation
+    const PlannerConfig::EnvironmentValidationParams& validation
 ) {
-    GeometryValidationReport report;
-    const double total_time = trajectory.total_time();
-    if (!std::isfinite(total_time) || total_time <= 0.0) {
-        report.rejection = "trajectory has invalid total time";
-        return report;
-    }
+    EnvironmentValidationReport report;
     const double total_arc_length = trajectory.total_arc_length();
-    if (!std::isfinite(total_arc_length) || total_arc_length < 0.0) {
-        report.rejection = "trajectory has invalid total arc length";
-        return report;
-    }
-    const auto self_intersection = find_possible_self_intersection(
-        trajectory,
-        {
-            .flatness_tolerance = validation.self_intersection_flatness_tolerance,
-            .max_edge_length = validation.self_intersection_max_edge_length,
-        }
-    );
-    if (self_intersection) {
-        report.warnings.push_back(
-            "possible self-intersection between MINCO segments "
-            + std::to_string(self_intersection->first_segment) + " and "
-            + std::to_string(self_intersection->second_segment)
-        );
-    }
-
     double worst_traversal_angle = validation.traversal_angle_tolerance;
-    double worst_traversal_angle_tau = 0.0;
-    const auto validate_sample = [&](const double tau) {
-        const TrajSample s = trajectory.eval(tau);
-        if (!s.p.allFinite() || !std::isfinite(s.theta) || !s.dp_dtau.allFinite()
-            || !s.ddp_dtau.allFinite() || !std::isfinite(s.dtheta_dtau)) {
-            report.rejection = "trajectory contains non-finite values at tau=" + std::to_string(tau)
-                + ": p=(" + std::to_string(s.p.x()) + "," + std::to_string(s.p.y()) + ")"
-                + " theta=" + std::to_string(s.theta)
-                + " dp_dtau=(" + std::to_string(s.dp_dtau.x()) + "," + std::to_string(s.dp_dtau.y()) + ")"
-                + " ddp_dtau=(" + std::to_string(s.ddp_dtau.x()) + "," + std::to_string(s.ddp_dtau.y()) + ")"
-                + " dtheta_dtau=" + std::to_string(s.dtheta_dtau);
-            return false;
-        }
-        const Eigen::Vector2d grid = cost_map.map_coord_to_grid(s.p);
-        if (!cost_map.is_valid_coord(grid)) {
-            report.rejection = "trajectory leaves planning map at tau=" + std::to_string(tau);
-            return false;
-        }
-        if (cost_map.interpolate(grid) >= static_cast<double>(occupied_threshold)) {
-            report.rejection = "trajectory intersects occupied cost at tau=" + std::to_string(tau)
-                + ": cost=" + std::to_string(cost_map.interpolate(grid))
-                + " >= threshold=" + std::to_string(occupied_threshold);
-            return false;
-        }
+    double worst_traversal_angle_arc_length = 0.0;
 
-        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(s.p);
-        if (!direction_map.is_valid_coord(dir_grid)) {
-            report.rejection = "trajectory leaves direction map at tau=" + std::to_string(tau);
-            return false;
-        }
-        if (direction_map.is_terrain_body_at(dir_grid)) {
-            const Eigen::Array2i cell_array = dir_grid.array().floor().cast<int>();
-            const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
-            const uint8_t label = direction_map.terrain_at(cell);
-            const Eigen::Vector2d raw_dir = direction_map.at(cell);
-            if (label < static_cast<uint8_t>(TerrainType::SLOPE)
-                || raw_dir.squaredNorm() <= 1e-12) {
-                report.rejection = "trajectory encountered invalid directional terrain body at tau="
-                    + std::to_string(tau);
-                return false;
-            }
-            const Eigen::Vector2d dir = raw_dir.normalized();
-            const Eigen::Vector2d heading(std::cos(s.theta), std::sin(s.theta));
-            const double alignment = heading.dot(dir);
-            if (std::abs(alignment) <= step_alignment_threshold) {
-                report.rejection = "trajectory is not aligned with directional terrain at tau=" + std::to_string(tau)
-                    + ": |heading.dot(dir)|=" + std::to_string(std::abs(alignment))
-                    + " <= threshold=" + std::to_string(step_alignment_threshold);
-                return false;
-            }
-            const bool going_up = alignment >= 0.0;
-            const TraversalMode* rule = terrain_constraints.selected_mode(label, going_up);
-            if (!rule) {
-                report.rejection = "trajectory uses prohibited directional terrain at tau=" + std::to_string(tau)
-                    + ": label=" + std::to_string(static_cast<int>(label))
-                    + ", direction=" + (going_up ? "up" : "down")
-                    + ", |dir|=" + std::to_string(raw_dir.norm());
-                return false;
-            }
-            const double angle_rad = std::acos(
-                std::clamp(std::abs(alignment), 0.0, 1.0)
-            );
-            if (angle_rad > worst_traversal_angle) {
-                worst_traversal_angle = angle_rad;
-                worst_traversal_angle_tau = tau;
-            }
-        }
-        return true;
-    };
-
-    // 时间均匀采样检查数值、位置与地形，并覆盖每个 MINCO 段的边界。
+    // 弧长是跟随层唯一的进度坐标，环境验收使用同一坐标。采样间距同时覆盖
+    // 地图分辨率与每段的最小采样密度，避免物理本体缩窄为单格后被跨过。
     const int samples_per_segment = std::max(validation.samples_per_segment, 1);
-    for (int segment = 0; segment < trajectory.segment_count(); ++segment) {
-        const double tau_begin = trajectory.segment_boundary_tau(segment);
-        const double tau_end = trajectory.segment_boundary_tau(segment + 1);
-        for (int sample = 0; sample <= samples_per_segment; ++sample) {
-            const double fraction = static_cast<double>(sample)
-                / static_cast<double>(samples_per_segment);
-            const double tau = std::lerp(tau_begin, tau_end, fraction);
-            if (!validate_sample(tau)) return report;
+    const double segment_spacing = total_arc_length
+        / static_cast<double>(std::max(trajectory.segment_count(), 1) * samples_per_segment);
+    const double spacing = std::min(direction_map.resolution * 0.5, segment_spacing);
+    const int intervals = std::max(
+        1, static_cast<int>(std::ceil(total_arc_length / spacing))
+    );
+
+    for (int i = 0; i <= intervals; ++i) {
+        const double arc_length = total_arc_length * static_cast<double>(i)
+            / static_cast<double>(intervals);
+        const TrajSample sample = trajectory.eval_arc_length(arc_length);
+        const std::string at = " at s=" + std::to_string(arc_length);
+
+        const Eigen::Vector2d grid = cost_map.map_coord_to_grid(sample.p);
+        if (!cost_map.is_valid_coord(grid)) {
+            report.rejection = "trajectory leaves the planning map" + at;
+            return report;
+        }
+        const double cost = cost_map.interpolate(grid);
+        if (cost >= static_cast<double>(occupied_threshold)) {
+            report.rejection = "trajectory intersects occupied cost" + at
+                + ": cost=" + std::to_string(cost)
+                + " >= threshold=" + std::to_string(occupied_threshold);
+            return report;
+        }
+
+        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(sample.p);
+        if (!direction_map.is_valid_coord(dir_grid)) {
+            report.rejection = "trajectory leaves the direction map" + at;
+            return report;
+        }
+        if (!direction_map.is_terrain_body_at(dir_grid)) continue;
+
+        const Eigen::Array2i cell_array = dir_grid.array().floor().cast<int>();
+        const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
+        const uint8_t label = direction_map.terrain_at(cell);
+        const Eigen::Vector2d raw_direction = direction_map.at(cell);
+        if (label < static_cast<uint8_t>(TerrainType::SLOPE)
+            || raw_direction.squaredNorm() <= 1e-12) {
+            report.rejection = "trajectory entered an invalid directional terrain body" + at;
+            return report;
+        }
+        const Eigen::Vector2d direction = raw_direction.normalized();
+        const Eigen::Vector2d heading(std::cos(sample.theta), std::sin(sample.theta));
+        const double alignment = heading.dot(direction);
+        if (std::abs(alignment) <= step_alignment_threshold) {
+            report.rejection = "trajectory is not aligned with directional terrain" + at
+                + ": |heading.dot(dir)|=" + std::to_string(std::abs(alignment))
+                + " <= threshold=" + std::to_string(step_alignment_threshold);
+            return report;
+        }
+        const bool going_up = alignment >= 0.0;
+        if (!terrain_constraints.selected_mode(label, going_up)) {
+            report.rejection = "trajectory uses prohibited directional terrain" + at
+                + ": label=" + std::to_string(static_cast<int>(label))
+                + ", direction=" + (going_up ? "up" : "down");
+            return report;
+        }
+        const double angle = std::acos(std::clamp(std::abs(alignment), 0.0, 1.0));
+        if (angle > worst_traversal_angle) {
+            worst_traversal_angle = angle;
+            worst_traversal_angle_arc_length = arc_length;
         }
     }
 
-    // 额外按弧长采样，避免物理本体缩窄为原始格后被固定 tau 网格跨过。
-    const double max_spatial_spacing = direction_map.resolution * 0.5;
-    const int spatial_intervals = std::max(
-        1, static_cast<int>(std::ceil(total_arc_length / max_spatial_spacing))
-    );
-    for (int sample = 0; sample <= spatial_intervals; ++sample) {
-        const double arc_length = total_arc_length * static_cast<double>(sample)
-            / static_cast<double>(spatial_intervals);
-        const double tau = trajectory.tau_at_arc_length(arc_length);
-        if (!validate_sample(tau)) return report;
-    }
     if (worst_traversal_angle > validation.traversal_angle_tolerance) {
         report.warnings.push_back(
-            "stair-direction deviation at tau=" + std::to_string(worst_traversal_angle_tau)
+            "stair-direction deviation at s="
+            + std::to_string(worst_traversal_angle_arc_length)
             + ": angle=" + std::to_string(worst_traversal_angle)
             + " rad, tolerance=" + std::to_string(validation.traversal_angle_tolerance)
             + " rad"
@@ -523,10 +485,10 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     // ── [2] Kinodynamic A*：空间曲率原语 + 可达速度区间搜索 ──
     KinodynamicAstar::State strict_start;
     strict_start.position = start_map;
+    // A* 原语要求严格正的前向速度，因此起点参考速度不低于最低可跟踪速度。
+    const TrajectoryLimits& limits = config_.minco.limits;
     const double start_reference_speed = std::clamp(
-        req.current_velocity,
-        config_.forward_velocity_bounds.min,
-        config_.forward_velocity_bounds.max
+        req.current_velocity, limits.min_trackable_speed, limits.velocity_max
     );
     strict_start.velocity = start_reference_speed * Eigen::Vector2d(
         std::cos(req.current_yaw), std::sin(req.current_yaw)
@@ -546,7 +508,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
                 2.0 * M_PI / config_.kinodynamic.dedup_theta
             ))
         );
-        const double relaxed_speed = config_.forward_velocity_bounds.min;
+        const double relaxed_speed = limits.min_trackable_speed;
         for (int bin = 0; bin < heading_bins; ++bin) {
             const double yaw = wrap_angle(
                 req.current_yaw
@@ -568,10 +530,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         }
     }
 
-    KinodynamicAstar::Params kinodynamic_params = config_.kinodynamic;
-    MincoOptimizer::Params minco_params = config_.minco;
-
-    KinodynamicAstar astar(kinodynamic_params);
+    KinodynamicAstar astar(config_.kinodynamic);
     const auto kino = astar.search(
         kino_roots, goal_plan, dijkstra, transition_constraint
     );
@@ -596,12 +555,13 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         kino.durations
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
-    // ── [3] MINCO 时空优化 ──
-    MincoOptimizer optimizer(minco_params);
+    // ── [3] MINCO 有向正则几何优化 ──
+    MincoOptimizer optimizer(config_.minco);
     const auto minco_start = std::chrono::steady_clock::now();
     const auto opt = optimizer.optimize(
         minco_seed.states,
         minco_seed.durations,
+        minco_seed.tangents,
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints
@@ -632,35 +592,46 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         RCLCPP_DEBUG(
             logger_,
             "MINCO objective: cost %.3g -> %.3g | waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
-            "seed[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g] "
-            "final[E=%.3g T=%.3g O=%.3g V=%.3g Lat=%.3g W=%.3g A=%.3g SA=%.3g SV=%.3g SP=%.3g RA=%.3g RW=%.3g]",
+            "seed[energy=%.3g length=%.3g obstacle=%.3g speed=%.3g directed=%.3g "
+            "curvature=%.3g curvature_rate=%.3g align=%.3g prohibited=%.3g runup=%.3g] "
+            "final[energy=%.3g length=%.3g obstacle=%.3g speed=%.3g directed=%.3g "
+            "curvature=%.3g curvature_rate=%.3g align=%.3g prohibited=%.3g runup=%.3g]",
             s.total(), f.total(),
             opt.free_waypoint_count, opt.waypoint_total_displacement, opt.waypoint_max_displacement,
-            s.energy, s.time, s.obstacle, s.trajectory_velocity, s.lateral_acc,
-            s.omega, s.accel, s.traversal_alignment, s.traversal_velocity_target,
-            s.prohibited_traversal, s.runup_accel, s.runup_omega,
-            f.energy, f.time, f.obstacle, f.trajectory_velocity, f.lateral_acc,
-            f.omega, f.accel, f.traversal_alignment, f.traversal_velocity_target,
-            f.prohibited_traversal, f.runup_accel, f.runup_omega
+            s.energy, s.time, s.obstacle, s.parameterization_velocity, s.directed_regularity,
+            s.curvature, s.curvature_rate, s.traversal_alignment, s.prohibited_traversal,
+            s.runup_curvature,
+            f.energy, f.time, f.obstacle, f.parameterization_velocity, f.directed_regularity,
+            f.curvature, f.curvature_rate, f.traversal_alignment, f.prohibited_traversal,
+            f.runup_curvature
         );
     }
     if (opt.trajectory.empty()) return fail("MINCO produced empty trajectory");
-    const GeometryValidationReport geometry_validation = validate_path_geometry(
+
+    // ── [4] 独立几何证书：有向正则性、真实曲率、曲率变化率、有向可分辨性 ──
+    const GeometryCertificate certificate = certify_trajectory_geometry(
+        opt.trajectory, minco_seed.tangents, config_.minco.limits, config_.geometry_certificate
+    );
+    if (!certificate.valid) {
+        return fail("geometry certificate rejected the path: " + certificate.rejection);
+    }
+    const EnvironmentValidationReport environment_validation = validate_path_environment(
         opt.trajectory,
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints,
         config_.occupied_threshold,
         config_.step_detection.detect_dot_threshold,
-        config_.geometry_validation
+        config_.environment_validation
     );
-    if (geometry_validation.rejection) {
-        return fail("MINCO output rejected: " + *geometry_validation.rejection);
+    if (environment_validation.rejection) {
+        return fail("environment validation rejected the path: "
+            + *environment_validation.rejection);
     }
     result.warnings.insert(
         result.warnings.end(),
-        geometry_validation.warnings.begin(),
-        geometry_validation.warnings.end()
+        environment_validation.warnings.begin(),
+        environment_validation.warnings.end()
     );
 
     // ── 构建不可变 AnnotatedPath ──
@@ -670,7 +641,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     path->goal_id = req.goal.id;
     path->planning_performance = req.performance;
 
-    // 台阶几何标注：基于 base（未掩码）方向场，扫描轴为 MINCO 参数 τ。
+    // 台阶几何标注：基于 base（未掩码）方向场，扫描轴为累计弧长。
     path->step_segments = step_annotator::build_step_plan(
         config_.step_detection, path->trajectory, *req.direction_map, req.terrain_constraints, logger_
     );

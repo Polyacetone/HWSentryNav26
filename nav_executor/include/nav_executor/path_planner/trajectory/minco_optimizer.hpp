@@ -1,61 +1,54 @@
 #pragma once
 
-#include <memory>
 #include <string>
 #include <vector>
 
 #include <Eigen/Core>
 
 #include <nav_executor/common/trajectory/minco_trajectory.hpp>
+#include <nav_executor/common/trajectory/trajectory_limits.hpp>
 #include <nav_executor/path_planner/numerics/lbfgs_minimizer.hpp>
 #include <nav_executor/path_planner/trajectory/minco_minjerk.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
 
 namespace nav_executor {
 
-// ── MINCO 时空优化器（微分平坦，替换 bspline_optimizer）──
+// ── MINCO 几何优化器 ──
 //
-// 只优化 2D 平坦输出 (x,y)：决策变量 = 内部路点 Q（DIM×(N-1)）+ 段时长 T（经虚拟时间
-// 正性重参数化）。朝向 θ = atan2(运动方向) 由前向平坦输出解析导出，非完整约束因此**恒等
-// 满足**，不再需要增广拉格朗日或 θ 自由度。block-scaled trust-region L-BFGS 做无约束
-// 优化，约束以采样罚实现，梯度经 MincoMinJerk::propagate_gradient 从系数回传到 Q/T。
+// 只优化 2D 平坦输出 (x,y) 的**空间形状**：决策变量 = 内部路点 Q（DIM×(N-1)）+ 段时长 T
+// （经虚拟时间正性重参数化）。物理时标不在这里决定，而由 PathSpeedProfile 按弧长统一给出；
+// 因此本优化器的 τ 只是一个归一化参数，速度被约束在 [directed_speed_min, velocity_max]
+// 之内，使 w_time·ΣT 成为弧长的代理罚。
+//
+// 关键不变量：
+//   1. 有向正则性 p_τ·t̂_seed ≥ directed_speed_min > 0，排除内部零速点、尖点与逆向；
+//   2. 曲率与曲率变化率使用与跟随层同一份真实几何定义（TrajSample::kappa/kappa_rate）。
 //
 // 目标：
 //   J = w_energy·∫‖jerk‖² + w_time·ΣT
-//     + Σ_采样点 [ 障碍 + 速度上界 + |v·ω|≤a_lat + |ω|界 + |a|界
-//                 + 膨胀方向场对齐 + 离散地形速度窗 + 助跑区 ‖a‖²/ω² ]
+//     + Σ_采样点 [ 障碍 + 参数化速度上界 + 有向正则性 + |κ|界 + |dκ/ds|界
+//                 + 膨胀方向场对齐 + 禁止方向 + 助跑区 κ² ]
 class MincoOptimizer {
 public:
     struct Weights {
-        double energy = 1.0;         // min-jerk 能量
-        double time = 16.0;          // 总时长
-        double obstacle = 1000.0;    // 障碍罚
-        double trajectory_velocity = 100.0; // 通用轨迹速度界
-        double lateral_acc = 100.0;  // |v·ω| ≤ a_lat_max
-        double omega = 100.0;        // |ω| ≤ omega_max
-        double accel = 100.0;        // |dv/dt| ≤ acc_max
+        double energy = 1.0;                  // min-jerk 能量
+        double time = 16.0;                   // 归一化参数总长（弧长代理）
+        double obstacle = 1000.0;             // 障碍罚
+        double parameterization_velocity = 100.0; // ‖p_τ‖ ≤ velocity_max
+        double directed_regularity = 1000.0;  // p_τ·t̂_seed ≥ directed_speed_min
+        double curvature = 400.0;             // |κ| ≤ κ_max
+        double curvature_rate = 200.0;        // |dκ/ds| ≤ κ'_max
         double traversal_alignment = 200.0;
-        double traversal_velocity_target = 200.0; // 台阶区域共享速度窗口的软目标
         double prohibited_traversal = 1000.0;
-        double runup_accel = 100.0;    // 台阶场及其助跑区内的 ‖a‖² 正则
-        double runup_omega = 100.0;    // 台阶场及其助跑区内的 ω² 正则
-    };
-
-    struct TrajectoryLimits {
-        double velocity_max = 3.2;
-        double angular_velocity_max = 6.0;
-        double acceleration_max = 1.8;
-        double lateral_acceleration_max = 2.0;
+        double runup_curvature = 100.0;       // 台阶场及其助跑区内的 κ² 正则
     };
 
     // 方向地形罚的平滑门控（连续 smoothstep，替代离散 label/阈值硬开关）。
     // 以方向场插值模长 ‖dir‖ 为自变量：< norm_lo 罚项关闭，> norm_hi 全强度，
-    // 区间内 C1 平滑过渡。恢复目标沿采样点位移的分段光滑性，改善局部 trust-region
-    // 模型在台阶边界附近的预测质量。
+    // 区间内 C1 平滑过渡。
     struct TerrainGate {
-        double norm_lo = 0.1; // ‖dir‖ 下限：低于则方向地形罚为零
-        double norm_hi = 0.9; // ‖dir‖ 上限：高于则方向地形罚全强度
-        double motion_speed_scale = 0.05; // 低速方向/速度正则尺度 (m/s)
+        double norm_lo = 0.1;
+        double norm_hi = 0.9;
     };
 
     struct OptimizerParams {
@@ -73,7 +66,7 @@ public:
 
     struct Params {
         Weights weights;
-        TrajectoryLimits trajectory_limits;
+        TrajectoryLimits limits;
         TerrainGate terrain_gate;
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;
@@ -91,20 +84,17 @@ public:
         double energy = 0.0;
         double time = 0.0;
         double obstacle = 0.0;
-        double trajectory_velocity = 0.0;
-        double lateral_acc = 0.0;
-        double omega = 0.0;
-        double accel = 0.0;
+        double parameterization_velocity = 0.0;
+        double directed_regularity = 0.0;
+        double curvature = 0.0;
+        double curvature_rate = 0.0;
         double traversal_alignment = 0.0;
-        double traversal_velocity_target = 0.0;
         double prohibited_traversal = 0.0;
-        double runup_accel = 0.0;
-        double runup_omega = 0.0;
-        double total() const {
-            return energy + time + obstacle + trajectory_velocity + lateral_acc
-                + omega + accel + traversal_alignment + traversal_velocity_target
-                + prohibited_traversal
-                + runup_accel + runup_omega;
+        double runup_curvature = 0.0;
+        [[nodiscard]] double total() const {
+            return energy + time + obstacle + parameterization_velocity
+                + directed_regularity + curvature + curvature_rate
+                + traversal_alignment + prohibited_traversal + runup_curvature;
         }
     };
 
@@ -156,10 +146,12 @@ public:
 
     // 由平坦 seed 初始化并优化。
     //   seed_states：N+1 个 2D 边界全状态（含 head/tail 的 pos/vel/acc，仅 x,y）；
-    //   seed_durations：N 段初始时长；
+    //   seed_durations：N 段初始参数长度；
+    //   seed_tangents：N+1 个边界处的 A* 有向单位切向，定义有向正则性参考方向。
     Result optimize(
         const std::vector<MincoMinJerk::BoundaryPVA>& seed_states,
         const std::vector<double>& seed_durations,
+        const std::vector<Eigen::Vector2d>& seed_tangents,
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const TerrainTraversalConstraints& terrain_constraints

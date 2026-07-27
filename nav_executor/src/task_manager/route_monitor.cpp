@@ -31,7 +31,7 @@ bool check_projection_guard(const RouteMonitorInput& in, rclcpp::Logger logger) 
         RCLCPP_WARN(logger, "RouteMonitor: route tracking lost (tracking_error=%.2f m)", in.route.tracking_error);
         return true;
     }
-    const Eigen::Vector2d proj_map = in.route.projected_position;
+    const Eigen::Vector2d proj_map = in.route.reference_position;
 
     if (!in.masked_global_cost_map || in.proj_guard.cost_max < 0.0 || in.proj_guard.cost_max >= 255.0) {
         return false;

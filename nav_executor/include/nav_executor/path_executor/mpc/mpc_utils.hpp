@@ -91,11 +91,11 @@ void zoh_v_matrices(
 
 LPVDiscreteModel build_lpv_discrete_model(const LPVKinematicModelParams& params, double rho);
 
+// 底盘命令变化率的硬边界。PATH_SPEED_CMD 分量保持为零区间，由各问题按自身
+// 路径语义单独设置（STOP/HOLD 无路径，FOLLOW 限制在 [0, 剩余弧长/Δt]）。
 MPCControlBounds command_rate_control_bounds(
     const StateVec& x,
     const CapabilityProfile& capability,
-    double path_speed_min,
-    double path_speed_max,
     const MPCStartCommandLimits* start_command = nullptr
 );
 

@@ -54,14 +54,12 @@ struct MPCFollowTrackingWeights {
     double heading;
     double velocity;
     double angular_velocity;
-    double tangent_blend_speed_scale;
 };
 
 struct MPCFollowProgressParams {
     double progress_reward;
     double speed_tracking_weight;
     double speed_smoothness_weight;
-    double overshoot_weight;
 };
 
 struct MPCFollowTerminalWeights {
@@ -70,7 +68,6 @@ struct MPCFollowTerminalWeights {
     double velocity;
     double angular_velocity;
     double remaining_progress;
-    double overshoot;
 };
 
 struct MPCFollowCommandWeights {

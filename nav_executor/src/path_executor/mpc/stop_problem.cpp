@@ -25,7 +25,7 @@ void StopProblem::dynamics_jacobians(int, const StateVec& x, const ControlVec& u
 
 MPCControlBounds StopProblem::control_bounds(const int k, const StateVec& x) const {
     return command_rate_control_bounds(
-        x, p_.stop.profile, 0.0, 0.0, k == 0 ? &p_.stop.start_command : nullptr
+        x, p_.stop.profile, k == 0 ? &p_.stop.start_command : nullptr
     );
 }
 

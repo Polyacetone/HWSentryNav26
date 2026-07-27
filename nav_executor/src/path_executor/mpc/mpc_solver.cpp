@@ -126,8 +126,6 @@ AncillaryRollout<SolverT> rollout_ancillary_feedback(
         const MPCControlBounds applied_bounds = command_rate_control_bounds(
             result.rollout.xs[k],
             effective_capability,
-            effective_capability.command_envelope.velocity.min,
-            effective_capability.command_envelope.velocity.max,
             k == 0 ? &start_command : nullptr
         );
         const AncillaryControlResult ancillary = ancillary_velocity_command_rate(
@@ -342,13 +340,12 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         );
     }
 
+    // 有向进度估计是外部观测；虚拟进度速度允许从零开始，因此下界是 0 而非命令下限。
     const double path_progress0 = std::clamp(
         current_path_progress, 0.0, global_trajectory.total_arc_length()
     );
     const double path_speed0 = std::clamp(
-        current_path_speed,
-        effective_capability.command_envelope.velocity.min,
-        effective_capability.command_envelope.velocity.max
+        current_path_speed, 0.0, effective_capability.command_envelope.velocity.max
     );
 
     const double schedule_rho = select_follow_schedule_rho(
@@ -396,9 +393,8 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         : effective_capability;
 
     const FollowProblem problem(
-        global_trajectory, speed_profile, params_, step_cost_grids, ci, masked_global_grid, pred_dt, schedule_rho,
-        nominal_capability, effective_capability.command_envelope.velocity,
-        step_constraint_schedule
+        global_trajectory, speed_profile, params_, step_cost_grids, ci, masked_global_grid,
+        pred_dt, schedule_rho, nominal_capability, step_constraint_schedule
     );
 
     fddp::SolverOptions opts;
@@ -412,7 +408,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         ControlVec initial_control = ControlVec::Zero();
         initial_control(iu::PATH_SPEED_CMD) = std::clamp(
             speed_profile.eval_arc_length(path_progress0).velocity,
-            effective_capability.command_envelope.velocity.min,
+            0.0,
             effective_capability.command_envelope.velocity.max
         );
         fill_solver_controls(follow_solver_, initial_control);
@@ -485,18 +481,16 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         const double path_progress = nominal_rollout.xs[k](ix::PATH_PROGRESS);
         const double path_speed = follow_solver_.us[k](iu::PATH_SPEED_CMD);
         const TrajSample sample = global_trajectory.eval_arc_length(path_progress);
+        const double nominal_velocity =
+            speed_profile.eval_arc_length(path_progress).velocity;
         diagnostics.reference_path_progress.push_back(path_progress);
         diagnostics.reference_path_speed.push_back(path_speed);
-        diagnostics.trajectory_nominal_velocity.push_back(
-            speed_profile.eval_arc_length(path_progress).velocity
-        );
+        diagnostics.trajectory_nominal_velocity.push_back(nominal_velocity);
         diagnostics.trajectory_nominal_angular_velocity.push_back(
-            sample.kappa * speed_profile.eval_arc_length(path_progress).velocity
+            sample.kappa * nominal_velocity
         );
         diagnostics.reference_velocity.push_back(path_speed);
-        diagnostics.reference_angular_velocity.push_back(
-            global_trajectory.heading_rate_per_arc_length(sample) * path_speed
-        );
+        diagnostics.reference_angular_velocity.push_back(sample.kappa * path_speed);
     }
 
     if (check_lethal_status) {
