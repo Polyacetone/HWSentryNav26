@@ -7,9 +7,9 @@
 namespace map_server {
 
 struct ObjectTrackerParams {
-    int morph_close_kernel_size; // 形态学闭运算核大小（0或1=关闭）
-    int min_blob_area; // 最小连通域面积（像素），滤除噪声小斑块
-    int local_grid_size; // 局部栅格地图边长（像素）
+    double morph_close_radius_m; // 跟踪检测前闭运算的物理半径（m，0=关闭）
+    double min_tracking_component_area_m2; // 进入目标跟踪的最小连通域面积（m²）
+    double local_grid_extent_m; // 目标局部栅格的最小物理边长（m）
     double max_association_dist; // 匈牙利匹配最大关联距离（m）
     double process_noise_std; // KF 过程噪声（加速度标准差，m/s²）
     double measurement_noise_std; // KF 量测噪声标准差（m）
@@ -84,6 +84,9 @@ private:
     int width_, height_;
     double resolution_;
     ObjectTrackerParams params_;
+    int morph_close_kernel_size_;
+    int min_tracking_component_cells_;
+    int local_grid_size_;
     std::vector<Track> tracks_;
     int next_id_ = 0;
 };

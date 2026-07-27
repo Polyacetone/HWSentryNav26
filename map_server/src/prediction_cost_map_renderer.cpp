@@ -1,5 +1,6 @@
 #include <map_server/prediction_cost_map_renderer.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -40,9 +41,7 @@ PredictionCostMapRenderer::PredictionCostMapRenderer(
     map_width_(map_width),
     map_height_(map_height),
     prediction_steps_(prediction_steps),
-    cutoff_radius_px_(static_cast<int>(std::round(
-        inflation_params.cutoff_radius_m / inflation_params.resolution
-    ))),
+    cutoff_radius_px_(0),
     inflation_params_(inflation_params) {
     if (map_width_ <= 0 || map_height_ <= 0) {
         throw std::invalid_argument("prediction renderer map dimensions must be positive");
@@ -54,6 +53,13 @@ PredictionCostMapRenderer::PredictionCostMapRenderer(
         || inflation_params_.resolution <= 0.0) {
         throw std::invalid_argument("prediction renderer resolution must be positive");
     }
+    cutoff_radius_px_ = std::min(
+        map_utils::enclosing_radius_cells(
+            inflation_params_.cutoff_radius_m,
+            inflation_params_.resolution
+        ),
+        std::max(map_width_, map_height_)
+    );
 }
 
 std::vector<cv::Mat> PredictionCostMapRenderer::render(

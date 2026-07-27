@@ -30,10 +30,20 @@ struct TerrainMapData {
 struct MapInflationParams {
     double robot_radius_m;
     double cutoff_radius_m;
-    double decay_alpha;
+    double decay_rate_per_m;
     double direction_non_body_magnitude_cap; // (0, 0.9]，须与本体 magnitude=1 保持可分离
     double resolution = 0.0; // map resolution (m/px), must be set before calling inflation functions
 };
+
+int containing_cell(double coordinate_m, double resolution);
+int nearest_cell(double coordinate_m, double resolution);
+double cell_center_coordinate(double cell_coordinate, double resolution);
+int enclosing_radius_cells(double radius_m, double resolution);
+int nearest_radius_cells(double radius_m, double resolution);
+int morphology_kernel_size(double radius_m, double resolution);
+int minimum_area_cells(double area_m2, double resolution);
+int centered_extent_cells(double extent_m, double resolution);
+int minimum_density_count(double density_per_m2, double resolution);
 
 struct DirectionOverlapPair {
     uint8_t first_label;

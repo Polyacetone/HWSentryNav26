@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <array>
 #include <cmath>
 #include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -21,6 +22,7 @@
 #include <small_gicp/util/normal_estimation.hpp>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <map_server/object_tracker.hpp>
 #include <map_server/prediction_cost_map_renderer.hpp>
 #include <map_server/utils.hpp>
@@ -53,9 +55,11 @@ private:
         } without_global_cloud;
         int sor_num_neighbors;
         double sor_std_mul;
-        int cell_obstacle_point_threshold;
-        int min_obstacle_cluster_cells;
+        double min_projected_point_density_per_m2;
+        double min_obstacle_cluster_area_m2;
     } local_map_params_;
+    int min_points_per_cell_ = 1;
+    int min_obstacle_cluster_cells_ = 1;
     bool bypass_dynamic_obstacle_;
     bool enable_prediction_with_cloud_;
     bool enable_prediction_without_cloud_;
@@ -102,6 +106,39 @@ private:
 };
 
 MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_server", options) {
+    constexpr std::array RENAMED_PARAMETERS {
+        std::pair {"map_inflation.decay_alpha", "map_inflation.decay_rate_per_m"},
+        std::pair {
+            "local_map.cell_obstacle_point_threshold",
+            "local_map.min_projected_point_density_per_m2"
+        },
+        std::pair {
+            "local_map.min_obstacle_cluster_cells",
+            "local_map.min_obstacle_cluster_area_m2"
+        },
+        std::pair {
+            "local_map.object_tracker.morph_close_kernel_size",
+            "local_map.object_tracker.morph_close_radius_m"
+        },
+        std::pair {
+            "local_map.object_tracker.min_blob_area",
+            "local_map.object_tracker.min_tracking_component_area_m2"
+        },
+        std::pair {
+            "local_map.object_tracker.local_grid_size",
+            "local_map.object_tracker.local_grid_extent_m"
+        },
+    };
+    const auto& parameter_overrides = get_node_parameters_interface()->get_parameter_overrides();
+    for (const auto& [old_name, new_name] : RENAMED_PARAMETERS) {
+        if (parameter_overrides.contains(old_name)) {
+            throw std::invalid_argument(
+                "parameter '" + std::string(old_name) + "' was replaced by metric parameter '"
+                + std::string(new_name) + "'; update the parameter file"
+            );
+        }
+    }
+
     // 参数加载
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
@@ -109,7 +146,7 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     map_inflation_params_ = {
         .robot_radius_m = declare_parameter<double>("map_inflation.robot_radius_m"),
         .cutoff_radius_m = declare_parameter<double>("map_inflation.cutoff_radius_m"),
-        .decay_alpha = declare_parameter<double>("map_inflation.decay_alpha"),
+        .decay_rate_per_m = declare_parameter<double>("map_inflation.decay_rate_per_m"),
         .direction_non_body_magnitude_cap = declare_parameter<double>(
             "map_inflation.direction_non_body_magnitude_cap"
         ),
@@ -118,8 +155,8 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         || map_inflation_params_.robot_radius_m < 0.0
         || !std::isfinite(map_inflation_params_.cutoff_radius_m)
         || map_inflation_params_.cutoff_radius_m < map_inflation_params_.robot_radius_m
-        || !std::isfinite(map_inflation_params_.decay_alpha)
-        || map_inflation_params_.decay_alpha < 0.0
+        || !std::isfinite(map_inflation_params_.decay_rate_per_m)
+        || map_inflation_params_.decay_rate_per_m < 0.0
         || !std::isfinite(map_inflation_params_.direction_non_body_magnitude_cap)
         || map_inflation_params_.direction_non_body_magnitude_cap <= 0.0
         || map_inflation_params_.direction_non_body_magnitude_cap > 0.9) {
@@ -143,8 +180,12 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
         },
         .sor_num_neighbors = (int)declare_parameter<int>("local_map.sor_num_neighbors"),
         .sor_std_mul = declare_parameter<double>("local_map.sor_std_mul"),
-        .cell_obstacle_point_threshold = (int)declare_parameter<int>("local_map.cell_obstacle_point_threshold"),
-        .min_obstacle_cluster_cells = (int)declare_parameter<int>("local_map.min_obstacle_cluster_cells")
+        .min_projected_point_density_per_m2 = declare_parameter<double>(
+            "local_map.min_projected_point_density_per_m2"
+        ),
+        .min_obstacle_cluster_area_m2 = declare_parameter<double>(
+            "local_map.min_obstacle_cluster_area_m2"
+        )
     };
 
     enable_debug_ = declare_parameter<bool>("debug.enable");
@@ -161,9 +202,11 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
 
     // 目标跟踪预测参数
     tracker_params_ = {
-        .morph_close_kernel_size = (int)declare_parameter<int>("local_map.object_tracker.morph_close_kernel_size"),
-        .min_blob_area = (int)declare_parameter<int>("local_map.object_tracker.min_blob_area"),
-        .local_grid_size = (int)declare_parameter<int>("local_map.object_tracker.local_grid_size"),
+        .morph_close_radius_m = declare_parameter<double>("local_map.object_tracker.morph_close_radius_m"),
+        .min_tracking_component_area_m2 = declare_parameter<double>(
+            "local_map.object_tracker.min_tracking_component_area_m2"
+        ),
+        .local_grid_extent_m = declare_parameter<double>("local_map.object_tracker.local_grid_extent_m"),
         .max_association_dist = declare_parameter<double>("local_map.object_tracker.max_association_dist"),
         .process_noise_std = declare_parameter<double>("local_map.object_tracker.process_noise_std"),
         .measurement_noise_std = declare_parameter<double>("local_map.object_tracker.measurement_noise_std"),
@@ -589,14 +632,20 @@ small_gicp::PointCloud MapServerNode::extract_dynamic_points_without_global_map(
 // 逐格点数阈值只做单元格内的时间/密度判定，无法区分“成片的障碍物”与“散落的噪声格”。
 // 后续的膨胀与目标跟踪都按连通域组织工作量，因此在这里把不具备空间连续性的格子剔除。
 cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynamic_points) const {
-    cv::Mat counts = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
+    cv::Mat counts = cv::Mat::zeros(map_size_y_, map_size_x_, CV_32SC1);
     cv::Mat mask = cv::Mat::zeros(map_size_y_, map_size_x_, CV_8UC1);
     const bool use_direction_filter = !global_kdtree_
         && local_map_params_.without_global_cloud.direction_filter_threshold > 0.0
         && !global_direction_map_.empty();
     for (const auto& pt : dynamic_points.points) {
-        const int map_x = static_cast<int>(pt.x() / map_resolution_);
-        const int map_y = static_cast<int>(pt.y() / map_resolution_);
+        if (!std::isfinite(pt.x()) || !std::isfinite(pt.y())
+            || pt.x() < 0.0 || pt.y() < 0.0
+            || pt.x() >= static_cast<double>(map_size_x_) * map_resolution_
+            || pt.y() >= static_cast<double>(map_size_y_) * map_resolution_) {
+            continue;
+        }
+        const int map_x = map_utils::containing_cell(pt.x(), map_resolution_);
+        const int map_y = map_utils::containing_cell(pt.y(), map_resolution_);
         if (map_x < 0 || map_x >= map_size_x_ || map_y < 0 || map_y >= map_size_y_) continue;
 
         if (use_direction_filter) {
@@ -608,13 +657,13 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
             }
         }
 
-        uint8_t& cell = counts.at<uint8_t>(map_y, map_x);
-        cell = (cell < 255) ? (cell + 1) : 255;
-        if (cell >= local_map_params_.cell_obstacle_point_threshold) {
+        int& cell = counts.at<int>(map_y, map_x);
+        if (cell < min_points_per_cell_) ++cell;
+        if (cell >= min_points_per_cell_) {
             mask.at<uint8_t>(map_y, map_x) = 255;
         }
     }
-    if (local_map_params_.min_obstacle_cluster_cells <= 1) return mask;
+    if (min_obstacle_cluster_cells_ <= 1) return mask;
 
     cv::Mat labels;
     cv::Mat stats;
@@ -628,7 +677,7 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
     bool dropped_any = false;
     for (int label = 1; label < label_count; label++) {
         const bool kept = stats.at<int>(label, cv::CC_STAT_AREA)
-            >= local_map_params_.min_obstacle_cluster_cells;
+            >= min_obstacle_cluster_cells_;
         label_kept[static_cast<size_t>(label)] = kept ? 1 : 0;
         dropped_any = dropped_any || !kept;
     }
@@ -660,8 +709,8 @@ void MapServerNode::load_nav_map(const std::string& filename) {
             if (i > 0) details << ", ";
             const auto& sample = maps.direction_overlaps.samples[i];
             details << "grid(" << sample.x << "," << sample.y << ")/map("
-                    << static_cast<double>(sample.x) * maps.resolution << ","
-                    << static_cast<double>(sample.y) * maps.resolution << ") labels[";
+                    << map_utils::cell_center_coordinate(sample.x, maps.resolution) << ","
+                    << map_utils::cell_center_coordinate(sample.y, maps.resolution) << ") labels[";
             bool first_label = true;
             for (uint8_t label = static_cast<uint8_t>(map_utils::TerrainType::SLOPE);
                  label <= static_cast<uint8_t>(map_utils::TerrainType::STEP_HIGH); ++label) {
@@ -688,6 +737,42 @@ void MapServerNode::load_nav_map(const std::string& filename) {
     map_inflation_params_.resolution = map_resolution_;
     map_size_x_ = maps.width;
     map_size_y_ = maps.height;
+    min_points_per_cell_ = map_utils::minimum_density_count(
+        local_map_params_.min_projected_point_density_per_m2,
+        map_resolution_
+    );
+    min_obstacle_cluster_cells_ = map_utils::minimum_area_cells(
+        local_map_params_.min_obstacle_cluster_area_m2,
+        map_resolution_
+    );
+    const int morph_kernel_size = map_utils::morphology_kernel_size(
+        tracker_params_.morph_close_radius_m,
+        map_resolution_
+    );
+    const int morph_radius_cells = morph_kernel_size / 2;
+    const int tracking_component_cells = map_utils::minimum_area_cells(
+        tracker_params_.min_tracking_component_area_m2,
+        map_resolution_
+    );
+    const int local_grid_size = map_utils::centered_extent_cells(
+        tracker_params_.local_grid_extent_m,
+        map_resolution_
+    );
+    RCLCPP_INFO(
+        get_logger(),
+        "Resolution-dependent parameters: resolution=%.3f m/cell, min_points=%d/cell, "
+        "obstacle_cluster=%d cells, morph_close=%d cells (%dx%d), "
+        "tracking_component=%d cells, local_grid=%dx%d",
+        map_resolution_,
+        min_points_per_cell_,
+        min_obstacle_cluster_cells_,
+        morph_radius_cells,
+        morph_kernel_size,
+        morph_kernel_size,
+        tracking_component_cells,
+        local_grid_size,
+        local_grid_size
+    );
     global_cost_map_ = std::move(maps.cost_map);
     global_direction_map_ = std::move(maps.direction_map);
 }

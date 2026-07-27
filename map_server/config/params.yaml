@@ -6,10 +6,10 @@
       accumulated_cloud_pub_topic: "/map_server/debug/accumulated_local_cloud" # 累积局部点云发布话题名称
       dynamic_points_pub_topic: "/map_server/debug/dynamic_obstacle_points" # 动态障碍物点云发布话题名称
 
-    map_inflation: # 全局与局部统一的代价地图/方向场膨胀参数（单位：米，自动根据地图分辨率换算为像素）
+    map_inflation: # 全局与局部统一的代价地图/方向场膨胀参数，使用物理距离计算
       robot_radius_m: 0.1 # 膨胀平台半径（米）；障碍代价保持255，方向场非本体保持到独立 cap
       cutoff_radius_m: 0.3 # 膨胀截断半径（米），超过该距离不再膨胀
-      decay_alpha: 1.2 # 指数衰减系数（像素距离语义），越大衰减越快
+      decay_rate_per_m: 24.0 # 指数衰减率（1/m），对应原0.05m分辨率下decay_alpha=1.2的物理衰减曲线
       direction_non_body_magnitude_cap: 0.9 # 非原始方向地形本体格的模长上限；uint8 向下量化为 229/255，本体固定为 1
 
     global_map:
@@ -44,12 +44,12 @@
         direction_filter_threshold: 0.1 # 台阶方向场归一化模长过滤阈值 [0,1]（0.0=关闭），当无全局点云时在create_obstacle_mask中检查每个动态点对应的方向场模长（ch1, 0-255），超过此阈值则视为台阶等已知静态结构予以滤除
       sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
       sor_std_mul: 2.0 # SOR保留阈值=均值+sor_std_mul*标准差
-      cell_obstacle_point_threshold: 3 # 如果某个栅格内的动态障碍物点数大于此阈值，则认为该栅格被动态障碍物占据
-      min_obstacle_cluster_cells: 3 # 障碍物连通域最小格数（<=1 关闭）；滤除噪声散点，避免膨胀与跟踪在数百个孤立格上做无效工作
+      min_projected_point_density_per_m2: 1200.0 # 动态点投影密度阈值（点/m²），按地图分辨率换算为每格最小点数
+      min_obstacle_cluster_area_m2: 0.0075 # 障碍物连通域最小物理面积（m²，0=关闭），滤除噪声散点
       object_tracker: # 基于目标的动态障碍物跟踪与预测参数
-        morph_close_kernel_size: 5 # 形态学闭运算核大小（0或1=关闭）
-        min_blob_area: 3 # 最小连通域面积（像素），滤除噪声小斑块
-        local_grid_size: 50 # 局部栅格地图边长（像素）
+        morph_close_radius_m: 0.10 # 跟踪检测前形态学闭运算半径（m，0=关闭），只影响跟踪，不修改当前障碍图
+        min_tracking_component_area_m2: 0.0075 # 进入目标跟踪的最小连通域面积（m²），不负责从代价图删除小障碍
+        local_grid_extent_m: 2.0 # 目标局部栅格的最小物理边长（m），内部向上取整为以质心为中心的奇数边长
         max_association_dist: 0.3 # 匈牙利匹配最大关联距离（m），超过则视为新目标
         process_noise_std: 4.0 # KF 过程噪声（加速度标准差，m/s²），越大越信任量测，越小越信任模型
         measurement_noise_std: 0.08 # KF 测量噪声标准差（m），对应质心观测精度

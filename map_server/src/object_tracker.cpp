@@ -1,7 +1,9 @@
 #include <map_server/object_tracker.hpp>
+#include <map_server/utils.hpp>
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace map_server {
 
@@ -93,7 +95,38 @@ ObjectTracker::ObjectTracker(int width, int height, double resolution, const Obj
     width_(width),
     height_(height),
     resolution_(resolution),
-    params_(params) {}
+    params_(params),
+    morph_close_kernel_size_(0),
+    min_tracking_component_cells_(0),
+    local_grid_size_(0) {
+    if (width_ <= 0 || height_ <= 0) {
+        throw std::invalid_argument("object tracker map dimensions must be positive");
+    }
+    if (!std::isfinite(resolution_) || resolution_ <= 0.0) {
+        throw std::invalid_argument("object tracker resolution must be finite and positive");
+    }
+    if (!std::isfinite(params_.morph_close_radius_m)
+        || params_.morph_close_radius_m < 0.0
+        || !std::isfinite(params_.min_tracking_component_area_m2)
+        || params_.min_tracking_component_area_m2 < 0.0
+        || !std::isfinite(params_.local_grid_extent_m)
+        || params_.local_grid_extent_m <= 0.0) {
+        throw std::invalid_argument("invalid metric object tracker parameters");
+    }
+
+    morph_close_kernel_size_ = map_utils::morphology_kernel_size(
+        params_.morph_close_radius_m,
+        resolution_
+    );
+    min_tracking_component_cells_ = map_utils::minimum_area_cells(
+        params_.min_tracking_component_area_m2,
+        resolution_
+    );
+    local_grid_size_ = map_utils::centered_extent_cells(
+        params_.local_grid_extent_m,
+        resolution_
+    );
+}
 
 // ═══════════════ Main Update ═══════════════
 
@@ -125,10 +158,12 @@ ObjectTracker::PredictionResult ObjectTracker::update(const cv::Mat& obstacle_ma
 // ═══════════════ Preprocessing ═══════════════
 
 cv::Mat ObjectTracker::preprocess_mask(const cv::Mat& mask) const {
-    if (params_.morph_close_kernel_size <= 1) return mask;
+    if (morph_close_kernel_size_ <= 1) return mask;
     cv::Mat cleaned;
-    const int ks = params_.morph_close_kernel_size | 1; // ensure odd
-    const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, {ks, ks});
+    const cv::Mat kernel = cv::getStructuringElement(
+        cv::MORPH_ELLIPSE,
+        {morph_close_kernel_size_, morph_close_kernel_size_}
+    );
     cv::morphologyEx(mask, cleaned, cv::MORPH_CLOSE, kernel);
     return cleaned;
 }
@@ -141,20 +176,23 @@ std::vector<ObjectTracker::Detection> ObjectTracker::detect(const cv::Mat& mask)
     cv::Mat labels, stats, centroids;
     const int n_labels = cv::connectedComponentsWithStats(mask, labels, stats, centroids, 8, CV_32S);
 
-    const int half = params_.local_grid_size / 2;
-    const int grid_sz = params_.local_grid_size;
+    const int half = local_grid_size_ / 2;
+    const int grid_sz = local_grid_size_;
 
     // Label 0 is background
     for (int label = 1; label < n_labels; label++) {
         const int area = stats.at<int>(label, cv::CC_STAT_AREA);
-        if (area < params_.min_blob_area) continue;
+        if (area < min_tracking_component_cells_) continue;
 
         // Centroid (pixel, sub-pixel precision)
         const double cx_px = centroids.at<double>(label, 0);
         const double cy_px = centroids.at<double>(label, 1);
 
         Detection det;
-        det.centroid_m = {cx_px * resolution_, cy_px * resolution_};
+        det.centroid_m = {
+            map_utils::cell_center_coordinate(cx_px, resolution_),
+            map_utils::cell_center_coordinate(cy_px, resolution_)
+        };
 
         // Extract local grid relative to rounded centroid
         const int cx_int = static_cast<int>(std::round(cx_px));
@@ -372,8 +410,8 @@ void ObjectTracker::rasterize_local_grid(
     const Eigen::Vector2i& centroid_px,
     uint8_t value
 ) const {
-    const int half = params_.local_grid_size / 2;
-    const int grid_sz = params_.local_grid_size;
+    const int half = local_grid_size_ / 2;
+    const int grid_sz = local_grid_size_;
     const float render_thresh = static_cast<float>(params_.local_grid_render_threshold);
 
     for (int ly = 0; ly < grid_sz; ly++) {
@@ -394,7 +432,6 @@ void ObjectTracker::rasterize_local_grid(
 std::vector<ObjectTracker::MotionPrediction> ObjectTracker::build_motion_predictions() const {
     std::vector<MotionPrediction> predictions;
     predictions.reserve(tracks_.size());
-    const double inv_res = 1.0 / resolution_;
     for (const auto& track: tracks_) {
         if (!track.confirmed) continue;
 
@@ -422,8 +459,8 @@ std::vector<ObjectTracker::MotionPrediction> ObjectTracker::build_motion_predict
                 : t_future;
             const Eigen::Vector2d pred_m = track.x.head<2>() + velocity * prediction_time;
             prediction.future_centroids_px.emplace_back(
-                static_cast<int>(std::round(pred_m.x() * inv_res)),
-                static_cast<int>(std::round(pred_m.y() * inv_res))
+                map_utils::nearest_cell(pred_m.x(), resolution_),
+                map_utils::nearest_cell(pred_m.y(), resolution_)
             );
         }
         predictions.push_back(std::move(prediction));
