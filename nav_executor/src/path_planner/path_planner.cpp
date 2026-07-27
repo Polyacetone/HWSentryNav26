@@ -28,7 +28,7 @@ const char* speed_profile_selection_string(
     return "UNKNOWN";
 }
 
-// kinodynamic 前向平坦状态序列 → MINCO 平坦边界状态 + 段参数长度 + 有向切向。
+// KinoA* 动力学见证 → MINCO 平坦边界状态 + 物理见证时长 + 有向切向。
 struct MincoSeed {
     std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
     std::vector<double> durations;
@@ -43,42 +43,47 @@ struct EnvironmentValidationReport {
 // 距离和显著转向点会保留；段时长严格累加 A* 返回的真实逐边时长。
 // tangents 记录 A* 的有向性，供 MINCO 有向正则性软罚使用。
 MincoSeed build_minco_seed(
-    const std::vector<KinodynamicAstar::State>& raw,
+    const std::vector<KinodynamicAstar::State>& witness_states,
     const double resample_distance,
-    const std::vector<double>& raw_durations
+    const std::vector<double>& witness_durations
 ) {
     MincoSeed seed;
-    if (raw.size() < 2 || raw_durations.size() + 1 != raw.size()) return seed;
+    if (witness_states.size() < 2
+        || witness_durations.size() + 1 != witness_states.size()) return seed;
 
     std::vector<size_t> selected {0};
     const double distance_threshold = std::max(resample_distance, 0.05);
     constexpr double HEADING_THRESHOLD = 0.5;
-    for (size_t i = 1; i + 1 < raw.size(); ++i) {
+    for (size_t i = 1; i + 1 < witness_states.size(); ++i) {
         const size_t last = selected.back();
-        const double distance = (raw[i].position - raw[last].position).norm();
-        const double heading = std::atan2(raw[i].velocity.y(), raw[i].velocity.x());
+        const double distance = (
+            witness_states[i].position - witness_states[last].position
+        ).norm();
+        const double heading = std::atan2(
+            witness_states[i].velocity.y(), witness_states[i].velocity.x()
+        );
         const double last_heading = std::atan2(
-            raw[last].velocity.y(), raw[last].velocity.x()
+            witness_states[last].velocity.y(), witness_states[last].velocity.x()
         );
         const double heading_change = std::abs(wrap_angle(heading - last_heading));
         if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD) {
             selected.push_back(i);
         }
     }
-    selected.push_back(raw.size() - 1);
+    selected.push_back(witness_states.size() - 1);
 
     const size_t n = selected.size();
     seed.states.resize(n);
     seed.tangents.resize(n);
     for (size_t i = 0; i < n; ++i) {
-        const KinodynamicAstar::State& state = raw[selected[i]];
+        const KinodynamicAstar::State& state = witness_states[selected[i]];
         seed.states[i].pos = state.position;
         seed.states[i].vel = state.velocity;
         seed.states[i].acc.setZero();
         // A* 末状态速度为零，其有向性由前一状态给出。
         const Eigen::Vector2d direction = state.velocity.norm() > 1e-9
             ? state.velocity
-            : raw[selected[i] > 0 ? selected[i] - 1 : 0].velocity;
+            : witness_states[selected[i] > 0 ? selected[i] - 1 : 0].velocity;
         seed.tangents[i] = direction.norm() > 1e-9
             ? direction.normalized()
             : Eigen::Vector2d::UnitX();
@@ -87,7 +92,7 @@ MincoSeed build_minco_seed(
     for (size_t i = 0; i + 1 < n; ++i) {
         double duration = 0.0;
         for (size_t edge = selected[i]; edge < selected[i + 1]; ++edge) {
-            duration += raw_durations[edge];
+            duration += witness_durations[edge];
         }
         seed.durations[i] = std::max(duration, 0.1);
     }
@@ -457,7 +462,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         if (!direction_map->is_terrain_body_at(dg)) {
             return KinodynamicAstar::SpeedRange {
                 .min = 0.0,
-                .max = config.kinodynamic.state_limits.speed_max,
+                .max = config.kinodynamic.dynamics.velocity_max,
             };
         }
         const Eigen::Array2i cell_array = dg.array().floor().cast<int>();
@@ -486,12 +491,13 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     // ── [2] Kinodynamic A*：空间曲率原语 + 可达速度区间搜索 ──
     KinodynamicAstar::State strict_start;
     strict_start.position = start_map;
-    // A* 原语要求严格正的前向速度，因此起点参考速度不低于最低可跟踪速度。
-    const MincoOptimizer::Limits& limits = config_.minco.limits;
-    const double start_reference_speed = std::clamp(
-        req.current_velocity, limits.min_trackable_speed, limits.velocity_max
+    // 搜索根需要严格正的速度见证；该值只用于拓扑可达性，不是最终参考速度。
+    const double start_witness_speed = std::clamp(
+        req.current_velocity,
+        config_.kinodynamic.witness_speed_min,
+        config_.kinodynamic.dynamics.velocity_max
     );
-    strict_start.velocity = start_reference_speed * Eigen::Vector2d(
+    strict_start.velocity = start_witness_speed * Eigen::Vector2d(
         std::cos(req.current_yaw), std::sin(req.current_yaw)
     );
 
@@ -509,7 +515,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
                 2.0 * M_PI / config_.kinodynamic.dedup_theta
             ))
         );
-        const double relaxed_speed = limits.min_trackable_speed;
+        const double relaxed_speed = config_.kinodynamic.witness_speed_min;
         for (int bin = 0; bin < heading_bins; ++bin) {
             const double yaw = wrap_angle(
                 req.current_yaw
@@ -546,17 +552,18 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             + ", open_peak=" + std::to_string(kino.open_peak) + ")"
         );
     }
-    const std::vector<KinodynamicAstar::State>& seed_states_raw = kino.states;
+    const std::vector<KinodynamicAstar::State>& kino_witness_states =
+        kino.witness_states;
     const auto kinodynamic_done = std::chrono::steady_clock::now();
 
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
     const auto minco_seed = build_minco_seed(
-        seed_states_raw,
+        kino_witness_states,
         config_.seed_resample_distance,
-        kino.durations
+        kino.witness_durations
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
-    // ── [3] MINCO 有向正则几何优化 ──
+    // ── [3] MINCO 物理时标见证 + 连续几何联合塑形 ──
     MincoOptimizer optimizer(config_.minco);
     const auto minco_start = std::chrono::steady_clock::now();
     const auto opt = optimizer.optimize(
@@ -597,18 +604,22 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         );
         RCLCPP_DEBUG(
             logger_,
-            "MINCO objective: cost %.3g -> %.3g | waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
-            "seed[energy=%.3g length=%.3g obstacle=%.3g speed=%.3g directed=%.3g "
-            "curvature=%.3g curvature_rate=%.3g align=%.3g prohibited=%.3g runup=%.3g] "
-            "final[energy=%.3g length=%.3g obstacle=%.3g speed=%.3g directed=%.3g "
-            "curvature=%.3g curvature_rate=%.3g align=%.3g prohibited=%.3g runup=%.3g]",
+            "MINCO objective: cost %.3g -> %.3g witness_time=%.2f s | "
+            "waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
+            "seed[energy=%.3g time=%.3g obstacle=%.3g v=%.3g at=%.3g omega=%.3g "
+            "alpha=%.3g alat=%.3g directed=%.3g align=%.3g prohibited=%.3g runup=%.3g] "
+            "final[energy=%.3g time=%.3g obstacle=%.3g v=%.3g at=%.3g omega=%.3g "
+            "alpha=%.3g alat=%.3g directed=%.3g align=%.3g prohibited=%.3g runup=%.3g]",
             s.total(), f.total(),
+            opt.trajectory.total_time(),
             opt.free_waypoint_count, opt.waypoint_total_displacement, opt.waypoint_max_displacement,
-            s.energy, s.time, s.obstacle, s.parameterization_velocity, s.directed_regularity,
-            s.curvature, s.curvature_rate, s.traversal_alignment, s.prohibited_traversal,
+            s.energy, s.time, s.obstacle, s.velocity, s.tangential_acceleration,
+            s.angular_velocity, s.angular_acceleration, s.lateral_acceleration,
+            s.directed_regularity, s.traversal_alignment, s.prohibited_traversal,
             s.runup_curvature,
-            f.energy, f.time, f.obstacle, f.parameterization_velocity, f.directed_regularity,
-            f.curvature, f.curvature_rate, f.traversal_alignment, f.prohibited_traversal,
+            f.energy, f.time, f.obstacle, f.velocity, f.tangential_acceleration,
+            f.angular_velocity, f.angular_acceleration, f.lateral_acceleration,
+            f.directed_regularity, f.traversal_alignment, f.prohibited_traversal,
             f.runup_curvature
         );
     }
@@ -738,24 +749,27 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     if (config_.enable_diagnostics) {
         std::vector<Eigen::Vector2d> seed_pts;
-        seed_pts.reserve(seed_states_raw.size());
-        for (const auto& s : seed_states_raw) seed_pts.push_back(s.position);
+        seed_pts.reserve(kino_witness_states.size());
+        for (const auto& state : kino_witness_states) {
+            seed_pts.push_back(state.position);
+        }
         result.debug_rough_path = std::move(seed_pts);
     }
 
     result.path = std::move(path);
 
     double seed_path_length = 0.0;
-    for (size_t i = 1; i < seed_states_raw.size(); ++i) {
+    for (size_t i = 1; i < kino_witness_states.size(); ++i) {
         seed_path_length += (
-            seed_states_raw[i].position - seed_states_raw[i - 1].position
+            kino_witness_states[i].position - kino_witness_states[i - 1].position
         ).norm();
     }
     const int segment_count = opt.trajectory.segment_count();
     const int variable_count = 2 * std::max(segment_count - 1, 0) + segment_count; // 平坦：2D 路点 + 段时长
     RCLCPP_DEBUG(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
-        "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, seed_length=%.2f m, raw_states=%zu, "
+        "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, "
+        "witness_length=%.2f m, witness_states=%zu, "
         "kino[root=%s root_cost=%.2f exp=%d labels=%d dominated=%d transitions=%d goal=%d open=%zu], "
         "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
         "first_order=%.3g, scaled_grad=%.3g, raw_grad=%.3g",
@@ -765,7 +779,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         std::chrono::duration<double, std::milli>(dijkstra_done - plan_start).count(),
         std::chrono::duration<double, std::milli>(kinodynamic_done - dijkstra_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
-        seed_path_length, seed_states_raw.size(),
+        seed_path_length, kino_witness_states.size(),
         kino.selected_relaxed_root ? "relaxed-yaw" : "strict",
         kino.selected_root_cost,
         kino.expansions, kino.generated_labels, kino.dominated_labels,

@@ -471,7 +471,7 @@ visualization_msgs::msg::Marker NavExecutorNode::trajectory_to_marker(const Anno
         msg.points.push_back(point);
         msg.colors.push_back(velocity_color(
             path.speed_profile.eval_arc_length(progress).velocity,
-            minco_debug_velocity_min_, minco_debug_velocity_max_
+            debug_velocity_color_min_, debug_velocity_color_max_
         ));
     };
     for (double arc_length = 0.0; arc_length < trajectory.total_arc_length(); arc_length += path_publish_sample_resolution_) {

@@ -101,8 +101,8 @@ private:
     double dynamic_prediction_horizon_seconds_{};
     double dynamic_prediction_weight_decay_{};
     double path_publish_sample_resolution_{};
-    double minco_debug_velocity_min_{};
-    double minco_debug_velocity_max_{};
+    double debug_velocity_color_min_{};
+    double debug_velocity_color_max_{};
     FollowProjectionGuardParams proj_guard_params_{};
     RouteTrackerParams route_tracker_params_{};
     StepBlockReplanParams step_block_params_{};

@@ -186,9 +186,9 @@ KinodynamicAstar::Pose advance_pose(
 
 double dynamic_speed_squared_cap(
     const double curvature,
-    const KinodynamicAstar::Params::StateLimits& limits
+    const ShapingDynamicsLimits& limits
 ) {
-    double cap = limits.speed_max * limits.speed_max;
+    double cap = limits.velocity_max * limits.velocity_max;
     const double abs_curvature = std::abs(curvature);
     if (abs_curvature <= EPS) return cap;
     cap = std::min(
@@ -197,42 +197,37 @@ double dynamic_speed_squared_cap(
             / (abs_curvature * abs_curvature)
     );
     cap = std::min(cap, limits.lateral_acceleration_max / abs_curvature);
-    cap = std::min(cap, limits.acceleration_max / abs_curvature);
     return std::max(cap, 0.0);
 }
 
-// 在固定曲率弧长上使用全部剩余切向加速度时，速度平方的可达极值。
-// dz/ds = ±2*sqrt(a_max² - (|kappa|*z)²)，对 z 可解析积分。
+double tangential_acceleration_cap(
+    const double curvature,
+    const ShapingDynamicsLimits& limits
+) {
+    double cap = limits.tangential_acceleration_max;
+    const double abs_curvature = std::abs(curvature);
+    if (abs_curvature > EPS) {
+        // 恒曲率原语内 alpha=kappa*a_t；曲率跳变由后续连续 MINCO 负责平滑。
+        cap = std::min(cap, limits.angular_acceleration_max / abs_curvature);
+    }
+    return cap;
+}
+
+// 标量速度的切向加速度传播：z=v²，dz/ds=2a_t。
 double propagate_speed_extreme(
     const double initial_speed_squared,
     const double length,
-    const double curvature,
-    const double acceleration_max,
+    const double tangential_acceleration_max,
     const double speed_squared_cap,
     const bool accelerate
 ) {
     const double initial = std::clamp(initial_speed_squared, 0.0, speed_squared_cap);
-    const double abs_curvature = std::abs(curvature);
-    if (abs_curvature <= EPS) {
-        return std::clamp(
-            initial + (accelerate ? 1.0 : -1.0) * 2.0 * acceleration_max * length,
-            0.0,
-            speed_squared_cap
-        );
-    }
-
-    const double normal_acceleration_cap = acceleration_max / abs_curvature;
-    const double ratio = std::clamp(
-        abs_curvature * initial / acceleration_max, 0.0, 1.0
-    );
-    const double initial_angle = std::asin(ratio);
-    const double final_angle = std::clamp(
-        initial_angle + (accelerate ? 1.0 : -1.0) * 2.0 * abs_curvature * length,
+    return std::clamp(
+        initial + (accelerate ? 1.0 : -1.0)
+            * 2.0 * tangential_acceleration_max * length,
         0.0,
-        0.5 * M_PI
+        speed_squared_cap
     );
-    const double result = normal_acceleration_cap * std::sin(final_angle);
-    return std::clamp(result, 0.0, speed_squared_cap);
 }
 
 std::optional<SpeedSquaredInterval> propagate_speed_interval(
@@ -240,11 +235,12 @@ std::optional<SpeedSquaredInterval> propagate_speed_interval(
     const double length,
     const double curvature,
     const KinodynamicAstar::SpeedRange& environmental_speed,
-    const KinodynamicAstar::Params::StateLimits& limits,
+    const ShapingDynamicsLimits& limits,
     const bool terminal_stop,
     SpeedPropagationTrace* const trace = nullptr
 ) {
     const double dynamic_cap = dynamic_speed_squared_cap(curvature, limits);
+    const double acceleration_cap = tangential_acceleration_cap(curvature, limits);
     const double environmental_max = environmental_speed.max;
     const double endpoint_cap = std::min(
         dynamic_cap, std::max(environmental_max, 0.0) * std::max(environmental_max, 0.0)
@@ -275,16 +271,14 @@ std::optional<SpeedSquaredInterval> propagate_speed_interval(
         .min = propagate_speed_extreme(
             admissible_initial->min,
             length,
-            curvature,
-            limits.acceleration_max,
+            acceleration_cap,
             dynamic_cap,
             false
         ),
         .max = propagate_speed_extreme(
             admissible_initial->max,
             length,
-            curvature,
-            limits.acceleration_max,
+            acceleration_cap,
             dynamic_cap,
             true
         ),
@@ -345,7 +339,7 @@ std::optional<PropagationResult> propagate_primitive(
             substep_length,
             primitive.curvature,
             *environmental_speed,
-            params.state_limits,
+            params.dynamics,
             final_substep
         );
         if (!propagated) return std::nullopt;
@@ -401,15 +395,16 @@ std::vector<double> curvature_samples(const KinodynamicAstar::Params& params) {
 std::optional<SpeedSquaredInterval> predecessor_interval(
     const SpeedSquaredInterval& target,
     const RouteEdge& edge,
-    const KinodynamicAstar::Params::StateLimits& limits
+    const ShapingDynamicsLimits& limits
 ) {
     const double cap = dynamic_speed_squared_cap(edge.curvature, limits);
+    const double acceleration_cap = tangential_acceleration_cap(edge.curvature, limits);
     SpeedSquaredInterval result {
         .min = propagate_speed_extreme(
-            target.min, edge.length, edge.curvature, limits.acceleration_max, cap, false
+            target.min, edge.length, acceleration_cap, cap, false
         ),
         .max = propagate_speed_extreme(
-            target.max, edge.length, edge.curvature, limits.acceleration_max, cap, true
+            target.max, edge.length, acceleration_cap, cap, true
         ),
     };
     if (result.min > result.max + EPS) return std::nullopt;
@@ -471,7 +466,7 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         if (!root.state.position.allFinite() || !root.state.velocity.allFinite()
             || !std::isfinite(root.initial_cost) || root.initial_cost < 0.0
             || speed < FORWARD_SPEED_EPS
-            || speed > params_.state_limits.speed_max + EPS) {
+            || speed > params_.dynamics.velocity_max + EPS) {
             result.error = "search root is not a feasible forward state";
             return result;
         }
@@ -693,7 +688,7 @@ KinodynamicAstar::Result KinodynamicAstar::search(
                 substep_length,
                 primitive.curvature,
                 *environmental_speed,
-                params_.state_limits,
+                params_.dynamics,
                 terminal_stop
             );
             if (!propagated) {
@@ -726,7 +721,7 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         const auto predecessor = predecessor_interval(
             backward_intervals[reverse_index],
             route_edges[edge_index],
-            params_.state_limits
+            params_.dynamics
         );
         if (!predecessor) {
             result.success = false;
@@ -777,7 +772,7 @@ KinodynamicAstar::Result KinodynamicAstar::search(
             edge.length,
             edge.curvature,
             edge.endpoint_speed_range,
-            params_.state_limits,
+            params_.dynamics,
             edge.terminal_stop,
             &trace
         );
@@ -831,11 +826,11 @@ KinodynamicAstar::Result KinodynamicAstar::search(
     }
     selected_speed_squared.back() = 0.0;
 
-    result.states.reserve(sample_count);
-    result.durations.reserve(route_edges.size());
+    result.witness_states.reserve(sample_count);
+    result.witness_durations.reserve(route_edges.size());
     for (size_t sample = 0; sample < sample_count; ++sample) {
         const double speed = std::sqrt(std::max(selected_speed_squared[sample], 0.0));
-        result.states.push_back({
+        result.witness_states.push_back({
             .position = route_poses[sample].position,
             .velocity = speed * Eigen::Vector2d(
                 std::cos(route_poses[sample].theta),
@@ -850,11 +845,11 @@ KinodynamicAstar::Result KinodynamicAstar::search(
         if (speed_sum <= FORWARD_SPEED_EPS) {
             result.success = false;
             result.error = "speed profile contains a zero-speed spatial edge";
-            result.states.clear();
-            result.durations.clear();
+            result.witness_states.clear();
+            result.witness_durations.clear();
             return result;
         }
-        result.durations.push_back(
+        result.witness_durations.push_back(
             2.0 * route_edges[sample - 1].length / speed_sum
         );
     }

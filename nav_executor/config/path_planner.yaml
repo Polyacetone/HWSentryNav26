@@ -24,14 +24,17 @@
         obstacle_weight: 0.02 # 障碍代价系数，把 cost_map 的 0~255 代价值缩放到与路径步长可比的数量级
         feasible_threshold: 200 # 格子代价值 ≥ 此值就不再从此格子向外扩散搜索（0~255）
 
+      shaping_dynamics: # KinoA*/MINCO 共用；只让动力学塑造几何，不生成最终参考速度。
+        velocity_max: 3.0 # 动力学见证的线速度上限（m/s）
+        tangential_acceleration_max: 1.5 # 标量速度变化率 |d speed/dt| 上限（m/s²）
+        angular_velocity_max: 6.0 # 角速度上限（rad/s）
+        angular_acceleration_max: 7.0 # 角加速度上限（rad/s²）
+        lateral_acceleration_max: 2.0 # 侧向加速度 |κ|v² 上限（m/s²）
+
       kinodynamic:
-        state_limits:
-          speed_max: 3.0 # 前向平坦状态的最大速度 (m/s)
-          angular_velocity_max: 6.0 # 最大转向角速度（rad/s）
-          acceleration_max: 1.5 # 最大加减速度（m/s²）
-          lateral_acceleration_max: 2.0 # 最大侧向加速度，即 |速度 × 角速度|（m/s²），限制转弯不侧滑
+        witness_speed_min: 0.6 # 搜索根的最低正向见证速度；不是最终最低参考速度（m/s）
         curvature_samples: 7 # 三次密集于零的曲率采样数，兼顾高速缓弯和低速急弯
-        curvature_max: 4.0 # 几何种子的最大曲率（1/m）；实际可用曲率还受速度、角速度和加速度限制
+        curvature_max: 4.0 # 搜索原语的几何曲率上限（1/m）；实际可用值还受见证速度动力学限制
         primitive_length: 0.3 # 每条空间运动原语的弧长（米）
         collision_check_resolution: 0.075 # 空间原语碰撞、地形和速度区间传播的最大步长（米）
         goal_connection_max_length: 1.0 # 近目标恒曲率几何连接允许的最大弧长（米）
@@ -42,21 +45,17 @@
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
 
       minco:
-        trajectory_limits:
-          velocity_max: 3.0 # 参数化速度幅值上限（m/s），保持 τ 与弧长量级可比
-          angular_velocity_max: 6.0 # 计算几何曲率包络的参考角速度上限（rad/s）
-          angular_acceleration_max: 7.0 # 计算曲率变化率包络的参考角加速度上限（rad/s²）
-          lateral_acceleration_max: 2.0 # 计算几何曲率包络的参考侧向加速度上限（m/s²）
-          min_trackable_speed: 0.6 # 曲率包络采用的最低可稳定跟踪速度（m/s）
-          directed_speed_min: 0.05 # 速度沿种子方向分量的最小值（m/s）
+        directed_speed_min: 0.05 # 见证速度沿种子方向的正则下限，仅用于排除尖点和逆向（m/s）
         penalty_weights:
-          energy: 1.0 # 平滑性权重：最小化 jerk（加加速度），越大轨迹越平滑柔和
-          time: 16.0 # 归一化参数总长权重（弧长代理），越大轨迹越短
+          energy: 1.0 # 物理 min-jerk 能量权重
+          time: 16.0 # 动力学见证总时长权重；只参与几何塑形
           obstacle: 1000.0 # 障碍物权重：撞墙的惩罚，越大越不可能穿墙
-          parameterization_velocity: 100.0 # ‖p_τ‖ 不超过速度上限，保持 τ 与弧长量级可比
+          velocity: 100.0 # 见证线速度超限惩罚
+          tangential_acceleration: 100.0 # 切向加速度 |d speed/dt| 超限惩罚
+          angular_velocity: 100.0 # 角速度超限惩罚
+          angular_acceleration: 100.0 # 角加速度超限惩罚
+          lateral_acceleration: 100.0 # 侧向加速度 |κ|v² 超限惩罚
           directed_regularity: 1000.0 # 有向正则性：排除内部零速点、尖点与逆向
-          curvature: 400.0 # 真实几何曲率无量纲 Huber 违规的弧长积分
-          curvature_rate: 200.0 # 曲率变化率无量纲 Huber 违规的弧长积分，抑制极短距离内建立大角速度
           traversal_alignment: 1600.0 # 过台阶时让车身顺着台阶方向走的对齐惩罚
           prohibited_traversal: 1000.0 # 往台阶禁止方向（如逆行）走的惩罚
           runup_curvature: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 κ² 正则
@@ -93,7 +92,7 @@
             history_reset_after_rejections: 3 # 连续 rejected trial 超过此值就清空 L-BFGS 历史，避免陷入局部最优
           curvature_relative_threshold: 1.0e-8 # sy > eps*||s||*||y|| 才接受曲率对
           history_acceptance_ratio: 0.25 # 低模型可信度的 accepted step 不写入历史
-        min_segment_time: 0.05 # 每段轨迹最短时长（秒），防止时长归零导致数值问题
+        min_segment_time: 0.05 # 每段动力学见证的最短物理时长（秒）
 
       environment_validation: # 环境验收：路径与代价地图、方向地形的关系
         samples_per_segment: 20 # 每段空间曲线的碰撞与地形检查采样数下限

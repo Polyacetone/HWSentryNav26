@@ -10,12 +10,13 @@
 #include <Eigen/Core>
 
 #include <nav_executor/path_planner/search/dijkstra_cost_to_goal.hpp>
+#include <nav_executor/path_planner/trajectory/shaping_dynamics.hpp>
 
 namespace nav_executor {
 
-// 空间域前向时空搜索。几何状态为 (p, theta)，每个 label 携带该姿态处的可达速度平方区间。
-// 固定弧长、恒曲率原语保证每次展开都有空间进展；纵向控制通过速度区间传播压缩，避免枚举
-// 切向/法向加速度笛卡尔积。搜索只证明拓扑及速度可达性，最终连续动力学由 MINCO 负责。
+// 空间域动力学塑形搜索。几何状态为 (p, theta)，每个 label 携带该姿态处的可达见证速度
+// 平方区间。固定弧长、恒曲率原语保证空间进展；dz/ds=2a_t 传播只用于让动力学影响拓扑，
+// 返回的速度和时长不是参考速度。连续塑形由 MINCO 完成，最终执行时标由速度剖面重新求解。
 class KinodynamicAstar {
 public:
     struct State {
@@ -24,12 +25,8 @@ public:
     };
 
     struct Params {
-        struct StateLimits {
-            double speed_max = 3.2;
-            double angular_velocity_max = 6.0;
-            double acceleration_max = 1.8;
-            double lateral_acceleration_max = 2.0;
-        } state_limits;
+        ShapingDynamicsLimits dynamics;
+        double witness_speed_min = 0.6;
 
         int curvature_samples = 7;
         double curvature_max = 4.0;
@@ -68,8 +65,8 @@ public:
         std::function<std::optional<SpeedRange>(const Pose& from, const Pose& to)>;
 
     struct Result {
-        std::vector<State> states;
-        std::vector<double> durations;
+        std::vector<State> witness_states;
+        std::vector<double> witness_durations;
         bool success = false;
         int expansions = 0;
         int generated_labels = 0;

@@ -32,6 +32,18 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
 
     enable_debug_ = declare_parameter<bool>("node.debug.enable");
     if (enable_debug_) {
+        debug_velocity_color_min_ = declare_parameter<double>(
+            "node.debug.velocity_color.min"
+        );
+        debug_velocity_color_max_ = declare_parameter<double>(
+            "node.debug.velocity_color.max"
+        );
+        require_parameter(
+            std::isfinite(debug_velocity_color_min_)
+                && std::isfinite(debug_velocity_color_max_)
+                && debug_velocity_color_min_ < debug_velocity_color_max_,
+            "node debug velocity color range must be finite and ordered"
+        );
         get_logger().set_level(rclcpp::Logger::Level::Debug);
         debug_mpc_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.mpc_path_pub_topic"), 1);
         debug_minco_trajectory_pub_ = create_publisher<visualization_msgs::msg::Marker>(
@@ -67,8 +79,6 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         mpc_params.follow.normal_profile,
         mpc_params.follow.capability_profiles
     );
-    minco_debug_velocity_min_ = 0.0;
-    minco_debug_velocity_max_ = planner_config.minco.limits.velocity_max;
     planner_ = std::make_unique<PathPlanner>(
         planner_config, step_routing_mask_, get_logger().get_child("planner")
     );
@@ -496,13 +506,16 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .obstacle_weight = declare_parameter<double>("path_planner.dijkstra.obstacle_weight"),
         .feasible_threshold = static_cast<int>(declare_parameter<int>("path_planner.dijkstra.feasible_threshold")),
     };
+    const ShapingDynamicsLimits shaping_dynamics {
+        .velocity_max = declare_parameter<double>("path_planner.shaping_dynamics.velocity_max"),
+        .tangential_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.tangential_acceleration_max"),
+        .angular_velocity_max = declare_parameter<double>("path_planner.shaping_dynamics.angular_velocity_max"),
+        .angular_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.angular_acceleration_max"),
+        .lateral_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.lateral_acceleration_max"),
+    };
     c.kinodynamic = {
-        .state_limits = {
-            .speed_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.speed_max"),
-            .angular_velocity_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.angular_velocity_max"),
-            .acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.acceleration_max"),
-            .lateral_acceleration_max = declare_parameter<double>("path_planner.kinodynamic.state_limits.lateral_acceleration_max"),
-        },
+        .dynamics = shaping_dynamics,
+        .witness_speed_min = declare_parameter<double>("path_planner.kinodynamic.witness_speed_min"),
         .curvature_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.curvature_samples")),
         .curvature_max = declare_parameter<double>("path_planner.kinodynamic.curvature_max"),
         .primitive_length = declare_parameter<double>("path_planner.kinodynamic.primitive_length"),
@@ -519,22 +532,18 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .energy = declare_parameter<double>("path_planner.minco.penalty_weights.energy"),
             .time = declare_parameter<double>("path_planner.minco.penalty_weights.time"),
             .obstacle = declare_parameter<double>("path_planner.minco.penalty_weights.obstacle"),
-            .parameterization_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.parameterization_velocity"),
+            .velocity = declare_parameter<double>("path_planner.minco.penalty_weights.velocity"),
+            .tangential_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.tangential_acceleration"),
+            .angular_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.angular_velocity"),
+            .angular_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.angular_acceleration"),
+            .lateral_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.lateral_acceleration"),
             .directed_regularity = declare_parameter<double>("path_planner.minco.penalty_weights.directed_regularity"),
-            .curvature = declare_parameter<double>("path_planner.minco.penalty_weights.curvature"),
-            .curvature_rate = declare_parameter<double>("path_planner.minco.penalty_weights.curvature_rate"),
             .traversal_alignment = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_alignment"),
             .prohibited_traversal = declare_parameter<double>("path_planner.minco.penalty_weights.prohibited_traversal"),
             .runup_curvature = declare_parameter<double>("path_planner.minco.penalty_weights.runup_curvature"),
         },
-        .limits = {
-            .velocity_max = declare_parameter<double>("path_planner.minco.trajectory_limits.velocity_max"),
-            .angular_velocity_max = declare_parameter<double>("path_planner.minco.trajectory_limits.angular_velocity_max"),
-            .angular_acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.angular_acceleration_max"),
-            .lateral_acceleration_max = declare_parameter<double>("path_planner.minco.trajectory_limits.lateral_acceleration_max"),
-            .min_trackable_speed = declare_parameter<double>("path_planner.minco.trajectory_limits.min_trackable_speed"),
-            .directed_speed_min = declare_parameter<double>("path_planner.minco.trajectory_limits.directed_speed_min"),
-        },
+        .dynamics = shaping_dynamics,
+        .directed_speed_min = declare_parameter<double>("path_planner.minco.directed_speed_min"),
         .terrain_gate = {
             .norm_lo = declare_parameter<double>("path_planner.minco.terrain_gate.norm_lo"),
             .norm_hi = declare_parameter<double>("path_planner.minco.terrain_gate.norm_hi"),
@@ -616,16 +625,18 @@ PlannerConfig NavExecutorNode::load_planner_config(
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
     require_parameter(
         nonnegative_finite(c.start_yaw_relaxation.speed_threshold)
-            && c.start_yaw_relaxation.speed_threshold <= c.minco.limits.velocity_max
             && nonnegative_finite(c.start_yaw_relaxation.root_penalty)
             && nonnegative_finite(c.start_yaw_relaxation.yaw_penalty),
         "start yaw relaxation parameters are invalid"
     );
     require_parameter(
-        positive_finite(c.kinodynamic.state_limits.speed_max)
-        && positive_finite(c.kinodynamic.state_limits.angular_velocity_max)
-        && positive_finite(c.kinodynamic.state_limits.acceleration_max)
-        && positive_finite(c.kinodynamic.state_limits.lateral_acceleration_max)
+        positive_finite(shaping_dynamics.velocity_max)
+        && positive_finite(shaping_dynamics.tangential_acceleration_max)
+        && positive_finite(shaping_dynamics.angular_velocity_max)
+        && positive_finite(shaping_dynamics.angular_acceleration_max)
+        && positive_finite(shaping_dynamics.lateral_acceleration_max)
+        && positive_finite(c.kinodynamic.witness_speed_min)
+        && c.kinodynamic.witness_speed_min <= shaping_dynamics.velocity_max
         && positive_finite(c.kinodynamic.curvature_max)
         && positive_finite(c.kinodynamic.primitive_length)
         && positive_finite(c.kinodynamic.collision_check_resolution)
@@ -634,7 +645,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(c.kinodynamic.dedup_theta)
         && positive_finite(c.kinodynamic.heuristic_weight)
         && positive_finite(c.kinodynamic.goal_tolerance),
-        "kinodynamic limits, spatial primitive, heuristic, and dedup values must be finite and positive"
+        "shaping dynamics, witness speed, spatial primitive, heuristic, and dedup values must be finite and positive"
     );
     require_parameter(
         c.kinodynamic.curvature_samples > 0
@@ -643,28 +654,21 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "kinodynamic curvature_samples must be positive and odd, and max_expansions must be positive"
     );
     require_parameter(
-        positive_finite(c.minco.limits.velocity_max)
-        && positive_finite(c.minco.limits.angular_velocity_max)
-        && positive_finite(c.minco.limits.angular_acceleration_max)
-        && positive_finite(c.minco.limits.lateral_acceleration_max),
-        "MINCO trajectory limits must be finite and positive"
-    );
-    require_parameter(
-        positive_finite(c.minco.limits.min_trackable_speed)
-        && c.minco.limits.min_trackable_speed <= c.minco.limits.velocity_max
-        && positive_finite(c.minco.limits.directed_speed_min)
-        && c.minco.limits.directed_speed_min < c.minco.limits.min_trackable_speed,
-        "MINCO directed_speed_min and min_trackable_speed must be positive and ordered below velocity_max"
+        positive_finite(c.minco.directed_speed_min)
+        && c.minco.directed_speed_min <= c.kinodynamic.witness_speed_min,
+        "MINCO directed_speed_min must be positive and not exceed the KinoA* witness root speed"
     );
     const auto& minco_weights = c.minco.weights;
     require_parameter(
         nonnegative_finite(minco_weights.energy)
         && nonnegative_finite(minco_weights.time)
         && nonnegative_finite(minco_weights.obstacle)
-        && nonnegative_finite(minco_weights.parameterization_velocity)
+        && nonnegative_finite(minco_weights.velocity)
+        && nonnegative_finite(minco_weights.tangential_acceleration)
+        && nonnegative_finite(minco_weights.angular_velocity)
+        && nonnegative_finite(minco_weights.angular_acceleration)
+        && nonnegative_finite(minco_weights.lateral_acceleration)
         && nonnegative_finite(minco_weights.directed_regularity)
-        && nonnegative_finite(minco_weights.curvature)
-        && nonnegative_finite(minco_weights.curvature_rate)
         && nonnegative_finite(minco_weights.traversal_alignment)
         && nonnegative_finite(minco_weights.prohibited_traversal)
         && nonnegative_finite(minco_weights.runup_curvature),
@@ -779,19 +783,15 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && nonnegative_finite(speed_profile.validation.angular_acceleration_tolerance),
         "speed profile discretization, objective, or validation parameters are invalid"
     );
-    require_parameter(
-        normal_profile.command_envelope.velocity.max <= c.kinodynamic.state_limits.speed_max,
-        "FOLLOW forward capability exceeds the planner velocity limits"
-    );
     const auto overlaps = [](const double speed_max, const TraversalVelocityWindow& window) {
         return window.min <= std::min(speed_max, window.max);
     };
     for (const DirectionalTraversalModes& label : traversal_configuration_.directional_labels) {
         for (const auto* modes : {&label.up, &label.down}) {
             for (const TraversalMode& mode : *modes) {
-                if (!overlaps(c.kinodynamic.state_limits.speed_max, mode.velocity_window)) {
+                if (!overlaps(shaping_dynamics.velocity_max, mode.velocity_window)) {
                     throw std::invalid_argument(
-                        "kinodynamic state velocity limits cannot satisfy traversal mode \""
+                        "shaping velocity limit cannot represent traversal witness target \""
                         + mode.name + "\""
                     );
                 }
