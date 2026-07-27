@@ -179,7 +179,7 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
     const auto cross = [](const Eigen::Vector2d& a, const Eigen::Vector2d& b) {
         return a.x() * b.y() - a.y() * b.x();
     };
-    // 有向正则性由规划期几何证书保证，因此航向与曲率在整条路径上唯一定义。
+    // 发布前的数值验收排除检测到的内部 cusp。
     out.theta = std::atan2(out.dp_dtau.y(), out.dp_dtau.x());
     const double speed = out.ds_dtau;
     const double speed_cubed = speed * speed * speed;

@@ -13,7 +13,7 @@ constexpr double COST_EPS = 1e-9;
 constexpr int FOLLOW_RESIDUAL_DIM = 21;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
-// 有向路径参考点。几何证书保证切线唯一有定义，因此参考帧无需在轴向之间混合。
+// 有向路径参考点。发布前的数值验收排除检测到的内部 cusp。
 struct ReferenceFrame {
     TrajSample sample;
     double path_progress = 0.0;

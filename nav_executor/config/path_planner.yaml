@@ -41,7 +41,7 @@
         goal_tolerance: 0.3 # 进入该欧氏距离后尝试恒曲率几何终点连接（米）
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
 
-      trajectory_limits: # 全局规划包络：几何证书、MINCO 形状优化与速度剖面共用的唯一限值来源。
+      trajectory_limits: # MINCO 形状优化与速度剖面共用的规划限值来源。
         velocity_max: 3.0 # 路径速度幅值上限（m/s）
         acceleration_max: 1.5 # 切向加速度上限（m/s²）
         angular_velocity_max: 6.0 # 角速度上限（rad/s）
@@ -98,13 +98,6 @@
       environment_validation: # 环境验收：路径与代价地图、方向地形的关系
         samples_per_segment: 20 # 每段空间曲线的碰撞与地形检查采样数下限
         traversal_angle_tolerance: 0.4 # 台阶方向角允许偏差，只记录软诊断（rad）
-
-      geometry_certificate: # 独立几何证书：Bezier 凸包区间界 + 自适应细分，固定网格间的窄尖峰也无法通过
-        max_subdivision_depth: 14 # 自适应细分最大深度；达到深度仍无法证明即拒绝
-        observability_arc_separation: 0.5 # 判定为不同分支所需的最小弧长间隔 (m)
-        observability_position_distance: 0.25 # 两分支位置差小于该值视为空间重合 (m)
-        observability_heading_angle: 0.35 # 两分支航向差小于该值视为方向相同 (rad)
-        observability_sample_spacing: 0.1 # 有向可分辨性检查的弧长采样间距 (m)
 
       speed_profile:
         discretization:

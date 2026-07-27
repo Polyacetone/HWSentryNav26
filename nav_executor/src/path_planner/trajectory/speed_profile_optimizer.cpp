@@ -592,7 +592,7 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
     const std::vector<double> nodes = build_nodes(params_, geometry, step_segments);
     std::vector<NodeLimit> limits = build_limits(params_, geometry, step_segments, nodes);
 
-    // 起点速度取当前速度在有向路径切线上的前向投影；几何证书保证切线有定义。
+    // 起点速度取当前速度在有向路径切线上的前向投影。
     const TrajSample start = geometry.eval_arc_length(0.0);
     const Eigen::Vector2d tangent(std::cos(start.theta), std::sin(start.theta));
     const double initial_velocity = std::max(0.0, current_velocity_map.dot(tangent));

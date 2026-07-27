@@ -586,13 +586,6 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.environment_validation.samples_per_segment")),
         .traversal_angle_tolerance = declare_parameter<double>("path_planner.environment_validation.traversal_angle_tolerance"),
     };
-    c.geometry_certificate = {
-        .max_subdivision_depth = static_cast<int>(declare_parameter<int>("path_planner.geometry_certificate.max_subdivision_depth")),
-        .observability_arc_separation = declare_parameter<double>("path_planner.geometry_certificate.observability_arc_separation"),
-        .observability_position_distance = declare_parameter<double>("path_planner.geometry_certificate.observability_position_distance"),
-        .observability_heading_angle = declare_parameter<double>("path_planner.geometry_certificate.observability_heading_angle"),
-        .observability_sample_spacing = declare_parameter<double>("path_planner.geometry_certificate.observability_sample_spacing"),
-    };
     c.speed_profile = {
         .discretization = {
             .max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.max_spacing"),
@@ -664,11 +657,6 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(trajectory_limits.directed_speed_min)
         && trajectory_limits.directed_speed_min < trajectory_limits.min_trackable_speed,
         "min_trackable_speed and directed_speed_min must be positive and ordered below velocity_max"
-    );
-    // 曲率包络必须容纳前端几何种子，否则每条 A* 路径都会被几何证书拒绝。
-    require_parameter(
-        trajectory_limits.curvature_max() >= c.kinodynamic.curvature_max,
-        "trajectory limits derive a curvature bound tighter than the kinodynamic seed curvature"
     );
     const auto& minco_weights = c.minco.weights;
     require_parameter(
@@ -773,16 +761,6 @@ PlannerConfig NavExecutorNode::load_planner_config(
         c.environment_validation.samples_per_segment > 0
         && nonnegative_finite(c.environment_validation.traversal_angle_tolerance),
         "environment validation parameters are invalid"
-    );
-    require_parameter(
-        c.geometry_certificate.max_subdivision_depth > 0
-        && positive_finite(c.geometry_certificate.observability_arc_separation)
-        && positive_finite(c.geometry_certificate.observability_position_distance)
-        && positive_finite(c.geometry_certificate.observability_heading_angle)
-        && positive_finite(c.geometry_certificate.observability_sample_spacing)
-        && c.geometry_certificate.observability_sample_spacing
-            <= c.geometry_certificate.observability_arc_separation,
-        "geometry certificate parameters are invalid"
     );
     const auto& speed_profile = c.speed_profile;
     require_parameter(

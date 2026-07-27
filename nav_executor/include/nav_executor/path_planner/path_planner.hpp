@@ -13,7 +13,7 @@
 #include <rclcpp/logger.hpp>
 
 #include <nav_executor/common/trajectory/annotated_path.hpp>
-#include <nav_executor/common/trajectory/geometry_certificate.hpp>
+#include <nav_executor/common/trajectory/trajectory_validation.hpp>
 #include <nav_executor/path_planner/search/dijkstra_cost_to_goal.hpp>
 #include <nav_executor/path_planner/search/kinodynamic_astar.hpp>
 #include <nav_executor/path_planner/trajectory/minco_optimizer.hpp>
@@ -84,7 +84,7 @@ struct PlannerConfig {
         double yaw_penalty;
     } start_yaw_relaxation;
 
-    // 环境验收：几何形状本身由 GeometryCertificate 负责，这里只检查路径与地图的关系。
+    // 环境验收只检查路径与地图的关系。
     struct EnvironmentValidationParams {
         int samples_per_segment;
         double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只记录软诊断
@@ -109,7 +109,6 @@ struct PlannerConfig {
 
     StepDetectionParams step_detection;
     EnvironmentValidationParams environment_validation;
-    GeometryCertificateParams geometry_certificate;
     SpeedProfileOptimizer::Params speed_profile;
 
     bool enable_diagnostics;

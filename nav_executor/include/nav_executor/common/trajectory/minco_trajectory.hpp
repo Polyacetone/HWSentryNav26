@@ -6,8 +6,7 @@
 
 namespace nav_executor {
 
-// 有向正则曲线的求值结果。规划期几何证书保证 |dp_dtau| > 0 且切线不反向，
-// 因此航向、切线帧和几何曲率在整条路径上都有唯一定义。
+// 轨迹曲线的求值结果。发布前的数值验收排除非有限值和检测到的内部 cusp。
 struct TrajSample {
     Eigen::Vector2d p = Eigen::Vector2d::Zero();
     Eigen::Vector2d dp_dtau = Eigen::Vector2d::Zero();

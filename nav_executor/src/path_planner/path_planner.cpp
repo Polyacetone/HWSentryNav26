@@ -40,7 +40,7 @@ struct EnvironmentValidationReport {
 };
 
 // 距离和显著转向点会保留；段时长严格累加 A* 返回的真实逐边时长。
-// tangents 记录 A* 的有向性，供 MINCO 有向正则性罚与几何证书共用。
+// tangents 记录 A* 的有向性，供 MINCO 有向正则性软罚使用。
 MincoSeed build_minco_seed(
     const std::vector<KinodynamicAstar::State>& raw,
     const double resample_distance,
@@ -99,7 +99,7 @@ MincoSeed build_minco_seed(
     return seed;
 }
 
-// 环境验收：路径与代价地图、方向地形的关系。几何形状本身由 GeometryCertificate 负责。
+// 环境验收：路径与代价地图、方向地形的关系。
 EnvironmentValidationReport validate_path_environment(
     const MincoTrajectory& trajectory,
     const CostMap& cost_map,
@@ -608,12 +608,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     }
     if (opt.trajectory.empty()) return fail("MINCO produced empty trajectory");
 
-    // ── [4] 独立几何证书：有向正则性、真实曲率、曲率变化率、有向可分辨性 ──
-    const GeometryCertificate certificate = certify_trajectory_geometry(
-        opt.trajectory, minco_seed.tangents, config_.minco.limits, config_.geometry_certificate
-    );
-    if (!certificate.valid) {
-        return fail("geometry certificate rejected the path: " + certificate.rejection);
+    if (const auto numerical_error = validate_trajectory_numerics(opt.trajectory)) {
+        return fail("MINCO produced an invalid trajectory: " + *numerical_error);
     }
     const EnvironmentValidationReport environment_validation = validate_path_environment(
         opt.trajectory,
