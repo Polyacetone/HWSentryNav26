@@ -1,5 +1,7 @@
 #include <nav_executor/task_manager/task_manager.hpp>
 
+#include <algorithm>
+
 #include <rclcpp/logging.hpp>
 
 namespace nav_executor {
@@ -25,7 +27,7 @@ TaskUpdateOutput TaskManager::update(const TaskUpdateInput& input) {
 
     return {
         .command = command_view(),
-        .diagnostics = diagnostics(),
+        .diagnostics = diagnostics(input.stamp),
     };
 }
 
@@ -75,6 +77,11 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
     }
     begin_new_plan_generation(); // 同时淘汰所有旧目标/旧路径周期的在途结果
     in_cooldown_ = false;         // 新 goal 立即打断旧冷却
+    last_failure_reason_.reset();
+    last_failure_generation_ = 0;
+    last_replan_reason_ = ReplanReason::NONE;
+    planner_last_result_ = PlannerResultState::NONE;
+    replan_count_ = 0;
 
     RCLCPP_INFO(
         logger_, "New goal #%lu (%.2f, %.2f) fixed=%d [%s]",
@@ -97,6 +104,7 @@ void TaskManager::ingest_executor_replan_event(const bool event) {
     hold_goal_.reset();
     begin_new_plan_generation();
     last_replan_reason_ = ReplanReason::EXECUTOR_REPLAN_EVENT;
+    ++replan_count_;
     RCLCPP_INFO(logger_, "executor_replan_event → drop path/hold, replan current goal");
 }
 
@@ -127,6 +135,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
 
     switch (result->kind) {
         case PlanResult::Kind::PATH:
+            planner_last_result_ = PlannerResultState::PATH_ACCEPTED;
             active_path_ = result->path;
             hold_goal_.reset();
             needs_plan_ = false;
@@ -144,6 +153,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             break;
 
         case PlanResult::Kind::COMPLETE_NO_PLAN_NEEDED:
+            planner_last_result_ = PlannerResultState::COMPLETE;
             active_path_.reset();
             hold_goal_.reset();
             needs_plan_ = false;
@@ -154,6 +164,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             break;
 
         case PlanResult::Kind::USE_AS_FIXED_GOAL:
+            planner_last_result_ = PlannerResultState::FIXED_GOAL;
             active_path_.reset();
             hold_goal_ = result->goal_pos;
             needs_plan_ = false;
@@ -163,6 +174,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             break;
 
         case PlanResult::Kind::FAILED:
+            planner_last_result_ = PlannerResultState::FAILED;
             active_path_.reset();
             hold_goal_.reset();
             needs_plan_ = false;
@@ -244,6 +256,7 @@ void TaskManager::on_route_invalid(const ReplanReason reason) {
     active_path_.reset();
     begin_new_plan_generation();
     last_replan_reason_ = reason;
+    ++replan_count_;
     RCLCPP_INFO(logger_, "Path invalid (%s) → drop path, replan", replan_reason_str(reason));
 }
 
@@ -283,13 +296,29 @@ void TaskManager::ingest_goal_reached(const bool goal_reached, const AnnotatedPa
 
 // ═══════════════════ 诊断 ═══════════════════════════════════════
 
-TaskDiagnostics TaskManager::diagnostics() const {
+TaskDiagnostics TaskManager::diagnostics(const std::chrono::steady_clock::time_point stamp) const {
     TaskDiagnostics d;
-    d.has_goal = current_goal_.has_value();
-    d.has_path = static_cast<bool>(active_path_);
+    if (current_goal_) {
+        d.goal_id = current_goal_->id;
+        d.goal_position = current_goal_->position_map;
+        d.goal_fixed = current_goal_->fixed;
+    }
+    d.active_path_goal_id = active_path_ ? active_path_->goal_id : 0;
     d.has_hold_goal = hold_goal_.has_value();
+    if (hold_goal_) d.hold_goal_position = *hold_goal_;
+    d.plan_generation = plan_generation_;
+    d.needs_plan = needs_plan_;
     d.planner_state = planner_->busy() ? PlannerState::PLANNING : (in_cooldown_ ? PlannerState::COOLDOWN : PlannerState::IDLE);
+    if (in_cooldown_) {
+        d.planner_cooldown_remaining = std::max(
+            0.0,
+            params_.plan_cooldown - std::chrono::duration<double>(stamp - cooldown_start_).count()
+        );
+    }
+    d.planner_last_result = planner_last_result_;
+    d.planner_last_failure_reason = last_failure_reason_.value_or("");
     d.last_replan_reason = last_replan_reason_;
+    d.replan_count = replan_count_;
     d.debug_rough_path = last_debug_rough_path_;
     return d;
 }

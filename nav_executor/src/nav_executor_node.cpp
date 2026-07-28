@@ -22,15 +22,30 @@ std_msgs::msg::ColorRGBA velocity_color(const double velocity, const double velo
     return color;
 }
 
+uint8_t chassis_control_state_value(const uint8_t leg_mode, const uint8_t comp_stage) {
+    if (comp_stage != nav_executor::COMP_STAGE_MATCH
+        || leg_mode > static_cast<uint8_t>(nav_executor::LegMode::ABNORMAL)) {
+        return static_cast<uint8_t>(nav_executor::ChassisControlState::STOPPED);
+    }
+    return static_cast<uint8_t>(nav_executor::classify_chassis_control_state(leg_mode, comp_stage));
+}
+
 } // anonymous namespace
 
 namespace nav_executor {
 
+void NavExecutorNode::record_input_rejection(const uint8_t reason) {
+    last_input_rejection_reason_ = reason;
+    ++input_rejection_count_;
+}
+
 void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStatus::SharedPtr msg) {
     ++chassis_state_sequence_;
     if (!std::isfinite(msg->velocity) || !std::isfinite(msg->omega)
-        || !std::isfinite(msg->leg_h) || !std::isfinite(msg->leg_psi)) {
-        RCLCPP_ERROR(get_logger(), "Ignoring non-finite chassis status");
+        || !std::isfinite(msg->leg_h) || !std::isfinite(msg->leg_psi)
+        || msg->leg_mode > static_cast<uint8_t>(LegMode::ABNORMAL)) {
+        record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_CHASSIS_INVALID);
+        RCLCPP_ERROR(get_logger(), "Ignoring invalid chassis status");
         chassis_state_valid_ = false;
         return;
     }
@@ -52,17 +67,39 @@ void NavExecutorNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPt
         case 0: spin_state_ = SpinState::STOP; break;
         case 1: spin_state_ = SpinState::SPIN_SLOW; break;
         case 2: spin_state_ = SpinState::SPIN_FAST; break;
-        default: RCLCPP_ERROR(get_logger(), "Invalid spin_mode: %d", msg->spin_mode); return;
+        default:
+            record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_SPIN_MODE_INVALID);
+            RCLCPP_ERROR(get_logger(), "Invalid spin_mode: %d", msg->spin_mode);
+            return;
     }
     spin_high_priority_ = msg->high_priority;
 }
 
 void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg) {
-    if (!global_cost_map_ || msg->maps.empty()) return;
+    if (!global_cost_map_) {
+        record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_LOCAL_COST_MAP_BEFORE_GLOBAL_MAP);
+        return;
+    }
+    if (msg->maps.empty()) {
+        record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_LOCAL_COST_MAP_EMPTY);
+        return;
+    }
     const int w = global_cost_map_->width;
     const int h = global_cost_map_->height;
     const auto total = static_cast<size_t>(w * h);
-    if (msg->maps[0].data.size() != total) return;
+    for (size_t i = 0; i < msg->maps.size(); ++i) {
+        if (msg->maps[i].data.size() != total) {
+            record_input_rejection(i == 0
+                ? interfaces::msg::NavExecutorDiag::INPUT_REJECTION_LOCAL_COST_MAP_SIZE_MISMATCH
+                : interfaces::msg::NavExecutorDiag::INPUT_REJECTION_PREDICTION_MAP_SIZE_MISMATCH);
+            return;
+        }
+    }
+    if (!std::isfinite(msg->prediction_dt) || msg->prediction_dt < 0.0
+        || (msg->maps.size() > 1 && msg->prediction_dt <= 0.0)) {
+        record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_PREDICTION_DT_INVALID);
+        return;
+    }
     prediction_dt_ = msg->prediction_dt;
 
     const auto to_cost_map = [&](const nav_msgs::msg::OccupancyGrid& grid) {
@@ -74,10 +111,7 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
     current_cost_map_ = to_cost_map(msg->maps[0]);
 
     prediction_maps_.clear();
-    for (size_t i = 1; i < msg->maps.size(); i++) {
-        if (msg->maps[i].data.size() != total) continue;
-        prediction_maps_.push_back(to_cost_map(msg->maps[i]));
-    }
+    for (size_t i = 1; i < msg->maps.size(); i++) prediction_maps_.push_back(to_cost_map(msg->maps[i]));
 
     // planner 用：global + 时域融合动态
     CostMap::ConstPtr fused_dynamic;
@@ -122,15 +156,50 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
 // ROS 回调只写缓存；任务/运动状态转移在 control_tick 中完成。
 
 void NavExecutorNode::control_tick() {
-    if (!global_cost_map_ || !global_direction_map_ || !step_mask_ready_
-        || !chassis_state_valid_
-        || chassis_state_sequence_ == 0
-        || chassis_state_sequence_ == last_control_chassis_state_sequence_) return;
+    const auto control_stamp = std::chrono::steady_clock::now();
+    const rclcpp::Time diagnostic_stamp = now();
+    ++control_cycle_;
+
+    const auto publish_gate = [&](const uint8_t cycle_result) {
+        publish_diagnostics(
+            cycle_result,
+            diagnostic_stamp,
+            task_->diagnostics(control_stamp),
+            std::nullopt,
+            nullptr,
+            task_->active_path()
+        );
+    };
+
+    if (!global_cost_map_) {
+        publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_WAITING_GLOBAL_COST_MAP);
+        return;
+    }
+    if (!global_direction_map_) {
+        publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_WAITING_DIRECTION_MAP);
+        return;
+    }
+    if (!step_mask_ready_) {
+        publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_WAITING_STEP_MASK);
+        return;
+    }
+    if (!chassis_state_valid_) {
+        publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_INVALID_CHASSIS_STATE);
+        return;
+    }
+    if (chassis_state_sequence_ == 0
+        || chassis_state_sequence_ == last_control_chassis_state_sequence_) {
+        publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_NO_NEW_CHASSIS_STATE);
+        return;
+    }
 
     Eigen::Vector3d chassis_pose_map;
-    if (!get_chassis_pose(chassis_pose_map)) return;
+    if (!get_chassis_pose(chassis_pose_map)) {
+        publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_CHASSIS_POSE_UNAVAILABLE);
+        return;
+    }
 
-    const auto stamp = std::chrono::steady_clock::now();
+    const auto stamp = control_stamp;
 
     const CostLayers cost_layers {
         .global = global_cost_map_,
@@ -171,7 +240,17 @@ void NavExecutorNode::control_tick() {
     previous_motion_feedback_.preemptible = step_preview.preemptible;
 
     RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
-    if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
+    if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) {
+        publish_diagnostics(
+            interfaces::msg::NavExecutorDiag::CYCLE_ROUTE_CONTEXT_UNAVAILABLE_BEFORE_TASK,
+            diagnostic_stamp,
+            task_->diagnostics(control_stamp),
+            route_estimate,
+            nullptr,
+            active_path_before_update
+        );
+        return;
+    }
 
     TaskUpdateInput task_input;
     task_input.incoming_goal = pending_goal_;
@@ -229,7 +308,17 @@ void NavExecutorNode::control_tick() {
     }
 
     route_context = build_route_context(cost_layers, direction_layers, task_output.command.active_path);
-    if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) return;
+    if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) {
+        publish_diagnostics(
+            interfaces::msg::NavExecutorDiag::CYCLE_ROUTE_CONTEXT_UNAVAILABLE_AFTER_TASK,
+            diagnostic_stamp,
+            task_output.diagnostics,
+            route_estimate,
+            nullptr,
+            task_output.command.active_path
+        );
+        return;
+    }
 
     ExecutorInput ein;
     ein.intent.active_path = task_output.command.active_path;
@@ -277,7 +366,14 @@ void NavExecutorNode::control_tick() {
         chassis_cmd_pub_->publish(cmd);
     }
 
-    publish_diagnostics(task_output.diagnostics, out, task_output.command.active_path);
+    publish_diagnostics(
+        interfaces::msg::NavExecutorDiag::CYCLE_EXECUTED,
+        diagnostic_stamp,
+        task_output.diagnostics,
+        route_estimate,
+        &out,
+        task_output.command.active_path
+    );
 
     if (enable_debug_ && debug_final_cost_map_pub_) {
         nav_msgs::msg::OccupancyGrid grid_msg;
@@ -318,40 +414,109 @@ bool NavExecutorNode::get_chassis_pose(Eigen::Vector3d& chassis_pose) const {
 }
 
 void NavExecutorNode::publish_diagnostics(
+    const uint8_t cycle_result,
+    const rclcpp::Time& stamp,
     const TaskDiagnostics& diag,
-    const ExecutorOutput& executor_output,
+    const std::optional<RouteEstimate>& route,
+    const ExecutorOutput* const executor_output,
     const AnnotatedPath::ConstPtr& active_path
 ) {
-    if (active_path) global_path_pub_->publish(trajectory_to_nav_msg(active_path->trajectory));
-    if (!enable_debug_) return;
+    if (cycle_result == interfaces::msg::NavExecutorDiag::CYCLE_EXECUTED
+        && active_path && global_path_pub_) {
+        global_path_pub_->publish(trajectory_to_nav_msg(active_path->trajectory));
+    }
+    if (!enable_debug_ || !debug_diag_pub_) return;
 
-    if (!diag.debug_rough_path.empty()) {
-        debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
-    }
-    if (active_path) {
-        debug_minco_trajectory_pub_->publish(trajectory_to_marker(*active_path));
-    }
-    if (executor_output.mpc_path_map) {
-        debug_mpc_path_pub_->publish(path_to_nav_msg(*executor_output.mpc_path_map));
+    if (cycle_result == interfaces::msg::NavExecutorDiag::CYCLE_EXECUTED) {
+        if (!diag.debug_rough_path.empty() && debug_rough_path_pub_) {
+            debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
+        }
+        if (active_path && debug_minco_trajectory_pub_) {
+            debug_minco_trajectory_pub_->publish(trajectory_to_marker(*active_path));
+        }
+        if (executor_output && executor_output->mpc_path_map && debug_mpc_path_pub_) {
+            debug_mpc_path_pub_->publish(path_to_nav_msg(*executor_output->mpc_path_map));
+        }
     }
 
     interfaces::msg::NavExecutorDiag msg;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = "map";
+    msg.control_cycle = control_cycle_;
+    msg.cycle_result = cycle_result;
 
-    msg.motion_state = static_cast<uint8_t>(executor_output.motion_state);
-    msg.step_phase = static_cast<uint8_t>(executor_output.step_phase);
-    msg.has_goal = diag.has_goal;
-    msg.has_path = diag.has_path;
+    msg.last_input_rejection_reason = last_input_rejection_reason_;
+    msg.input_rejection_count = input_rejection_count_;
+
+    msg.chassis_state_sequence = chassis_state_sequence_;
+    msg.chassis_state_valid = chassis_state_valid_;
+    msg.chassis_velocity = chassis_state_.velocity;
+    msg.chassis_angular_velocity = chassis_state_.omega;
+    msg.chassis_leg_height = chassis_state_.leg_h;
+    msg.chassis_leg_psi = chassis_state_.leg_psi;
+    msg.chassis_leg_mode = chassis_leg_mode_;
+    msg.comp_stage = comp_stage_;
+    msg.chassis_control_state = chassis_control_state_value(chassis_leg_mode_, comp_stage_);
+    msg.remaining_energy_supercap = remaining_energy_supercap_filtered_;
+    msg.remaining_energy_buffercap = remaining_energy_buffercap_filtered_;
+    msg.rfr_power_limit = rfr_pwr_limit_;
+    msg.high_performance_available =
+        remaining_energy_buffercap_filtered_ >= traversal_configuration_.high_performance_buffercap_threshold
+        && remaining_energy_supercap_filtered_ >= traversal_configuration_.high_performance_supercap_threshold
+        && rfr_pwr_limit_ >= traversal_configuration_.high_performance_rfr_pwr_limit_threshold;
+    msg.spin_requested = spin_state_ != SpinState::STOP;
+    msg.spin_high_priority = spin_high_priority_;
+    msg.spin_fast = spin_state_ == SpinState::SPIN_FAST;
+    msg.current_cost_map_available = static_cast<bool>(current_cost_map_);
+    msg.prediction_map_count = static_cast<uint32_t>(prediction_maps_.size());
+    msg.prediction_dt = prediction_dt_;
+
+    msg.goal_id = diag.goal_id;
+    msg.goal_x = diag.goal_position.x();
+    msg.goal_y = diag.goal_position.y();
+    msg.goal_fixed = diag.goal_fixed;
+    msg.active_path_goal_id = diag.active_path_goal_id;
     msg.has_hold_goal = diag.has_hold_goal;
+    msg.hold_goal_x = diag.hold_goal_position.x();
+    msg.hold_goal_y = diag.hold_goal_position.y();
+    msg.plan_generation = diag.plan_generation;
+    msg.needs_plan = diag.needs_plan;
     msg.planner_state = static_cast<uint8_t>(diag.planner_state);
+    msg.planner_cooldown_remaining = diag.planner_cooldown_remaining;
+    msg.planner_last_result = static_cast<uint8_t>(diag.planner_last_result);
+    msg.planner_last_failure_reason = diag.planner_last_failure_reason;
     msg.last_replan_reason = static_cast<uint8_t>(diag.last_replan_reason);
+    msg.replan_count = diag.replan_count;
 
-    msg.command_published = executor_output.valid;
-    msg.command_velocity = executor_output.velocity;
-    msg.command_angular_velocity = executor_output.omega;
-    msg.command_mode = executor_output.mode;
-    msg.command_step_distance = executor_output.step_dist_cm;
+    if (route) {
+        msg.route_status = route->status == RouteTrackingStatus::TRACKED
+            ? interfaces::msg::NavExecutorDiag::ROUTE_TRACKED
+            : interfaces::msg::NavExecutorDiag::ROUTE_LOST;
+        msg.route_progress = route->arc_length;
+        msg.route_path_speed = route->path_speed;
+        msg.route_remaining_length = route->remaining_length;
+        msg.route_tracking_error = route->tracking_error;
+    } else {
+        msg.route_status = interfaces::msg::NavExecutorDiag::ROUTE_NONE;
+    }
 
-    const ObserverDiagnostics& observer = executor_output.observer_diagnostics;
+    if (executor_output) {
+        msg.motion_state = static_cast<uint8_t>(executor_output->motion_state);
+        msg.step_phase = static_cast<uint8_t>(executor_output->step_phase);
+        msg.command_status = static_cast<uint8_t>(executor_output->command_status);
+        msg.command_velocity = executor_output->velocity;
+        msg.command_angular_velocity = executor_output->omega;
+        msg.command_mode = executor_output->mode;
+        msg.command_step_distance = executor_output->step_dist_cm;
+    } else {
+        msg.motion_state = static_cast<uint8_t>(executor_->motion_state());
+        msg.step_phase = static_cast<uint8_t>(executor_->step_phase());
+        msg.command_status = interfaces::msg::NavExecutorDiag::COMMAND_NOT_EVALUATED;
+    }
+
+    const ObserverDiagnostics observer = executor_output
+        ? executor_output->observer_diagnostics
+        : ObserverDiagnostics {};
     msg.observer_event = static_cast<uint8_t>(observer.event);
     msg.observer_last_reset_reason = static_cast<uint8_t>(observer.last_reset_reason);
     msg.observer_initialized = observer.initialized;
@@ -374,20 +539,19 @@ void NavExecutorNode::publish_diagnostics(
     msg.observer_input_command_velocity = observer.input_command_velocity;
     msg.observer_input_command_angular_velocity = observer.input_command_angular_velocity;
 
-    msg.mpc_attempted = executor_output.mpc_diagnostics.has_value();
-    if (executor_output.mpc_diagnostics) {
-        const MPCDiagnostics& mpc = *executor_output.mpc_diagnostics;
+    msg.mpc_attempted = executor_output && executor_output->mpc_diagnostics.has_value();
+    if (executor_output && executor_output->mpc_diagnostics) {
+        const MPCDiagnostics& mpc = *executor_output->mpc_diagnostics;
         msg.mpc_mode = static_cast<uint8_t>(mpc.solver_mode);
         msg.mpc_succeeded = mpc.solve_succeeded;
         msg.mpc_error = mpc.solve_error;
+        msg.mpc_solve_time_ms = mpc.solve_time_ms;
 
         msg.ancillary_enabled = mpc.ancillary_enabled;
         msg.ancillary_active = mpc.ancillary_active;
         msg.ancillary_reanchored = mpc.nominal_reanchored;
         msg.ancillary_tube_feasible = mpc.first_command_tube_feasible;
 
-        msg.measured_velocity = mpc.measured_velocity.x();
-        msg.measured_angular_velocity = mpc.measured_velocity.y();
         msg.previous_command_velocity = mpc.previous_command.x();
         msg.previous_command_angular_velocity = mpc.previous_command.y();
         msg.mpc_nominal_command_velocity = mpc.nominal_command.x();

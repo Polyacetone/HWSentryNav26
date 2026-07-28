@@ -353,6 +353,7 @@ struct MPCDiagnostics {
     MPCSolverMode solver_mode = MPCSolverMode::NONE;
     bool solve_succeeded = false;
     std::string solve_error;
+    double solve_time_ms = 0.0;
     SolverTermination solver_termination;
     std::optional<RejectedFollowRollout> rejected_follow_rollout;
 

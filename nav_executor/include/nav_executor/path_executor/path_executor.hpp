@@ -28,6 +28,13 @@ struct PathExecutorParams {
     NoProgressGuardParams stepping_no_progress_guard;
 };
 
+enum class CommandStatus : uint8_t {
+    NOT_EVALUATED = 0,
+    PUBLISHED = 1,
+    HELD_PREVIOUS = 2,
+    INVALID = 3,
+};
+
 struct MotionIntent {
     AnnotatedPath::ConstPtr active_path;
     std::optional<Eigen::Vector2d> hold_goal;
@@ -69,6 +76,7 @@ struct ExecutorOutput {
     uint8_t mode = chassis_mode::NORMAL;
     uint8_t step_dist_cm = 0;
     bool valid = false;
+    CommandStatus command_status = CommandStatus::NOT_EVALUATED;
 
     MotionState motion_state = MotionState::IDLE;
     StepPhase step_phase = StepPhase::NONE;

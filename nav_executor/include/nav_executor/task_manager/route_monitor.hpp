@@ -26,15 +26,19 @@ struct StepBlockReplanParams {
 
 struct PerformanceReplanParams { double lookahead_distance; };
 
-// RouteMonitor 输出的重规划原因。前三种由本模块产出，EXECUTOR_REPLAN_EVENT 由 TaskManager 消费，此处仅用于诊断记录。
+// RouteMonitor 输出的重规划原因。EXECUTOR_REPLAN_EVENT 由 TaskManager 消费，
+// 其余原因由 RouteMonitor 直接产出。
 enum class ReplanReason : uint8_t {
     NONE = 0,
-    PROJECTION_GUARD = 1,
-    STEP_BLOCKED = 2,
-    MPC_LETHAL = 3,
-    EXECUTOR_REPLAN_EVENT = 4,
-    PERFORMANCE_DEGRADED = 5,
-    PERFORMANCE_RECOVERED = 6,
+    ROUTE_TRACKING_LOST = 1,
+    PROJECTION_OUT_OF_MAP = 2,
+    PROJECTION_COST_EXCEEDED = 3,
+    STEP_BLOCKED_CURRENT = 4,
+    STEP_BLOCKED_PREDICTED = 5,
+    MPC_LETHAL = 6,
+    EXECUTOR_REPLAN_EVENT = 7,
+    PERFORMANCE_DEGRADED = 8,
+    PERFORMANCE_RECOVERED = 9,
 };
 
 const char* replan_reason_str(ReplanReason reason);

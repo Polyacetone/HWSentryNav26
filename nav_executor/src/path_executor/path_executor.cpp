@@ -134,6 +134,7 @@ void PathExecutor::apply_held_command(ExecutorOutput& output) const {
     output.mode = last_command_output_.mode;
     output.step_dist_cm = last_command_output_.step_dist_cm;
     output.valid = true;
+    output.command_status = CommandStatus::HELD_PREVIOUS;
 }
 
 void PathExecutor::remember_command_output(
@@ -201,6 +202,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         out.step_dist_cm = 0;
         out.motion_state = MotionState::DEAD;
         out.valid = true;
+        out.command_status = CommandStatus::PUBLISHED;
 
         invalidate_mpc_command_history(ObserverResetReason::CONTROL_UNAVAILABLE);
         safety_monitor_.reset_stuck();
@@ -416,6 +418,9 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     mpc_lethal_pending_ = false;
 
     if (output.valid) {
+        if (output.command_status == CommandStatus::NOT_EVALUATED) {
+            output.command_status = CommandStatus::PUBLISHED;
+        }
         remember_command_output(output, input.observation.stamp);
         if (output.mpc_generated_command && !command_blocked) {
             const Eigen::Vector2d command(output.velocity, output.omega);
@@ -430,6 +435,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
             mpc_controller_->reset_warm_start();
         }
     } else {
+        output.command_status = CommandStatus::INVALID;
         mpc_command_rate_.setZero();
         invalidate_mpc_command_history(ObserverResetReason::CONTROL_OUTPUT_INVALID);
         mpc_controller_->set_command_state(
@@ -498,6 +504,7 @@ MPCDiagnostics failed_diagnostics(
     const std::string& error,
     const ChassisMotionState& chassis_state,
     const Eigen::Vector2d& previous_command,
+    const double solve_time_ms,
     const bool ancillary_enabled = false
 ) {
     MPCDiagnostics diagnostics;
@@ -506,15 +513,21 @@ MPCDiagnostics failed_diagnostics(
     diagnostics.ancillary_enabled = ancillary_enabled;
     diagnostics.measured_velocity = {chassis_state.velocity, chassis_state.omega};
     diagnostics.previous_command = previous_command;
+    diagnostics.solve_time_ms = solve_time_ms;
     return diagnostics;
 }
 
-void assign_hold_output(ExecutorOutput& out, const MPCSolver::SolveResult& result) {
+void assign_hold_output(
+    ExecutorOutput& out,
+    const MPCSolver::SolveResult& result,
+    const double solve_time_ms
+) {
     out.velocity = result.command.x();
     out.omega = result.command.y();
     out.mode = chassis_mode::NORMAL;
     out.mpc_path_map = result.diagnostics.applied_prediction.path_map;
     out.mpc_diagnostics = result.diagnostics;
+    out.mpc_diagnostics->solve_time_ms = solve_time_ms;
     out.mpc_generated_command = true;
     out.valid = true;
 }
@@ -546,7 +559,7 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
 
     step_controller_.tick_profile_blend();
     const SolveTimer timer;
-    const auto result = mpc_controller_->solve_follow(
+    auto result = mpc_controller_->solve_follow(
         path, input.intent.active_path->speed_profile,
         input.observation.chassis_pose_map, input.observation.chassis_state,
         input.route->arc_length, input.route->path_speed,
@@ -562,15 +575,16 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
             result.error(),
             input.observation.chassis_state,
             mpc_command_state_,
+            timer.elapsed_ms(),
             mpc_controller_->params().follow.ancillary_feedback.enable
         );
         return out;
     }
     warn_if_slow_solve(logger_, "Follow", timer.elapsed_ms());
 
-    const auto& follow_result = *result;
+    auto& follow_result = *result;
     const auto& cmd = follow_result.command;
-    const auto& diagnostics = follow_result.diagnostics;
+    auto& diagnostics = follow_result.diagnostics;
 
     // rollout 命中致命障碍：该 rollout 已被求解器拒绝，本周期下发的是 STOP 命令。
     // 只有连续拒绝达到阈值才把 MPC_LETHAL 上报给顶层触发重规划。
@@ -610,7 +624,8 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     }
 
     out.mpc_path_map = diagnostics.applied_prediction.path_map;
-    out.mpc_diagnostics = diagnostics;
+    diagnostics.solve_time_ms = timer.elapsed_ms();
+    out.mpc_diagnostics = std::move(diagnostics);
     out.mpc_generated_command = true;
 
     out.step_dist_cm = step_controller_.compute_step_distance_cm(path_progress);
@@ -644,12 +659,13 @@ ExecutorOutput PathExecutor::execute_prepare_spin(const ExecutorInput& input) {
             MPCSolverMode::STOP,
             result.error(),
             input.observation.chassis_state,
-            mpc_command_state_
+            mpc_command_state_,
+            timer.elapsed_ms()
         );
         return out;
     }
     warn_if_slow_solve(logger_, "Stop", timer.elapsed_ms());
-    assign_hold_output(out, *result);
+    assign_hold_output(out, *result, timer.elapsed_ms());
     return out;
 }
 
@@ -688,12 +704,13 @@ ExecutorOutput PathExecutor::execute_recovery(const ExecutorInput& input) {
             MPCSolverMode::HOLD,
             result.error(),
             input.observation.chassis_state,
-            mpc_command_state_
+            mpc_command_state_,
+            timer.elapsed_ms()
         );
         return out;
     }
     warn_if_slow_solve(logger_, "Recovery", timer.elapsed_ms());
-    assign_hold_output(out, *result);
+    assign_hold_output(out, *result, timer.elapsed_ms());
     return out;
 }
 
@@ -724,12 +741,13 @@ ExecutorOutput PathExecutor::execute_fixed(const ExecutorInput& input) {
             MPCSolverMode::HOLD,
             result.error(),
             input.observation.chassis_state,
-            mpc_command_state_
+            mpc_command_state_,
+            timer.elapsed_ms()
         );
         return out;
     }
     warn_if_slow_solve(logger_, "Fixed", timer.elapsed_ms());
-    assign_hold_output(out, *result);
+    assign_hold_output(out, *result, timer.elapsed_ms());
     return out;
 }
 

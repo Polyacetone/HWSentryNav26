@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -67,9 +68,13 @@ private:
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     nav_msgs::msg::Path trajectory_to_nav_msg(const MincoTrajectory& trajectory) const;
     visualization_msgs::msg::Marker trajectory_to_marker(const AnnotatedPath& path) const;
+    void record_input_rejection(uint8_t reason);
     void publish_diagnostics(
+        uint8_t cycle_result,
+        const rclcpp::Time& stamp,
         const TaskDiagnostics& diag,
-        const ExecutorOutput& executor_output,
+        const std::optional<RouteEstimate>& route,
+        const ExecutorOutput* executor_output,
         const AnnotatedPath::ConstPtr& active_path
     );
 
@@ -140,6 +145,10 @@ private:
     double remaining_energy_supercap_filtered_ = 1400.0;
     double remaining_energy_buffercap_filtered_ = 0.0;
     uint8_t idle_chassis_mode_override_ = 0;
+
+    uint64_t control_cycle_ = 0;
+    uint8_t last_input_rejection_reason_ = 0;
+    uint64_t input_rejection_count_ = 0;
 
     enum class SpinState { STOP, SPIN_SLOW, SPIN_FAST } spin_state_ = SpinState::STOP;
     bool spin_high_priority_ = false;

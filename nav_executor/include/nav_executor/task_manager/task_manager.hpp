@@ -1,7 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
@@ -20,12 +23,29 @@ struct TaskManagerParams {
 
 enum class PlannerState : uint8_t { IDLE, PLANNING, COOLDOWN };
 
+enum class PlannerResultState : uint8_t {
+    NONE = 0,
+    PATH_ACCEPTED = 1,
+    COMPLETE = 2,
+    FIXED_GOAL = 3,
+    FAILED = 4,
+};
+
 struct TaskDiagnostics {
-    bool has_goal = false;
-    bool has_path = false;
+    uint64_t goal_id = 0;
+    Eigen::Vector2d goal_position = Eigen::Vector2d::Zero();
+    bool goal_fixed = false;
+    uint64_t active_path_goal_id = 0;
     bool has_hold_goal = false;
+    Eigen::Vector2d hold_goal_position = Eigen::Vector2d::Zero();
+    uint64_t plan_generation = 0;
+    bool needs_plan = false;
     PlannerState planner_state = PlannerState::IDLE;
+    double planner_cooldown_remaining = 0.0;
+    PlannerResultState planner_last_result = PlannerResultState::NONE;
+    std::string planner_last_failure_reason;
     ReplanReason last_replan_reason = ReplanReason::NONE;
+    uint64_t replan_count = 0;
     std::vector<Eigen::Vector2d> debug_rough_path;
 };
 
@@ -87,7 +107,7 @@ public:
         return current_goal_ ? std::optional<uint64_t>(current_goal_->id) : std::nullopt;
     }
 
-    [[nodiscard]] TaskDiagnostics diagnostics() const;
+    [[nodiscard]] TaskDiagnostics diagnostics(std::chrono::steady_clock::time_point stamp) const;
 
 private:
     [[nodiscard]] bool goals_equivalent(const Goal& a, const Goal& b) const;
@@ -122,6 +142,8 @@ private:
 
     uint64_t next_goal_id_ = 1;
     ReplanReason last_replan_reason_ = ReplanReason::NONE;
+    PlannerResultState planner_last_result_ = PlannerResultState::NONE;
+    uint64_t replan_count_ = 0;
 
     // 缓存最新一次成功规划的调试路径（供 node 发布用）
     std::vector<Eigen::Vector2d> last_debug_rough_path_;

@@ -173,6 +173,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         declare_parameter<std::string>("node.topics.global_direction_map_sub"), 1,
         [this](const sensor_msgs::msg::Image::SharedPtr msg) {
             if (!global_cost_map_) {
+                record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_DIRECTION_MAP_BEFORE_GLOBAL_MAP);
                 RCLCPP_WARN(get_logger(), "Received direction map before cost map; ignoring");
                 return;
             }
@@ -181,6 +182,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
                 img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y
             );
             if (global_direction_map_->width != global_cost_map_->width || global_direction_map_->height != global_cost_map_->height) {
+                record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_DIRECTION_MAP_SIZE_MISMATCH);
                 RCLCPP_FATAL(get_logger(), "Direction map size mismatch with cost map!");
                 throw std::runtime_error("Direction map size mismatch");
             }
@@ -220,6 +222,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         [this](const interfaces::msg::IdleChassisModeOverride::SharedPtr msg) {
             const uint8_t mode = msg->mode_override;
             if (mode != 0 && (mode < 200 || mode > 207)) {
+                record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_IDLE_MODE_INVALID);
                 RCLCPP_ERROR(
                     get_logger(),
                     "Ignoring invalid IDLE chassis mode override: %u (expected 0 or 200-207)",

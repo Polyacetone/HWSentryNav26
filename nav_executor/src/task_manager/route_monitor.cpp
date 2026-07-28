@@ -12,8 +12,11 @@ namespace nav_executor {
 const char* replan_reason_str(const ReplanReason reason) {
     switch (reason) {
         case ReplanReason::NONE: return "NONE";
-        case ReplanReason::PROJECTION_GUARD: return "PROJECTION_GUARD";
-        case ReplanReason::STEP_BLOCKED: return "STEP_BLOCKED";
+        case ReplanReason::ROUTE_TRACKING_LOST: return "ROUTE_TRACKING_LOST";
+        case ReplanReason::PROJECTION_OUT_OF_MAP: return "PROJECTION_OUT_OF_MAP";
+        case ReplanReason::PROJECTION_COST_EXCEEDED: return "PROJECTION_COST_EXCEEDED";
+        case ReplanReason::STEP_BLOCKED_CURRENT: return "STEP_BLOCKED_CURRENT";
+        case ReplanReason::STEP_BLOCKED_PREDICTED: return "STEP_BLOCKED_PREDICTED";
         case ReplanReason::MPC_LETHAL: return "MPC_LETHAL";
         case ReplanReason::EXECUTOR_REPLAN_EVENT: return "EXECUTOR_REPLAN_EVENT";
         case ReplanReason::PERFORMANCE_DEGRADED: return "PERFORMANCE_DEGRADED";
@@ -25,16 +28,16 @@ const char* replan_reason_str(const ReplanReason reason) {
 namespace {
 
 // 投影保护
-bool check_projection_guard(const RouteMonitorInput& in, rclcpp::Logger logger) {
+std::optional<ReplanReason> check_projection_guard(const RouteMonitorInput& in, rclcpp::Logger logger) {
     const Eigen::Vector2d pos_map = in.chassis_pos_map;
     if (in.route.status != RouteTrackingStatus::TRACKED || in.route.path != in.active_path) {
         RCLCPP_WARN(logger, "RouteMonitor: route tracking lost (tracking_error=%.2f m)", in.route.tracking_error);
-        return true;
+        return ReplanReason::ROUTE_TRACKING_LOST;
     }
     const Eigen::Vector2d proj_map = in.route.reference_position;
 
     if (!in.masked_global_cost_map || in.proj_guard.cost_max < 0.0 || in.proj_guard.cost_max >= 255.0) {
-        return false;
+        return std::nullopt;
     }
 
     const auto max_cost = recovery_helpers::max_cost_along_segment(
@@ -42,13 +45,13 @@ bool check_projection_guard(const RouteMonitorInput& in, rclcpp::Logger logger) 
     );
     if (!max_cost) {
         RCLCPP_WARN(logger, "RouteMonitor: projection segment out of masked_global_cost_map bounds");
-        return true;
+        return ReplanReason::PROJECTION_OUT_OF_MAP;
     }
     if (*max_cost > in.proj_guard.cost_max) {
         RCLCPP_WARN(logger, "RouteMonitor: projection segment cost too high (max_cost=%.1f > %.1f)", *max_cost, in.proj_guard.cost_max);
-        return true;
+        return ReplanReason::PROJECTION_COST_EXCEEDED;
     }
-    return false;
+    return std::nullopt;
 }
 
 // 台阶阻塞
@@ -181,20 +184,24 @@ std::optional<BlockSampleStats> sample_current_block_stats(
     return stats;
 }
 
-bool check_step_blocked(const RouteMonitorInput& in, const MincoTrajectory& path, rclcpp::Logger logger) {
+std::optional<ReplanReason> check_step_blocked(
+    const RouteMonitorInput& in,
+    const MincoTrajectory& path,
+    rclcpp::Logger logger
+) {
     const auto& p = in.step_block;
-    if (!p.enable) return false;
+    if (!p.enable) return std::nullopt;
 
     // 预测模式需要完整的预测帧序列与计划速度剖面：帧索引由计划到达时刻推出。
     const bool using_predicted = !in.per_step_dynamic_cost_maps.empty()
         && in.prediction_dt > 0.0
         && !in.active_path->speed_profile.empty();
-    if (!using_predicted && !in.base_direction_map) return false;
+    if (!using_predicted && !in.base_direction_map) return std::nullopt;
 
     const auto stats = using_predicted
         ? sample_predicted_block_stats(in, path)
         : sample_current_block_stats(in, path);
-    if (!stats || stats->step_sample_count == 0) return false;
+    if (!stats || stats->step_sample_count == 0) return std::nullopt;
 
     if (!using_predicted) {
         if (stats->blocked_step_sample_count > 0) {
@@ -202,9 +209,9 @@ bool check_step_blocked(const RouteMonitorInput& in, const MincoTrajectory& path
                 logger, "RouteMonitor: blocked step ahead within %.2f m (blocked_step_samples=%d/%d)",
                 p.lookahead_distance, stats->blocked_step_sample_count, stats->step_sample_count
             );
-            return true;
+            return ReplanReason::STEP_BLOCKED_CURRENT;
         }
-        return false;
+        return std::nullopt;
     }
 
     const double blocked_ratio = static_cast<double>(stats->blocked_step_sample_count) / static_cast<double>(stats->step_sample_count);
@@ -213,9 +220,9 @@ bool check_step_blocked(const RouteMonitorInput& in, const MincoTrajectory& path
             logger, "RouteMonitor: predicted blocked step ahead within %.2f m (ratio=%.2f >= %.2f)",
             p.lookahead_distance, blocked_ratio, p.predicted_obstacle_ratio_threshold
         );
-        return true;
+        return ReplanReason::STEP_BLOCKED_PREDICTED;
     }
-    return false;
+    return std::nullopt;
 }
 
 std::optional<ReplanReason> check_performance(const RouteMonitorInput& in, rclcpp::Logger logger) {
@@ -255,15 +262,15 @@ RouteMonitorReport run_route_monitor(const RouteMonitorInput& input, rclcpp::Log
         return report;
     }
 
-    if (check_projection_guard(input, logger)) {
+    if (const auto reason = check_projection_guard(input, logger)) {
         report.needs_replan = true;
-        report.reason = ReplanReason::PROJECTION_GUARD;
+        report.reason = *reason;
         return report;
     }
 
-    if (check_step_blocked(input, path, logger)) {
+    if (const auto reason = check_step_blocked(input, path, logger)) {
         report.needs_replan = true;
-        report.reason = ReplanReason::STEP_BLOCKED;
+        report.reason = *reason;
         return report;
     }
 
