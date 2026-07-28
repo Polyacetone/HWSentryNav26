@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 #include <Eigen/Dense>
@@ -160,7 +161,17 @@ struct LPVDiscreteModel {
 struct MPCFollowRolloutSafetyParams {
     bool enable_lethal_obstacle_check;
     double lethal_obstacle_threshold;
-    int fddp_lethal_consecutive_threshold;
+    // 命令安全与重规划是两个独立策略：命中致命障碍的 rollout 首帧即被拒绝，
+    // 该阈值只决定连续拒绝多少帧后才请求全局重规划。
+    int lethal_replan_consecutive_threshold;
+};
+
+// 冷启动初值沿已认证的全局路径做纯追踪前推，使 seed rollout 收敛到路径邻域，
+// 而不是保持当前命令的定曲率圆弧。
+struct MPCFollowReferenceSeedParams {
+    double lookahead_time;
+    double lookahead_distance_min;
+    double lookahead_distance_max;
 };
 
 struct MPCFollowAncillaryFeedbackParams {
@@ -182,6 +193,7 @@ struct MPCFollowParams {
     MPCTraversalTargetWeights traversal_target_weights;
     MPCFollowEnvironmentWeights environment_weights;
     MPCFollowRolloutSafetyParams rollout_safety;
+    MPCFollowReferenceSeedParams reference_seed;
     MPCFollowAncillaryFeedbackParams ancillary_feedback;
     MPCFollowProgressParams progress;
     MPCFollowTerminalWeights terminal_weights;
@@ -256,6 +268,14 @@ struct RolloutLethalObstacleInfo {
     double sampled_cost = 0.0;
 };
 
+// FDDP 终止情况。不参与验收判定（实时 MPC 在 max_iters 内通常不会真正收敛），
+// 只用于离线判断求解质量。
+struct SolverTermination {
+    int iters = 0;
+    bool converged = false;
+    double cost = 0.0;
+};
+
 struct MPCPrediction {
     std::vector<Eigen::Vector2d> path_map;
     std::vector<double> headings;
@@ -320,10 +340,21 @@ struct ObserverDiagnostics {
     double input_command_angular_velocity = 0.0;
 };
 
+// 因命中致命障碍而被拒绝、从未下发的 FOLLOW rollout。发布的命令来自 STOP，
+// 保留这份快照才能在录包里看到"差点撞上"的证据。
+struct RejectedFollowRollout {
+    RolloutLethalObstacleInfo lethal;
+    MPCPrediction prediction;
+    int consecutive_count = 0;
+    bool replan_requested = false;
+};
+
 struct MPCDiagnostics {
     MPCSolverMode solver_mode = MPCSolverMode::NONE;
     bool solve_succeeded = false;
     std::string solve_error;
+    SolverTermination solver_termination;
+    std::optional<RejectedFollowRollout> rejected_follow_rollout;
 
     bool ancillary_enabled = false;
     bool ancillary_active = false;

@@ -77,9 +77,14 @@
           speed_tracking_weight: 2.0 # 路径速度偏离规划期全局速度剖面的残差权重
           speed_smoothness_weight: 1.5 # 相邻路径速度变化残差权重
         rollout_safety:
-          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；全局采样命中则直接判无效，FDDP 最终解连续命中 N 帧则触发停止 + 重规划
+          enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；命中则该 rollout 首帧即被拒绝，本周期改为下发 STOP 命令
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
-          fddp_lethal_consecutive_threshold: 3 # FDDP 连续多少帧检测到致命障碍物后才触发停止 + 重规划，避免短暂抖动造成误打断
+          lethal_replan_consecutive_threshold: 3 # 连续多少帧拒绝 rollout 后才请求全局重规划，避免短暂抖动造成误打断；命令安全不受该值影响
+        reference_seed:
+          # 冷启动沿已认证全局路径做纯追踪前推，使初始 rollout 落在正确的同伦类中。
+          lookahead_time: 0.6 # 前视距离 = 速度 × 该时间 (s)
+          lookahead_distance_min: 0.3 # 前视距离下界 (m)，低速时保证有效的回正几何
+          lookahead_distance_max: 1.5 # 前视距离上界 (m)，高速时限制切弯幅度
         ancillary_feedback:
           enable: true # 是否启用辅助反馈环；在 MPC 预测模型与实际运动状态存在偏差时，使用实测状态修正 MPC 指令
           velocity_error_gain: 0.05 # 实测−名义速度误差到指令变化率修正的增益 (1/s)

@@ -572,25 +572,35 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
     const auto& cmd = follow_result.command;
     const auto& diagnostics = follow_result.diagnostics;
 
-    if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
-        // path invalid（MPC_LETHAL）：本周期输出减速指令，标记 one-shot 供顶层 replan。
-        mpc_lethal_pending_ = true;
+    // rollout 命中致命障碍：该 rollout 已被求解器拒绝，本周期下发的是 STOP 命令。
+    // 只有连续拒绝达到阈值才把 MPC_LETHAL 上报给顶层触发重规划。
+    const bool rollout_rejected =
+        follow_result.status != MPCSolver::FollowSolveStatus::FOLLOW;
+    if (rollout_rejected) {
+        const bool replan = follow_result.status
+            == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN;
+        if (replan) mpc_lethal_pending_ = true;
         if (follow_result.lethal_obstacle) {
             const auto& lethal = *follow_result.lethal_obstacle;
             RCLCPP_WARN(
                 logger_,
-                "Follow rollout entered lethal obstacle at step %d (x=%.2f, y=%.2f, cost=%.1f); flagging MPC_LETHAL",
-                lethal.state_index, lethal.position_map.x(), lethal.position_map.y(), lethal.sampled_cost
+                "Rejected Follow rollout: lethal obstacle at step %d (x=%.2f, y=%.2f, cost=%.1f); "
+                "commanding stop%s",
+                lethal.state_index, lethal.position_map.x(), lethal.position_map.y(),
+                lethal.sampled_cost, replan ? " and flagging MPC_LETHAL" : ""
             );
         } else {
-            RCLCPP_WARN(logger_, "Follow rollout entered lethal obstacle; flagging MPC_LETHAL");
+            RCLCPP_WARN(
+                logger_, "Rejected Follow rollout: lethal obstacle; commanding stop%s",
+                replan ? " and flagging MPC_LETHAL" : ""
+            );
         }
     }
 
     out.velocity = cmd.x();
     out.omega = cmd.y();
 
-    if (follow_result.status == MPCSolver::FollowSolveStatus::STOP_AND_WAIT_REPLAN) {
+    if (rollout_rejected) {
         out.mode = chassis_mode::NORMAL;
     } else if (const StepChassisCommand* const chassis_command = step_controller_.current_chassis_command(path_progress);
                chassis_command && step_phase_activates_chassis_mode(control_fsm_->step_phase())) {

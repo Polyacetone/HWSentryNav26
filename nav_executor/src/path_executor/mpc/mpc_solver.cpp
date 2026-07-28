@@ -96,6 +96,31 @@ AncillaryControlResult ancillary_velocity_command_rate(
     };
 }
 
+// 纯追踪曲率 κ = 2·y_body/d²，既含参考曲率前馈，也回正当前横向与航向误差，
+// 因此 seed rollout 会收敛到已认证的全局路径上，而不是与之平行偏移。
+double reference_tracking_omega(
+    const StateVec& x,
+    const MincoTrajectory& trajectory,
+    const double path_progress,
+    const double velocity,
+    const MPCFollowReferenceSeedParams& seed
+) {
+    const double lookahead = std::clamp(
+        velocity * seed.lookahead_time,
+        seed.lookahead_distance_min,
+        seed.lookahead_distance_max
+    );
+    const Eigen::Vector2d target =
+        trajectory.eval_arc_length(path_progress + lookahead).p;
+    const Eigen::Vector2d delta = target - Eigen::Vector2d(x(ix::X), x(ix::Y));
+    const double distance_squared = delta.squaredNorm();
+    if (distance_squared < 1e-6) return 0.0;
+
+    const double theta = x(ix::THETA);
+    const double lateral = -std::sin(theta) * delta.x() + std::cos(theta) * delta.y();
+    return 2.0 * lateral * velocity / distance_squared;
+}
+
 template<typename SolverT>
 struct RolloutStates {
     std::array<StateVec, SolverT::N + 1> xs {};
@@ -173,6 +198,56 @@ template<typename SolverT>
 void fill_solver_controls(SolverT& solver, const ControlVec& u) {
     for (size_t k = 0; k < SolverT::N; ++k) {
         solver.us[k] = u;
+    }
+}
+
+// 沿已认证全局路径构造 FOLLOW 冷启动初值。零变化率初值会让 rollout 保持当前
+// 角速度命令画圆弧，在弯道处直接穿入走廊外侧障碍；这里改为跟踪律前推，使 seed
+// 从一开始就位于正确的同伦类中。
+template<typename ProblemT, typename SolverT>
+void fill_reference_tracking_seed(
+    SolverT& solver,
+    const ProblemT& problem,
+    const StateVec& x0,
+    const MincoTrajectory& trajectory,
+    const PathSpeedProfile& speed_profile,
+    const CapabilityProfile& capability,
+    const MPCFollowReferenceSeedParams& seed
+) {
+    const double velocity_max = capability.command_envelope.velocity.max;
+    const double velocity_rate_max = capability.command_dynamics.velocity_rate_max;
+    const double angular_rate_max = capability.command_dynamics.angular_velocity_rate_max;
+    const auto& angular_envelope = capability.command_envelope.angular_velocity;
+
+    StateVec x = x0;
+    for (size_t k = 0; k < SolverT::N; ++k) {
+        // PATH_PROGRESS 由 problem.dynamics 按 MPC_DT · PATH_SPEED_CMD 前向积分。
+        const double path_progress = x(ix::PATH_PROGRESS);
+        const double path_speed = std::clamp(
+            speed_profile.eval_arc_length(path_progress).velocity, 0.0, velocity_max
+        );
+        const double omega_reference = std::clamp(
+            reference_tracking_omega(x, trajectory, path_progress, path_speed, seed),
+            angular_envelope.min,
+            angular_envelope.max
+        );
+
+        ControlVec& u = solver.us[k];
+        u(iu::PATH_SPEED_CMD) = path_speed;
+        u(iu::V_CMD_RATE) = std::clamp(
+            (path_speed - x(ix::V_CMD)) / MPC_DT, -velocity_rate_max, velocity_rate_max
+        );
+        u(iu::W_CMD_RATE) = std::clamp(
+            (omega_reference - x(ix::W_CMD)) / MPC_DT, -angular_rate_max, angular_rate_max
+        );
+
+        const StateVec next = problem.dynamics(static_cast<int>(k), x, u);
+        if (!next.allFinite()) {
+            // 前推失效时保持剩余控制为该拍的值，硬边界由 solver 的投影负责收紧。
+            for (size_t rest = k + 1; rest < SolverT::N; ++rest) solver.us[rest] = u;
+            return;
+        }
+        x = next;
     }
 }
 
@@ -264,16 +339,12 @@ void MPCSolver::set_command_state(
 }
 
 void MPCSolver::reset_warm_start() {
+    // 清除 warm 标记即可：三个 solver 都会在下次求解的冷启动分支重填整条控制序列。
     follow_warm_ = false;
     stop_warm_ = false;
     hold_warm_ = false;
     follow_nominal_longitudinal_state_.reset();
-    fddp_lethal_consecutive_count_ = 0;
-    for (size_t k = 0; k < MPC_HORIZON; ++k) {
-        follow_solver_.us[k].setZero();
-        stop_solver_.us[k].setZero();
-        hold_solver_.us[k].setZero();
-    }
+    follow_lethal_consecutive_count_ = 0;
 }
 
 void MPCSolver::update_observer(
@@ -353,20 +424,19 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         params_.kinematic_model
     );
 
+    // per_step_cost_maps 是 t0 + (i+1)·prediction_dt 的预测帧；当前帧必须作为
+    // 时域向量的第 0 项，否则 stage 0 会错用未来 +prediction_dt 的地图。
+    const bool prediction_usable = !per_step_cost_maps.empty()
+        && std::isfinite(prediction_dt) && prediction_dt > 0.0;
     std::vector<CostMapGridView> step_cost_grids;
-    if (per_step_cost_maps.empty()) {
-        step_cost_grids.reserve(1);
-    } else {
-        step_cost_grids.reserve(per_step_cost_maps.size());
-    }
-    if (per_step_cost_maps.empty()) {
-        step_cost_grids.emplace_back(cost_map);
-    } else {
+    step_cost_grids.reserve(prediction_usable ? per_step_cost_maps.size() + 1 : 1);
+    step_cost_grids.emplace_back(cost_map);
+    if (prediction_usable) {
         for (const auto* cm : per_step_cost_maps) {
             step_cost_grids.emplace_back(*cm);
         }
     }
-    const double pred_dt = per_step_cost_maps.empty() ? MPC_DT : prediction_dt;
+    const double pred_dt = prediction_usable ? prediction_dt : MPC_DT;
 
     const GridInfo ci = make_grid_info(cost_map);
     const CostMapGridView masked_global_grid(masked_global_map);
@@ -401,17 +471,15 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     opts.max_iters = params_.follow.max_iters;
     opts.tol_grad = SOLVER_TOL_GRAD;
 
-    if (feedback_active && nominal_initial.reanchored) follow_warm_ = false;
+    // 纵向重锚只替换 x0 的纵向分量，与控制序列初值是否可用无关，因此不影响
+    // warm start 的有效性；尤其不能丢弃上一帧已收敛的角向命令变化率序列。
     if (follow_warm_) {
         shift_warm_start(follow_solver_);
     } else {
-        ControlVec initial_control = ControlVec::Zero();
-        initial_control(iu::PATH_SPEED_CMD) = std::clamp(
-            speed_profile.eval_arc_length(path_progress0).velocity,
-            0.0,
-            effective_capability.command_envelope.velocity.max
+        fill_reference_tracking_seed(
+            follow_solver_, problem, x0, global_trajectory, speed_profile,
+            nominal_capability, params_.follow.reference_seed
         );
-        fill_solver_controls(follow_solver_, initial_control);
     }
     follow_solver_.xs[0] = x0;
     const auto solver_result = follow_solver_.solve(problem, opts);
@@ -455,6 +523,11 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
     MPCDiagnostics diagnostics = initial_diagnostics(MPCSolverMode::FOLLOW, measured_x0);
     diagnostics.solve_succeeded = true;
+    diagnostics.solver_termination = {
+        .iters = solver_result.iters,
+        .converged = solver_result.converged,
+        .cost = solver_result.cost,
+    };
     diagnostics.ancillary_enabled = feedback.enable;
     diagnostics.ancillary_active = feedback_active;
     diagnostics.nominal_reanchored = feedback_active && nominal_initial.reanchored;
@@ -494,33 +567,42 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     }
 
     if (check_lethal_status) {
-        const auto& safety = params_.follow.rollout_safety;
         const auto lethal = detect_rollout_lethal_obstacle(
             problem, applied_rollout.xs, applied_rollout.valid_steps + 1
         );
-
         if (lethal.has_value()) {
-            ++fddp_lethal_consecutive_count_;
-        } else {
-            fddp_lethal_consecutive_count_ = 0;
-        }
+            // 命令安全不做消抖：命中致命障碍的 rollout 一次也不下发。坏解同时失去
+            // warm start 资格，下一帧从参考跟踪 seed 重启，不再从坏盆地继续。
+            ++follow_lethal_consecutive_count_;
+            follow_warm_ = false;
+            follow_nominal_longitudinal_state_.reset();
 
-        const int threshold = safety.fddp_lethal_consecutive_threshold;
-        if (lethal.has_value() && fddp_lethal_consecutive_count_ >= threshold) {
             auto stop_result = solve_stop(chassis_pose_map, chassis_state, cost_map);
             if (!stop_result) {
                 return std::unexpected(stop_result.error());
             }
 
+            const bool replan_requested = follow_lethal_consecutive_count_
+                >= params_.follow.rollout_safety.lethal_replan_consecutive_threshold;
+            stop_result->diagnostics.rejected_follow_rollout = RejectedFollowRollout {
+                .lethal = *lethal,
+                .prediction = std::move(diagnostics.applied_prediction),
+                .consecutive_count = follow_lethal_consecutive_count_,
+                .replan_requested = replan_requested,
+            };
+
             FollowSolveResult out;
             out.command = stop_result->command;
             out.diagnostics = std::move(stop_result->diagnostics);
-            out.status = FollowSolveStatus::STOP_AND_WAIT_REPLAN;
+            out.status = replan_requested
+                ? FollowSolveStatus::STOP_AND_WAIT_REPLAN
+                : FollowSolveStatus::STOP;
             out.lethal_obstacle = lethal;
             return out;
         }
+        follow_lethal_consecutive_count_ = 0;
     } else {
-        fddp_lethal_consecutive_count_ = 0;
+        follow_lethal_consecutive_count_ = 0;
     }
 
     if (feedback_active) {
@@ -594,6 +676,11 @@ std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_stop(
     last_cmd_ = cmd;
     MPCDiagnostics diagnostics = initial_diagnostics(MPCSolverMode::STOP, x0);
     diagnostics.solve_succeeded = true;
+    diagnostics.solver_termination = {
+        .iters = solver_result.iters,
+        .converged = solver_result.converged,
+        .cost = solver_result.cost,
+    };
     diagnostics.nominal_command = cmd;
     diagnostics.nominal_command_rate = {
         stop_solver_.us[0](iu::V_CMD_RATE), stop_solver_.us[0](iu::W_CMD_RATE)
@@ -651,6 +738,11 @@ std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_hold(
     last_cmd_ = cmd;
     MPCDiagnostics diagnostics = initial_diagnostics(MPCSolverMode::HOLD, x0);
     diagnostics.solve_succeeded = true;
+    diagnostics.solver_termination = {
+        .iters = solver_result.iters,
+        .converged = solver_result.converged,
+        .cost = solver_result.cost,
+    };
     diagnostics.nominal_command = cmd;
     diagnostics.nominal_command_rate = {
         hold_solver_.us[0](iu::V_CMD_RATE), hold_solver_.us[0](iu::W_CMD_RATE)

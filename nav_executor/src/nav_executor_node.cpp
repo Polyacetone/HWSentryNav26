@@ -407,6 +407,27 @@ void NavExecutorNode::publish_diagnostics(
         msg.mpc_nominal_prediction_angular_velocity = mpc.nominal_prediction.w_pred;
         msg.mpc_applied_prediction_velocity = mpc.applied_prediction.v_pred;
         msg.mpc_applied_prediction_angular_velocity = mpc.applied_prediction.w_pred;
+
+        msg.mpc_solver_iters = mpc.solver_termination.iters;
+        msg.mpc_solver_converged = mpc.solver_termination.converged;
+        msg.mpc_solver_cost = mpc.solver_termination.cost;
+
+        msg.rejected_follow_rollout = mpc.rejected_follow_rollout.has_value();
+        if (mpc.rejected_follow_rollout) {
+            const RejectedFollowRollout& rejected = *mpc.rejected_follow_rollout;
+            msg.rejected_lethal_state_index = rejected.lethal.state_index;
+            msg.rejected_lethal_position_x = rejected.lethal.position_map.x();
+            msg.rejected_lethal_position_y = rejected.lethal.position_map.y();
+            msg.rejected_lethal_sampled_cost = rejected.lethal.sampled_cost;
+            msg.rejected_consecutive_count = rejected.consecutive_count;
+            msg.rejected_replan_requested = rejected.replan_requested;
+            msg.rejected_prediction_x.reserve(rejected.prediction.path_map.size());
+            msg.rejected_prediction_y.reserve(rejected.prediction.path_map.size());
+            for (const Eigen::Vector2d& point : rejected.prediction.path_map) {
+                msg.rejected_prediction_x.push_back(point.x());
+                msg.rejected_prediction_y.push_back(point.y());
+            }
+        }
     }
 
     debug_diag_pub_->publish(msg);

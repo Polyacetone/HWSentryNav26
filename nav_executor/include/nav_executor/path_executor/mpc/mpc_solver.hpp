@@ -16,7 +16,9 @@ class MPCSolver {
 public:
     enum class FollowSolveStatus : uint8_t {
         FOLLOW = 0,
-        STOP_AND_WAIT_REPLAN = 1,
+        // rollout 命中致命障碍：本周期下发 STOP 命令，但尚未达到请求重规划的连续帧数。
+        STOP = 1,
+        STOP_AND_WAIT_REPLAN = 2,
     };
 
     struct FollowSolveResult {
@@ -102,7 +104,7 @@ private:
     bool hold_warm_ = false;
     std::optional<StateVec> follow_nominal_longitudinal_state_;
 
-    int fddp_lethal_consecutive_count_ = 0;
+    int follow_lethal_consecutive_count_ = 0;
 
     StateVec make_initial_state(
         const Eigen::Vector3d& pose,

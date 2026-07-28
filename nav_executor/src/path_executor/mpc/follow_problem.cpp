@@ -245,6 +245,8 @@ MPCControlBounds FollowProblemT<Horizon>::control_bounds(const int k, const Stat
 
 template<int Horizon>
 const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(const int k) const {
+    // 时域向量约定：下标 0 是当前帧，下标 i 对应 t0 + i·prediction_dt。
+    // stage k 位于 t0 + k·MPC_DT，取时间上不晚于它的最近一帧。
     if (step_cost_grids_.size() <= 1) return step_cost_grids_[0];
     const int index = static_cast<int>(static_cast<double>(k) * MPC_DT / prediction_dt_);
     return step_cost_grids_[static_cast<size_t>(

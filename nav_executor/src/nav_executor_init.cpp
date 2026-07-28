@@ -877,7 +877,12 @@ MPCParams NavExecutorNode::load_mpc_params() {
             .rollout_safety = {
                 .enable_lethal_obstacle_check = declare_parameter<bool>("mpc.follow.rollout_safety.enable_lethal_obstacle_check"),
                 .lethal_obstacle_threshold = declare_parameter<double>("mpc.follow.rollout_safety.lethal_obstacle_threshold"),
-                .fddp_lethal_consecutive_threshold = static_cast<int>(declare_parameter<int>("mpc.follow.rollout_safety.fddp_lethal_consecutive_threshold"))
+                .lethal_replan_consecutive_threshold = static_cast<int>(declare_parameter<int>("mpc.follow.rollout_safety.lethal_replan_consecutive_threshold"))
+            },
+            .reference_seed = {
+                .lookahead_time = declare_parameter<double>("mpc.follow.reference_seed.lookahead_time"),
+                .lookahead_distance_min = declare_parameter<double>("mpc.follow.reference_seed.lookahead_distance_min"),
+                .lookahead_distance_max = declare_parameter<double>("mpc.follow.reference_seed.lookahead_distance_max")
             },
             .ancillary_feedback = {
                 .enable = declare_parameter<bool>("mpc.follow.ancillary_feedback.enable"),
@@ -1016,6 +1021,21 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && nonnegative_finite(terminal.angular_velocity)
         && nonnegative_finite(terminal.remaining_progress),
         "mpc.follow terminal weights are invalid"
+    );
+    const auto& rollout_safety = mpc_params.follow.rollout_safety;
+    require_parameter(
+        rollout_safety.lethal_obstacle_threshold > 0.0
+        && rollout_safety.lethal_obstacle_threshold <= 255.0
+        && rollout_safety.lethal_replan_consecutive_threshold > 0,
+        "mpc.follow rollout safety parameters are invalid"
+    );
+    const auto& reference_seed = mpc_params.follow.reference_seed;
+    require_parameter(
+        positive_finite(reference_seed.lookahead_time)
+        && positive_finite(reference_seed.lookahead_distance_min)
+        && reference_seed.lookahead_distance_min <= reference_seed.lookahead_distance_max
+        && std::isfinite(reference_seed.lookahead_distance_max),
+        "mpc.follow reference seed parameters are invalid"
     );
     const auto& feedback = mpc_params.follow.ancillary_feedback;
     require_parameter(
