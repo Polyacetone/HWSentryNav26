@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <numbers>
 #include <queue>
 
 #include <rclcpp/logging.hpp>
@@ -28,7 +29,7 @@ const char* speed_profile_selection_string(
     return "UNKNOWN";
 }
 
-// 分层搜索动力学见证 → MINCO 平坦边界状态 + 物理见证时长 + 有向切向。
+// 全局动力学搜索见证 → MINCO 平坦边界状态 + 物理见证时长 + 有向切向。
 struct MincoSeed {
     std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
     std::vector<double> durations;
@@ -44,12 +45,16 @@ struct EnvironmentValidationReport {
 // tangents 记录 A* 的有向性，供 MINCO 有向正则性软罚使用。
 MincoSeed build_minco_seed(
     const SpeedWitness& witness,
-    const double resample_distance
+    const double resample_distance,
+    const double directed_speed_min
 ) {
     MincoSeed seed;
     if (witness.positions.size() < 2
+        || witness.tangents.size() != witness.positions.size()
         || witness.velocities.size() != witness.positions.size()
-        || witness.durations.size() + 1 != witness.positions.size()) return seed;
+        || witness.durations.size() + 1 != witness.positions.size()
+        || !std::isfinite(directed_speed_min)
+        || directed_speed_min <= 0.0) return seed;
 
     std::vector<size_t> selected {0};
     const double distance_threshold = std::max(resample_distance, 0.05);
@@ -60,10 +65,10 @@ MincoSeed build_minco_seed(
             witness.positions[i] - witness.positions[last]
         ).norm();
         const double heading = std::atan2(
-            witness.velocities[i].y(), witness.velocities[i].x()
+            witness.tangents[i].y(), witness.tangents[i].x()
         );
         const double last_heading = std::atan2(
-            witness.velocities[last].y(), witness.velocities[last].x()
+            witness.tangents[last].y(), witness.tangents[last].x()
         );
         const double heading_change = std::abs(wrap_angle(heading - last_heading));
         if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD) {
@@ -80,13 +85,9 @@ MincoSeed build_minco_seed(
         seed.states[i].pos = witness.positions[selected_index];
         seed.states[i].vel = witness.velocities[selected_index];
         seed.states[i].acc.setZero();
-        // A* 末状态速度为零，其有向性由前一状态给出。
-        const Eigen::Vector2d direction = witness.velocities[selected_index].norm() > 1e-9
-            ? witness.velocities[selected_index]
-            : witness.velocities[selected_index > 0 ? selected_index - 1 : 0];
-        seed.tangents[i] = direction.norm() > 1e-9
-            ? direction.normalized()
-            : Eigen::Vector2d::UnitX();
+        const Eigen::Vector2d& tangent = witness.tangents[selected_index];
+        if (!tangent.allFinite() || tangent.norm() <= 1e-9) return {};
+        seed.tangents[i] = tangent.normalized();
     }
     seed.durations.resize(n - 1);
     for (size_t i = 0; i + 1 < n; ++i) {
@@ -97,9 +98,13 @@ MincoSeed build_minco_seed(
         seed.durations[i] = std::max(duration, 0.1);
     }
 
-    // 终点位置固定；速度剖面负责终点停止，MINCO 端点速度只需保持有向非零。
+    // MINCO 时标只塑形几何，首尾导数必须保持有向非零；真实起步和停车速度
+    // 由后续 PathSpeedProfile 独立确定。
+    seed.states.front().vel = seed.tangents.front()
+        * std::max(seed.states.front().vel.norm(), directed_speed_min);
     seed.states.back().vel = seed.tangents.back()
-        * std::max(seed.states[n - 2].vel.norm(), 1e-3);
+        * std::max(seed.states.back().vel.norm(), directed_speed_min);
+    seed.states.front().acc.setZero();
     seed.states.back().acc.setZero();
 
     return seed;
@@ -219,7 +224,7 @@ PathPlanner::PathPlanner(
     } else {
         RCLCPP_INFO(
             logger_,
-            "Generated %zu canonical motion primitives (max residual: position=%.3g m, heading=%.3g rad)",
+            "Generated %zu quantized motion primitives (max quantization: position=%.3g m, heading=%.3g rad)",
             primitive_library_.primitive_count(),
             primitive_library_.max_position_residual(),
             primitive_library_.max_heading_residual()
@@ -373,7 +378,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     result.plan_generation = req.plan_generation;
     result.goal_pos = req.goal.position_map;
 
-    if (!req.global_cost_map || !req.merged_cost_map || !req.direction_map || !req.terrain_constraints.blocked_cost_layer) {
+    if (!req.global_cost_map || !req.merged_cost_map || !req.direction_map) {
         result.failure_reason = "map snapshot incomplete";
         result.kind = PlanResult::Kind::FAILED;
         return result;
@@ -388,12 +393,10 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         return result;
     };
 
-    const CostMap global_feasibility_cost = req.global_cost_map->merge(
-        *req.terrain_constraints.blocked_cost_layer
-    );
-    const CostMap planning_cost_map = req.merged_cost_map->merge(
-        *req.terrain_constraints.blocked_cost_layer
-    );
+    // 地形合法性只由严格本体上的局部边约束决定。blocked_cost_layer 包含
+    // 膨胀 halo，融合后会把本应仅用于软塑形的方向场变成硬障碍。
+    const CostMap& global_feasibility_cost = *req.global_cost_map;
+    const CostMap& planning_cost_map = *req.merged_cost_map;
 
     Eigen::Vector2d start_map = req.current_pos_map;
     Eigen::Vector2d goal_plan = goal_map;
@@ -418,9 +421,21 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     // ── 终点 global 严格检查 ──
     {
         if (!global_feasibility_cost.geometry.contains_map_point(goal_map)) {
+            RCLCPP_ERROR(
+                logger_, "Goal (%.2f, %.2f) is outside the global map",
+                goal_map.x(), goal_map.y()
+            );
             return fail("Goal is out of bound");
         }
-        if (!is_map_point_feasible(global_feasibility_cost, *req.direction_map, goal_map)) return fail("Goal is not feasible on global map");
+        if (!is_map_point_feasible(
+                global_feasibility_cost, *req.direction_map, goal_map
+            )) {
+            RCLCPP_ERROR(
+                logger_, "Goal (%.2f, %.2f) is not feasible on the global map",
+                goal_map.x(), goal_map.y()
+            );
+            return fail("Goal is not feasible on global map");
+        }
     }
 
     // ── 终点 merged 检查 / nudge（取决于 fixed）──
@@ -450,79 +465,88 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     const auto plan_start = std::chrono::steady_clock::now();
 
-    // ── [1] 全局有向栅格 A* + 分段平地 lattice + 地形局部 A* ──
-    const LayeredRoutePlanner layered_planner(
-        {
-            .grid_astar = config_.global_astar,
-            .state_lattice = config_.state_lattice,
-            .lattice_xy_resolution = config_.motion_primitives.xy_resolution,
-            .lattice_heading_bins = config_.motion_primitives.heading_bins,
-            .start_yaw_relaxation = {
-                .speed_threshold = config_.start_yaw_relaxation.speed_threshold,
-                .root_penalty = config_.start_yaw_relaxation.root_penalty,
-                .yaw_penalty = config_.start_yaw_relaxation.yaw_penalty,
-            },
-            .occupied_threshold = config_.occupied_threshold,
-            .detect_dot_threshold = config_.step_detection.detect_dot_threshold,
-        },
-        primitive_library_
+    const auto start_cell = planning_cost_map.geometry.containing_cell(start_map);
+    const auto goal_cell = planning_cost_map.geometry.containing_cell(goal_plan);
+    if (!start_cell || !goal_cell) return fail("planning endpoints are outside the map");
+
+    // ── [1] 地形感知的时间-to-goal 引导场 ──
+    TimeToGoalHeuristic heuristic;
+    heuristic.build(
+        planning_cost_map,
+        *req.direction_map,
+        req.terrain_constraints,
+        *goal_cell,
+        config_.occupied_threshold,
+        config_.state_lattice.dynamics.velocity_max
     );
-    const auto layered = layered_planner.search(
-        start_map,
-        req.current_yaw,
-        req.current_velocity,
+    if (!heuristic.ready() || !std::isfinite(heuristic.at_cell(*start_cell))) {
+        return fail("goal is geometrically unreachable on the planning map");
+    }
+    const auto heuristic_done = std::chrono::steady_clock::now();
+
+    // ── [2] 全局 canonical state lattice：拓扑、几何与速度同时搜索 ──
+    const LatticeFrame frame {
+        .origin_map = start_map,
+        .base_heading = req.current_yaw,
+        .xy_resolution = config_.motion_primitives.xy_resolution,
+        .heading_bins = config_.motion_primitives.heading_bins,
+    };
+    const double clamped_start_speed = std::clamp(
+        std::max(req.current_velocity, 0.0),
+        0.0,
+        config_.state_lattice.dynamics.velocity_max
+    );
+    const double speed_bin_width = config_.state_lattice.dynamics.velocity_max
+        / static_cast<double>(config_.state_lattice.speed_bin_count - 1);
+    const int start_speed_bin = std::clamp(
+        static_cast<int>(std::floor(clamped_start_speed / speed_bin_width + 1e-12)),
+        0,
+        config_.state_lattice.speed_bin_count - 1
+    );
+    std::vector<StateLatticeAstar::SearchRoot> roots {{
+        .key = {0, 0, 0, start_speed_bin},
+        .relaxation_bias = 0.0,
+        .relaxed = false,
+    }};
+    // 仅静止离散根允许改变初始航向；非零速度的航向必须保持实测方向。
+    if (start_speed_bin == 0) {
+        for (int heading = 1; heading < frame.heading_bins; ++heading) {
+            const double yaw_change = std::abs(wrap_angle(
+                2.0 * std::numbers::pi * static_cast<double>(heading)
+                    / static_cast<double>(frame.heading_bins)
+            ));
+            roots.push_back({
+                .key = {0, 0, heading, 0},
+                .relaxation_bias = config_.start_yaw_relaxation.root_bias_seconds
+                    + config_.start_yaw_relaxation.yaw_bias_seconds_per_rad
+                        * yaw_change,
+                .relaxed = true,
+            });
+        }
+    }
+    const StateLatticeAstar lattice(config_.state_lattice, primitive_library_);
+    const auto lattice_result = lattice.search(
+        frame,
+        roots,
         goal_plan,
         planning_cost_map,
         *req.direction_map,
-        req.terrain_constraints
+        req.terrain_constraints,
+        heuristic,
+        config_.occupied_threshold,
+        config_.step_detection.detect_dot_threshold
     );
-    if (!layered.success) return fail("layered route planning failed: " + layered.error);
-    const auto layered_done = std::chrono::steady_clock::now();
-
-    if (config_.enable_diagnostics) {
-        double global_path_length = 0.0;
-        for (size_t i = 1; i < layered.global_raw_path.size(); ++i) {
-            global_path_length += (
-                layered.global_raw_path[i] - layered.global_raw_path[i - 1]
-            ).norm();
-        }
-        std::string terrain_sequence;
-        for (size_t i = 0; i < layered.diagnostics.terrain_regions.size(); ++i) {
-            if (!terrain_sequence.empty()) terrain_sequence += ",";
-            terrain_sequence += "region="
-                + std::to_string(layered.diagnostics.terrain_regions[i])
-                + "/label="
-                + std::to_string(layered.diagnostics.terrain_labels[i])
-                + "/portal="
-                + std::to_string(layered.diagnostics.portal_sizes[i]);
-        }
-        RCLCPP_DEBUG(
-            logger_,
-            "Global route: length=%.2f m, cells=%zu, passages=[%s], "
-            "unreachable_portal_transitions=%zu, rejected_portal_terminals=%d",
-            global_path_length,
-            layered.global_raw_path.size(),
-            terrain_sequence.c_str(),
-            layered.diagnostics.unreachable_portal_transitions,
-            layered.diagnostics.rejected_portal_terminals
-        );
+    if (!lattice_result.success) {
+        return fail("global state-lattice planning failed: " + lattice_result.error);
     }
-
-    // ── [2] 完整空间路线统一反向/前向速度见证重建 ──
-    const SpeedReachability speed_reachability(config_.state_lattice.dynamics);
-    std::string witness_error;
-    const auto speed_witness = speed_reachability.reconstruct_witness(
-        layered.initial_speed, layered.route, witness_error
-    );
-    if (!speed_witness) {
-        return fail("full-route speed witness reconstruction failed: " + witness_error);
-    }
-    const auto witness_done = std::chrono::steady_clock::now();
+    const auto lattice_done = std::chrono::steady_clock::now();
+    const SpeedWitness& speed_witness = lattice_result.witness;
 
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
     const auto minco_seed = build_minco_seed(
-        *speed_witness,
-        config_.seed_resample_distance
+        speed_witness,
+        config_.seed_resample_distance,
+        config_.minco.directed_speed_min
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
     // ── [3] MINCO 物理时标见证 + 连续几何联合塑形 ──
@@ -710,62 +734,50 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     result.kind = PlanResult::Kind::PATH;
 
     if (config_.enable_diagnostics) {
-        result.debug_rough_path = speed_witness->positions;
+        result.debug_rough_path = speed_witness.positions;
     }
 
     result.path = std::move(path);
 
     double seed_path_length = 0.0;
-    for (size_t i = 1; i < speed_witness->positions.size(); ++i) {
+    for (size_t i = 1; i < speed_witness.positions.size(); ++i) {
         seed_path_length += (
-            speed_witness->positions[i] - speed_witness->positions[i - 1]
+            speed_witness.positions[i] - speed_witness.positions[i - 1]
         ).norm();
     }
     const int segment_count = opt.trajectory.segment_count();
     const int variable_count = 2 * std::max(segment_count - 1, 0) + segment_count; // 平坦：2D 路点 + 段时长
-    RCLCPP_DEBUG(
-        logger_,
-        "Layered search queues: active_open_peak=%zu anchor_peak=%zu pending_focal_peak=%zu "
-        "focal_peak=%zu stale_entries=%zu terrain_reachability_open_peak=%zu",
-        layered.diagnostics.lattice_open_peak,
-        layered.diagnostics.lattice_anchor_queue_peak,
-        layered.diagnostics.lattice_pending_focal_queue_peak,
-        layered.diagnostics.lattice_focal_queue_peak,
-        layered.diagnostics.lattice_stale_queue_entries,
-        layered.diagnostics.terrain_reachability_open_peak
-    );
+    const auto& search_diagnostics = lattice_result.diagnostics;
     RCLCPP_DEBUG(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
-        "layered=%.2f ms, speed_witness=%.2f ms, MINCO=%.2f ms, "
+        "heuristic=%.2f ms, lattice=%.2f ms, MINCO=%.2f ms, "
         "witness_length=%.2f m, witness_states=%zu, "
-        "route[passages=%zu global_exp=%d terrain_reach_exp=%d terrain_exp=%d "
-        "unreachable_portal=%zu root=%s root_cost=%.2f lattice_cost=%.2f "
-        "lattice_exp=%d labels=%d dominated=%d transitions=%d terminal=%d rejected_portal=%d open=%zu], "
+        "search[root=%s bias=%.3f time=%.2f exp=%d states=%d improved=%d "
+        "transitions=%d terminal=%d open=%zu stale=%zu "
+        "geometry_cache=%zu hits=%zu terrain_spans=%zu], "
         "primitives[count=%zu pos_res=%.3g heading_res=%.3g], "
         "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
         "first_order=%.3g, scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : "", result.path->step_segments.size(),
-        std::chrono::duration<double, std::milli>(layered_done - plan_start).count(),
-        std::chrono::duration<double, std::milli>(witness_done - layered_done).count(),
+        std::chrono::duration<double, std::milli>(heuristic_done - plan_start).count(),
+        std::chrono::duration<double, std::milli>(lattice_done - heuristic_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
-        seed_path_length, speed_witness->positions.size(),
-        layered.diagnostics.passage_count,
-        layered.diagnostics.global_expansions,
-        layered.diagnostics.terrain_reachability_expansions,
-        layered.diagnostics.terrain_expansions,
-        layered.diagnostics.unreachable_portal_transitions,
-        layered.diagnostics.selected_relaxed_root ? "relaxed-yaw" : "strict",
-        layered.diagnostics.selected_root_cost,
-        layered.diagnostics.lattice_search_cost,
-        layered.diagnostics.lattice_expansions,
-        layered.diagnostics.lattice_labels,
-        layered.diagnostics.lattice_dominated,
-        layered.diagnostics.lattice_transition_checks,
-        layered.diagnostics.lattice_terminal_attempts,
-        layered.diagnostics.rejected_portal_terminals,
-        layered.diagnostics.lattice_open_peak,
+        seed_path_length, speed_witness.positions.size(),
+        search_diagnostics.selected_relaxed_root ? "relaxed-yaw" : "strict",
+        search_diagnostics.selected_relaxation_bias,
+        search_diagnostics.search_time,
+        search_diagnostics.expansions,
+        search_diagnostics.generated_states,
+        search_diagnostics.improved_states,
+        search_diagnostics.transition_candidates,
+        search_diagnostics.terminal_attempts,
+        search_diagnostics.open_peak,
+        search_diagnostics.stale_queue_entries,
+        search_diagnostics.geometry_cache_entries,
+        search_diagnostics.geometry_cache_hits,
+        search_diagnostics.terrain_spans_checked,
         primitive_library_.primitive_count(),
         primitive_library_.max_position_residual(),
         primitive_library_.max_heading_residual(),

@@ -507,21 +507,12 @@ PlannerConfig NavExecutorNode::load_planner_config(
     c.goal_reached_distance = declare_parameter<double>("path_planner.planner.goal_reached_distance");
     c.seed_resample_distance = declare_parameter<double>("path_planner.planner.seed_resample_distance");
     c.start_yaw_relaxation = {
-        .speed_threshold = declare_parameter<double>(
-            "path_planner.planner.start_yaw_relaxation.speed_threshold"
+        .root_bias_seconds = declare_parameter<double>(
+            "path_planner.planner.start_yaw_relaxation.root_bias_seconds"
         ),
-        .root_penalty = declare_parameter<double>(
-            "path_planner.planner.start_yaw_relaxation.root_penalty"
+        .yaw_bias_seconds_per_rad = declare_parameter<double>(
+            "path_planner.planner.start_yaw_relaxation.yaw_bias_seconds_per_rad"
         ),
-        .yaw_penalty = declare_parameter<double>(
-            "path_planner.planner.start_yaw_relaxation.yaw_penalty"
-        ),
-    };
-    c.global_astar = {
-        .obstacle_weight = declare_parameter<double>("path_planner.global_astar.obstacle_weight"),
-        .alignment_weight = declare_parameter<double>("path_planner.global_astar.alignment_weight"),
-        .terrain_proximity_weight = declare_parameter<double>("path_planner.global_astar.terrain_proximity_weight"),
-        .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.global_astar.max_expansions")),
     };
     const ShapingDynamicsLimits shaping_dynamics {
         .velocity_max = declare_parameter<double>("path_planner.shaping_dynamics.velocity_max"),
@@ -530,20 +521,42 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .angular_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.angular_acceleration_max"),
         .lateral_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.lateral_acceleration_max"),
     };
-    c.motion_primitives = {
-        .xy_resolution = declare_parameter<double>("path_planner.state_lattice.xy_resolution"),
-        .heading_bins = static_cast<int>(declare_parameter<int>("path_planner.state_lattice.heading_bins")),
-        .nominal_curvature_samples = static_cast<int>(declare_parameter<int>("path_planner.motion_primitives.nominal_curvature_samples")),
-        .curvature_max = declare_parameter<double>("path_planner.motion_primitives.curvature_max"),
-        .primitive_length = declare_parameter<double>("path_planner.motion_primitives.primitive_length"),
-    };
+    c.motion_primitives.xy_resolution = declare_parameter<double>(
+        "path_planner.state_lattice.xy_resolution"
+    );
+    c.motion_primitives.heading_bins = static_cast<int>(declare_parameter<int>(
+        "path_planner.state_lattice.heading_bins"
+    ));
+    const std::vector<double> curvature_magnitudes = declare_parameter<std::vector<double>>(
+        "path_planner.motion_primitives.curvature_magnitudes"
+    );
+    const std::vector<double> band_lengths = declare_parameter<std::vector<double>>(
+        "path_planner.motion_primitives.band_lengths"
+    );
+    require_parameter(
+        curvature_magnitudes.size() == c.motion_primitives.curvature_magnitudes.size()
+            && band_lengths.size() == c.motion_primitives.band_lengths.size(),
+        "motion primitive curvature_magnitudes or band_lengths has an invalid size"
+    );
+    std::ranges::copy(
+        curvature_magnitudes, c.motion_primitives.curvature_magnitudes.begin()
+    );
+    std::ranges::copy(band_lengths, c.motion_primitives.band_lengths.begin());
+    c.motion_primitives.straight_length = declare_parameter<double>(
+        "path_planner.motion_primitives.straight_length"
+    );
+    c.motion_primitives.curvature_max = declare_parameter<double>(
+        "path_planner.motion_primitives.curvature_max"
+    );
     c.state_lattice = {
         .dynamics = shaping_dynamics,
-        .curvature_max = c.motion_primitives.curvature_max,
+        .speed_bin_count = static_cast<int>(declare_parameter<int>(
+            "path_planner.state_lattice.speed_bin_count"
+        )),
         .collision_check_resolution = declare_parameter<double>("path_planner.state_lattice.collision_check_resolution"),
         .goal_connection_max_length = declare_parameter<double>("path_planner.state_lattice.goal_connection_max_length"),
         .goal_tolerance = declare_parameter<double>("path_planner.state_lattice.goal_tolerance"),
-        .focal_suboptimality = declare_parameter<double>("path_planner.state_lattice.focal_suboptimality"),
+        .heuristic_weight = declare_parameter<double>("path_planner.state_lattice.heuristic_weight"),
         .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.state_lattice.max_expansions")),
     };
     c.minco = {
@@ -643,9 +656,8 @@ PlannerConfig NavExecutorNode::load_planner_config(
     );
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
     require_parameter(
-        nonnegative_finite(c.start_yaw_relaxation.speed_threshold)
-            && nonnegative_finite(c.start_yaw_relaxation.root_penalty)
-            && nonnegative_finite(c.start_yaw_relaxation.yaw_penalty),
+        nonnegative_finite(c.start_yaw_relaxation.root_bias_seconds)
+            && nonnegative_finite(c.start_yaw_relaxation.yaw_bias_seconds_per_rad),
         "start yaw relaxation parameters are invalid"
     );
     require_parameter(
@@ -656,24 +668,30 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(shaping_dynamics.lateral_acceleration_max)
         && positive_finite(c.motion_primitives.xy_resolution)
         && positive_finite(c.motion_primitives.curvature_max)
-        && positive_finite(c.motion_primitives.primitive_length)
+        && positive_finite(c.motion_primitives.straight_length)
         && positive_finite(c.state_lattice.collision_check_resolution)
         && positive_finite(c.state_lattice.goal_connection_max_length)
         && positive_finite(c.state_lattice.goal_tolerance)
-        && std::isfinite(c.state_lattice.focal_suboptimality)
-        && c.state_lattice.focal_suboptimality >= 1.0
-        && nonnegative_finite(c.global_astar.obstacle_weight)
-        && nonnegative_finite(c.global_astar.alignment_weight)
-        && nonnegative_finite(c.global_astar.terrain_proximity_weight),
-        "layered planner geometry, dynamics, and cost weights must be finite and valid"
+        && nonnegative_finite(c.state_lattice.heuristic_weight),
+        "global lattice geometry, dynamics, and heuristic weight must be finite and valid"
+    );
+    require_parameter(
+        std::ranges::all_of(
+            c.motion_primitives.curvature_magnitudes,
+            [&](const double value) {
+                return positive_finite(value)
+                    && value <= c.motion_primitives.curvature_max;
+            }
+        ) && std::ranges::all_of(
+            c.motion_primitives.band_lengths, positive_finite
+        ),
+        "motion primitive bands must be finite, positive, and within curvature_max"
     );
     require_parameter(
         c.motion_primitives.heading_bins > 0
-        && c.motion_primitives.nominal_curvature_samples > 0
-        && c.motion_primitives.nominal_curvature_samples % 2 == 1
-        && c.global_astar.max_expansions > 0
+        && c.state_lattice.speed_bin_count >= 2
         && c.state_lattice.max_expansions > 0,
-        "lattice bins, odd nominal action count, and expansion limits must be positive"
+        "lattice pose/speed bins and expansion limit must be valid"
     );
     require_parameter(
         positive_finite(c.minco.directed_speed_min)

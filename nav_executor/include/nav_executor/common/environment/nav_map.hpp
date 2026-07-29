@@ -38,7 +38,7 @@ public:
     // footprint boundary and therefore is not a contained map point.
     [[nodiscard]] Eigen::Vector2d clamp_to_footprint(const Eigen::Vector2d& point_map) const;
     // Continuous coordinates whose integer lines are cell boundaries; intended
-    // only for DDA/portal geometry, not interpolation.
+    // only for DDA grid-crossing geometry, not interpolation.
     [[nodiscard]] Eigen::Vector2d map_point_to_boundary_grid(
         const Eigen::Vector2d& point_map
     ) const;

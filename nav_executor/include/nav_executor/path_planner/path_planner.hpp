@@ -14,7 +14,8 @@
 
 #include <nav_executor/common/trajectory/annotated_path.hpp>
 #include <nav_executor/common/trajectory/trajectory_validation.hpp>
-#include <nav_executor/path_planner/search/layered_route_planner.hpp>
+#include <nav_executor/path_planner/search/state_lattice_astar.hpp>
+#include <nav_executor/path_planner/search/time_to_goal_heuristic.hpp>
 #include <nav_executor/path_planner/trajectory/minco_optimizer.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
 #include <nav_executor/path_planner/trajectory/step_annotator.hpp>
@@ -78,9 +79,8 @@ struct PlanResult {
 
 struct PlannerConfig {
     struct StartYawRelaxationParams {
-        double speed_threshold;
-        double root_penalty;
-        double yaw_penalty;
+        double root_bias_seconds;
+        double yaw_bias_seconds_per_rad;
     } start_yaw_relaxation;
 
     // 环境验收只检查路径与地图的关系。
@@ -99,10 +99,9 @@ struct PlannerConfig {
     // 近距离短路（robot-to-goal 完成阈值，不是 goal-to-goal 去重阈值）
     double goal_reached_distance;
 
-    // MINCO 种子构造：分层搜索速度见证的重采样间隔（米），决定 MINCO 段数
+    // MINCO 种子构造：全局动力学搜索见证的重采样间隔（米），决定 MINCO 段数
     double seed_resample_distance;
 
-    DirectedGridAstar::Params global_astar;
     MotionPrimitiveLibrary::Params motion_primitives;
     StateLatticeAstar::Params state_lattice;
     MincoOptimizer::Params minco;

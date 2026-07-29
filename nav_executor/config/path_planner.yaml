@@ -14,17 +14,10 @@
 
       planner:
         goal_reached_distance: 0.5 # 机器人到终点距离小于该值时认为已到达，直接标记 COMPLETE
-        seed_resample_distance: 0.5 # 分层搜索速度见证的路径点重采样间隔（米），决定 MINCO 分成多少段
+        seed_resample_distance: 0.5 # 全局动力学搜索见证的路径点重采样间隔（米），决定 MINCO 分成多少段
         start_yaw_relaxation:
-          speed_threshold: 0.5 # 实测速度不高于该值时，额外允许从最低前进速度的全航向根开始搜索 (m/s)
-          root_penalty: 2.0 # 使用松弛航向根的固定等效路径长度代价 (m)，优先保留真实起始运动状态
-          yaw_penalty: 0.5 # 松弛根相对真实 yaw 每旋转 1 rad 的附加等效路径长度 (m/rad)
-
-      global_astar:
-        obstacle_weight: 0.02 # 归一化障碍代价的边权重；启发函数仍保持 admissible
-        alignment_weight: 1.0 # 膨胀方向场中的软方向对齐代价；严格本体另做硬检查
-        terrain_proximity_weight: 0.1 # 膨胀方向场中的软接近代价
-        max_expansions: 1000000 # 全局和单个地形局部栅格 A* 的展开上限
+          root_bias_seconds: 0.67 # 静止时使用松弛航向根的固定 OPEN 排序偏置（秒）
+          yaw_bias_seconds_per_rad: 0.17 # 松弛根相对实测 yaw 每旋转 1 rad 的排序偏置（秒/rad）
 
       shaping_dynamics: # State-lattice/MINCO 共用；只让动力学塑造几何，不生成最终参考速度。
         velocity_max: 3.0 # 动力学见证的线速度上限（m/s）
@@ -36,16 +29,18 @@
       state_lattice:
         xy_resolution: 0.05 # root-relative canonical lattice 位置分辨率（米）
         heading_bins: 80 # canonical 航向数量，80 对应 4.5°
-        collision_check_resolution: 0.075 # 空间原语碰撞、地形和速度区间传播的最大步长（米）
-        goal_connection_max_length: 1.0 # 近目标恒曲率几何连接允许的最大弧长（米）
-        goal_tolerance: 0.3 # 进入该欧氏距离后尝试恒曲率几何终点连接（米）
-        focal_suboptimality: 1.1 # A*ε 次优上界；focal 内按全局 raw path 的软引导选择节点
+        collision_check_resolution: 0.075 # 空间原语碰撞与地形检查的最大步长（米）
+        goal_connection_max_length: 1.0 # 近目标直线 seed connector 允许的最大长度（米）
+        goal_tolerance: 1.0 # 进入该欧氏距离后尝试连接真实目标位置（米）
+        speed_bin_count: 13 # 离散速度值数量（含 0）；13 对应 0.25 m/s 间隔
+        heuristic_weight: 1.0 # 时间-to-goal 引导强度，不承载形式化次优界
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
 
       motion_primitives:
-        nominal_curvature_samples: 11 # 三次分布 nominal action 数；初始化时拟合为 canonical 三段原语
-        curvature_max: 4.0 # 原语子段和终点连接的最大几何曲率（1/m）
-        primitive_length: 0.3 # canonical motion primitive 的总弧长（米）
+        curvature_magnitudes: [1.0, 4.0, 0.25, 1.0, 0.0625, 0.25] # 三个长度带各自的两个 nominal 曲率幅值
+        band_lengths: [0.32, 0.63, 1.26] # 与曲率带对应的原语长度（米）
+        straight_length: 1.26 # nominal 直行动作长度（米）
+        curvature_max: 4.0 # nominal 原语允许的最大几何曲率（1/m）
 
       minco:
         directed_speed_min: 0.05 # 见证速度沿种子方向的正则下限，仅用于排除尖点和逆向（m/s）

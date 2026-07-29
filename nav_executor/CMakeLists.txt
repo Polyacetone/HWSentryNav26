@@ -20,10 +20,6 @@ find_package(OpenCV REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
 
-find_package(Ceres REQUIRED)
-target_include_directories(${PROJECT_NAME} PRIVATE ${CERES_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${CERES_LIBRARIES})
-
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN nav_executor::NavExecutorNode
   EXECUTABLE ${PROJECT_NAME}_node
