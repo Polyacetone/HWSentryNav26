@@ -28,7 +28,7 @@ const char* speed_profile_selection_string(
     return "UNKNOWN";
 }
 
-// KinoA* 动力学见证 → MINCO 平坦边界状态 + 物理见证时长 + 有向切向。
+// 分层搜索动力学见证 → MINCO 平坦边界状态 + 物理见证时长 + 有向切向。
 struct MincoSeed {
     std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
     std::vector<double> durations;
@@ -43,47 +43,47 @@ struct EnvironmentValidationReport {
 // 距离和显著转向点会保留；段时长严格累加 A* 返回的真实逐边时长。
 // tangents 记录 A* 的有向性，供 MINCO 有向正则性软罚使用。
 MincoSeed build_minco_seed(
-    const std::vector<KinodynamicAstar::State>& witness_states,
-    const double resample_distance,
-    const std::vector<double>& witness_durations
+    const SpeedWitness& witness,
+    const double resample_distance
 ) {
     MincoSeed seed;
-    if (witness_states.size() < 2
-        || witness_durations.size() + 1 != witness_states.size()) return seed;
+    if (witness.positions.size() < 2
+        || witness.velocities.size() != witness.positions.size()
+        || witness.durations.size() + 1 != witness.positions.size()) return seed;
 
     std::vector<size_t> selected {0};
     const double distance_threshold = std::max(resample_distance, 0.05);
     constexpr double HEADING_THRESHOLD = 0.5;
-    for (size_t i = 1; i + 1 < witness_states.size(); ++i) {
+    for (size_t i = 1; i + 1 < witness.positions.size(); ++i) {
         const size_t last = selected.back();
         const double distance = (
-            witness_states[i].position - witness_states[last].position
+            witness.positions[i] - witness.positions[last]
         ).norm();
         const double heading = std::atan2(
-            witness_states[i].velocity.y(), witness_states[i].velocity.x()
+            witness.velocities[i].y(), witness.velocities[i].x()
         );
         const double last_heading = std::atan2(
-            witness_states[last].velocity.y(), witness_states[last].velocity.x()
+            witness.velocities[last].y(), witness.velocities[last].x()
         );
         const double heading_change = std::abs(wrap_angle(heading - last_heading));
         if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD) {
             selected.push_back(i);
         }
     }
-    selected.push_back(witness_states.size() - 1);
+    selected.push_back(witness.positions.size() - 1);
 
     const size_t n = selected.size();
     seed.states.resize(n);
     seed.tangents.resize(n);
     for (size_t i = 0; i < n; ++i) {
-        const KinodynamicAstar::State& state = witness_states[selected[i]];
-        seed.states[i].pos = state.position;
-        seed.states[i].vel = state.velocity;
+        const size_t selected_index = selected[i];
+        seed.states[i].pos = witness.positions[selected_index];
+        seed.states[i].vel = witness.velocities[selected_index];
         seed.states[i].acc.setZero();
         // A* 末状态速度为零，其有向性由前一状态给出。
-        const Eigen::Vector2d direction = state.velocity.norm() > 1e-9
-            ? state.velocity
-            : witness_states[selected[i] > 0 ? selected[i] - 1 : 0].velocity;
+        const Eigen::Vector2d direction = witness.velocities[selected_index].norm() > 1e-9
+            ? witness.velocities[selected_index]
+            : witness.velocities[selected_index > 0 ? selected_index - 1 : 0];
         seed.tangents[i] = direction.norm() > 1e-9
             ? direction.normalized()
             : Eigen::Vector2d::UnitX();
@@ -92,7 +92,7 @@ MincoSeed build_minco_seed(
     for (size_t i = 0; i + 1 < n; ++i) {
         double duration = 0.0;
         for (size_t edge = selected[i]; edge < selected[i + 1]; ++edge) {
-            duration += witness_durations[edge];
+            duration += witness.durations[edge];
         }
         seed.durations[i] = std::max(duration, 0.1);
     }
@@ -207,8 +207,24 @@ PathPlanner::PathPlanner(
     std::shared_ptr<StepRoutingMask> step_routing_mask,
     rclcpp::Logger logger
 ) : config_(config),
+    primitive_library_(config.motion_primitives),
     step_routing_mask_(std::move(step_routing_mask)),
-    logger_(logger) {}
+    logger_(logger) {
+    if (!primitive_library_.valid()) {
+        RCLCPP_ERROR(
+            logger_, "Motion primitive generation failed: %s",
+            primitive_library_.error().c_str()
+        );
+    } else {
+        RCLCPP_INFO(
+            logger_,
+            "Generated %zu canonical motion primitives (max residual: position=%.3g m, heading=%.3g rad)",
+            primitive_library_.primitive_count(),
+            primitive_library_.max_position_residual(),
+            primitive_library_.max_heading_residual()
+        );
+    }
+}
 
 PathPlanner::~PathPlanner() {
     stop();
@@ -430,137 +446,81 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         return result;
     }
 
-    const Eigen::Vector2d goal_grid = planning_cost_map.map_coord_to_grid(goal_plan);
     const auto plan_start = std::chrono::steady_clock::now();
 
-    // ── [1] Dijkstra cost-to-goal（map 系工作，供 kinodynamic h + 开阔 seed）──
-    DijkstraCostToGoal dijkstra;
-    dijkstra.build(planning_cost_map, goal_grid.cast<int>(), config_.dijkstra);
-    if (!dijkstra.ready() || std::isinf(dijkstra.at_map(start_map))) {
-        return fail("Dijkstra: goal unreachable from start");
-    }
-    const auto dijkstra_done = std::chrono::steady_clock::now();
-
-    // 空间原语逐子步约束：碰撞、方向地形通行方向以及局部允许速度范围。
-    const CostMap* const planning_map_ptr = &planning_cost_map;
-    const auto transition_constraint = [
-        planning_map_ptr,
-        direction_map = req.direction_map.get(),
-        &terrain = req.terrain_constraints,
-        &config = config_
-    ](const KinodynamicAstar::Pose& from, const KinodynamicAstar::Pose& to)
-        -> std::optional<KinodynamicAstar::SpeedRange> {
-        const Eigen::Vector2d& map_pt = to.position;
-        const Eigen::Vector2d g = planning_map_ptr->map_coord_to_grid(map_pt);
-        if (!planning_map_ptr->is_valid_coord(g)) return std::nullopt;
-        if (planning_map_ptr->interpolate(g) >= config.occupied_threshold) {
-            return std::nullopt;
-        }
-
-        const Eigen::Vector2d dg = direction_map->map_coord_to_grid(map_pt);
-        if (!direction_map->is_valid_coord(dg)) return std::nullopt;
-        if (!direction_map->is_terrain_body_at(dg)) {
-            return KinodynamicAstar::SpeedRange {
-                .min = 0.0,
-                .max = config.kinodynamic.dynamics.velocity_max,
-            };
-        }
-        const Eigen::Array2i cell_array = dg.array().floor().cast<int>();
-        const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
-        const uint8_t label = direction_map->terrain_at(cell);
-        const Eigen::Vector2d raw_dir = direction_map->at(cell);
-        if (label < static_cast<uint8_t>(TerrainType::SLOPE)
-            || raw_dir.squaredNorm() <= 1e-12) return std::nullopt;
-
-        const Eigen::Vector2d displacement = to.position - from.position;
-        if (displacement.norm() < 1e-6) return std::nullopt;
-        const Eigen::Vector2d dir = raw_dir.normalized();
-        const double travel_alignment = displacement.normalized().dot(dir);
-        if (std::abs(travel_alignment) <= config.step_detection.detect_dot_threshold) {
-            return std::nullopt;
-        }
-        const TraversalMode* rule = terrain.selected_mode(label, travel_alignment >= 0.0);
-        if (!rule) return std::nullopt;
-
-        return KinodynamicAstar::SpeedRange {
-            .min = rule->velocity_window.min,
-            .max = rule->velocity_window.max,
-        };
-    };
-
-    // ── [2] Kinodynamic A*：空间曲率原语 + 可达速度区间搜索 ──
-    KinodynamicAstar::State strict_start;
-    strict_start.position = start_map;
-    // 搜索根需要严格正的速度见证；该值只用于拓扑可达性，不是最终参考速度。
-    const double start_witness_speed = std::clamp(
+    // ── [1] 全局有向栅格 A* + 分段平地 lattice + 地形局部 A* ──
+    const LayeredRoutePlanner layered_planner(
+        {
+            .grid_astar = config_.global_astar,
+            .state_lattice = config_.state_lattice,
+            .lattice_xy_resolution = config_.motion_primitives.xy_resolution,
+            .lattice_heading_bins = config_.motion_primitives.heading_bins,
+            .start_yaw_relaxation = {
+                .speed_threshold = config_.start_yaw_relaxation.speed_threshold,
+                .root_penalty = config_.start_yaw_relaxation.root_penalty,
+                .yaw_penalty = config_.start_yaw_relaxation.yaw_penalty,
+            },
+            .occupied_threshold = config_.occupied_threshold,
+            .detect_dot_threshold = config_.step_detection.detect_dot_threshold,
+        },
+        primitive_library_
+    );
+    const auto layered = layered_planner.search(
+        start_map,
+        req.current_yaw,
         req.current_velocity,
-        config_.kinodynamic.witness_speed_min,
-        config_.kinodynamic.dynamics.velocity_max
+        goal_plan,
+        planning_cost_map,
+        *req.direction_map,
+        req.terrain_constraints
     );
-    strict_start.velocity = start_witness_speed * Eigen::Vector2d(
-        std::cos(req.current_yaw), std::sin(req.current_yaw)
-    );
+    if (!layered.success) return fail("layered route planning failed: " + layered.error);
+    const auto layered_done = std::chrono::steady_clock::now();
 
-    std::vector<KinodynamicAstar::SearchRoot> kino_roots;
-    kino_roots.push_back({
-        .state = strict_start,
-        .initial_cost = 0.0,
-        .relaxed = false,
-    });
-    if (std::abs(req.current_velocity)
-        <= config_.start_yaw_relaxation.speed_threshold) {
-        const int heading_bins = std::max(
-            1,
-            static_cast<int>(std::llround(
-                2.0 * M_PI / config_.kinodynamic.dedup_theta
-            ))
-        );
-        const double relaxed_speed = config_.kinodynamic.witness_speed_min;
-        for (int bin = 0; bin < heading_bins; ++bin) {
-            const double yaw = wrap_angle(
-                req.current_yaw
-                + 2.0 * M_PI * static_cast<double>(bin)
-                    / static_cast<double>(heading_bins)
-            );
-            const double yaw_change = std::abs(wrap_angle(yaw - req.current_yaw));
-            KinodynamicAstar::State relaxed_start;
-            relaxed_start.position = start_map;
-            relaxed_start.velocity = relaxed_speed * Eigen::Vector2d(
-                std::cos(yaw), std::sin(yaw)
-            );
-            kino_roots.push_back({
-                .state = relaxed_start,
-                .initial_cost = config_.start_yaw_relaxation.root_penalty
-                    + config_.start_yaw_relaxation.yaw_penalty * yaw_change,
-                .relaxed = true,
-            });
+    if (config_.enable_diagnostics) {
+        double global_path_length = 0.0;
+        for (size_t i = 1; i < layered.global_raw_path.size(); ++i) {
+            global_path_length += (
+                layered.global_raw_path[i] - layered.global_raw_path[i - 1]
+            ).norm();
         }
-    }
-
-    KinodynamicAstar astar(config_.kinodynamic);
-    const auto kino = astar.search(
-        kino_roots, goal_plan, dijkstra, transition_constraint
-    );
-    if (!kino.success) {
-        return fail(
-            "Kinodynamic A* failed: " + kino.error
-            + " (expansions=" + std::to_string(kino.expansions)
-            + ", labels=" + std::to_string(kino.generated_labels)
-            + ", dominated=" + std::to_string(kino.dominated_labels)
-            + ", transitions=" + std::to_string(kino.transition_checks)
-            + ", goal_attempts=" + std::to_string(kino.goal_connection_attempts)
-            + ", open_peak=" + std::to_string(kino.open_peak) + ")"
+        std::string terrain_sequence;
+        for (size_t i = 0; i < layered.diagnostics.terrain_regions.size(); ++i) {
+            if (!terrain_sequence.empty()) terrain_sequence += ",";
+            terrain_sequence += "region="
+                + std::to_string(layered.diagnostics.terrain_regions[i])
+                + "/label="
+                + std::to_string(layered.diagnostics.terrain_labels[i])
+                + "/portal="
+                + std::to_string(layered.diagnostics.portal_sizes[i]);
+        }
+        RCLCPP_DEBUG(
+            logger_,
+            "Global route: length=%.2f m, cells=%zu, passages=[%s], "
+            "unreachable_portal_transitions=%zu, rejected_portal_terminals=%d",
+            global_path_length,
+            layered.global_raw_path.size(),
+            terrain_sequence.c_str(),
+            layered.diagnostics.unreachable_portal_transitions,
+            layered.diagnostics.rejected_portal_terminals
         );
     }
-    const std::vector<KinodynamicAstar::State>& kino_witness_states =
-        kino.witness_states;
-    const auto kinodynamic_done = std::chrono::steady_clock::now();
+
+    // ── [2] 完整空间路线统一反向/前向速度见证重建 ──
+    const SpeedReachability speed_reachability(config_.state_lattice.dynamics);
+    std::string witness_error;
+    const auto speed_witness = speed_reachability.reconstruct_witness(
+        layered.initial_speed, layered.route, witness_error
+    );
+    if (!speed_witness) {
+        return fail("full-route speed witness reconstruction failed: " + witness_error);
+    }
+    const auto witness_done = std::chrono::steady_clock::now();
 
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
     const auto minco_seed = build_minco_seed(
-        kino_witness_states,
-        config_.seed_resample_distance,
-        kino.witness_durations
+        *speed_witness,
+        config_.seed_resample_distance
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
     // ── [3] MINCO 物理时标见证 + 连续几何联合塑形 ──
@@ -748,42 +708,65 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     result.kind = PlanResult::Kind::PATH;
 
     if (config_.enable_diagnostics) {
-        std::vector<Eigen::Vector2d> seed_pts;
-        seed_pts.reserve(kino_witness_states.size());
-        for (const auto& state : kino_witness_states) {
-            seed_pts.push_back(state.position);
-        }
-        result.debug_rough_path = std::move(seed_pts);
+        result.debug_rough_path = speed_witness->positions;
     }
 
     result.path = std::move(path);
 
     double seed_path_length = 0.0;
-    for (size_t i = 1; i < kino_witness_states.size(); ++i) {
+    for (size_t i = 1; i < speed_witness->positions.size(); ++i) {
         seed_path_length += (
-            kino_witness_states[i].position - kino_witness_states[i - 1].position
+            speed_witness->positions[i] - speed_witness->positions[i - 1]
         ).norm();
     }
     const int segment_count = opt.trajectory.segment_count();
     const int variable_count = 2 * std::max(segment_count - 1, 0) + segment_count; // 平坦：2D 路点 + 段时长
     RCLCPP_DEBUG(
+        logger_,
+        "Layered search queues: active_open_peak=%zu anchor_peak=%zu pending_focal_peak=%zu "
+        "focal_peak=%zu stale_entries=%zu terrain_reachability_open_peak=%zu",
+        layered.diagnostics.lattice_open_peak,
+        layered.diagnostics.lattice_anchor_queue_peak,
+        layered.diagnostics.lattice_pending_focal_queue_peak,
+        layered.diagnostics.lattice_focal_queue_peak,
+        layered.diagnostics.lattice_stale_queue_entries,
+        layered.diagnostics.terrain_reachability_open_peak
+    );
+    RCLCPP_DEBUG(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
-        "Dijkstra=%.2f ms, Kino=%.2f ms, MINCO=%.2f ms, "
+        "layered=%.2f ms, speed_witness=%.2f ms, MINCO=%.2f ms, "
         "witness_length=%.2f m, witness_states=%zu, "
-        "kino[root=%s root_cost=%.2f exp=%d labels=%d dominated=%d transitions=%d goal=%d open=%zu], "
+        "route[passages=%zu global_exp=%d terrain_reach_exp=%d terrain_exp=%d "
+        "unreachable_portal=%zu root=%s root_cost=%.2f lattice_cost=%.2f "
+        "lattice_exp=%d labels=%d dominated=%d transitions=%d terminal=%d rejected_portal=%d open=%zu], "
+        "primitives[count=%zu pos_res=%.3g heading_res=%.3g], "
         "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
         "first_order=%.3g, scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : "", result.path->step_segments.size(),
-        std::chrono::duration<double, std::milli>(dijkstra_done - plan_start).count(),
-        std::chrono::duration<double, std::milli>(kinodynamic_done - dijkstra_done).count(),
+        std::chrono::duration<double, std::milli>(layered_done - plan_start).count(),
+        std::chrono::duration<double, std::milli>(witness_done - layered_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
-        seed_path_length, kino_witness_states.size(),
-        kino.selected_relaxed_root ? "relaxed-yaw" : "strict",
-        kino.selected_root_cost,
-        kino.expansions, kino.generated_labels, kino.dominated_labels,
-        kino.transition_checks, kino.goal_connection_attempts, kino.open_peak,
+        seed_path_length, speed_witness->positions.size(),
+        layered.diagnostics.passage_count,
+        layered.diagnostics.global_expansions,
+        layered.diagnostics.terrain_reachability_expansions,
+        layered.diagnostics.terrain_expansions,
+        layered.diagnostics.unreachable_portal_transitions,
+        layered.diagnostics.selected_relaxed_root ? "relaxed-yaw" : "strict",
+        layered.diagnostics.selected_root_cost,
+        layered.diagnostics.lattice_search_cost,
+        layered.diagnostics.lattice_expansions,
+        layered.diagnostics.lattice_labels,
+        layered.diagnostics.lattice_dominated,
+        layered.diagnostics.lattice_transition_checks,
+        layered.diagnostics.lattice_terminal_attempts,
+        layered.diagnostics.rejected_portal_terminals,
+        layered.diagnostics.lattice_open_peak,
+        primitive_library_.primitive_count(),
+        primitive_library_.max_position_residual(),
+        primitive_library_.max_heading_residual(),
         segment_count, variable_count,
         static_cast<int>(opt.optimizer_status_string().size()), opt.optimizer_status_string().data(),
         opt.accepted_iterations, opt.function_evaluations,

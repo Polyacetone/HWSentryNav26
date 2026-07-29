@@ -21,7 +21,7 @@ namespace nav_executor {
 //
 // 关键不变量：
 //   1. 有向正则性 v·t̂_seed ≥ directed_speed_min > 0，排除内部零速点、尖点与逆向；
-//   2. KinoA* 与 MINCO 共用 ShapingDynamicsLimits，搜索见证与连续见证语义一致；
+//   2. State-lattice 与 MINCO 共用 ShapingDynamicsLimits，搜索见证与连续见证语义一致；
 //   3. MINCO 时标只塑形，绝不写入最终 PathSpeedProfile。
 //
 // 目标：

@@ -2,7 +2,7 @@
 
 namespace nav_executor {
 
-// KinoA* 与 MINCO 共用的几何塑形动力学包络。
+// State-lattice 与 MINCO 共用的几何塑形动力学包络。
 //
 // 这些量只用于证明/推动空间路径存在合理的运动学见证，不构成最终参考速度。
 // 路径发布前，SpeedProfileOptimizer 会在固定几何上根据 MPC capability 重新求解唯一执行时标。

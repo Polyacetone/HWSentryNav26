@@ -505,9 +505,11 @@ PlannerConfig NavExecutorNode::load_planner_config(
             "path_planner.planner.start_yaw_relaxation.yaw_penalty"
         ),
     };
-    c.dijkstra = {
-        .obstacle_weight = declare_parameter<double>("path_planner.dijkstra.obstacle_weight"),
-        .feasible_threshold = static_cast<int>(declare_parameter<int>("path_planner.dijkstra.feasible_threshold")),
+    c.global_astar = {
+        .obstacle_weight = declare_parameter<double>("path_planner.global_astar.obstacle_weight"),
+        .alignment_weight = declare_parameter<double>("path_planner.global_astar.alignment_weight"),
+        .terrain_proximity_weight = declare_parameter<double>("path_planner.global_astar.terrain_proximity_weight"),
+        .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.global_astar.max_expansions")),
     };
     const ShapingDynamicsLimits shaping_dynamics {
         .velocity_max = declare_parameter<double>("path_planner.shaping_dynamics.velocity_max"),
@@ -516,19 +518,21 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .angular_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.angular_acceleration_max"),
         .lateral_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.lateral_acceleration_max"),
     };
-    c.kinodynamic = {
+    c.motion_primitives = {
+        .xy_resolution = declare_parameter<double>("path_planner.state_lattice.xy_resolution"),
+        .heading_bins = static_cast<int>(declare_parameter<int>("path_planner.state_lattice.heading_bins")),
+        .nominal_curvature_samples = static_cast<int>(declare_parameter<int>("path_planner.motion_primitives.nominal_curvature_samples")),
+        .curvature_max = declare_parameter<double>("path_planner.motion_primitives.curvature_max"),
+        .primitive_length = declare_parameter<double>("path_planner.motion_primitives.primitive_length"),
+    };
+    c.state_lattice = {
         .dynamics = shaping_dynamics,
-        .witness_speed_min = declare_parameter<double>("path_planner.kinodynamic.witness_speed_min"),
-        .curvature_samples = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.curvature_samples")),
-        .curvature_max = declare_parameter<double>("path_planner.kinodynamic.curvature_max"),
-        .primitive_length = declare_parameter<double>("path_planner.kinodynamic.primitive_length"),
-        .collision_check_resolution = declare_parameter<double>("path_planner.kinodynamic.collision_check_resolution"),
-        .goal_connection_max_length = declare_parameter<double>("path_planner.kinodynamic.goal_connection_max_length"),
-        .dedup_xy = declare_parameter<double>("path_planner.kinodynamic.dedup_xy"),
-        .dedup_theta = declare_parameter<double>("path_planner.kinodynamic.dedup_theta"),
-        .heuristic_weight = declare_parameter<double>("path_planner.kinodynamic.heuristic_weight"),
-        .goal_tolerance = declare_parameter<double>("path_planner.kinodynamic.goal_tolerance"),
-        .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.kinodynamic.max_expansions")),
+        .curvature_max = c.motion_primitives.curvature_max,
+        .collision_check_resolution = declare_parameter<double>("path_planner.state_lattice.collision_check_resolution"),
+        .goal_connection_max_length = declare_parameter<double>("path_planner.state_lattice.goal_connection_max_length"),
+        .goal_tolerance = declare_parameter<double>("path_planner.state_lattice.goal_tolerance"),
+        .focal_suboptimality = declare_parameter<double>("path_planner.state_lattice.focal_suboptimality"),
+        .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.state_lattice.max_expansions")),
     };
     c.minco = {
         .weights = {
@@ -638,28 +642,31 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(shaping_dynamics.angular_velocity_max)
         && positive_finite(shaping_dynamics.angular_acceleration_max)
         && positive_finite(shaping_dynamics.lateral_acceleration_max)
-        && positive_finite(c.kinodynamic.witness_speed_min)
-        && c.kinodynamic.witness_speed_min <= shaping_dynamics.velocity_max
-        && positive_finite(c.kinodynamic.curvature_max)
-        && positive_finite(c.kinodynamic.primitive_length)
-        && positive_finite(c.kinodynamic.collision_check_resolution)
-        && positive_finite(c.kinodynamic.goal_connection_max_length)
-        && positive_finite(c.kinodynamic.dedup_xy)
-        && positive_finite(c.kinodynamic.dedup_theta)
-        && positive_finite(c.kinodynamic.heuristic_weight)
-        && positive_finite(c.kinodynamic.goal_tolerance),
-        "shaping dynamics, witness speed, spatial primitive, heuristic, and dedup values must be finite and positive"
+        && positive_finite(c.motion_primitives.xy_resolution)
+        && positive_finite(c.motion_primitives.curvature_max)
+        && positive_finite(c.motion_primitives.primitive_length)
+        && positive_finite(c.state_lattice.collision_check_resolution)
+        && positive_finite(c.state_lattice.goal_connection_max_length)
+        && positive_finite(c.state_lattice.goal_tolerance)
+        && std::isfinite(c.state_lattice.focal_suboptimality)
+        && c.state_lattice.focal_suboptimality >= 1.0
+        && nonnegative_finite(c.global_astar.obstacle_weight)
+        && nonnegative_finite(c.global_astar.alignment_weight)
+        && nonnegative_finite(c.global_astar.terrain_proximity_weight),
+        "layered planner geometry, dynamics, and cost weights must be finite and valid"
     );
     require_parameter(
-        c.kinodynamic.curvature_samples > 0
-        && c.kinodynamic.curvature_samples % 2 == 1
-        && c.kinodynamic.max_expansions > 0,
-        "kinodynamic curvature_samples must be positive and odd, and max_expansions must be positive"
+        c.motion_primitives.heading_bins > 0
+        && c.motion_primitives.nominal_curvature_samples > 0
+        && c.motion_primitives.nominal_curvature_samples % 2 == 1
+        && c.global_astar.max_expansions > 0
+        && c.state_lattice.max_expansions > 0,
+        "lattice bins, odd nominal action count, and expansion limits must be positive"
     );
     require_parameter(
         positive_finite(c.minco.directed_speed_min)
-        && c.minco.directed_speed_min <= c.kinodynamic.witness_speed_min,
-        "MINCO directed_speed_min must be positive and not exceed the KinoA* witness root speed"
+        && c.minco.directed_speed_min <= shaping_dynamics.velocity_max,
+        "MINCO directed_speed_min must be positive and not exceed shaping velocity_max"
     );
     const auto& minco_weights = c.minco.weights;
     require_parameter(
@@ -756,7 +763,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
     );
     require_parameter(
         c.step_detection.detect_dot_threshold > 0.0
-        && c.step_detection.detect_dot_threshold <= 1.0
+        && c.step_detection.detect_dot_threshold < 1.0
         && positive_finite(c.step_detection.path_sample_resolution)
         && nonnegative_finite(c.step_detection.profile_prepare_distance)
         && nonnegative_finite(c.step_detection.chassis_activation_distance)

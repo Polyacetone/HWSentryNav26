@@ -619,7 +619,7 @@ double MincoOptimizer::accumulate_penalties(
             gradient.velocity -= w.directed_regularity * under * sample.seed_tangent;
         }
 
-        // (d) 标量速度变化率 a_t=d|v|/dt，与 KinoA* 的 dz/ds=2a_t 语义一致。
+        // (d) 标量速度变化率 a_t=d|v|/dt，与搜索层的 dz/ds=2a_t 语义一致。
         {
             const ScalarConstraintGradient penalty = symmetric_limit_penalty(
                 sample.motion.tangential_acceleration,
