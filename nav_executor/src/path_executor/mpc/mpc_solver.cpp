@@ -1,6 +1,5 @@
 #include <nav_executor/path_executor/mpc/mpc_solver.hpp>
 #include <nav_executor/path_executor/mpc/mpc_utils.hpp>
-#include <nav_executor/path_executor/mpc/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/mpc/lpv_model.hpp>
 
 namespace nav_executor {
@@ -428,18 +427,16 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
     // 时域向量的第 0 项，否则 stage 0 会错用未来 +prediction_dt 的地图。
     const bool prediction_usable = !per_step_cost_maps.empty()
         && std::isfinite(prediction_dt) && prediction_dt > 0.0;
-    std::vector<CostMapGridView> step_cost_grids;
-    step_cost_grids.reserve(prediction_usable ? per_step_cost_maps.size() + 1 : 1);
-    step_cost_grids.emplace_back(cost_map);
+    std::vector<const CostMap*> step_cost_maps;
+    step_cost_maps.reserve(prediction_usable ? per_step_cost_maps.size() + 1 : 1);
+    step_cost_maps.push_back(&cost_map);
     if (prediction_usable) {
         for (const auto* cm : per_step_cost_maps) {
-            step_cost_grids.emplace_back(*cm);
+            step_cost_maps.push_back(cm);
         }
     }
     const double pred_dt = prediction_usable ? prediction_dt : MPC_DT;
 
-    const GridInfo ci = make_grid_info(cost_map);
-    const CostMapGridView masked_global_grid(masked_global_map);
     const StateVec measured_x0 = make_initial_state(
         chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, path_progress0, path_speed0
     );
@@ -463,7 +460,7 @@ std::expected<MPCSolver::FollowSolveResult, std::string> MPCSolver::solve_follow
         : effective_capability;
 
     const FollowProblem problem(
-        global_trajectory, speed_profile, params_, step_cost_grids, ci, masked_global_grid,
+        global_trajectory, speed_profile, params_, step_cost_maps, masked_global_map,
         pred_dt, schedule_rho, nominal_capability, step_constraint_schedule
     );
 
@@ -638,8 +635,6 @@ std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_stop(
     follow_nominal_longitudinal_state_.reset();
     const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
 
-    const CostMapGridView cg(cost_map);
-    const GridInfo ci = make_grid_info(cost_map);
     const StateVec x0 = make_initial_state(
         chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, 0.0, 0.0
     );
@@ -648,7 +643,7 @@ std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_stop(
         return std::unexpected("Stop MPC received a non-finite initial state");
     }
 
-    StopProblem prob(params_, cg, ci, schedule_rho);
+    StopProblem prob(params_, cost_map, schedule_rho);
     if (stop_warm_) {
         shift_warm_start(stop_solver_);
     } else {
@@ -700,8 +695,6 @@ std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_hold(
     follow_nominal_longitudinal_state_.reset();
     const double schedule_rho = schedule_rho_from_state(chassis_state, params_.kinematic_model);
 
-    const CostMapGridView cg(cost_map);
-    const GridInfo ci = make_grid_info(cost_map);
     const StateVec x0 = make_initial_state(
         chassis_pose_map, chassis_state, last_cmd_, last_cmd_rate_, 0.0, 0.0
     );
@@ -710,7 +703,7 @@ std::expected<MPCSolver::SolveResult, std::string> MPCSolver::solve_hold(
         return std::unexpected("Hold MPC received a non-finite initial state");
     }
 
-    HoldProblem prob(goal_map, params_, cg, ci, schedule_rho);
+    HoldProblem prob(goal_map, params_, cost_map, schedule_rho);
     if (hold_warm_) {
         shift_warm_start(hold_solver_);
     } else {

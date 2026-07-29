@@ -161,9 +161,18 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("node.topics.global_cost_map_sub"), 1,
         [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-            global_cost_map_ = std::make_shared<CostMap>(*msg);
+            try {
+                global_cost_map_ = std::make_shared<CostMap>(*msg);
+            } catch (const std::exception& error) {
+                RCLCPP_ERROR(
+                    get_logger(), "Rejected invalid global cost map geometry: %s",
+                    error.what()
+                );
+                return;
+            }
             RCLCPP_INFO(get_logger(), "Received global cost map: (%d,%d) res=%.2f",
-                global_cost_map_->width, global_cost_map_->height, global_cost_map_->resolution);
+                global_cost_map_->geometry.width(), global_cost_map_->geometry.height(),
+                global_cost_map_->geometry.resolution());
             try_init_step_mask();
             global_cost_map_sub_.reset();
         }
@@ -178,14 +187,17 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
                 return;
             }
             const cv::Mat img = cv_bridge::toCvShare(msg, "8UC3")->image;
-            global_direction_map_ = std::make_shared<DirectionMap>(
-                img, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y
-            );
-            if (global_direction_map_->width != global_cost_map_->width || global_direction_map_->height != global_cost_map_->height) {
-                record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_DIRECTION_MAP_SIZE_MISMATCH);
-                RCLCPP_FATAL(get_logger(), "Direction map size mismatch with cost map!");
-                throw std::runtime_error("Direction map size mismatch");
+            if (img.cols != global_cost_map_->geometry.width()
+                || img.rows != global_cost_map_->geometry.height()) {
+                record_input_rejection(
+                    interfaces::msg::NavExecutorDiag::INPUT_REJECTION_DIRECTION_MAP_SIZE_MISMATCH
+                );
+                RCLCPP_ERROR(get_logger(), "Direction map size mismatch with cost map");
+                return;
             }
+            global_direction_map_ = std::make_shared<DirectionMap>(
+                img, global_cost_map_->geometry
+            );
             RCLCPP_INFO(get_logger(), "Received global direction map");
             try_init_step_mask();
             global_direction_map_sub_.reset();

@@ -3,6 +3,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,41 @@ namespace nav_executor {
 
 class CostMap;
 class DirectionMap;
+
+class GridGeometry {
+public:
+    GridGeometry(int width, int height, double resolution, Eigen::Vector2d origin);
+    explicit GridGeometry(const nav_msgs::msg::MapMetaData& metadata);
+
+    [[nodiscard]] int width() const { return width_; }
+    [[nodiscard]] int height() const { return height_; }
+    [[nodiscard]] double resolution() const { return resolution_; }
+    [[nodiscard]] const Eigen::Vector2d& origin() const { return origin_; }
+    [[nodiscard]] Eigen::Vector2d footprint_max() const;
+
+    [[nodiscard]] bool contains_cell(const Eigen::Vector2i& cell) const;
+    // OccupancyGrid footprint is half-open: [origin, origin + size * resolution).
+    [[nodiscard]] bool contains_map_point(const Eigen::Vector2d& point_map) const;
+    [[nodiscard]] std::optional<Eigen::Vector2i> containing_cell(
+        const Eigen::Vector2d& point_map
+    ) const;
+    [[nodiscard]] Eigen::Vector2d cell_center(const Eigen::Vector2i& cell) const;
+    // Clamps to the closed geometric footprint. An upper-bound result is on the
+    // footprint boundary and therefore is not a contained map point.
+    [[nodiscard]] Eigen::Vector2d clamp_to_footprint(const Eigen::Vector2d& point_map) const;
+    // Continuous coordinates whose integer lines are cell boundaries; intended
+    // only for DDA/portal geometry, not interpolation.
+    [[nodiscard]] Eigen::Vector2d map_point_to_boundary_grid(
+        const Eigen::Vector2d& point_map
+    ) const;
+    [[nodiscard]] bool same_geometry(const GridGeometry& other) const;
+
+private:
+    int width_;
+    int height_;
+    double resolution_;
+    Eigen::Vector2d origin_;
+};
 
 enum class TerrainType : uint8_t {
     FLAT = 0,
@@ -131,23 +167,23 @@ public:
     using Ptr = std::shared_ptr<CostMap>;
     using ConstPtr = std::shared_ptr<const CostMap>;
 
-    explicit CostMap(int width, int height, double resolution, double origin_x, double origin_y, const std::vector<uint8_t>& data);
+    struct CostSample {
+        double value;
+        Eigen::Vector2d gradient; // cost/m in map x/y.
+    };
+
+    explicit CostMap(GridGeometry geometry, std::vector<uint8_t> data);
     explicit CostMap(const nav_msgs::msg::OccupancyGrid& occupancy_grid);
 
-    CostMap merge(const CostMap& other) const;
+    [[nodiscard]] CostMap merge(const CostMap& other) const;
+    [[nodiscard]] uint8_t raw_cost_at_cell(const Eigen::Vector2i& cell) const;
+    // Map-space, cell-center-aligned bilinear sampling. Border cells are
+    // replicated through the footprint edge; points outside return nullopt.
+    [[nodiscard]] std::optional<CostSample> sample_map(
+        const Eigen::Vector2d& position_map
+    ) const;
 
-    Eigen::Vector2d map_coord_to_grid(const Eigen::Vector2d& map_coord) const;
-    Eigen::Vector2d grid_coord_to_map(const Eigen::Vector2d& grid_coord) const;
-
-    bool is_valid_coord(const Eigen::Vector2i& grid_coord) const;
-    bool is_valid_coord(const Eigen::Vector2d& grid_coord) const;
-
-    uint8_t at(const Eigen::Vector2i& grid_coord) const;
-    double interpolate(const Eigen::Vector2d& grid_coord) const;
-    Eigen::Vector2d gradient(const Eigen::Vector2d& grid_coord) const;
-
-    const int width, height;
-    const double resolution, origin_x, origin_y;
+    const GridGeometry geometry;
     const std::vector<uint8_t> data;
 };
 
@@ -159,21 +195,21 @@ public:
 
     struct DirectionSample {
         Eigen::Vector2d value;
-        Eigen::Matrix2d gradient; // 每列分别是对 grid_x、grid_y 的偏导。
+        Eigen::Matrix2d jacobian; // 1/m; columns are map x/y derivatives.
     };
 
     explicit DirectionMap(
-        const cv::Mat& direction_map, double resolution, double origin_x, double origin_y
+        const cv::Mat& direction_map, GridGeometry geometry
     );
 
     explicit DirectionMap(
-        int width, int height, double resolution, double origin_x, double origin_y,
+        GridGeometry geometry,
         std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data
     );
 
 private:
     explicit DirectionMap(
-        int width, int height, double resolution, double origin_x, double origin_y,
+        GridGeometry geometry,
         std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded
     );
 
@@ -181,26 +217,16 @@ private:
     decode_mat(const cv::Mat& mat);
 
 public:
-    Eigen::Vector2d map_coord_to_grid(const Eigen::Vector2d& map_coord) const;
-    Eigen::Vector2d grid_coord_to_map(const Eigen::Vector2d& grid_coord) const;
+    [[nodiscard]] Eigen::Vector2d raw_direction_at_cell(const Eigen::Vector2i& cell) const;
+    [[nodiscard]] double raw_magnitude_at_cell(const Eigen::Vector2i& cell) const;
+    [[nodiscard]] bool is_terrain_body_cell(const Eigen::Vector2i& cell) const;
+    [[nodiscard]] uint8_t terrain_label_at_cell(const Eigen::Vector2i& cell) const;
+    // Uses the same map-space centered stencil and edge replication as CostMap.
+    [[nodiscard]] std::optional<DirectionSample> sample_map(
+        const Eigen::Vector2d& position_map
+    ) const;
 
-    bool is_valid_coord(const Eigen::Vector2i& grid_coord) const;
-    bool is_valid_coord(const Eigen::Vector2d& grid_coord) const;
-
-    Eigen::Vector2d at(const Eigen::Vector2i& grid_coord) const;
-    // 严格本体语义只读取包含该位置的原始格点，不使用双线性插值。
-    double raw_magnitude_at(const Eigen::Vector2i& grid_coord) const;
-    double raw_magnitude_at(const Eigen::Vector2d& grid_coord) const;
-    bool is_terrain_body_at(const Eigen::Vector2i& grid_coord) const;
-    bool is_terrain_body_at(const Eigen::Vector2d& grid_coord) const;
-    Eigen::Vector2d interpolate(const Eigen::Vector2d& grid_coord) const;
-    DirectionSample interpolate_with_gradient(const Eigen::Vector2d& grid_coord) const;
-
-    uint8_t terrain_at(const Eigen::Vector2i& grid_coord) const;
-    uint8_t terrain_at(const Eigen::Vector2d& grid_coord) const;
-
-    const int width, height;
-    const double resolution, origin_x, origin_y;
+    const GridGeometry geometry;
     const std::vector<Eigen::Vector2d> data;
     const std::vector<uint8_t> terrain;
 

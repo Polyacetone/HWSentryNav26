@@ -84,14 +84,23 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
         record_input_rejection(interfaces::msg::NavExecutorDiag::INPUT_REJECTION_LOCAL_COST_MAP_EMPTY);
         return;
     }
-    const int w = global_cost_map_->width;
-    const int h = global_cost_map_->height;
-    const auto total = static_cast<size_t>(w * h);
+    std::vector<CostMap::Ptr> received_maps;
+    received_maps.reserve(msg->maps.size());
     for (size_t i = 0; i < msg->maps.size(); ++i) {
-        if (msg->maps[i].data.size() != total) {
+        try {
+            auto map = std::make_shared<CostMap>(msg->maps[i]);
+            if (!map->geometry.same_geometry(global_cost_map_->geometry)) {
+                throw std::invalid_argument("geometry differs from the global cost map");
+            }
+            received_maps.push_back(std::move(map));
+        } catch (const std::exception& error) {
             record_input_rejection(i == 0
                 ? interfaces::msg::NavExecutorDiag::INPUT_REJECTION_LOCAL_COST_MAP_SIZE_MISMATCH
                 : interfaces::msg::NavExecutorDiag::INPUT_REJECTION_PREDICTION_MAP_SIZE_MISMATCH);
+            RCLCPP_ERROR(
+                get_logger(), "Rejected invalid %s cost map at index %zu: %s",
+                i == 0 ? "current" : "predicted", i, error.what()
+            );
             return;
         }
     }
@@ -102,16 +111,12 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
     }
     prediction_dt_ = msg->prediction_dt;
 
-    const auto to_cost_map = [&](const nav_msgs::msg::OccupancyGrid& grid) {
-        std::vector<uint8_t> data(total);
-        for (size_t j = 0; j < total; j++) data[j] = static_cast<uint8_t>(grid.data[j]);
-        return std::make_shared<CostMap>(w, h, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y, data);
-    };
-
-    current_cost_map_ = to_cost_map(msg->maps[0]);
+    current_cost_map_ = received_maps.front();
 
     prediction_maps_.clear();
-    for (size_t i = 1; i < msg->maps.size(); i++) prediction_maps_.push_back(to_cost_map(msg->maps[i]));
+    for (size_t i = 1; i < received_maps.size(); ++i) {
+        prediction_maps_.push_back(received_maps[i]);
+    }
 
     // planner 用：global + 时域融合动态
     CostMap::ConstPtr fused_dynamic;
@@ -129,11 +134,12 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
         if (total_weight <= 0.0) {
             fused_dynamic = current_cost_map_;
         } else {
+            const size_t total = global_cost_map_->data.size();
             std::vector<double> accum(total, 0.0);
             for (size_t i = 0; i < n; i++) {
                 const double weight = frame_weights[i];
                 if (weight <= 0.0) continue;
-                const auto& frame = msg->maps[i];
+                const CostMap& frame = *received_maps[i];
                 for (size_t j = 0; j < total; j++) accum[j] += static_cast<double>(frame.data[j]) * weight;
             }
             std::vector<uint8_t> result(total);
@@ -141,7 +147,9 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
                 const uint32_t u = static_cast<uint32_t>(accum[j] / total_weight + 0.5);
                 result[j] = u > 255u ? 255u : static_cast<uint8_t>(u);
             }
-            fused_dynamic = std::make_shared<CostMap>(w, h, global_cost_map_->resolution, global_cost_map_->origin_x, global_cost_map_->origin_y, result);
+            fused_dynamic = std::make_shared<CostMap>(
+                global_cost_map_->geometry, std::move(result)
+            );
         }
     }
 
@@ -379,11 +387,13 @@ void NavExecutorNode::control_tick() {
         nav_msgs::msg::OccupancyGrid grid_msg;
         grid_msg.header.stamp = now();
         grid_msg.header.frame_id = "map";
-        grid_msg.info.width = static_cast<uint32_t>(route_context.control_final->width);
-        grid_msg.info.height = static_cast<uint32_t>(route_context.control_final->height);
-        grid_msg.info.resolution = static_cast<float>(route_context.control_final->resolution);
-        grid_msg.info.origin.position.x = route_context.control_final->origin_x;
-        grid_msg.info.origin.position.y = route_context.control_final->origin_y;
+        const GridGeometry& geometry = route_context.control_final->geometry;
+        grid_msg.info.width = static_cast<uint32_t>(geometry.width());
+        grid_msg.info.height = static_cast<uint32_t>(geometry.height());
+        grid_msg.info.resolution = static_cast<float>(geometry.resolution());
+        grid_msg.info.origin.position.x = geometry.origin().x();
+        grid_msg.info.origin.position.y = geometry.origin().y();
+        grid_msg.info.origin.orientation.w = 1.0;
         grid_msg.data.resize(route_context.control_final->data.size());
         for (size_t idx = 0; idx < route_context.control_final->data.size(); idx++) {
             grid_msg.data[idx] = static_cast<int8_t>(route_context.control_final->data[idx]);

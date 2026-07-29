@@ -173,7 +173,7 @@ double distance_to_transition(
     const Eigen::Vector2d& position_map,
     const BoundaryTransition& transition
 ) {
-    const Eigen::Vector2d position = map.map_coord_to_grid(position_map);
+    const Eigen::Vector2d position = map.geometry.map_point_to_boundary_grid(position_map);
     const Eigen::Vector2i delta = transition.body_cell - transition.flat_cell;
     Eigen::Vector2d closest;
     if (delta.x() != 0 && delta.y() == 0) {
@@ -200,7 +200,7 @@ double distance_to_transition(
             std::max(transition.flat_cell.y(), transition.body_cell.y())
         );
     }
-    return (position - closest).norm() * map.resolution;
+    return (position - closest).norm() * map.geometry.resolution();
 }
 
 std::vector<GridCrossing> trace_grid_crossings(
@@ -208,8 +208,8 @@ std::vector<GridCrossing> trace_grid_crossings(
     const Eigen::Vector2d& from_map,
     const Eigen::Vector2d& to_map
 ) {
-    const Eigen::Vector2d from = map.map_coord_to_grid(from_map);
-    const Eigen::Vector2d to = map.map_coord_to_grid(to_map);
+    const Eigen::Vector2d from = map.geometry.map_point_to_boundary_grid(from_map);
+    const Eigen::Vector2d to = map.geometry.map_point_to_boundary_grid(to_map);
     Eigen::Vector2i cell = from.array().floor().cast<int>();
     const Eigen::Vector2i target = to.array().floor().cast<int>();
     std::vector<GridCrossing> crossings;
@@ -249,7 +249,8 @@ std::vector<GridCrossing> trace_grid_crossings(
             t_max_y += t_delta_y;
         }
         crossings.push_back({previous, cell, std::clamp(fraction, 0.0, 1.0)});
-        if (crossings.size() > static_cast<size_t>(map.width + map.height)) break;
+        if (crossings.size() > static_cast<size_t>(
+                map.geometry.width() + map.geometry.height())) break;
     }
     return crossings;
 }
@@ -269,7 +270,9 @@ std::optional<SpeedSquaredInterval> terrain_speed_limit(
     const StepDirection required_direction,
     const double detect_dot_threshold
 ) {
-    const Eigen::Vector2d raw_direction = direction_map.at(transition.body_cell);
+    const Eigen::Vector2d raw_direction = direction_map.raw_direction_at_cell(
+        transition.body_cell
+    );
     if (raw_direction.squaredNorm() <= 1e-12 || actual_tangent.squaredNorm() <= 1e-12) {
         return std::nullopt;
     }
@@ -280,7 +283,7 @@ std::optional<SpeedSquaredInterval> terrain_speed_limit(
     if (direction != required_direction) return std::nullopt;
     const bool going_up = direction == StepDirection::UP;
     const TraversalMode* mode = constraints.selected_mode(
-        direction_map.terrain_at(transition.body_cell), going_up
+        direction_map.terrain_label_at_cell(transition.body_cell), going_up
     );
     if (!mode) return std::nullopt;
     return SpeedSquaredInterval {
@@ -334,9 +337,9 @@ PrimitivePropagation propagate_segments(
             const SpatialPose previous = propagated.pose;
             SpatialPose next = advance_pose(previous, segment.curvature, substep_length);
             ++transition_checks;
-            const Eigen::Vector2d next_grid = cost_map.map_coord_to_grid(next.position);
-            if (!cost_map.is_valid_coord(next_grid)
-                || cost_map.interpolate(next_grid) >= static_cast<double>(occupied_threshold)) {
+            const auto cost_sample = cost_map.sample_map(next.position);
+            if (!cost_sample
+                || cost_sample->value >= static_cast<double>(occupied_threshold)) {
                 return {};
             }
             const std::vector<GridCrossing> crossings = trace_grid_crossings(
@@ -349,13 +352,13 @@ PrimitivePropagation propagate_segments(
                     )) {
                     return {};
                 }
-                if (!direction_map.is_terrain_body_at(crossing.to)) continue;
+                if (!direction_map.is_terrain_body_cell(crossing.to)) continue;
                 const BoundaryTransition transition {
                     .flat_cell = crossing.from,
                     .body_cell = crossing.to,
                 };
                 if (!portal_target
-                    || direction_map.is_terrain_body_at(crossing.from)
+                    || direction_map.is_terrain_body_cell(crossing.from)
                     || !portal_edges.contains(transition_key(transition))) {
                     return {};
                 }
@@ -918,7 +921,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             detect_dot_threshold, 0.0, 1.0
         ));
         for (const BoundaryTransition& transition : portal.transitions) {
-            const Eigen::Vector2d terrain_direction = direction_map.at(
+            const Eigen::Vector2d terrain_direction = direction_map.raw_direction_at_cell(
                 transition.body_cell
             ).normalized() * (portal.direction == StepDirection::UP ? 1.0 : -1.0);
             const double required_heading = std::atan2(
@@ -931,7 +934,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             );
             const double heading_distance = heading_error / params_.curvature_max;
             const TraversalMode* mode = terrain_constraints.selected_mode(
-                direction_map.terrain_at(transition.body_cell),
+                direction_map.terrain_label_at_cell(transition.body_cell),
                 portal.direction == StepDirection::UP
             );
             const double acceleration_distance = mode

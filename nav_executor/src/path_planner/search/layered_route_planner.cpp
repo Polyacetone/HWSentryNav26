@@ -12,14 +12,6 @@ double wrap_angle(const double angle) {
     return std::atan2(std::sin(angle), std::cos(angle));
 }
 
-Eigen::Vector2i containing_cell(const CostMap& map, const Eigen::Vector2d& point) {
-    return map.map_coord_to_grid(point).array().floor().cast<int>();
-}
-
-Eigen::Vector2d cell_center(const CostMap& map, const Eigen::Vector2i& cell) {
-    return map.grid_coord_to_map(cell.cast<double>() + Eigen::Vector2d::Constant(0.5));
-}
-
 bool append_route(SpatialRoute& destination, const SpatialRoute& source) {
     if (source.edges.empty()) return false;
     if (destination.edges.empty()) {
@@ -43,14 +35,14 @@ std::vector<std::vector<Eigen::Vector2d>> extract_flat_references(
     std::vector<std::vector<Eigen::Vector2d>> references;
     std::vector<Eigen::Vector2d> current;
     for (const Eigen::Vector2i& cell : raw_path) {
-        if (direction_map.is_terrain_body_at(cell)) {
+        if (direction_map.is_terrain_body_cell(cell)) {
             if (!current.empty()) {
                 references.push_back(std::move(current));
                 current.clear();
             }
             continue;
         }
-        current.push_back(cell_center(cost_map, cell));
+        current.push_back(cost_map.geometry.cell_center(cell));
     }
     if (!current.empty()) references.push_back(std::move(current));
     if (!references.empty()) {
@@ -68,7 +60,7 @@ std::optional<SpeedSquaredInterval> directional_speed_limit(
     const StepDirection required_direction,
     const double detect_dot_threshold
 ) {
-    const Eigen::Vector2d raw_direction = direction_map.at(terrain_cell);
+    const Eigen::Vector2d raw_direction = direction_map.raw_direction_at_cell(terrain_cell);
     if (raw_direction.squaredNorm() <= 1e-12 || movement.squaredNorm() <= 1e-12) {
         return std::nullopt;
     }
@@ -78,7 +70,7 @@ std::optional<SpeedSquaredInterval> directional_speed_limit(
         ? StepDirection::UP : StepDirection::DOWN;
     if (direction != required_direction) return std::nullopt;
     const TraversalMode* mode = constraints.selected_mode(
-        direction_map.terrain_at(terrain_cell), direction == StepDirection::UP
+        direction_map.terrain_label_at_cell(terrain_cell), direction == StepDirection::UP
     );
     if (!mode) return std::nullopt;
     return SpeedSquaredInterval {
@@ -112,7 +104,7 @@ std::optional<std::pair<SpatialRoute, SpeedSquaredInterval>> build_terrain_route
     targets.reserve(body_path.size() + 1);
     for (size_t i = 0; i < body_path.size(); ++i) {
         const Eigen::Vector2i& cell = body_path[i];
-        const Eigen::Vector2d center = cell_center(cost_map, cell);
+        const Eigen::Vector2d center = cost_map.geometry.cell_center(cell);
         if ((entry_pose.position - center).norm() <= 1e-8) continue;
         if (!targets.empty() && (targets.back().position - center).norm() <= 1e-8) continue;
         targets.push_back({
@@ -121,7 +113,7 @@ std::optional<std::pair<SpatialRoute, SpeedSquaredInterval>> build_terrain_route
         });
     }
     targets.push_back({
-        .position = cell_center(cost_map, exit.flat_cell),
+        .position = cost_map.geometry.cell_center(exit.flat_cell),
         .terrain_cell = exit.body_cell,
     });
 
@@ -196,6 +188,16 @@ LayeredRoutePlanner::Result LayeredRoutePlanner::search(
     const TerrainTraversalConstraints& terrain_constraints
 ) const {
     Result result;
+    if (!planning_cost_map.geometry.same_geometry(direction_map.geometry)) {
+        result.error = "planning cost map and direction map geometry mismatch";
+        return result;
+    }
+    const auto start_cell = planning_cost_map.geometry.containing_cell(start_map);
+    const auto goal_cell = planning_cost_map.geometry.containing_cell(goal_map);
+    if (!start_cell || !goal_cell) {
+        result.error = "layered route endpoint is outside the planning map";
+        return result;
+    }
     if (!primitive_library_.valid()) {
         result.error = "motion primitive generation failed: " + primitive_library_.error();
         return result;
@@ -209,8 +211,8 @@ LayeredRoutePlanner::Result LayeredRoutePlanner::search(
         planning_cost_map,
         direction_map,
         terrain_constraints,
-        containing_cell(planning_cost_map, start_map),
-        containing_cell(planning_cost_map, goal_map),
+        *start_cell,
+        *goal_cell,
         params_.occupied_threshold,
         params_.detect_dot_threshold
     );
@@ -222,7 +224,7 @@ LayeredRoutePlanner::Result LayeredRoutePlanner::search(
     result.diagnostics.global_open_peak = global->open_peak;
     result.global_raw_path.reserve(global->raw_path.size());
     for (const Eigen::Vector2i& cell : global->raw_path) {
-        result.global_raw_path.push_back(cell_center(planning_cost_map, cell));
+        result.global_raw_path.push_back(planning_cost_map.geometry.cell_center(cell));
     }
 
     auto passages = extract_terrain_passages(

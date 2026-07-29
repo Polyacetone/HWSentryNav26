@@ -55,24 +55,25 @@ std::expected<DirectedGridAstar::Result, std::string> run_astar(
         || !grid_cell_traversable(cost_map, goal, occupied_threshold)) {
         return std::unexpected("grid A* start or goal is not traversable");
     }
-    const size_t cell_count = static_cast<size_t>(cost_map.width)
-        * static_cast<size_t>(cost_map.height);
+    const int width = cost_map.geometry.width();
+    const size_t cell_count = static_cast<size_t>(width)
+        * static_cast<size_t>(cost_map.geometry.height());
     std::vector<double> g_score(cell_count, std::numeric_limits<double>::infinity());
     std::vector<Eigen::Vector2i> parent(cell_count, Eigen::Vector2i(-1, -1));
     std::priority_queue<OpenEntry, std::vector<OpenEntry>, std::greater<>> open;
-    g_score[index_of(start, cost_map.width)] = 0.0;
-    open.push({heuristic(start, goal, cost_map.resolution), 0.0, start});
+    g_score[index_of(start, width)] = 0.0;
+    open.push({heuristic(start, goal, cost_map.geometry.resolution()), 0.0, start});
 
     DirectedGridAstar::Result result;
     while (!open.empty()) {
         result.open_peak = std::max(result.open_peak, open.size());
         const OpenEntry current = open.top();
         open.pop();
-        const size_t current_index = index_of(current.cell, cost_map.width);
+        const size_t current_index = index_of(current.cell, width);
         if (current.g > g_score[current_index] + 1e-12) continue;
         if (same_cell(current.cell, goal)) {
             for (Eigen::Vector2i cell = goal; cell.x() >= 0;
-                 cell = parent[index_of(cell, cost_map.width)]) {
+                 cell = parent[index_of(cell, width)]) {
                 result.raw_path.push_back(cell);
                 if (same_cell(cell, start)) break;
             }
@@ -95,9 +96,9 @@ std::expected<DirectedGridAstar::Result, std::string> run_astar(
                 ) || !edge_allowed(current.cell, next)) {
                 continue;
             }
-            const double length = delta.cast<double>().norm() * cost_map.resolution;
-            const double occupancy = static_cast<double>(cost_map.at(next)) / 255.0;
-            const Eigen::Vector2d raw_direction = direction_map.at(next);
+            const double length = delta.cast<double>().norm() * cost_map.geometry.resolution();
+            const double occupancy = static_cast<double>(cost_map.raw_cost_at_cell(next)) / 255.0;
+            const Eigen::Vector2d raw_direction = direction_map.raw_direction_at_cell(next);
             double alignment_cost = 0.0;
             if (raw_direction.squaredNorm() > 1e-12) {
                 alignment_cost = params.alignment_weight * length
@@ -110,12 +111,12 @@ std::expected<DirectedGridAstar::Result, std::string> run_astar(
                 + alignment_cost
                 + params.terrain_proximity_weight * length * raw_direction.norm();
             const double candidate = current.g + edge_cost;
-            const size_t next_index = index_of(next, cost_map.width);
+            const size_t next_index = index_of(next, width);
             if (candidate + 1e-12 >= g_score[next_index]) continue;
             g_score[next_index] = candidate;
             parent[next_index] = current.cell;
             open.push({
-                candidate + heuristic(next, goal, cost_map.resolution),
+                candidate + heuristic(next, goal, cost_map.geometry.resolution()),
                 candidate,
                 next,
             });
@@ -218,13 +219,14 @@ DirectedGridAstar::build_terrain_reachability(
         return std::unexpected("terrain reachability exit is not traversable in the region");
     }
     TerrainReachability result;
-    result.width = cost_map.width;
+    result.width = cost_map.geometry.width();
     result.can_reach_exit.assign(
-        static_cast<size_t>(cost_map.width) * static_cast<size_t>(cost_map.height), 0
+        static_cast<size_t>(cost_map.geometry.width())
+            * static_cast<size_t>(cost_map.geometry.height()), 0
     );
     std::queue<Eigen::Vector2i> open;
     open.push(exit);
-    result.can_reach_exit[index_of(exit, cost_map.width)] = 1;
+    result.can_reach_exit[index_of(exit, cost_map.geometry.width())] = 1;
     while (!open.empty()) {
         result.open_peak = std::max(result.open_peak, open.size());
         const Eigen::Vector2i current = open.front();
@@ -250,7 +252,7 @@ DirectedGridAstar::build_terrain_reachability(
             ) || edge_direction != direction) {
                 continue;
             }
-            const size_t predecessor_index = index_of(predecessor, cost_map.width);
+            const size_t predecessor_index = index_of(predecessor, cost_map.geometry.width());
             if (result.can_reach_exit[predecessor_index]) continue;
             result.can_reach_exit[predecessor_index] = 1;
             open.push(predecessor);

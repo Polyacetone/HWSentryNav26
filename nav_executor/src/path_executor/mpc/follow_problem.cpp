@@ -13,6 +13,15 @@ constexpr double COST_EPS = 1e-9;
 constexpr int FOLLOW_RESIDUAL_DIM = 21;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
+CostMap::CostSample sample_cost_or_lethal(
+    const CostMap& cost_map, const Eigen::Vector2d& position_map
+) {
+    return cost_map.sample_map(position_map).value_or(CostMap::CostSample {
+        .value = 255.0,
+        .gradient = Eigen::Vector2d::Zero(),
+    });
+}
+
 // 有向路径参考点。发布前的数值验收排除检测到的内部 cusp。
 struct ReferenceFrame {
     TrajSample sample;
@@ -50,8 +59,7 @@ FollowResidualVec follow_residual_impl(
     const MincoTrajectory& trajectory,
     const PathSpeedProfile& speed_profile,
     const MPCParams& params,
-    const CostMapGridView& cost_grid,
-    const GridInfo& cost_info,
+    const CostMap& cost_map,
     const CommandDynamicsLimits& motion_limits,
     const LPVDiscreteModel& model,
     const std::shared_ptr<const StepConstraintSchedule>& step_schedule,
@@ -113,7 +121,7 @@ FollowResidualVec follow_residual_impl(
         * positive_part(std::abs(v_cmd * omega_cmd) - motion_limits.lateral_acceleration_max);
 
     residual(14) = environment.obstacle
-        * eval_cost_bilinear(cost_grid, cost_info, px, py).value / 255.0;
+        * sample_cost_or_lethal(cost_map, {px, py}).value / 255.0;
 
     const StepTraversalConstraint* const step = frozen_step_gate
         ? frozen_step_gate->constraint
@@ -178,9 +186,8 @@ FollowProblemT<Horizon>::FollowProblemT(
     MincoTrajectory trajectory,
     PathSpeedProfile speed_profile,
     const MPCParams& params,
-    const std::vector<CostMapGridView>& per_step_cost_grids,
-    const GridInfo& cost_info,
-    const CostMapGridView& masked_global_grid,
+    const std::vector<const CostMap*>& per_step_cost_maps,
+    const CostMap& masked_global_map,
     const double prediction_dt,
     const double schedule_rho,
     const CapabilityProfile& command_capability,
@@ -189,9 +196,8 @@ FollowProblemT<Horizon>::FollowProblemT(
     trajectory_(std::move(trajectory)),
     speed_profile_(std::move(speed_profile)),
     p_(params),
-    step_cost_grids_(per_step_cost_grids),
-    cost_info_(cost_info),
-    masked_global_grid_(masked_global_grid),
+    step_cost_maps_(per_step_cost_maps),
+    masked_global_map_(masked_global_map),
     prediction_dt_(prediction_dt),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)),
     command_capability_(command_capability),
@@ -244,13 +250,13 @@ MPCControlBounds FollowProblemT<Horizon>::control_bounds(const int k, const Stat
 }
 
 template<int Horizon>
-const CostMapGridView& FollowProblemT<Horizon>::cost_grid_for_step(const int k) const {
+const CostMap& FollowProblemT<Horizon>::cost_map_for_step(const int k) const {
     // 时域向量约定：下标 0 是当前帧，下标 i 对应 t0 + i·prediction_dt。
     // stage k 位于 t0 + k·MPC_DT，取时间上不晚于它的最近一帧。
-    if (step_cost_grids_.size() <= 1) return step_cost_grids_[0];
+    if (step_cost_maps_.size() <= 1) return *step_cost_maps_[0];
     const int index = static_cast<int>(static_cast<double>(k) * MPC_DT / prediction_dt_);
-    return step_cost_grids_[static_cast<size_t>(
-        std::min(index, static_cast<int>(step_cost_grids_.size()) - 1)
+    return *step_cost_maps_[static_cast<size_t>(
+        std::min(index, static_cast<int>(step_cost_maps_.size()) - 1)
     )];
 }
 
@@ -259,7 +265,7 @@ double FollowProblemT<Horizon>::running_cost(
     const int k, const StateVec& x, const ControlVec& u
 ) const {
     const FollowResidualVec residual = follow_residual_impl(
-        x, u, trajectory_, speed_profile_, p_, cost_grid_for_step(k), cost_info_,
+        x, u, trajectory_, speed_profile_, p_, cost_map_for_step(k),
         command_capability_.command_dynamics, model_, step_constraint_schedule_
     );
     // 进度奖励：s 的硬上界已保证不会越界，因此线性奖励无需再做剩余弧长截断。
@@ -278,7 +284,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     Eigen::Matrix<double, MPC_NU, MPC_NX>& lux,
     Eigen::Matrix<double, MPC_NU, MPC_NU>& luu
 ) const {
-    const auto& cost_grid = cost_grid_for_step(k);
+    const auto& cost_map = cost_map_for_step(k);
     const double path_progress = std::clamp(x(ix::PATH_PROGRESS), 0.0, total_length_);
     FrozenStepGate frozen_step_gate;
     frozen_step_gate.constraint = step_constraint_schedule_
@@ -291,7 +297,7 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
     }
     auto residual_fn = [&](const StateVec& state, const ControlVec& control) {
         return follow_residual_impl(
-            state, control, trajectory_, speed_profile_, p_, cost_grid, cost_info_,
+            state, control, trajectory_, speed_profile_, p_, cost_map,
             command_capability_.command_dynamics, model_, step_constraint_schedule_,
             &frozen_step_gate
         );
@@ -335,8 +341,8 @@ std::optional<RolloutLethalObstacleInfo> FollowProblemT<Horizon>::detect_lethal_
     const auto& safety = p_.follow.rollout_safety;
     if (!safety.enable_lethal_obstacle_check) return std::nullopt;
 
-    const auto sample = eval_cost_bilinear(
-        masked_global_grid_, cost_info_, x(ix::X), x(ix::Y)
+    const auto sample = sample_cost_or_lethal(
+        masked_global_map_, {x(ix::X), x(ix::Y)}
     );
     if (out_cost_value) *out_cost_value = sample.value;
     if (sample.value + COST_EPS < safety.lethal_obstacle_threshold) return std::nullopt;

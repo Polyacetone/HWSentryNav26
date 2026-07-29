@@ -2,7 +2,6 @@
 
 #include <nav_executor/path_executor/mpc/mpc_types.hpp>
 #include <nav_executor/path_executor/mpc/lpv_model.hpp>
-#include <nav_executor/path_executor/mpc/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/mpc/fddp_solver.hpp>
 
 namespace nav_executor {
@@ -12,8 +11,7 @@ public:
     HoldProblem(
         const Eigen::Vector2d& goal_map,
         const MPCParams& params,
-        const CostMapGridView& cost_grid,
-        const GridInfo& cost_info,
+        const CostMap& cost_map,
         double schedule_rho
     );
 
@@ -40,8 +38,7 @@ public:
 private:
     Eigen::Vector2d goal_;
     const MPCParams& p_;
-    const CostMapGridView& cost_grid_;
-    GridInfo cost_info_;
+    const CostMap& cost_map_;
     LPVDiscreteModel model_ {};
 };
 

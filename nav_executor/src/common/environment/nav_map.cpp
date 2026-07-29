@@ -9,22 +9,158 @@ namespace nav_executor {
 namespace {
 
 constexpr uint8_t MAX_NON_BODY_ENCODED_MAGNITUDE = 229;
+constexpr double ORIENTATION_TOLERANCE = 1e-9;
+
+void validate_unrotated_orientation(const geometry_msgs::msg::Quaternion& orientation) {
+    const double norm = std::hypot(
+        std::hypot(orientation.x, orientation.y),
+        std::hypot(orientation.z, orientation.w)
+    );
+    if (!std::isfinite(norm) || std::abs(norm - 1.0) > ORIENTATION_TOLERANCE
+        || std::abs(orientation.x / norm) > ORIENTATION_TOLERANCE
+        || std::abs(orientation.y / norm) > ORIENTATION_TOLERANCE
+        || std::abs(orientation.z / norm) > ORIENTATION_TOLERANCE
+        || std::abs(std::abs(orientation.w / norm) - 1.0) > ORIENTATION_TOLERANCE) {
+        throw std::invalid_argument(
+            "Rotated OccupancyGrid origins are not supported; origin orientation must be a normalized identity quaternion"
+        );
+    }
+}
+
+struct BilinearStencil {
+    std::array<Eigen::Vector2i, 4> cells;
+    std::array<double, 4> weights;
+    std::array<Eigen::Vector2d, 4> weight_gradients;
+};
+
+BilinearStencil centered_bilinear_stencil(
+    const GridGeometry& geometry, const Eigen::Vector2d& position_map
+) {
+    Eigen::Vector2d q = (position_map - geometry.origin()) / geometry.resolution()
+        - Eigen::Vector2d::Constant(0.5);
+    for (int axis = 0; axis < 2; ++axis) {
+        const double nearest_integer = std::round(q(axis));
+        if (std::abs(q(axis) - nearest_integer) <= 1e-10) q(axis) = nearest_integer;
+    }
+    const double unclamped_x = q.x();
+    const double unclamped_y = q.y();
+    q.x() = std::clamp(q.x(), 0.0, static_cast<double>(geometry.width() - 1));
+    q.y() = std::clamp(q.y(), 0.0, static_cast<double>(geometry.height() - 1));
+    const int x0 = static_cast<int>(std::floor(q.x()));
+    const int y0 = static_cast<int>(std::floor(q.y()));
+    const int x1 = std::min(x0 + 1, geometry.width() - 1);
+    const int y1 = std::min(y0 + 1, geometry.height() - 1);
+    const double tx = q.x() - static_cast<double>(x0);
+    const double ty = q.y() - static_cast<double>(y0);
+    const double inv_resolution = 1.0 / geometry.resolution();
+    BilinearStencil stencil {
+        .cells = {{{x0, y0}, {x1, y0}, {x0, y1}, {x1, y1}}},
+        .weights = {{
+            (1.0 - tx) * (1.0 - ty), tx * (1.0 - ty),
+            (1.0 - tx) * ty, tx * ty,
+        }},
+        .weight_gradients = {{
+            {-(1.0 - ty) * inv_resolution, -(1.0 - tx) * inv_resolution},
+            {(1.0 - ty) * inv_resolution, -tx * inv_resolution},
+            {-ty * inv_resolution, (1.0 - tx) * inv_resolution},
+            {ty * inv_resolution, tx * inv_resolution},
+        }},
+    };
+    if (unclamped_x < 0.0 || unclamped_x > static_cast<double>(geometry.width() - 1)) {
+        for (Eigen::Vector2d& gradient : stencil.weight_gradients) gradient.x() = 0.0;
+    }
+    if (unclamped_y < 0.0 || unclamped_y > static_cast<double>(geometry.height() - 1)) {
+        for (Eigen::Vector2d& gradient : stencil.weight_gradients) gradient.y() = 0.0;
+    }
+    return stencil;
+}
 
 } // anonymous namespace
 
-CostMap::CostMap(int width, int height, double resolution, double origin_x, double origin_y, const std::vector<uint8_t>& data):
-    width(width), height(height), resolution(resolution), origin_x(origin_x), origin_y(origin_y), data(data) {}
+GridGeometry::GridGeometry(
+    const int width, const int height, const double resolution, Eigen::Vector2d origin
+): width_(width), height_(height), resolution_(resolution), origin_(std::move(origin)) {
+    if (width <= 0 || height <= 0 || !std::isfinite(resolution) || resolution <= 0.0
+        || !origin_.allFinite()) {
+        throw std::invalid_argument("GridGeometry dimensions, resolution, or origin are invalid");
+    }
+}
+
+GridGeometry::GridGeometry(const nav_msgs::msg::MapMetaData& metadata):
+    GridGeometry(
+        static_cast<int>(metadata.width), static_cast<int>(metadata.height),
+        static_cast<double>(metadata.resolution),
+        {metadata.origin.position.x, metadata.origin.position.y}
+    ) {
+    validate_unrotated_orientation(metadata.origin.orientation);
+}
+
+Eigen::Vector2d GridGeometry::footprint_max() const {
+    return origin_ + resolution_ * Eigen::Vector2d(width_, height_);
+}
+
+bool GridGeometry::contains_cell(const Eigen::Vector2i& cell) const {
+    return cell.x() >= 0 && cell.x() < width_ && cell.y() >= 0 && cell.y() < height_;
+}
+
+bool GridGeometry::contains_map_point(const Eigen::Vector2d& point_map) const {
+    const Eigen::Vector2d maximum = footprint_max();
+    return point_map.allFinite() && point_map.x() >= origin_.x() && point_map.y() >= origin_.y()
+        && point_map.x() < maximum.x() && point_map.y() < maximum.y();
+}
+
+std::optional<Eigen::Vector2i> GridGeometry::containing_cell(
+    const Eigen::Vector2d& point_map
+) const {
+    if (!contains_map_point(point_map)) return std::nullopt;
+    const Eigen::Array2i cell = ((point_map - origin_) / resolution_)
+        .array().floor().cast<int>();
+    return Eigen::Vector2i(
+        std::clamp(cell.x(), 0, width_ - 1),
+        std::clamp(cell.y(), 0, height_ - 1)
+    );
+}
+
+Eigen::Vector2d GridGeometry::cell_center(const Eigen::Vector2i& cell) const {
+    if (!contains_cell(cell)) throw std::out_of_range("GridGeometry::cell_center cell is outside map");
+    return origin_ + resolution_ * (cell.cast<double>() + Eigen::Vector2d::Constant(0.5));
+}
+
+Eigen::Vector2d GridGeometry::clamp_to_footprint(const Eigen::Vector2d& point_map) const {
+    if (!point_map.allFinite()) {
+        throw std::invalid_argument("GridGeometry::clamp_to_footprint requires a finite point");
+    }
+    return point_map.cwiseMax(origin_).cwiseMin(footprint_max());
+}
+
+Eigen::Vector2d GridGeometry::map_point_to_boundary_grid(
+    const Eigen::Vector2d& point_map
+) const {
+    return (point_map - origin_) / resolution_;
+}
+
+bool GridGeometry::same_geometry(const GridGeometry& other) const {
+    return width_ == other.width_ && height_ == other.height_
+        && resolution_ == other.resolution_ && origin_ == other.origin_;
+}
+
+CostMap::CostMap(GridGeometry geometry, std::vector<uint8_t> data):
+    geometry(std::move(geometry)), data(std::move(data)) {
+    const size_t expected = static_cast<size_t>(this->geometry.width())
+        * static_cast<size_t>(this->geometry.height());
+    if (this->data.size() != expected) {
+        throw std::invalid_argument("CostMap data size does not match geometry");
+    }
+}
 
 CostMap::CostMap(const nav_msgs::msg::OccupancyGrid& occupancy_grid):
-    width(static_cast<int>(occupancy_grid.info.width)),
-    height(static_cast<int>(occupancy_grid.info.height)),
-    resolution(occupancy_grid.info.resolution),
-    origin_x(occupancy_grid.info.origin.position.x),
-    origin_y(occupancy_grid.info.origin.position.y),
-    data(occupancy_grid.data.begin(), occupancy_grid.data.end()) {}
+    CostMap(
+        GridGeometry(occupancy_grid.info),
+        std::vector<uint8_t>(occupancy_grid.data.begin(), occupancy_grid.data.end())
+    ) {}
 
 CostMap CostMap::merge(const CostMap& other) const {
-    if (width != other.width || height != other.height || resolution != other.resolution || origin_x != other.origin_x || origin_y != other.origin_y) {
+    if (!geometry.same_geometry(other.geometry)) {
         throw std::runtime_error("Cannot merge cost maps with different parameters");
     }
 
@@ -33,56 +169,29 @@ CostMap CostMap::merge(const CostMap& other) const {
     for (size_t i = 0; i < data.size(); i++) {
         merged_data.push_back(std::max(data[i], other.data[i]));
     }
-    return CostMap(width, height, resolution, origin_x, origin_y, merged_data);
+    return CostMap(geometry, std::move(merged_data));
 }
 
-Eigen::Vector2d CostMap::map_coord_to_grid(const Eigen::Vector2d& map_coord) const {
-    return {(map_coord.x() - origin_x) / resolution, (map_coord.y() - origin_y) / resolution};
-}
-
-Eigen::Vector2d CostMap::grid_coord_to_map(const Eigen::Vector2d& grid_coord) const {
-    return {grid_coord.x() * resolution + origin_x, grid_coord.y() * resolution + origin_y};
-}
-
-bool CostMap::is_valid_coord(const Eigen::Vector2i& grid_coord) const {
-    return grid_coord.x() >= 0 && grid_coord.x() < width && grid_coord.y() >= 0 && grid_coord.y() < height;
-}
-
-bool CostMap::is_valid_coord(const Eigen::Vector2d& grid_coord) const {
-    return grid_coord.x() >= 0 && grid_coord.x() + 1 <= width && grid_coord.y() >= 0 && grid_coord.y() + 1 <= height;
-}
-
-uint8_t CostMap::at(const Eigen::Vector2i& grid_coord) const {
-    if (is_valid_coord(grid_coord)) {
-        return data[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
+uint8_t CostMap::raw_cost_at_cell(const Eigen::Vector2i& cell) const {
+    if (geometry.contains_cell(cell)) {
+        return data[static_cast<size_t>(cell.y()) * static_cast<size_t>(geometry.width())
+            + static_cast<size_t>(cell.x())];
     }
     return 255;
 }
 
-double CostMap::interpolate(const Eigen::Vector2d& grid_coord) const {
-    if (!is_valid_coord(grid_coord)) return 255;
-
-    const int x0 = static_cast<int>(grid_coord.x());
-    const int y0 = static_cast<int>(grid_coord.y());
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
-    const double dx = grid_coord.x() - x0;
-    const double dy = grid_coord.y() - y0;
-
-    return (1 - dx) * (1 - dy) * at({x0, y0}) + dx * (1 - dy) * at({x1, y0}) + (1 - dx) * dy * at({x0, y1}) + dx * dy * at({x1, y1});
-}
-
-Eigen::Vector2d CostMap::gradient(const Eigen::Vector2d& grid_coord) const {
-    constexpr int samples = 2;
-    const int x = static_cast<int>(grid_coord.x());
-    const int y = static_cast<int>(grid_coord.y());
-
-    Eigen::Vector2d sum_grad(0, 0);
-    for (int i = 1; i <= samples; i++) {
-        sum_grad.x() += (at({x + i, y}) - at({x - i, y})) / (i * 2.0);
-        sum_grad.y() += (at({x, y + i}) - at({x, y - i})) / (i * 2.0);
+std::optional<CostMap::CostSample> CostMap::sample_map(
+    const Eigen::Vector2d& position_map
+) const {
+    if (!geometry.contains_map_point(position_map)) return std::nullopt;
+    const BilinearStencil stencil = centered_bilinear_stencil(geometry, position_map);
+    CostSample sample {.value = 0.0, .gradient = Eigen::Vector2d::Zero()};
+    for (size_t i = 0; i < stencil.cells.size(); ++i) {
+        const double raw = static_cast<double>(raw_cost_at_cell(stencil.cells[i]));
+        sample.value += stencil.weights[i] * raw;
+        sample.gradient += stencil.weight_gradients[i] * raw;
     }
-    return sum_grad / samples;
+    return sample;
 }
 
 /*static*/ std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>>
@@ -131,38 +240,43 @@ DirectionMap::decode_mat(const cv::Mat& mat) {
 }
 
 DirectionMap::DirectionMap(
-    const cv::Mat& direction_map, double resolution, double origin_x, double origin_y):
+    const cv::Mat& direction_map, GridGeometry geometry):
     DirectionMap(
-        direction_map.cols, direction_map.rows, resolution, origin_x, origin_y,
+        std::move(geometry),
         decode_mat(direction_map)
-    ) {}
+    ) {
+    if (direction_map.cols != this->geometry.width()
+        || direction_map.rows != this->geometry.height()) {
+        throw std::invalid_argument("Direction map image size does not match geometry");
+    }
+}
 
 DirectionMap::DirectionMap(
-    int width, int height, double resolution, double origin_x, double origin_y,
+    GridGeometry geometry,
     std::pair<std::vector<Eigen::Vector2d>, std::vector<uint8_t>> decoded):
     DirectionMap(
-        width, height, resolution, origin_x, origin_y,
+        std::move(geometry),
         std::move(decoded.first), std::move(decoded.second)
     ) {}
 
 DirectionMap::DirectionMap(
-    int width, int height, double resolution, double origin_x, double origin_y,
+    GridGeometry geometry,
     std::vector<Eigen::Vector2d> dir_data, std::vector<uint8_t> terrain_data):
-    width(width),
-    height(height),
-    resolution(resolution),
-    origin_x(origin_x),
-    origin_y(origin_y),
+    geometry(std::move(geometry)),
     data(std::move(dir_data)),
-    terrain(terrain_data.empty() ? std::vector<uint8_t>(static_cast<size_t>(width) * static_cast<size_t>(height), static_cast<uint8_t>(TerrainType::FLAT)) : std::move(terrain_data)) {
-    if (width <= 0 || height <= 0 || !std::isfinite(resolution) || resolution <= 0.0
-        || !std::isfinite(origin_x) || !std::isfinite(origin_y)) {
-        throw std::runtime_error("DirectionMap geometry is invalid");
-    }
-    if (static_cast<int>(this->data.size()) != width * height) {
+    terrain(terrain_data.empty()
+        ? std::vector<uint8_t>(
+            static_cast<size_t>(this->geometry.width())
+                * static_cast<size_t>(this->geometry.height()),
+            static_cast<uint8_t>(TerrainType::FLAT)
+        )
+        : std::move(terrain_data)) {
+    const size_t expected = static_cast<size_t>(this->geometry.width())
+        * static_cast<size_t>(this->geometry.height());
+    if (this->data.size() != expected) {
         throw std::runtime_error("DirectionMap data size does not match width*height");
     }
-    if (static_cast<int>(this->terrain.size()) != width * height) {
+    if (this->terrain.size() != expected) {
         throw std::runtime_error("DirectionMap terrain size does not match width*height");
     }
     for (size_t i = 0; i < this->data.size(); ++i) {
@@ -172,88 +286,45 @@ DirectionMap::DirectionMap(
     }
 }
 
-Eigen::Vector2d DirectionMap::map_coord_to_grid(const Eigen::Vector2d& map_coord) const {
-    return {(map_coord.x() - origin_x) / resolution, (map_coord.y() - origin_y) / resolution};
-}
-
-Eigen::Vector2d DirectionMap::grid_coord_to_map(const Eigen::Vector2d& grid_coord) const {
-    return {grid_coord.x() * resolution + origin_x, grid_coord.y() * resolution + origin_y};
-}
-
-bool DirectionMap::is_valid_coord(const Eigen::Vector2i& grid_coord) const {
-    return grid_coord.x() >= 0 && grid_coord.x() < width && grid_coord.y() >= 0 && grid_coord.y() < height;
-}
-
-bool DirectionMap::is_valid_coord(const Eigen::Vector2d& grid_coord) const {
-    return grid_coord.x() >= 0 && grid_coord.x() + 1 <= width && grid_coord.y() >= 0 && grid_coord.y() + 1 <= height;
-}
-
-Eigen::Vector2d DirectionMap::at(const Eigen::Vector2i& grid_coord) const {
-    if (is_valid_coord(grid_coord)) {
-        return data[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
+Eigen::Vector2d DirectionMap::raw_direction_at_cell(const Eigen::Vector2i& cell) const {
+    if (geometry.contains_cell(cell)) {
+        return data[static_cast<size_t>(cell.y()) * static_cast<size_t>(geometry.width())
+            + static_cast<size_t>(cell.x())];
     }
     return {0, 0};
 }
 
-double DirectionMap::raw_magnitude_at(const Eigen::Vector2i& grid_coord) const {
-    return at(grid_coord).norm();
+double DirectionMap::raw_magnitude_at_cell(const Eigen::Vector2i& cell) const {
+    return raw_direction_at_cell(cell).norm();
 }
 
-double DirectionMap::raw_magnitude_at(const Eigen::Vector2d& grid_coord) const {
-    const Eigen::Array2i floored = grid_coord.array().floor().cast<int>();
-    return raw_magnitude_at(Eigen::Vector2i(floored.x(), floored.y()));
+bool DirectionMap::is_terrain_body_cell(const Eigen::Vector2i& cell) const {
+    return raw_magnitude_at_cell(cell) > TERRAIN_BODY_MAGNITUDE_THRESHOLD;
 }
 
-bool DirectionMap::is_terrain_body_at(const Eigen::Vector2i& grid_coord) const {
-    return raw_magnitude_at(grid_coord) > TERRAIN_BODY_MAGNITUDE_THRESHOLD;
-}
-
-bool DirectionMap::is_terrain_body_at(const Eigen::Vector2d& grid_coord) const {
-    return raw_magnitude_at(grid_coord) > TERRAIN_BODY_MAGNITUDE_THRESHOLD;
-}
-
-Eigen::Vector2d DirectionMap::interpolate(const Eigen::Vector2d& grid_coord) const {
-    if (!is_valid_coord(grid_coord)) return {0, 0};
-
-    const int x0 = static_cast<int>(grid_coord.x());
-    const int y0 = static_cast<int>(grid_coord.y());
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
-    const double dx = grid_coord.x() - x0;
-    const double dy = grid_coord.y() - y0;
-
-    return (1 - dx) * (1 - dy) * at({x0, y0}) + dx * (1 - dy) * at({x1, y0}) + (1 - dx) * dy * at({x0, y1}) + dx * dy * at({x1, y1});
-}
-
-DirectionMap::DirectionSample DirectionMap::interpolate_with_gradient(const Eigen::Vector2d& grid_coord) const {
-    if (!is_valid_coord(grid_coord)) return {{0, 0}, Eigen::Matrix2d::Zero()};
-    const int x0 = static_cast<int>(grid_coord.x());
-    const int y0 = static_cast<int>(grid_coord.y());
-    const int x1 = x0 + 1;
-    const int y1 = y0 + 1;
-    const double dx = grid_coord.x() - x0;
-    const double dy = grid_coord.y() - y0;
-
-    const Eigen::Vector2d d00 = at({x0, y0}), d10 = at({x1, y0});
-    const Eigen::Vector2d d01 = at({x0, y1}), d11 = at({x1, y1});
-
-    DirectionSample result;
-    result.value = (1 - dx) * (1 - dy) * d00 + dx * (1 - dy) * d10 + (1 - dx) * dy * d01 + dx * dy * d11;
-    result.gradient.col(0) = (1 - dy) * (d10 - d00) + dy * (d11 - d01);
-    result.gradient.col(1) = (1 - dx) * (d01 - d00) + dx * (d11 - d10);
-    return result;
-}
-
-uint8_t DirectionMap::terrain_at(const Eigen::Vector2i& grid_coord) const {
-    if (is_valid_coord(grid_coord)) {
-        return terrain[static_cast<size_t>(grid_coord.y()) * static_cast<size_t>(width) + static_cast<size_t>(grid_coord.x())];
+uint8_t DirectionMap::terrain_label_at_cell(const Eigen::Vector2i& cell) const {
+    if (geometry.contains_cell(cell)) {
+        return terrain[static_cast<size_t>(cell.y()) * static_cast<size_t>(geometry.width())
+            + static_cast<size_t>(cell.x())];
     }
     return static_cast<uint8_t>(TerrainType::OBSTACLE);
 }
 
-uint8_t DirectionMap::terrain_at(const Eigen::Vector2d& grid_coord) const {
-    const Eigen::Array2i floored = grid_coord.array().floor().cast<int>();
-    return terrain_at(Eigen::Vector2i(floored.x(), floored.y()));
+std::optional<DirectionMap::DirectionSample> DirectionMap::sample_map(
+    const Eigen::Vector2d& position_map
+) const {
+    if (!geometry.contains_map_point(position_map)) return std::nullopt;
+    const BilinearStencil stencil = centered_bilinear_stencil(geometry, position_map);
+    DirectionSample result {
+        .value = Eigen::Vector2d::Zero(),
+        .jacobian = Eigen::Matrix2d::Zero(),
+    };
+    for (size_t i = 0; i < stencil.cells.size(); ++i) {
+        const Eigen::Vector2d raw = raw_direction_at_cell(stencil.cells[i]);
+        result.value += stencil.weights[i] * raw;
+        result.jacobian += raw * stencil.weight_gradients[i].transpose();
+    }
+    return result;
 }
 
 const TraversalMode* TerrainTraversalConstraints::selected_mode(const uint8_t label, const bool is_up) const {
@@ -298,7 +369,7 @@ TerrainTraversalConstraints build_terrain_traversal_constraints(
         }
     }
     constraints.blocked_cost_layer = std::make_shared<CostMap>(
-        direction_map.width, direction_map.height, direction_map.resolution, direction_map.origin_x, direction_map.origin_y, blocked
+        direction_map.geometry, std::move(blocked)
     );
     return constraints;
 }

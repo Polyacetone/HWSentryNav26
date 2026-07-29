@@ -333,23 +333,23 @@ double MincoOptimizer::accumulate_penalties(
             sample.arc_measure = sample.dt * sample.speed;
 
             if (ws.direction_map && ws.terrain_constraints) {
-                const Eigen::Vector2d grid =
-                    ws.direction_map->map_coord_to_grid(sample.position);
-                if (ws.direction_map->is_valid_coord(grid)) {
-                    const auto field = ws.direction_map->interpolate_with_gradient(grid);
-                    const double norm = field.value.norm();
-                    sample.terrain_label = ws.direction_map->terrain_at(grid);
+                const auto field = ws.direction_map->sample_map(sample.position);
+                const auto terrain_cell =
+                    ws.direction_map->geometry.containing_cell(sample.position);
+                if (field && terrain_cell) {
+                    const double norm = field->value.norm();
+                    sample.terrain_label =
+                        ws.direction_map->terrain_label_at_cell(*terrain_cell);
                     sample.direction_norm = norm;
                     if (norm > EPS) {
-                        const Eigen::Vector2d direction = field.value / norm;
+                        const Eigen::Vector2d direction = field->value / norm;
                         sample.terrain_direction = direction;
                         sample.terrain_direction_jacobian = (
                             (Eigen::Matrix2d::Identity() - direction * direction.transpose())
                                 / norm
-                        ) * field.gradient / ws.direction_map->resolution;
+                        ) * field->jacobian;
                         const Eigen::Vector2d dnorm_dposition =
-                            (field.gradient.transpose() * direction)
-                            / ws.direction_map->resolution;
+                            field->jacobian.transpose() * direction;
                         const auto [terrain_gate, dterrain_gate] = smoothstep_gate(
                             norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi
                         );
@@ -364,48 +364,15 @@ double MincoOptimizer::accumulate_penalties(
                             const Eigen::Vector2d dbody_gate_dposition =
                                 dbody_gate * dnorm_dposition;
                             const bool going_up = sample.velocity.dot(direction) >= 0.0;
-
-                            const int x0 = static_cast<int>(std::floor(grid.x()));
-                            const int y0 = static_cast<int>(std::floor(grid.y()));
-                            const double tx = grid.x() - static_cast<double>(x0);
-                            const double ty = grid.y() - static_cast<double>(y0);
-                            struct Corner {
-                                Eigen::Vector2i grid;
-                                double weight;
-                                Eigen::Vector2d gradient_grid;
-                            };
-                            const std::array<Corner, 4> corners {{
-                                {{x0, y0}, (1.0 - tx) * (1.0 - ty), {-(1.0 - ty), -(1.0 - tx)}},
-                                {{x0 + 1, y0}, tx * (1.0 - ty), {1.0 - ty, -tx}},
-                                {{x0, y0 + 1}, (1.0 - tx) * ty, {-ty, 1.0 - tx}},
-                                {{x0 + 1, y0 + 1}, tx * ty, {ty, tx}},
-                            }};
-
-                            std::array<double, TERRAIN_LABEL_COUNT> label_weights {};
-                            std::array<Eigen::Vector2d, TERRAIN_LABEL_COUNT> label_gradients;
-                            label_gradients.fill(Eigen::Vector2d::Zero());
-                            for (const Corner& corner : corners) {
-                                const uint8_t label =
-                                    ws.direction_map->terrain_at(corner.grid);
-                                if (label >= TERRAIN_LABEL_COUNT) continue;
-                                label_weights[label] += corner.weight;
-                                label_gradients[label] += corner.gradient_grid
-                                    / ws.direction_map->resolution;
-                            }
-                            for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE);
-                                 label < TERRAIN_LABEL_COUNT; ++label) {
-                                const double label_weight = label_weights[label];
-                                if (label_weight <= 0.0) continue;
-                                const TraversalMode* rule =
-                                    ws.terrain_constraints->selected_mode(label, going_up);
-                                if (!rule) continue;
+                            const uint8_t label = sample.terrain_label;
+                            const TraversalMode* rule =
+                                ws.terrain_constraints->selected_mode(label, going_up);
+                            if (rule) {
                                 sample.sources[static_cast<size_t>(sample.source_count++)] =
                                     RunupSource {
-                                        .value = body_gate * label_weight,
+                                        .value = body_gate,
                                         .radius = rule->run_up,
-                                        .position_gradient =
-                                            label_weight * dbody_gate_dposition
-                                            + body_gate * label_gradients[label],
+                                        .position_gradient = dbody_gate_dposition,
                                     };
                             }
                         }
@@ -557,42 +524,19 @@ double MincoOptimizer::accumulate_penalties(
 
         // (a) 障碍罚：双线性插值 map 坐标梯度；越界时按到边界的距离外推。
         if (ws.cost_map && w.obstacle > 0.0) {
-            const Eigen::Vector2d grid = ws.cost_map->map_coord_to_grid(sample.position);
             double value = 0.0;
             Eigen::Vector2d value_gradient = Eigen::Vector2d::Zero();
-            if (ws.cost_map->is_valid_coord(grid)) {
-                const int x0 = static_cast<int>(std::floor(grid.x()));
-                const int y0 = static_cast<int>(std::floor(grid.y()));
-                const double tx = grid.x() - static_cast<double>(x0);
-                const double ty = grid.y() - static_cast<double>(y0);
-                const double c00 = static_cast<double>(ws.cost_map->at({x0, y0}));
-                const double c10 = static_cast<double>(ws.cost_map->at({x0 + 1, y0}));
-                const double c01 = static_cast<double>(ws.cost_map->at({x0, y0 + 1}));
-                const double c11 = static_cast<double>(ws.cost_map->at({x0 + 1, y0 + 1}));
-                value = (
-                    (1.0 - tx) * (1.0 - ty) * c00 + tx * (1.0 - ty) * c10
-                    + (1.0 - tx) * ty * c01 + tx * ty * c11
-                ) / 255.0;
-                const double inv_scale = 1.0 / (255.0 * ws.cost_map->resolution);
-                value_gradient = {
-                    ((1.0 - ty) * (c10 - c00) + ty * (c11 - c01)) * inv_scale,
-                    ((1.0 - tx) * (c01 - c00) + tx * (c11 - c10)) * inv_scale,
-                };
+            if (const auto cost_sample = ws.cost_map->sample_map(sample.position)) {
+                value = cost_sample->value / 255.0;
+                value_gradient = cost_sample->gradient / 255.0;
             } else {
-                const double x_min = ws.cost_map->origin_x;
-                const double y_min = ws.cost_map->origin_y;
-                const double x_max = x_min
-                    + static_cast<double>(ws.cost_map->width - 1) * ws.cost_map->resolution;
-                const double y_max = y_min
-                    + static_cast<double>(ws.cost_map->height - 1) * ws.cost_map->resolution;
-                const Eigen::Vector2d clamped(
-                    std::clamp(sample.position.x(), x_min, x_max),
-                    std::clamp(sample.position.y(), y_min, y_max)
-                );
+                const Eigen::Vector2d clamped =
+                    ws.cost_map->geometry.clamp_to_footprint(sample.position);
                 const Eigen::Vector2d delta = sample.position - clamped;
                 const double distance = std::sqrt(delta.squaredNorm() + EPS);
-                value = 1.0 + distance / ws.cost_map->resolution;
-                value_gradient = delta / (distance * ws.cost_map->resolution);
+                value = 1.0 + distance / ws.cost_map->geometry.resolution();
+                value_gradient = delta
+                    / (distance * ws.cost_map->geometry.resolution());
             }
             const double obstacle = w.obstacle * 0.5 * value * value;
             density += obstacle;

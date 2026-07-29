@@ -125,7 +125,9 @@ EnvironmentValidationReport validate_path_environment(
     const int samples_per_segment = std::max(validation.samples_per_segment, 1);
     const double segment_spacing = total_arc_length
         / static_cast<double>(std::max(trajectory.segment_count(), 1) * samples_per_segment);
-    const double spacing = std::min(direction_map.resolution * 0.5, segment_spacing);
+    const double spacing = std::min(
+        direction_map.geometry.resolution() * 0.5, segment_spacing
+    );
     const int intervals = std::max(
         1, static_cast<int>(std::ceil(total_arc_length / spacing))
     );
@@ -136,12 +138,12 @@ EnvironmentValidationReport validate_path_environment(
         const TrajSample sample = trajectory.eval_arc_length(arc_length);
         const std::string at = " at s=" + std::to_string(arc_length);
 
-        const Eigen::Vector2d grid = cost_map.map_coord_to_grid(sample.p);
-        if (!cost_map.is_valid_coord(grid)) {
+        const auto cost_sample = cost_map.sample_map(sample.p);
+        if (!cost_sample) {
             report.rejection = "trajectory leaves the planning map" + at;
             return report;
         }
-        const double cost = cost_map.interpolate(grid);
+        const double cost = cost_sample->value;
         if (cost >= static_cast<double>(occupied_threshold)) {
             report.rejection = "trajectory intersects occupied cost" + at
                 + ": cost=" + std::to_string(cost)
@@ -149,17 +151,16 @@ EnvironmentValidationReport validate_path_environment(
             return report;
         }
 
-        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(sample.p);
-        if (!direction_map.is_valid_coord(dir_grid)) {
+        const auto direction_sample = direction_map.sample_map(sample.p);
+        const auto terrain_cell = direction_map.geometry.containing_cell(sample.p);
+        if (!direction_sample || !terrain_cell) {
             report.rejection = "trajectory leaves the direction map" + at;
             return report;
         }
-        if (!direction_map.is_terrain_body_at(dir_grid)) continue;
+        if (!direction_map.is_terrain_body_cell(*terrain_cell)) continue;
 
-        const Eigen::Array2i cell_array = dir_grid.array().floor().cast<int>();
-        const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
-        const uint8_t label = direction_map.terrain_at(cell);
-        const Eigen::Vector2d raw_direction = direction_map.at(cell);
+        const uint8_t label = direction_map.terrain_label_at_cell(*terrain_cell);
+        const Eigen::Vector2d raw_direction = direction_map.raw_direction_at_cell(*terrain_cell);
         if (label < static_cast<uint8_t>(TerrainType::SLOPE)
             || raw_direction.squaredNorm() <= 1e-12) {
             report.rejection = "trajectory entered an invalid directional terrain body" + at;
@@ -297,12 +298,11 @@ bool PathPlanner::is_map_point_feasible(
     const DirectionMap& direction_map,
     const Eigen::Vector2d& map_pt
 ) const {
-    const Eigen::Vector2d cost_grid = cost_map.map_coord_to_grid(map_pt);
-    const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(map_pt);
-    if (!cost_map.is_valid_coord(cost_grid) || !direction_map.is_valid_coord(dir_grid)) return false;
-
-    return cost_map.interpolate(cost_grid) < config_.occupied_threshold
-        && direction_map.interpolate(dir_grid).norm() < config_.on_step_threshold;
+    const auto cost = cost_map.sample_map(map_pt);
+    const auto direction = direction_map.sample_map(map_pt);
+    if (!cost || !direction) return false;
+    return cost->value < config_.occupied_threshold
+        && direction->value.norm() < config_.on_step_threshold;
 }
 
 std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
@@ -311,22 +311,23 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
     const Eigen::Vector2d& map_pt,
     const double max_nudge_distance
 ) const {
-    const Eigen::Vector2d grid_pt = cost_map.map_coord_to_grid(map_pt);
-    const int width = cost_map.width;
-    const int height = cost_map.height;
+    const GridGeometry& geometry = cost_map.geometry;
+    const int width = geometry.width();
+    const int height = geometry.height();
 
     const auto key = [width](const int x, const int y) {
         return static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
     };
 
-    if (cost_map.is_valid_coord(grid_pt)
+    if (geometry.contains_map_point(map_pt)
         && is_map_point_feasible(cost_map, direction_map, map_pt)) {
         return map_pt;
     }
 
-    const int sx = static_cast<int>(std::round(grid_pt.x()));
-    const int sy = static_cast<int>(std::round(grid_pt.y()));
-    if (sx < 0 || sx >= width || sy < 0 || sy >= height) return std::nullopt;
+    const auto start_cell = geometry.containing_cell(map_pt);
+    if (!start_cell) return std::nullopt;
+    const int sx = start_cell->x();
+    const int sy = start_cell->y();
 
     std::vector<uint8_t> visited(static_cast<size_t>(width) * static_cast<size_t>(height), 0);
     std::queue<Eigen::Vector2i> q;
@@ -340,10 +341,10 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
         const auto current = q.front();
         q.pop();
 
-        const double dist = (current.cast<double>() - grid_pt).norm() * cost_map.resolution;
+        const Eigen::Vector2d candidate_map = geometry.cell_center(current);
+        const double dist = (candidate_map - map_pt).norm();
         if (dist > max_nudge_distance) continue;
 
-        const Eigen::Vector2d candidate_map = cost_map.grid_coord_to_map(current.cast<double>());
         if (is_map_point_feasible(cost_map, direction_map, candidate_map)) {
             return candidate_map;
         }
@@ -352,8 +353,7 @@ std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
             const int nx = current.x() + dx[i];
             const int ny = current.y() + dy[i];
             if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-            const double ndist = (Eigen::Vector2d(nx, ny) - grid_pt).norm()
-                * cost_map.resolution;
+            const double ndist = (geometry.cell_center({nx, ny}) - map_pt).norm();
             if (ndist > max_nudge_distance) continue;
             const size_t nk = key(nx, ny);
             if (visited[nk]) continue;
@@ -400,8 +400,9 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     // ── 起点 global 严格检查 ──
     {
-        const Eigen::Vector2d sg = global_feasibility_cost.map_coord_to_grid(start_map);
-        if (!global_feasibility_cost.is_valid_coord(sg)) return fail("Start is out of bound");
+        if (!global_feasibility_cost.geometry.contains_map_point(start_map)) {
+            return fail("Start is out of bound");
+        }
         if (!is_map_point_feasible(global_feasibility_cost, *req.direction_map, start_map)) return fail("Start is not feasible on global map");
     }
 
@@ -416,8 +417,9 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     // ── 终点 global 严格检查 ──
     {
-        const Eigen::Vector2d gg = global_feasibility_cost.map_coord_to_grid(goal_map);
-        if (!global_feasibility_cost.is_valid_coord(gg)) return fail("Goal is out of bound");
+        if (!global_feasibility_cost.geometry.contains_map_point(goal_map)) {
+            return fail("Goal is out of bound");
+        }
         if (!is_map_point_feasible(global_feasibility_cost, *req.direction_map, goal_map)) return fail("Goal is not feasible on global map");
     }
 

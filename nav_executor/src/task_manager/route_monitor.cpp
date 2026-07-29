@@ -138,11 +138,11 @@ std::optional<BlockSampleStats> sample_predicted_block_stats(
             if (!cost_map) return std::nullopt;
 
             const Eigen::Vector2d pos = path.eval_arc_length(sample_progress).p;
-            const Eigen::Vector2d cost_grid = cost_map->map_coord_to_grid(pos);
-            if (!cost_map->is_valid_coord(cost_grid)) return std::nullopt;
+            const auto cost = cost_map->sample_map(pos);
+            if (!cost) return std::nullopt;
 
             stats.step_sample_count++;
-            if (cost_map->interpolate(cost_grid) >= in.step_block.obstacle_cost_threshold) {
+            if (cost->value >= in.step_block.obstacle_cost_threshold) {
                 stats.blocked_step_sample_count++;
             }
         }
@@ -160,22 +160,23 @@ std::optional<BlockSampleStats> sample_current_block_stats(
     const DirectionMap& direction_map = *in.base_direction_map;
     // 本体判定读取原始格点，采样间距必须细于半个格宽，否则会漏过整格台阶。
     const BlockSampleGrid grid = build_block_sample_grid(
-        in, path, std::min(in.step_block.sample_resolution, direction_map.resolution * 0.5)
+        in, path, std::min(
+            in.step_block.sample_resolution, direction_map.geometry.resolution() * 0.5
+        )
     );
 
     BlockSampleStats stats;
     for (int i = 0; i < grid.count; ++i) {
         const Eigen::Vector2d pos = path.eval_arc_length(grid.progress_at(i)).p;
-        const Eigen::Vector2d dir_grid = direction_map.map_coord_to_grid(pos);
-        if (!direction_map.is_valid_coord(dir_grid)) return std::nullopt;
-        if (!direction_map.is_terrain_body_at(dir_grid)) continue;
+        const auto terrain_cell = direction_map.geometry.containing_cell(pos);
+        if (!terrain_cell) return std::nullopt;
+        if (!direction_map.is_terrain_body_cell(*terrain_cell)) continue;
 
         bool blocked_dynamic = false;
         if (in.current_dynamic_cost_map) {
-            const Eigen::Vector2d cost_grid = in.current_dynamic_cost_map->map_coord_to_grid(pos);
-            if (!in.current_dynamic_cost_map->is_valid_coord(cost_grid)) return std::nullopt;
-            blocked_dynamic = in.current_dynamic_cost_map->interpolate(cost_grid)
-                >= in.step_block.obstacle_cost_threshold;
+            const auto cost = in.current_dynamic_cost_map->sample_map(pos);
+            if (!cost) return std::nullopt;
+            blocked_dynamic = cost->value >= in.step_block.obstacle_cost_threshold;
         }
 
         stats.step_sample_count++;

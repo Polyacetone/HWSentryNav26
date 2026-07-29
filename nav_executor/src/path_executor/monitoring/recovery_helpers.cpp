@@ -8,14 +8,13 @@ std::optional<FieldSample> sample_fields(
     const DirectionMap& dir_map,
     const Eigen::Vector2d& pos
 ) {
-    const Eigen::Vector2d gc = cost_map.map_coord_to_grid(pos);
-    if (!cost_map.is_valid_coord(gc)) return std::nullopt;
-    const Eigen::Vector2d gd = dir_map.map_coord_to_grid(pos);
-    if (!dir_map.is_valid_coord(gd)) return std::nullopt;
+    const auto cost = cost_map.sample_map(pos);
+    const auto direction = dir_map.sample_map(pos);
+    if (!cost || !direction) return std::nullopt;
 
     FieldSample s;
-    s.cost = cost_map.interpolate(gc);
-    s.step_norm = dir_map.interpolate(gd).norm();
+    s.cost = cost->value;
+    s.step_norm = direction->value.norm();
     return s;
 }
 
@@ -49,9 +48,8 @@ std::optional<PathScore> score_candidate_by_path_integral(
             + p.path_integral_step_weight * s->step_norm;
 
         if (base_dir_map && path_dir_norm > 1e-6) {
-            const Eigen::Vector2d gd = base_dir_map->map_coord_to_grid(pos);
-            if (base_dir_map->is_valid_coord(gd)) {
-                const Eigen::Vector2d step_dir = base_dir_map->interpolate(gd);
+            if (const auto direction = base_dir_map->sample_map(pos)) {
+                const Eigen::Vector2d& step_dir = direction->value;
                 if (step_dir.norm() >= p.step_ascent_penalty_norm_threshold) {
                     const double dot = step_dir.normalized().dot(path_dir / path_dir_norm);
                     if (dot >= p.step_ascent_penalty_dot_threshold) {
@@ -131,9 +129,9 @@ std::optional<double> max_cost_along_segment(
     for (int i = 0; i <= n; i++) {
         const double t = static_cast<double>(i) / static_cast<double>(n);
         const Eigen::Vector2d pos = a_map + (b_map - a_map) * t;
-        const Eigen::Vector2d g = cost_map.map_coord_to_grid(pos);
-        if (!cost_map.is_valid_coord(g)) return std::nullopt;
-        max_cost = std::max(max_cost, cost_map.interpolate(g));
+        const auto cost = cost_map.sample_map(pos);
+        if (!cost) return std::nullopt;
+        max_cost = std::max(max_cost, cost->value);
     }
     return max_cost;
 }

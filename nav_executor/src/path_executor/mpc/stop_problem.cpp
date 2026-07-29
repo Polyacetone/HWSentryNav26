@@ -1,18 +1,15 @@
 #include <nav_executor/path_executor/mpc/stop_problem.hpp>
 #include <nav_executor/path_executor/mpc/mpc_utils.hpp>
-#include <nav_executor/path_executor/mpc/bilinear_sampling.hpp>
 
 namespace nav_executor {
 
 StopProblem::StopProblem(
     const MPCParams& params,
-    const CostMapGridView& cost_grid,
-    const GridInfo& cost_info,
+    const CostMap& cost_map,
     double schedule_rho
 ):
     p_(params),
-    cost_grid_(cost_grid),
-    cost_info_(cost_info),
+    cost_map_(cost_map),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)) {}
 
 StateVec StopProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
@@ -36,8 +33,7 @@ StopResidualVec stop_residual_impl(
     const StateVec& x,
     const ControlVec& u,
     const MPCParams& p,
-    const CostMapGridView& cg,
-    const GridInfo& ci
+    const CostMap& cost_map
 ) {
     const auto& stop = p.stop;
     const auto& motion_lim = stop.profile.command_dynamics;
@@ -52,7 +48,10 @@ StopResidualVec stop_residual_impl(
     const double dv_cmd = MPC_DT * u(iu::V_CMD_RATE);
     const double dw_cmd = MPC_DT * u(iu::W_CMD_RATE);
 
-    const auto cs = eval_cost_bilinear(cg, ci, px, py);
+    const auto cs = cost_map.sample_map({px, py}).value_or(CostMap::CostSample {
+        .value = 255.0,
+        .gradient = Eigen::Vector2d::Zero(),
+    });
 
     const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = command_w.r_v * v_cmd;
@@ -76,19 +75,20 @@ using StopTerminalResidualVec = Eigen::Matrix<double, STOP_TERMINAL_RESIDUAL_DIM
 StopTerminalResidualVec stop_terminal_residual_impl(
     const StateVec& x,
     const MPCParams& p,
-    const CostMapGridView& cost_grid,
-    const GridInfo& cost_info
+    const CostMap& cost_map
 ) {
     StopTerminalResidualVec r = StopTerminalResidualVec::Zero();
     const auto& w = p.stop.terminal_weights;
-    const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
+    const auto cs = cost_map.sample_map({x(ix::X), x(ix::Y)}).value_or(
+        CostMap::CostSample {.value = 255.0, .gradient = Eigen::Vector2d::Zero()}
+    );
     r(0) = w.obstacle_terminal * cs.value / 255.0;
     return r;
 }
 
 double StopProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     (void)k;
-    return residual_cost(stop_residual_impl(x, u, p_, cost_grid_, cost_info_));
+    return residual_cost(stop_residual_impl(x, u, p_, cost_map_));
 }
 
 void StopProblem::running_cost_derivatives(
@@ -103,18 +103,18 @@ void StopProblem::running_cost_derivatives(
 ) const {
     (void)k;
     auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
-        return stop_residual_impl(xv, uv, p_, cost_grid_, cost_info_);
+        return stop_residual_impl(xv, uv, p_, cost_map_);
     };
     gauss_newton_running_derivatives<STOP_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
 }
 
 double StopProblem::terminal_cost(const StateVec& x) const {
-    return residual_cost(stop_terminal_residual_impl(x, p_, cost_grid_, cost_info_));
+    return residual_cost(stop_terminal_residual_impl(x, p_, cost_map_));
 }
 
 void StopProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const {
     auto residual_fn = [&](const StateVec& xv) {
-        return stop_terminal_residual_impl(xv, p_, cost_grid_, cost_info_);
+        return stop_terminal_residual_impl(xv, p_, cost_map_);
     };
     gauss_newton_terminal_derivatives<STOP_TERMINAL_RESIDUAL_DIM>(residual_fn, x, lfx, lfxx);
 }

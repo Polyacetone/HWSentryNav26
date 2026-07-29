@@ -12,8 +12,7 @@ void StepRoutingMask::initialize(const CostMap& cost_map, DirectionMap::ConstPtr
     if (!direction_map) {
         throw std::invalid_argument("StepRoutingMask::initialize: direction_map is null");
     }
-    if (cost_map.width != direction_map->width || cost_map.height != direction_map->height || cost_map.resolution != direction_map->resolution
-        || cost_map.origin_x != direction_map->origin_x || cost_map.origin_y != direction_map->origin_y) {
+    if (!cost_map.geometry.same_geometry(direction_map->geometry)) {
         throw std::runtime_error("StepRoutingMask::initialize: direction_map geometry mismatch");
     }
 
@@ -25,7 +24,7 @@ void StepRoutingMask::initialize(const CostMap& cost_map, DirectionMap::ConstPtr
         base_step_cost_data_[idx] = static_cast<uint8_t>(std::clamp(mag * 255.0, 0.0, 255.0));
     }
 
-    build_kernel(base_direction_map_->resolution);
+    build_kernel(base_direction_map_->geometry.resolution());
 }
 
 StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajectory>& global_path) const {
@@ -37,7 +36,7 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajec
         const auto& spline = *global_path;
         const double length = approximate_path_length(spline);
         if (length > 0.0) {
-            const double sample_spacing = base_direction_map_->resolution * 0.5;
+            const double sample_spacing = base_direction_map_->geometry.resolution() * 0.5;
             const int samples = std::max(1, static_cast<int>(std::ceil(length / sample_spacing)));
 
             for (int i = 0; i <= samples; ++i) {
@@ -49,20 +48,14 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajec
                 if (tangent_norm < 1e-6) continue;
                 tangent /= tangent_norm;
 
-                const Eigen::Vector2d gc_dir = base_direction_map_->map_coord_to_grid(pos);
-                if (!base_direction_map_->is_valid_coord(gc_dir)) continue;
+                const auto direction_sample = base_direction_map_->sample_map(pos);
+                const auto erase_center = base_direction_map_->geometry.containing_cell(pos);
+                if (!direction_sample || !erase_center) continue;
 
-                const Eigen::Vector2d dir = base_direction_map_->interpolate(gc_dir);
-                const double dot = std::abs(tangent.dot(dir));
+                const double dot = std::abs(tangent.dot(direction_sample->value));
                 if (dot <= params_.path_align_dot_threshold) continue;
 
-                const Eigen::Vector2i erase_center{
-                    static_cast<int>(std::round(gc_dir.x())),
-                    static_cast<int>(std::round(gc_dir.y()))
-                };
-                if (!base_direction_map_->is_valid_coord(erase_center)) continue;
-
-                apply_kernel_at(erase_center, max_alpha);
+                apply_kernel_at(*erase_center, max_alpha);
             }
         }
     }
@@ -77,12 +70,7 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajec
     }
 
     auto step_cost_layer = std::make_shared<const CostMap>(
-        base_direction_map_->width,
-        base_direction_map_->height,
-        base_direction_map_->resolution,
-        base_direction_map_->origin_x,
-        base_direction_map_->origin_y,
-        step_cost_data
+        base_direction_map_->geometry, std::move(step_cost_data)
     );
 
     // 仅保留路径附近的方向场，避免控制器误用其他台阶约束。
@@ -94,11 +82,7 @@ StepRoutingMask::Layers StepRoutingMask::compute(const std::optional<MincoTrajec
     }
 
     auto masked_direction_map = std::make_shared<const DirectionMap>(
-        base_direction_map_->width,
-        base_direction_map_->height,
-        base_direction_map_->resolution,
-        base_direction_map_->origin_x,
-        base_direction_map_->origin_y,
+        base_direction_map_->geometry,
         std::move(masked_dir_data),
         base_direction_map_->terrain
     );
@@ -142,8 +126,8 @@ void StepRoutingMask::apply_kernel_at(const Eigen::Vector2i& grid_coord, std::ve
     if (!base_direction_map_) return;
     if (kernel_.empty()) return;
 
-    const int width = base_direction_map_->width;
-    const int height = base_direction_map_->height;
+    const int width = base_direction_map_->geometry.width();
+    const int height = base_direction_map_->geometry.height();
     const int cx = grid_coord.x();
     const int cy = grid_coord.y();
 

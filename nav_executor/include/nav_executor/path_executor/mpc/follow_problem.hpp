@@ -7,7 +7,6 @@
 #include <nav_executor/common/trajectory/path_speed_profile.hpp>
 #include <nav_executor/path_executor/mpc/mpc_types.hpp>
 #include <nav_executor/path_executor/mpc/lpv_model.hpp>
-#include <nav_executor/path_executor/mpc/bilinear_sampling.hpp>
 #include <nav_executor/path_executor/mpc/fddp_solver.hpp>
 
 namespace nav_executor {
@@ -22,9 +21,8 @@ public:
         MincoTrajectory trajectory,
         PathSpeedProfile speed_profile,
         const MPCParams& params,
-        const std::vector<CostMapGridView>& per_step_cost_grids,
-        const GridInfo& cost_info,
-        const CostMapGridView& masked_global_grid,
+        const std::vector<const CostMap*>& per_step_cost_maps,
+        const CostMap& masked_global_map,
         double prediction_dt,
         double schedule_rho,
         const CapabilityProfile& command_capability,
@@ -54,14 +52,13 @@ public:
     [[nodiscard]] std::optional<RolloutLethalObstacleInfo> detect_lethal_obstacle(int state_index, const StateVec& x, double* out_cost_value = nullptr) const;
 
 private:
-    const CostMapGridView& cost_grid_for_step(int k) const;
+    const CostMap& cost_map_for_step(int k) const;
 
     MincoTrajectory trajectory_;
     PathSpeedProfile speed_profile_;
     const MPCParams& p_;
-    const std::vector<CostMapGridView>& step_cost_grids_;
-    GridInfo cost_info_;
-    const CostMapGridView& masked_global_grid_;
+    const std::vector<const CostMap*>& step_cost_maps_;
+    const CostMap& masked_global_map_;
     double prediction_dt_;
     LPVDiscreteModel model_ {};
     CapabilityProfile command_capability_;

@@ -45,8 +45,8 @@ std::expected<DirectedPortal, std::string> build_entry_portal(
     for (const Eigen::Vector2i& body : regions.cells(passage.region)) {
         for (const Eigen::Vector2i& delta : NEIGHBORS) {
             const Eigen::Vector2i flat = body - delta;
-            if (!direction_map.is_valid_coord(flat)
-                || direction_map.is_terrain_body_at(flat)
+            if (!direction_map.geometry.contains_cell(flat)
+                || direction_map.is_terrain_body_cell(flat)
                 || !grid_cell_traversable(cost_map, flat, occupied_threshold)
                 || !grid_cell_traversable(cost_map, body, occupied_threshold)
                 || !grid_edge_avoids_corner_cutting(
@@ -121,8 +121,8 @@ TerrainRegionIndex::TerrainRegionIndex(
     const CostMap& planning_cost_map,
     const int occupied_threshold
 )
-    : width_(direction_map.width),
-      height_(direction_map.height),
+    : width_(direction_map.geometry.width()),
+      height_(direction_map.geometry.height()),
       region_by_cell_(
           static_cast<size_t>(width_) * static_cast<size_t>(height_),
           INVALID_TERRAIN_REGION
@@ -130,7 +130,7 @@ TerrainRegionIndex::TerrainRegionIndex(
     for (int y = 0; y < height_; ++y) {
         for (int x = 0; x < width_; ++x) {
             const Eigen::Vector2i root(x, y);
-            if (!direction_map.is_terrain_body_at(root)
+            if (!direction_map.is_terrain_body_cell(root)
                 || !grid_cell_traversable(
                     planning_cost_map, root, occupied_threshold
                 )
@@ -139,7 +139,7 @@ TerrainRegionIndex::TerrainRegionIndex(
             }
             const TerrainRegionId id = static_cast<TerrainRegionId>(cells_by_region_.size());
             cells_by_region_.emplace_back();
-            const uint8_t label = direction_map.terrain_at(root);
+            const uint8_t label = direction_map.terrain_label_at_cell(root);
             std::queue<Eigen::Vector2i> open;
             open.push(root);
             region_by_cell_[index(root)] = id;
@@ -149,9 +149,9 @@ TerrainRegionIndex::TerrainRegionIndex(
                 cells_by_region_.back().push_back(current);
                 for (const Eigen::Vector2i& delta : NEIGHBORS) {
                     const Eigen::Vector2i next = current + delta;
-                    if (!direction_map.is_valid_coord(next)
-                        || !direction_map.is_terrain_body_at(next)
-                        || direction_map.terrain_at(next) != label
+                    if (!direction_map.geometry.contains_cell(next)
+                        || !direction_map.is_terrain_body_cell(next)
+                        || direction_map.terrain_label_at_cell(next) != label
                         || !grid_cell_traversable(
                             planning_cost_map, next, occupied_threshold
                         )
@@ -198,8 +198,8 @@ bool grid_cell_traversable(
     const Eigen::Vector2i& cell,
     const int occupied_threshold
 ) {
-    return cost_map.is_valid_coord(cell)
-        && static_cast<int>(cost_map.at(cell)) < occupied_threshold;
+    return cost_map.geometry.contains_cell(cell)
+        && static_cast<int>(cost_map.raw_cost_at_cell(cell)) < occupied_threshold;
 }
 
 bool grid_edge_avoids_corner_cutting(
@@ -225,11 +225,11 @@ bool directed_terrain_edge_allowed(
     const double detect_dot_threshold,
     StepDirection* const direction
 ) {
-    const bool destination_body = direction_map.is_terrain_body_at(to);
-    const bool source_body = direction_map.is_terrain_body_at(from);
+    const bool destination_body = direction_map.is_terrain_body_cell(to);
+    const bool source_body = direction_map.is_terrain_body_cell(from);
     if (!destination_body && !source_body) return true;
     const Eigen::Vector2i terrain_cell = destination_body ? to : from;
-    const Eigen::Vector2d raw_direction = direction_map.at(terrain_cell);
+    const Eigen::Vector2d raw_direction = direction_map.raw_direction_at_cell(terrain_cell);
     const Eigen::Vector2d displacement = (to - from).cast<double>();
     if (raw_direction.squaredNorm() <= 1e-12 || displacement.squaredNorm() <= 1e-12) {
         return false;
@@ -238,7 +238,7 @@ bool directed_terrain_edge_allowed(
     if (std::abs(alignment) <= detect_dot_threshold) return false;
     const bool going_up = alignment > 0.0;
     if (!terrain_constraints.selected_mode(
-        direction_map.terrain_at(terrain_cell), going_up
+        direction_map.terrain_label_at_cell(terrain_cell), going_up
     )) {
         return false;
     }
@@ -258,13 +258,13 @@ std::expected<std::vector<TerrainPassage>, std::string> extract_terrain_passages
     std::vector<TerrainPassage> passages;
     size_t cursor = 0;
     while (cursor < raw_path.size()) {
-        if (!direction_map.is_terrain_body_at(raw_path[cursor])) {
+        if (!direction_map.is_terrain_body_cell(raw_path[cursor])) {
             ++cursor;
             continue;
         }
         const size_t first_body = cursor;
         while (cursor + 1 < raw_path.size()
-            && direction_map.is_terrain_body_at(raw_path[cursor + 1])) {
+            && direction_map.is_terrain_body_cell(raw_path[cursor + 1])) {
             ++cursor;
         }
         const size_t last_body = cursor;
@@ -274,7 +274,7 @@ std::expected<std::vector<TerrainPassage>, std::string> extract_terrain_passages
 
         TerrainPassage passage;
         passage.region = regions.region_at(raw_path[first_body]);
-        passage.label = direction_map.terrain_at(raw_path[first_body]);
+        passage.label = direction_map.terrain_label_at_cell(raw_path[first_body]);
         passage.selected_entry = {
             .flat_cell = raw_path[first_body - 1],
             .body_cell = raw_path[first_body],

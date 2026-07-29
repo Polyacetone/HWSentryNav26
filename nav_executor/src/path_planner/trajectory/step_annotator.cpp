@@ -18,8 +18,9 @@ const TraversalMode* lookup_step_rule(
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints
 ) {
-    const Eigen::Vector2d grid = direction_map.map_coord_to_grid(step_enter_pos_map);
-    const uint8_t label = direction_map.terrain_at(grid);
+    const auto cell = direction_map.geometry.containing_cell(step_enter_pos_map);
+    if (!cell) return nullptr;
+    const uint8_t label = direction_map.terrain_label_at_cell(*cell);
     const TraversalMode* rule = terrain_constraints.selected_mode(
         label, direction == StepDirection::UP
     );
@@ -36,7 +37,7 @@ std::vector<StepPlanSegment> build_step_plan(
     rclcpp::Logger logger
 ) {
     const double sample_spacing = std::min(
-        params.path_sample_resolution, direction_map.resolution * 0.5
+        params.path_sample_resolution, direction_map.geometry.resolution() * 0.5
     );
     const double total_length = path.total_arc_length();
     const int sample_intervals = std::max(
@@ -91,16 +92,13 @@ std::vector<StepPlanSegment> build_step_plan(
         const double arc_length = total_length * static_cast<double>(i)
             / static_cast<double>(sample_intervals);
         const TrajSample sample = path.eval_arc_length(arc_length);
-        const Eigen::Vector2d grid = direction_map.map_coord_to_grid(sample.p);
-        if (!direction_map.is_valid_coord(grid)
-            || !direction_map.is_terrain_body_at(grid)) {
+        const auto cell = direction_map.geometry.containing_cell(sample.p);
+        if (!cell || !direction_map.is_terrain_body_cell(*cell)) {
             finalize();
             continue;
         }
-        const Eigen::Array2i cell_array = grid.array().floor().cast<int>();
-        const Eigen::Vector2i cell(cell_array.x(), cell_array.y());
-        const uint8_t label = direction_map.terrain_at(cell);
-        const Eigen::Vector2d direction = direction_map.at(cell);
+        const uint8_t label = direction_map.terrain_label_at_cell(*cell);
+        const Eigen::Vector2d direction = direction_map.raw_direction_at_cell(*cell);
         if (label < static_cast<uint8_t>(TerrainType::SLOPE)) {
             finalize();
             continue;

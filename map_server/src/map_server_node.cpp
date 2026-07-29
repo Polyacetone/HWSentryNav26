@@ -804,6 +804,10 @@ void MapServerNode::fill_occupancy_grid(
     grid.info.resolution = static_cast<float>(map_resolution_);
     grid.info.height = static_cast<uint32_t>(map_size_y_);
     grid.info.width = static_cast<uint32_t>(map_size_x_);
+    grid.info.origin.orientation.x = 0.0;
+    grid.info.origin.orientation.y = 0.0;
+    grid.info.origin.orientation.z = 0.0;
+    grid.info.origin.orientation.w = 1.0;
     grid.data.assign(cost_map.begin<uint8_t>(), cost_map.end<uint8_t>());
 }
 

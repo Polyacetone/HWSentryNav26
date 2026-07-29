@@ -387,33 +387,6 @@ struct MPCParams {
     LPVKinematicModelParams kinematic_model;
 };
 
-struct GridInfo {
-    double origin_x, origin_y, inv_resolution;
-    int width, height;
-};
-
-template<typename MapT>
-inline GridInfo make_grid_info(const MapT& map) {
-    return GridInfo {map.origin_x, map.origin_y, 1.0 / map.resolution, map.width, map.height};
-}
-
-struct CostMapGridView {
-    explicit CostMapGridView(const CostMap& map): map_(map) {}
-
-    double value_at_clamped(int row, int col) const {
-        row = std::max(0, std::min(row, map_.height - 1));
-        col = std::max(0, std::min(col, map_.width - 1));
-        return static_cast<double>(map_.data[static_cast<size_t>(row * map_.width + col)]);
-    }
-
-    const CostMap& map_;
-};
-
-struct CostSample {
-    double value;
-    double dx, dy;
-};
-
 using StateVec = Eigen::Matrix<double, MPC_NX, 1>;
 using ControlVec = Eigen::Matrix<double, MPC_NU, 1>;
 using MatXX = Eigen::Matrix<double, MPC_NX, MPC_NX>;

@@ -1,20 +1,17 @@
 #include <nav_executor/path_executor/mpc/hold_problem.hpp>
 #include <nav_executor/path_executor/mpc/mpc_utils.hpp>
-#include <nav_executor/path_executor/mpc/bilinear_sampling.hpp>
 
 namespace nav_executor {
 
 HoldProblem::HoldProblem(
     const Eigen::Vector2d& goal_map,
     const MPCParams& params,
-    const CostMapGridView& cost_grid,
-    const GridInfo& cost_info,
+    const CostMap& cost_map,
     double schedule_rho
 ):
     goal_(goal_map),
     p_(params),
-    cost_grid_(cost_grid),
-    cost_info_(cost_info),
+    cost_map_(cost_map),
     model_(build_lpv_discrete_model(params.kinematic_model, schedule_rho)) {}
 
 StateVec HoldProblem::dynamics(int, const StateVec& x, const ControlVec& u) const {
@@ -39,8 +36,7 @@ HoldResidualVec hold_residual_impl(
     const ControlVec& u,
     const Eigen::Vector2d& goal,
     const MPCParams& p,
-    const CostMapGridView& cg,
-    const GridInfo& ci
+    const CostMap& cost_map
 ) {
     const auto& hold = p.hold;
     const auto& goal_w = hold.goal_weights;
@@ -64,7 +60,10 @@ HoldResidualVec hold_residual_impl(
     const double desired_theta = std::atan2(goal.y() - py, goal.x() - px);
     const double heading_sin = std::sin(theta - desired_theta);
 
-    const auto cs = eval_cost_bilinear(cg, ci, px, py);
+    const auto cs = cost_map.sample_map({px, py}).value_or(CostMap::CostSample {
+        .value = 255.0,
+        .gradient = Eigen::Vector2d::Zero(),
+    });
 
     const double a_lat = std::abs(v_cmd * w_cmd);
     r(0) = goal_w.q_goal_xy * ddx;
@@ -92,8 +91,7 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
     const StateVec& x,
     const Eigen::Vector2d& goal,
     const MPCParams& p,
-    const CostMapGridView& cost_grid,
-    const GridInfo& cost_info
+    const CostMap& cost_map
 ) {
     HoldTerminalResidualVec r = HoldTerminalResidualVec::Zero();
     const auto& goal_w = p.hold.goal_weights;
@@ -102,7 +100,9 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
         Eigen::Vector2d(x(ix::X) - goal.x(), x(ix::Y) - goal.y()),
         goal_w.goal_deadzone
     );
-    const auto cs = eval_cost_bilinear(cost_grid, cost_info, x(ix::X), x(ix::Y));
+    const auto cs = cost_map.sample_map({x(ix::X), x(ix::Y)}).value_or(
+        CostMap::CostSample {.value = 255.0, .gradient = Eigen::Vector2d::Zero()}
+    );
     r(0) = terminal_w.q_goal_xy_terminal * terminal_delta.x();
     r(1) = terminal_w.q_goal_xy_terminal * terminal_delta.y();
     r(2) = terminal_w.obstacle_terminal * cs.value / 255.0;
@@ -111,7 +111,7 @@ HoldTerminalResidualVec hold_terminal_residual_impl(
 
 double HoldProblem::running_cost(int k, const StateVec& x, const ControlVec& u) const {
     (void)k;
-    return residual_cost(hold_residual_impl(x, u, goal_, p_, cost_grid_, cost_info_));
+    return residual_cost(hold_residual_impl(x, u, goal_, p_, cost_map_));
 }
 
 void HoldProblem::running_cost_derivatives(
@@ -126,18 +126,18 @@ void HoldProblem::running_cost_derivatives(
 ) const {
     (void)k;
     auto residual_fn = [&](const StateVec& xv, const ControlVec& uv) {
-        return hold_residual_impl(xv, uv, goal_, p_, cost_grid_, cost_info_);
+        return hold_residual_impl(xv, uv, goal_, p_, cost_map_);
     };
     gauss_newton_running_derivatives<HOLD_RESIDUAL_DIM>(residual_fn, x, u, lx, lu, lxx, lux, luu);
 }
 
 double HoldProblem::terminal_cost(const StateVec& x) const {
-    return residual_cost(hold_terminal_residual_impl(x, goal_, p_, cost_grid_, cost_info_));
+    return residual_cost(hold_terminal_residual_impl(x, goal_, p_, cost_map_));
 }
 
 void HoldProblem::terminal_cost_derivatives(const StateVec& x, StateVec& lfx, MatXX& lfxx) const {
     auto residual_fn = [&](const StateVec& xv) {
-        return hold_terminal_residual_impl(xv, goal_, p_, cost_grid_, cost_info_);
+        return hold_terminal_residual_impl(xv, goal_, p_, cost_map_);
     };
     gauss_newton_terminal_derivatives<HOLD_TERMINAL_RESIDUAL_DIM>(residual_fn, x, lfx, lfxx);
 }
