@@ -46,7 +46,9 @@ struct TaskDiagnostics {
     std::string planner_last_failure_reason;
     ReplanReason last_replan_reason = ReplanReason::NONE;
     uint64_t replan_count = 0;
-    std::vector<Eigen::Vector2d> debug_rough_path;
+    std::vector<Eigen::Vector2d> debug_spatial_path;
+    std::vector<Eigen::Vector2d> debug_smoothed_spatial_path;
+    std::vector<Eigen::Vector2d> debug_kino_path;
 };
 
 struct PlanRequestSnapshot {
@@ -145,9 +147,10 @@ private:
     PlannerResultState planner_last_result_ = PlannerResultState::NONE;
     uint64_t replan_count_ = 0;
 
-    // 缓存最新一次成功规划的调试路径（供 node 发布用）
-    std::vector<Eigen::Vector2d> last_debug_rough_path_;
-    std::vector<Eigen::Vector2d> last_debug_warmup_path_;
+    // 缓存最新一次有效规划结果的前端调试路径（失败结果同样保留）。
+    std::vector<Eigen::Vector2d> last_debug_spatial_path_;
+    std::vector<Eigen::Vector2d> last_debug_smoothed_spatial_path_;
+    std::vector<Eigen::Vector2d> last_debug_kino_path_;
 };
 
 } // namespace nav_executor

@@ -26,6 +26,17 @@
         angular_acceleration_max: 7.0 # 角加速度上限（rad/s²）
         lateral_acceleration_max: 2.0 # 侧向加速度 |κ|v² 上限（m/s²）
 
+      spatial_astar:
+        obstacle_weight: 1.0 # 归一化障碍软代价乘数；1.0 表示接近占据阈值时边代价约翻倍
+        max_expansions: 1000000 # 二维空间 A* 最大展开数
+
+      reference_path:
+        resample_spacing: 0.10 # LOS 平滑后参考路径的最大重采样间距（米）
+        tangent_lookahead: 0.30 # 平坦区域参考切向的前后差分距离（米）
+
+      guide_field:
+        corridor_width: 2.0 # 参考路径两侧的自由空间测地走廊宽度（米）
+
       state_lattice:
         xy_resolution: 0.05 # root-relative canonical lattice 位置分辨率（米）
         heading_bins: 80 # canonical 航向数量，80 对应 4.5°
@@ -33,7 +44,10 @@
         goal_connection_max_length: 1.0 # 近目标直线 seed connector 允许的最大长度（米）
         goal_tolerance: 1.0 # 进入该欧氏距离后尝试连接真实目标位置（米）
         speed_bin_count: 13 # 离散速度值数量（含 0）；13 对应 0.25 m/s 间隔
-        heuristic_weight: 1.0 # 时间-to-goal 引导强度，不承载形式化次优界
+        guidance_weight: 1.0 # 非 admissible 参考启发的整体 OPEN 排序强度
+        deviation_weight: 1.0 # 偏离参考路径的时间等效权重
+        heading_weight: 0.25 # 航向偏差权重（秒/rad）
+        speed_weight: 0.5 # 参考速度偏差的时间等效权重
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
 
       motion_primitives:

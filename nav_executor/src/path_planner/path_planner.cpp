@@ -469,22 +469,86 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto goal_cell = planning_cost_map.geometry.containing_cell(goal_plan);
     if (!start_cell || !goal_cell) return fail("planning endpoints are outside the map");
 
-    // ── [1] 地形感知的时间-to-goal 引导场 ──
-    TimeToGoalHeuristic heuristic;
-    heuristic.build(
+    // ── [1] 二维空间 A*：只选择空间拓扑 ──
+    const SpatialGridAstar spatial_astar(config_.spatial_astar);
+    const auto spatial_result = spatial_astar.search(
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints,
+        *start_cell,
         *goal_cell,
         config_.occupied_threshold,
-        config_.state_lattice.dynamics.velocity_max
+        config_.step_detection.detect_dot_threshold
     );
-    if (!heuristic.ready() || !std::isfinite(heuristic.at_cell(*start_cell))) {
-        return fail("goal is geometrically unreachable on the planning map");
+    if (!spatial_result.success) {
+        RCLCPP_WARN(
+            logger_, "Spatial planning failed: error=%s expansions=%d open_peak=%zu",
+            spatial_result.error.c_str(), spatial_result.route.expansions,
+            spatial_result.route.open_peak
+        );
+        return fail("spatial grid planning failed: " + spatial_result.error);
     }
-    const auto heuristic_done = std::chrono::steady_clock::now();
+    const SpatialRoute& spatial_route = spatial_result.route;
+    if (config_.enable_diagnostics) {
+        result.debug_spatial_path.reserve(spatial_route.raw_path.size());
+        for (const Eigen::Vector2i& cell : spatial_route.raw_path) {
+            result.debug_spatial_path.push_back(
+                planning_cost_map.geometry.cell_center(cell)
+            );
+        }
+        result.debug_spatial_path.front() = start_map;
+        result.debug_spatial_path.back() = goal_plan;
+    }
+    const auto spatial_done = std::chrono::steady_clock::now();
 
-    // ── [2] 全局 canonical state lattice：拓扑、几何与速度同时搜索 ──
+    // ── [2] passage-preserving LOS 平滑、参考状态与指导时标 ──
+    const ReferencePathBuilder reference_builder(config_.reference_path);
+    const auto reference_result = reference_builder.build(
+        spatial_route,
+        start_map,
+        goal_plan,
+        std::clamp(std::max(req.current_velocity, 0.0),
+            0.0, config_.state_lattice.dynamics.velocity_max),
+        planning_cost_map,
+        *req.direction_map,
+        req.terrain_constraints,
+        config_.state_lattice.dynamics,
+        config_.occupied_threshold
+    );
+    if (!reference_result.success) {
+        RCLCPP_WARN(
+            logger_, "Reference path construction failed: error=%s spatial_expansions=%d raw_cells=%zu",
+            reference_result.error.c_str(), spatial_route.expansions,
+            spatial_route.raw_path.size()
+        );
+        return fail("reference path construction failed: " + reference_result.error);
+    }
+    const ReferencePath& reference_path = reference_result.path;
+    if (config_.enable_diagnostics) {
+        result.debug_smoothed_spatial_path.reserve(reference_path.points.size());
+        for (const ReferencePoint& point : reference_path.points) {
+            result.debug_smoothed_spatial_path.push_back(point.position);
+        }
+    }
+    const auto reference_done = std::chrono::steady_clock::now();
+
+    // ── [3] 自由空间测地距离场与固定宽度走廊 ──
+    const GuideFieldBuilder guide_builder(config_.guide_field);
+    const auto guide_result = guide_builder.build(
+        reference_path, planning_cost_map, config_.occupied_threshold
+    );
+    if (!guide_result.success) {
+        RCLCPP_WARN(
+            logger_, "Guide field construction failed: error=%s spatial_expansions=%d raw_length=%.2f smoothed_length=%.2f",
+            guide_result.error.c_str(), spatial_route.expansions,
+            reference_path.raw_length, reference_path.smoothed_length
+        );
+        return fail("guide field construction failed: " + guide_result.error);
+    }
+    const GuideField& guide_field = guide_result.field;
+    const auto guide_done = std::chrono::steady_clock::now();
+
+    // ── [4] 走廊内 canonical state lattice：修正局部几何并搜索完整动力学状态 ──
     const LatticeFrame frame {
         .origin_map = start_map,
         .base_heading = req.current_yaw,
@@ -532,15 +596,30 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints,
-        heuristic,
+        guide_field,
+        reference_path,
         config_.occupied_threshold,
         config_.step_detection.detect_dot_threshold
     );
     if (!lattice_result.success) {
-        return fail("global state-lattice planning failed: " + lattice_result.error);
+        const auto& diagnostics = lattice_result.diagnostics;
+        RCLCPP_WARN(
+            logger_, "Corridor lattice planning failed: error=%s spatial_expansions=%d "
+            "raw_length=%.2f smoothed_length=%.2f corridor_cells=%zu "
+            "lattice_expansions=%d generated=%d open_peak=%zu corridor_rejections=%zu",
+            lattice_result.error.c_str(), spatial_route.expansions,
+            reference_path.raw_length, reference_path.smoothed_length,
+            guide_field.corridor_cell_count(), diagnostics.expansions,
+            diagnostics.generated_states, diagnostics.open_peak,
+            diagnostics.corridor_rejections
+        );
+        return fail("corridor state-lattice planning failed: " + lattice_result.error);
     }
     const auto lattice_done = std::chrono::steady_clock::now();
     const SpeedWitness& speed_witness = lattice_result.witness;
+    if (config_.enable_diagnostics) {
+        result.debug_kino_path = speed_witness.positions;
+    }
 
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
     const auto minco_seed = build_minco_seed(
@@ -549,7 +628,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         config_.minco.directed_speed_min
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
-    // ── [3] MINCO 物理时标见证 + 连续几何联合塑形 ──
+    // ── [5] MINCO 物理时标见证 + 连续几何联合塑形 ──
     MincoOptimizer optimizer(config_.minco);
     const auto minco_start = std::chrono::steady_clock::now();
     const auto opt = optimizer.optimize(
@@ -733,10 +812,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     result.kind = PlanResult::Kind::PATH;
 
-    if (config_.enable_diagnostics) {
-        result.debug_rough_path = speed_witness.positions;
-    }
-
     result.path = std::move(path);
 
     double seed_path_length = 0.0;
@@ -750,20 +825,27 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto& search_diagnostics = lattice_result.diagnostics;
     RCLCPP_DEBUG(
         logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
-        "heuristic=%.2f ms, lattice=%.2f ms, MINCO=%.2f ms, "
+        "spatial=%.2f ms, reference=%.2f ms, guide=%.2f ms, lattice=%.2f ms, MINCO=%.2f ms, "
+        "spatial_search[exp=%d open=%zu raw_cells=%zu passages=%zu raw_length=%.2f smoothed_length=%.2f corridor_cells=%zu], "
         "witness_length=%.2f m, witness_states=%zu, "
         "search[root=%s bias=%.3f time=%.2f exp=%d states=%d improved=%d "
         "transitions=%d terminal=%d open=%zu stale=%zu "
-        "geometry_cache=%zu hits=%zu terrain_spans=%zu], "
+        "geometry_cache=%zu hits=%zu terrain_spans=%zu corridor_rejections=%zu], "
         "primitives[count=%zu pos_res=%.3g heading_res=%.3g], "
         "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
         "first_order=%.3g, scaled_grad=%.3g, raw_grad=%.3g",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
         fixed ? "[FIXED]" : "", result.path->step_segments.size(),
-        std::chrono::duration<double, std::milli>(heuristic_done - plan_start).count(),
-        std::chrono::duration<double, std::milli>(lattice_done - heuristic_done).count(),
+        std::chrono::duration<double, std::milli>(spatial_done - plan_start).count(),
+        std::chrono::duration<double, std::milli>(reference_done - spatial_done).count(),
+        std::chrono::duration<double, std::milli>(guide_done - reference_done).count(),
+        std::chrono::duration<double, std::milli>(lattice_done - guide_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
+        spatial_route.expansions, spatial_route.open_peak,
+        spatial_route.raw_path.size(), spatial_route.passages.size(),
+        reference_path.raw_length, reference_path.smoothed_length,
+        guide_field.corridor_cell_count(),
         seed_path_length, speed_witness.positions.size(),
         search_diagnostics.selected_relaxed_root ? "relaxed-yaw" : "strict",
         search_diagnostics.selected_relaxation_bias,
@@ -778,6 +860,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         search_diagnostics.geometry_cache_entries,
         search_diagnostics.geometry_cache_hits,
         search_diagnostics.terrain_spans_checked,
+        search_diagnostics.corridor_rejections,
         primitive_library_.primitive_count(),
         primitive_library_.max_position_residual(),
         primitive_library_.max_heading_residual(),

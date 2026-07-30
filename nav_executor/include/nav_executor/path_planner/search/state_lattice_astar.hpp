@@ -7,7 +7,7 @@
 
 #include <Eigen/Core>
 
-#include <nav_executor/path_planner/search/time_to_goal_heuristic.hpp>
+#include <nav_executor/path_planner/search/guide_field.hpp>
 #include <nav_executor/path_planner/trajectory/shaping_dynamics.hpp>
 
 namespace nav_executor {
@@ -100,7 +100,10 @@ public:
         double collision_check_resolution = 0.075;
         double goal_connection_max_length = 1.0;
         double goal_tolerance = 1.0;
-        double heuristic_weight = 1.0;
+        double guidance_weight = 1.0;
+        double deviation_weight = 1.0;
+        double heading_weight = 0.25;
+        double speed_weight = 0.5;
         int max_expansions = 500000;
     };
 
@@ -121,6 +124,7 @@ public:
         size_t geometry_cache_entries = 0;
         size_t geometry_cache_hits = 0;
         size_t terrain_spans_checked = 0;
+        size_t corridor_rejections = 0;
         bool selected_relaxed_root = false;
         double selected_relaxation_bias = 0.0;
         double search_time = 0.0;
@@ -145,7 +149,8 @@ public:
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const TerrainTraversalConstraints& terrain_constraints,
-        const TimeToGoalHeuristic& heuristic,
+        const GuideField& guide_field,
+        const ReferencePath& reference_path,
         int occupied_threshold,
         double detect_dot_threshold
     ) const;

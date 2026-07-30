@@ -438,8 +438,17 @@ void NavExecutorNode::publish_diagnostics(
     if (!enable_debug_ || !debug_diag_pub_) return;
 
     if (cycle_result == interfaces::msg::NavExecutorDiag::CYCLE_EXECUTED) {
-        if (!diag.debug_rough_path.empty() && debug_rough_path_pub_) {
-            debug_rough_path_pub_->publish(path_to_nav_msg(diag.debug_rough_path));
+        if (!diag.debug_spatial_path.empty() && debug_spatial_path_pub_) {
+            debug_spatial_path_pub_->publish(path_to_nav_msg(diag.debug_spatial_path));
+        }
+        if (!diag.debug_smoothed_spatial_path.empty()
+            && debug_smoothed_spatial_path_pub_) {
+            debug_smoothed_spatial_path_pub_->publish(
+                path_to_nav_msg(diag.debug_smoothed_spatial_path)
+            );
+        }
+        if (!diag.debug_kino_path.empty() && debug_kino_path_pub_) {
+            debug_kino_path_pub_->publish(path_to_nav_msg(diag.debug_kino_path));
         }
         if (active_path && debug_minco_trajectory_pub_) {
             debug_minco_trajectory_pub_->publish(trajectory_to_marker(*active_path));

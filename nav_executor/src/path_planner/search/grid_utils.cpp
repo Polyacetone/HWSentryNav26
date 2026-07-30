@@ -34,6 +34,47 @@ bool grid_edge_avoids_corner_cutting(
     );
 }
 
+bool directed_terrain_edge_allowed(
+    const DirectionMap& direction_map,
+    const TerrainTraversalConstraints& terrain_constraints,
+    const Eigen::Vector2i& from,
+    const Eigen::Vector2i& to,
+    const double detect_dot_threshold,
+    bool* const going_up
+) {
+    const bool from_body = direction_map.is_terrain_body_cell(from);
+    const bool to_body = direction_map.is_terrain_body_cell(to);
+    if (!from_body && !to_body) return true;
+    if (from_body && to_body
+        && direction_map.terrain_label_at_cell(from)
+            != direction_map.terrain_label_at_cell(to)) {
+        return false;
+    }
+
+    const Eigen::Vector2d displacement = (to - from).cast<double>();
+    if (displacement.squaredNorm() <= 1e-12) return false;
+    const Eigen::Vector2d movement = displacement.normalized();
+    std::optional<bool> edge_direction;
+    for (const Eigen::Vector2i& cell : {from, to}) {
+        if (!direction_map.is_terrain_body_cell(cell)) continue;
+        const Eigen::Vector2d raw_direction = direction_map.raw_direction_at_cell(cell);
+        if (raw_direction.squaredNorm() <= 1e-12) return false;
+        const double alignment = movement.dot(raw_direction.normalized());
+        if (std::abs(alignment) <= detect_dot_threshold) return false;
+        const bool cell_going_up = alignment > 0.0;
+        if (edge_direction && *edge_direction != cell_going_up) return false;
+        if (!terrain_constraints.selected_mode(
+                direction_map.terrain_label_at_cell(cell), cell_going_up
+            )) {
+            return false;
+        }
+        edge_direction = cell_going_up;
+    }
+    if (!edge_direction) return false;
+    if (going_up) *going_up = *edge_direction;
+    return true;
+}
+
 std::vector<GridCrossing> trace_grid_crossings(
     const GridGeometry& geometry,
     const Eigen::Vector2d& from_map,

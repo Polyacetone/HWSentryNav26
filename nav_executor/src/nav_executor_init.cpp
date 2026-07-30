@@ -49,8 +49,9 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         debug_minco_trajectory_pub_ = create_publisher<visualization_msgs::msg::Marker>(
             declare_parameter<std::string>("node.debug.minco_trajectory_pub_topic"), 1
         );
-        debug_rough_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.rough_path_pub_topic"), 1);
-        debug_warmup_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.warmup_path_pub_topic"), 1);
+        debug_spatial_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.spatial_path_pub_topic"), 1);
+        debug_smoothed_spatial_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.smoothed_spatial_path_pub_topic"), 1);
+        debug_kino_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.debug.kino_path_pub_topic"), 1);
         debug_diag_pub_ = create_publisher<interfaces::msg::NavExecutorDiag>(
             declare_parameter<std::string>("node.debug.diag_pub_topic"), 1
         );
@@ -548,6 +549,27 @@ PlannerConfig NavExecutorNode::load_planner_config(
     c.motion_primitives.curvature_max = declare_parameter<double>(
         "path_planner.motion_primitives.curvature_max"
     );
+    c.spatial_astar = {
+        .obstacle_weight = declare_parameter<double>(
+            "path_planner.spatial_astar.obstacle_weight"
+        ),
+        .max_expansions = static_cast<int>(declare_parameter<int>(
+            "path_planner.spatial_astar.max_expansions"
+        )),
+    };
+    c.reference_path = {
+        .resample_spacing = declare_parameter<double>(
+            "path_planner.reference_path.resample_spacing"
+        ),
+        .tangent_lookahead = declare_parameter<double>(
+            "path_planner.reference_path.tangent_lookahead"
+        ),
+    };
+    c.guide_field = {
+        .corridor_width = declare_parameter<double>(
+            "path_planner.guide_field.corridor_width"
+        ),
+    };
     c.state_lattice = {
         .dynamics = shaping_dynamics,
         .speed_bin_count = static_cast<int>(declare_parameter<int>(
@@ -556,7 +578,10 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .collision_check_resolution = declare_parameter<double>("path_planner.state_lattice.collision_check_resolution"),
         .goal_connection_max_length = declare_parameter<double>("path_planner.state_lattice.goal_connection_max_length"),
         .goal_tolerance = declare_parameter<double>("path_planner.state_lattice.goal_tolerance"),
-        .heuristic_weight = declare_parameter<double>("path_planner.state_lattice.heuristic_weight"),
+        .guidance_weight = declare_parameter<double>("path_planner.state_lattice.guidance_weight"),
+        .deviation_weight = declare_parameter<double>("path_planner.state_lattice.deviation_weight"),
+        .heading_weight = declare_parameter<double>("path_planner.state_lattice.heading_weight"),
+        .speed_weight = declare_parameter<double>("path_planner.state_lattice.speed_weight"),
         .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.state_lattice.max_expansions")),
     };
     c.minco = {
@@ -649,7 +674,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .normal_profile = normal_profile,
         .step_profiles = step_profiles,
     };
-    require_parameter(c.occupied_threshold >= 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in [0, 255]");
+    require_parameter(c.occupied_threshold > 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in (0, 255]");
     require_parameter(
         c.on_step_threshold > 0.0 && c.on_step_threshold <= 1.0,
         "path_planner on_step_threshold must be finite and in (0, 1]"
@@ -669,11 +694,18 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(c.motion_primitives.xy_resolution)
         && positive_finite(c.motion_primitives.curvature_max)
         && positive_finite(c.motion_primitives.straight_length)
+        && nonnegative_finite(c.spatial_astar.obstacle_weight)
+        && positive_finite(c.reference_path.resample_spacing)
+        && positive_finite(c.reference_path.tangent_lookahead)
+        && positive_finite(c.guide_field.corridor_width)
         && positive_finite(c.state_lattice.collision_check_resolution)
         && positive_finite(c.state_lattice.goal_connection_max_length)
         && positive_finite(c.state_lattice.goal_tolerance)
-        && nonnegative_finite(c.state_lattice.heuristic_weight),
-        "global lattice geometry, dynamics, and heuristic weight must be finite and valid"
+        && nonnegative_finite(c.state_lattice.guidance_weight)
+        && nonnegative_finite(c.state_lattice.deviation_weight)
+        && nonnegative_finite(c.state_lattice.heading_weight)
+        && nonnegative_finite(c.state_lattice.speed_weight),
+        "spatial/reference/corridor geometry, dynamics, and guidance weights must be finite and valid"
     );
     require_parameter(
         std::ranges::all_of(
@@ -689,6 +721,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
     );
     require_parameter(
         c.motion_primitives.heading_bins > 0
+        && c.spatial_astar.max_expansions > 0
         && c.state_lattice.speed_bin_count >= 2
         && c.state_lattice.max_expansions > 0,
         "lattice pose/speed bins and expansion limit must be valid"

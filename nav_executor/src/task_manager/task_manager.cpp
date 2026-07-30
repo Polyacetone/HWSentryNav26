@@ -133,6 +133,12 @@ void TaskManager::poll_planner_result(const bool preemptible) {
         return;
     }
 
+    last_debug_spatial_path_ = std::move(result->debug_spatial_path);
+    last_debug_smoothed_spatial_path_ = std::move(
+        result->debug_smoothed_spatial_path
+    );
+    last_debug_kino_path_ = std::move(result->debug_kino_path);
+
     switch (result->kind) {
         case PlanResult::Kind::PATH:
             planner_last_result_ = PlannerResultState::PATH_ACCEPTED;
@@ -141,8 +147,6 @@ void TaskManager::poll_planner_result(const bool preemptible) {
             needs_plan_ = false;
             in_cooldown_ = false;
             last_failure_reason_.reset();
-            // 缓存调试路径（即便 enable_debug=false 也是空 vector，无开销）
-            last_debug_rough_path_ = std::move(result->debug_rough_path);
             RCLCPP_INFO(logger_, "Accepted new path for goal #%lu", static_cast<unsigned long>(result->goal_id));
             for (const std::string& warning : result->warnings) {
                 RCLCPP_WARN(
@@ -319,7 +323,9 @@ TaskDiagnostics TaskManager::diagnostics(const std::chrono::steady_clock::time_p
     d.planner_last_failure_reason = last_failure_reason_.value_or("");
     d.last_replan_reason = last_replan_reason_;
     d.replan_count = replan_count_;
-    d.debug_rough_path = last_debug_rough_path_;
+    d.debug_spatial_path = last_debug_spatial_path_;
+    d.debug_smoothed_spatial_path = last_debug_smoothed_spatial_path_;
+    d.debug_kino_path = last_debug_kino_path_;
     return d;
 }
 

@@ -201,9 +201,11 @@ GeometryResult build_geometry(
     const std::optional<SpatialPose>& canonical_endpoint,
     const CostMap& cost_map,
     const DirectionMap& direction_map,
+    const GuideField& guide_field,
     const int occupied_threshold,
     const double detect_dot_threshold,
-    const double collision_resolution
+    const double collision_resolution,
+    size_t& corridor_rejections
 ) {
     GeometryResult result;
     SpatialPose pose = start;
@@ -224,6 +226,11 @@ GeometryResult build_geometry(
                 && substep + 1 == substeps;
             if (canonical_endpoint && final_substep) pose = *canonical_endpoint;
 
+            if (!guide_field.contains_map(previous.position)
+                || !guide_field.contains_map(pose.position)) {
+                ++corridor_rejections;
+                return result;
+            }
             const auto start_cell = cost_map.geometry.containing_cell(previous.position);
             const auto end_cost = cost_map.sample_map(pose.position);
             if (!start_cell || !end_cost
@@ -236,6 +243,11 @@ GeometryResult build_geometry(
             Eigen::Vector2i cell = *start_cell;
             double previous_fraction = 0.0;
             for (const GridCrossing& crossing : crossings) {
+                if (!guide_field.contains(crossing.from)
+                    || !guide_field.contains(crossing.to)) {
+                    ++corridor_rejections;
+                    return result;
+                }
                 if (!append_terrain_span(
                         result, direction_map, cell, previous,
                         segment.curvature, substep_length,
@@ -501,7 +513,8 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
-    const TimeToGoalHeuristic& heuristic,
+    const GuideField& guide_field,
+    const ReferencePath& reference_path,
     const int occupied_threshold,
     const double detect_dot_threshold
 ) const {
@@ -511,11 +524,14 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             + primitive_library_.error();
         return result;
     }
-    if (roots.empty() || !heuristic.ready() || frame.heading_bins <= 0
+    if (roots.empty() || !guide_field.ready() || reference_path.points.empty()
+        || frame.heading_bins <= 0
         || frame.xy_resolution <= 0.0 || params_.speed_bin_count <= 1
-        || params_.heuristic_weight < 0.0 || params_.max_expansions <= 0
+        || params_.guidance_weight < 0.0 || params_.deviation_weight < 0.0
+        || params_.heading_weight < 0.0 || params_.speed_weight < 0.0
+        || params_.max_expansions <= 0
         || !cost_map.geometry.same_geometry(direction_map.geometry)) {
-        result.error = "global state-lattice configuration or inputs are invalid";
+        result.error = "corridor state-lattice configuration or inputs are invalid";
         return result;
     }
 
@@ -526,11 +542,23 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     std::unordered_map<GeometryCacheKey, GeometryResult, GeometryCacheKeyHash>
         geometry_cache;
 
-    const auto heuristic_at = [&](const SpatialPose& pose) {
-        const double estimate = heuristic.at_map(pose.position);
-        return std::isfinite(estimate)
-            ? estimate
-            : (goal_map - pose.position).norm() / params_.dynamics.velocity_max;
+    const auto guidance_at = [&](const SpatialPose& pose, const int speed_bin) {
+        const GuideFieldCell* cell = guide_field.at_map(pose.position);
+        if (!cell || cell->nearest_reference_index >= reference_path.points.size()) {
+            return std::numeric_limits<double>::infinity();
+        }
+        const ReferencePoint& reference = reference_path.points[
+            cell->nearest_reference_index
+        ];
+        return reference.time_to_goal
+            + params_.deviation_weight
+                * static_cast<double>(cell->distance_to_reference)
+                / params_.dynamics.velocity_max
+            + params_.heading_weight
+                * std::abs(wrap_angle(pose.heading - reference.heading))
+            + params_.speed_weight
+                * std::abs(speed_of(speed_bin) - reference.speed)
+                / params_.dynamics.tangential_acceleration_max;
     };
     const auto enqueue = [&](const LatticeKey& raw_key,
                              const double g,
@@ -544,6 +572,8 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             || !std::isfinite(g) || g < 0.0) {
             return false;
         }
+        const double guidance = guidance_at(pose_of(frame, key), key.speed);
+        if (!std::isfinite(guidance)) return false;
         const auto incumbent = best.find(key);
         if (incumbent != best.end()
             && nodes[static_cast<size_t>(incumbent->second)].g <= g + EPS) {
@@ -561,8 +591,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             .expanded = false,
         });
         best[key] = index;
-        const double f = g + params_.heuristic_weight
-            * heuristic_at(pose_of(frame, key)) + relaxation_bias;
+        const double f = g + params_.guidance_weight * guidance + relaxation_bias;
         open.push({f, g, index});
         result.diagnostics.open_peak = std::max(
             result.diagnostics.open_peak, open.size()
@@ -578,7 +607,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
         );
     }
     if (open.empty()) {
-        result.error = "global state-lattice has no valid search root";
+        result.error = "state-lattice has no valid root in the selected spatial corridor";
         return result;
     }
 
@@ -607,9 +636,11 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             pose_of(frame, successor_pose),
             cost_map,
             direction_map,
+            guide_field,
             occupied_threshold,
             detect_dot_threshold,
-            params_.collision_check_resolution
+            params_.collision_check_resolution,
+            result.diagnostics.corridor_rejections
         );
         return geometry_cache.emplace(cache_key, std::move(geometry)).first->second;
     };
@@ -629,7 +660,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             continue;
         }
         if (result.diagnostics.expansions >= params_.max_expansions) {
-            result.error = "global state-lattice expansion limit reached";
+            result.error = "state-lattice expansion limit reached in the selected spatial corridor";
             break;
         }
         selected.expanded = true;
@@ -669,9 +700,11 @@ StateLatticeAstar::Result StateLatticeAstar::search(
                     endpoint,
                     cost_map,
                     direction_map,
+                    guide_field,
                     occupied_threshold,
                     detect_dot_threshold,
-                    params_.collision_check_resolution
+                    params_.collision_check_resolution,
+                    result.diagnostics.corridor_rejections
                 );
                 if (geometry.valid) {
                     double best_duration = std::numeric_limits<double>::infinity();
@@ -757,7 +790,9 @@ StateLatticeAstar::Result StateLatticeAstar::search(
 
     result.diagnostics.geometry_cache_entries = geometry_cache.size();
     if (!terminal) {
-        if (result.error.empty()) result.error = "global state-lattice found no feasible path";
+        if (result.error.empty()) {
+            result.error = "state-lattice found no kinodynamic path in the selected spatial corridor";
+        }
         return result;
     }
 
@@ -768,7 +803,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     }
     std::reverse(chain.begin(), chain.end());
     if (chain.empty()) {
-        result.error = "global state-lattice produced an empty parent chain";
+        result.error = "corridor state-lattice produced an empty parent chain";
         return result;
     }
     const SearchNode& root = nodes[static_cast<size_t>(chain.front())];
@@ -832,7 +867,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
         || result.witness.positions.size() != result.witness.tangents.size()
         || result.witness.positions.size() != result.witness.velocities.size()
         || result.witness.positions.size() != result.witness.durations.size() + 1) {
-        result.error = "global state-lattice witness reconstruction failed";
+        result.error = "corridor state-lattice witness reconstruction failed";
         return result;
     }
     result.success = true;

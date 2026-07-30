@@ -22,8 +22,9 @@
           min: 0.0 # 蓝色端速度（m/s）
           max: 3.0 # 红色端速度（m/s）
         final_cost_map_pub_topic: "/nav_executor/debug/final_cost_map"
-        rough_path_pub_topic: "/nav_executor/debug/rough_path"
-        warmup_path_pub_topic: "/nav_executor/debug/warmup_path"
+        spatial_path_pub_topic: "/nav_executor/debug/spatial_path"
+        smoothed_spatial_path_pub_topic: "/nav_executor/debug/smoothed_spatial_path"
+        kino_path_pub_topic: "/nav_executor/debug/kino_path"
         mpc_path_pub_topic: "/nav_executor/debug/mpc_path"
         minco_trajectory_pub_topic: "/nav_executor/debug/minco_trajectory"
         diag_pub_topic: "/nav_executor/debug/diag"

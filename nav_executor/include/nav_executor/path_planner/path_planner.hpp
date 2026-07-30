@@ -14,8 +14,10 @@
 
 #include <nav_executor/common/trajectory/annotated_path.hpp>
 #include <nav_executor/common/trajectory/trajectory_validation.hpp>
+#include <nav_executor/path_planner/search/guide_field.hpp>
+#include <nav_executor/path_planner/search/reference_path.hpp>
+#include <nav_executor/path_planner/search/spatial_grid_astar.hpp>
 #include <nav_executor/path_planner/search/state_lattice_astar.hpp>
-#include <nav_executor/path_planner/search/time_to_goal_heuristic.hpp>
 #include <nav_executor/path_planner/trajectory/minco_optimizer.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
 #include <nav_executor/path_planner/trajectory/step_annotator.hpp>
@@ -74,7 +76,9 @@ struct PlanResult {
     // 可执行但存在降级项；仅在结果被 TaskManager 接纳后记录。
     std::vector<std::string> warnings;
 
-    std::vector<Eigen::Vector2d> debug_rough_path;
+    std::vector<Eigen::Vector2d> debug_spatial_path;
+    std::vector<Eigen::Vector2d> debug_smoothed_spatial_path;
+    std::vector<Eigen::Vector2d> debug_kino_path;
 };
 
 struct PlannerConfig {
@@ -103,6 +107,9 @@ struct PlannerConfig {
     double seed_resample_distance;
 
     MotionPrimitiveLibrary::Params motion_primitives;
+    SpatialGridAstar::Params spatial_astar;
+    ReferencePathBuilder::Params reference_path;
+    GuideFieldBuilder::Params guide_field;
     StateLatticeAstar::Params state_lattice;
     MincoOptimizer::Params minco;
 

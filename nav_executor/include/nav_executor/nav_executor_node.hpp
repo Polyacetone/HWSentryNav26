@@ -90,8 +90,9 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr global_path_pub_;
     rclcpp::Publisher<interfaces::msg::ChassisCmd>::SharedPtr chassis_cmd_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr debug_final_cost_map_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_rough_path_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_warmup_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_spatial_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_smoothed_spatial_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_kino_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mpc_path_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr debug_minco_trajectory_pub_;
     rclcpp::Publisher<interfaces::msg::NavExecutorDiag>::SharedPtr debug_diag_pub_;
