@@ -69,9 +69,12 @@
           angular_acceleration: 100.0 # 角加速度超限惩罚
           lateral_acceleration: 100.0 # 侧向加速度 |κ|v² 超限惩罚
           directed_regularity: 1000.0 # 有向正则性：排除内部零速点、尖点与逆向
-          traversal_alignment: 1600.0 # 过台阶时让车身顺着台阶方向走的对齐惩罚
+          traversal_velocity_window: 1600.0 # runup 起点至台阶出口的地形目标速度窗软约束
+          traversal_alignment: 1600.0 # runup 起点至台阶出口的方向对齐软约束
+          traversal_tangential_acceleration: 10.0 # runup 起点至台阶出口的 a_t² 正则
+          traversal_angular_velocity: 10.0 # runup 起点至台阶出口的 ω² 正则
           prohibited_traversal: 1000.0 # 往台阶禁止方向（如逆行）走的惩罚
-          runup_curvature: 100.0 # 台阶膨胀过渡、本体及其助跑区内的 κ² 正则
+          runup_curvature: 100.0 # runup 起点至台阶出口的 κ² 正则
         terrain_gate:
           norm_lo: 0.1 # 方向场模长低于此值时不施加地形软约束
           norm_hi: 0.9 # 方向场模长高于此值时施加完整软约束

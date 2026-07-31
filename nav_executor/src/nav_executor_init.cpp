@@ -598,7 +598,10 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .angular_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.angular_acceleration"),
             .lateral_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.lateral_acceleration"),
             .directed_regularity = declare_parameter<double>("path_planner.minco.penalty_weights.directed_regularity"),
+            .traversal_velocity_window = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_velocity_window"),
             .traversal_alignment = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_alignment"),
+            .traversal_tangential_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_tangential_acceleration"),
+            .traversal_angular_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_angular_velocity"),
             .prohibited_traversal = declare_parameter<double>("path_planner.minco.penalty_weights.prohibited_traversal"),
             .runup_curvature = declare_parameter<double>("path_planner.minco.penalty_weights.runup_curvature"),
         },
@@ -743,7 +746,10 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && nonnegative_finite(minco_weights.angular_acceleration)
         && nonnegative_finite(minco_weights.lateral_acceleration)
         && nonnegative_finite(minco_weights.directed_regularity)
+        && nonnegative_finite(minco_weights.traversal_velocity_window)
         && nonnegative_finite(minco_weights.traversal_alignment)
+        && nonnegative_finite(minco_weights.traversal_tangential_acceleration)
+        && nonnegative_finite(minco_weights.traversal_angular_velocity)
         && nonnegative_finite(minco_weights.prohibited_traversal)
         && nonnegative_finite(minco_weights.runup_curvature),
         "MINCO penalty weights must be finite and non-negative"

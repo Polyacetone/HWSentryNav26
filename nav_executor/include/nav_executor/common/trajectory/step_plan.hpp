@@ -79,12 +79,12 @@ struct StepChassisCommand {
 
 // 规划期生成、运行期只读的完整台阶生命周期。
 struct StepPlanSegment {
-    double prepare_arc_length = 0.0;
-    double active_arc_length = 0.0;
-    double commit_arc_length = 0.0;
-    double step_enter_arc_length = 0.0;
-    double step_exit_arc_length = 0.0;
-    double release_arc_length = 0.0;
+    double prepare_arc_length = 0.0; // 开始渐变 capability 的位置。
+    double active_arc_length = 0.0; // STEPPING-ARMED 起点。开始给底盘发送台阶模式的位置。
+    double commit_arc_length = 0.0; // STEPPING-COMMITTED 起点。底盘执行器实际开始做地形跨越动作的预期位置。因此是 runup 约束开始处。
+    double step_enter_arc_length = 0.0; // 物理台阶边缘入口。
+    double step_exit_arc_length = 0.0; // 物理台阶边缘出口。
+    double release_arc_length = 0.0; // STEPPING 父状态退出位置。
     Eigen::Vector2d step_enter_pos_map = Eigen::Vector2d::Zero();
     Eigen::Vector2d step_exit_pos_map = Eigen::Vector2d::Zero();
     Eigen::Vector2d dir_map = Eigen::Vector2d::Zero();

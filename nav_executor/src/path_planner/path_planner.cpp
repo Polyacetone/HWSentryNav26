@@ -694,6 +694,22 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             opt.accepted_iterations, opt.function_evaluations,
             opt.rejected_trials, opt.nonfinite_trials
         );
+        RCLCPP_DEBUG(
+            logger_,
+            "Plan #%lu [minco-traversal] window=%.3g->%.3g align=%.3g->%.3g "
+            "accel=%.3g->%.3g omega=%.3g->%.3g curvature=%.3g->%.3g",
+            static_cast<unsigned long>(req.goal.id),
+            opt.seed_costs.traversal_velocity_window,
+            opt.final_costs.traversal_velocity_window,
+            opt.seed_costs.traversal_alignment,
+            opt.final_costs.traversal_alignment,
+            opt.seed_costs.traversal_tangential_acceleration,
+            opt.final_costs.traversal_tangential_acceleration,
+            opt.seed_costs.traversal_angular_velocity,
+            opt.final_costs.traversal_angular_velocity,
+            opt.seed_costs.runup_curvature,
+            opt.final_costs.runup_curvature
+        );
     }
     if (opt.trajectory.empty()) return fail("MINCO produced empty trajectory");
 

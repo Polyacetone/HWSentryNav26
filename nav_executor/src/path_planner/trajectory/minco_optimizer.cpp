@@ -205,7 +205,15 @@ struct PolynomialBasis {
 struct RunupSource {
     double value = 0.0;
     double radius = 0.0;
+    TraversalVelocityWindow velocity_window;
     Eigen::Vector2d position_gradient = Eigen::Vector2d::Zero();
+};
+
+struct TraversalContext {
+    bool valid = false;
+    int source_sample = -1;
+    TraversalVelocityWindow velocity_window;
+    Eigen::Vector2d direction = Eigen::Vector2d::Zero();
 };
 
 // 每个采样点的完整几何与地形快照。罚项与非局部助跑回传都基于这份缓存，
@@ -236,6 +244,8 @@ struct Sample {
     Eigen::Matrix2d terrain_direction_jacobian = Eigen::Matrix2d::Zero();
     double terrain_gate = 0.0;
     Eigen::Vector2d terrain_gate_position_gradient = Eigen::Vector2d::Zero();
+    double body_gate = 0.0;
+    Eigen::Vector2d body_gate_position_gradient = Eigen::Vector2d::Zero();
     std::array<RunupSource, TERRAIN_LABEL_COUNT - 2> sources {};
     int source_count = 0;
 };
@@ -380,6 +390,9 @@ double MincoOptimizer::accumulate_penalties(
                         if (body_gate > 0.0) {
                             const Eigen::Vector2d dbody_gate_dposition =
                                 dbody_gate * dnorm_dposition;
+                            sample.body_gate = body_gate;
+                            sample.body_gate_position_gradient =
+                                dbody_gate_dposition;
                             const bool going_up = sample.velocity.dot(direction) >= 0.0;
                             const uint8_t label = sample.terrain_label;
                             const TraversalMode* rule =
@@ -389,6 +402,7 @@ double MincoOptimizer::accumulate_penalties(
                                     RunupSource {
                                         .value = body_gate,
                                         .radius = rule->run_up,
+                                        .velocity_window = rule->velocity_window,
                                         .position_gradient = dbody_gate_dposition,
                                     };
                             }
@@ -417,9 +431,13 @@ double MincoOptimizer::accumulate_penalties(
     const double lookahead_limit = max_runup_radius + params_.runup_transition_distance;
     std::vector<double> runup_exposure(static_cast<size_t>(sample_count), 0.0);
     std::vector<double> runup_gate(static_cast<size_t>(sample_count), 0.0);
+    std::vector<TraversalContext> traversal_contexts(
+        static_cast<size_t>(sample_count)
+    );
     for (int i = 0; i < sample_count; ++i) {
         double distance = 0.0;
         double exposure = 0.0;
+        TraversalContext& context = traversal_contexts[static_cast<size_t>(i)];
         for (int j = i; j < sample_count; ++j) {
             const Sample& future = samples[static_cast<size_t>(j)];
             for (int index = 0; index < future.source_count; ++index) {
@@ -429,6 +447,13 @@ double MincoOptimizer::accumulate_penalties(
                 );
                 (void)unused;
                 exposure += source.value * distance_gate * future.arc_measure;
+                if (!context.valid && source.value > 0.0 && distance_gate > 0.0
+                    && future.terrain_direction.squaredNorm() > EPS) {
+                    context.valid = true;
+                    context.source_sample = j;
+                    context.velocity_window = source.velocity_window;
+                    context.direction = future.terrain_direction;
+                }
             }
             distance += future.arc_measure;
             if (distance > lookahead_limit) break;
@@ -439,8 +464,36 @@ double MincoOptimizer::accumulate_penalties(
         );
     }
 
-    // 状态正则 gate = 1−(1−runup_gate)(1−terrain_gate)。这里反传其 runup 分支；
-    // terrain 分支的位置梯度在主采样循环中按乘积法则累积。
+    // traversal gate = 1−(1−runup_gate)(1−body_gate)，严格覆盖 runup 起点到本体
+    // 出口。先汇总所有受该 gate 控制的密度，用同一套非局部伴随反传 gate。
+    std::vector<double> traversal_base_density(
+        static_cast<size_t>(sample_count), 0.0
+    );
+    for (int i = 0; i < sample_count; ++i) {
+        const Sample& sample = samples[static_cast<size_t>(i)];
+        const TraversalContext& context = traversal_contexts[static_cast<size_t>(i)];
+        double base_density = 0.5 * w.runup_curvature * sample.speed
+            * sample.curvature.kappa * sample.curvature.kappa;
+        if (context.valid) {
+            const double speed_under = violation(
+                context.velocity_window.min - sample.speed
+            );
+            const double speed_over = violation(
+                sample.speed - context.velocity_window.max
+            );
+            base_density += 0.5 * w.traversal_velocity_window
+                * (speed_under * speed_under + speed_over * speed_over);
+            base_density += 0.5 * w.traversal_tangential_acceleration
+                * sample.motion.tangential_acceleration
+                * sample.motion.tangential_acceleration;
+            base_density += 0.5 * w.traversal_angular_velocity
+                * sample.motion.angular_velocity * sample.motion.angular_velocity;
+            const double cross = cross_2d(sample.direction, context.direction);
+            base_density += 0.5 * w.traversal_alignment * cross * cross;
+        }
+        traversal_base_density[static_cast<size_t>(i)] = base_density;
+    }
+
     std::vector<Eigen::Vector2d> lookahead_position_gradient(
         static_cast<size_t>(sample_count), Eigen::Vector2d::Zero()
     );
@@ -448,11 +501,9 @@ double MincoOptimizer::accumulate_penalties(
     std::vector<double> arc_range_difference(static_cast<size_t>(sample_count + 1), 0.0);
     for (int i = 0; i < sample_count; ++i) {
         const Sample& current = samples[static_cast<size_t>(i)];
-        const double regularization_density = 0.5 * w.runup_curvature
-            * current.curvature.kappa * current.curvature.kappa;
-        const double dcost_dexposure = current.dt * current.speed
-            * regularization_density
-            * (1.0 - current.terrain_gate)
+        const double dcost_dexposure = current.dt
+            * traversal_base_density[static_cast<size_t>(i)]
+            * (1.0 - current.body_gate)
             * std::exp(-runup_exposure[static_cast<size_t>(i)]
                 / params_.runup_saturation_length)
             / params_.runup_saturation_length;
@@ -641,11 +692,14 @@ double MincoOptimizer::accumulate_penalties(
                 * sample.motion.dlateral_dacceleration;
         }
 
-        // (h) 台阶助跑与本体的 κ² 正则：gate 是 runup 与当前位置 terrain 的平滑并集。
-        // runup 的非局部梯度稍后回传；当前位置 terrain 分支在这里按乘积法则回传。
+        // (h) runup 起点至台阶出口的统一 traversal gate。
         const double current_runup_gate = runup_gate[static_cast<size_t>(index)];
         const double state_gate = 1.0
-            - (1.0 - current_runup_gate) * (1.0 - sample.terrain_gate);
+            - (1.0 - current_runup_gate) * (1.0 - sample.body_gate);
+        const TraversalContext& traversal =
+            traversal_contexts[static_cast<size_t>(index)];
+
+        // 台阶延长区内的 κ² 正则。
         const double regularization_density = 0.5 * w.runup_curvature
             * jet.kappa * jet.kappa;
         if (state_gate > 0.0) {
@@ -660,34 +714,81 @@ double MincoOptimizer::accumulate_penalties(
                 * sample.speed_gradient;
             gradient.acceleration += scale * jet.dkappa_dacceleration;
         }
-        gradient.position += sample.speed * (1.0 - current_runup_gate)
-            * regularization_density * sample.terrain_gate_position_gradient;
 
-        // (i) 膨胀方向场提供连续的通行方向对齐强度；离散 label 只决定禁止方向。
-        if (ws.terrain_constraints
-            && (w.traversal_alignment > 0.0 || w.prohibited_traversal > 0.0)
-            && sample.terrain_gate > 0.0
-            && sample.direction_norm > EPS) {
+        // 速度窗、方向对齐、切向加速度与角速度正则共享严格的 traversal gate。
+        if (state_gate > 0.0 && traversal.valid) {
+            const double speed_under = violation(
+                traversal.velocity_window.min - sample.speed
+            );
+            const double speed_over = violation(
+                sample.speed - traversal.velocity_window.max
+            );
+            const double speed_density = 0.5 * w.traversal_velocity_window
+                * (speed_under * speed_under + speed_over * speed_over);
+            density += state_gate * speed_density;
+            sample_terms.traversal_velocity_window += state_gate * speed_density;
+            gradient.velocity += state_gate * w.traversal_velocity_window
+                * (speed_over - speed_under) * sample.speed_gradient;
+
+            const double tangential = sample.motion.tangential_acceleration;
+            const double tangential_density = 0.5
+                * w.traversal_tangential_acceleration * tangential * tangential;
+            density += state_gate * tangential_density;
+            sample_terms.traversal_tangential_acceleration +=
+                state_gate * tangential_density;
+            const double tangential_scale = state_gate
+                * w.traversal_tangential_acceleration * tangential;
+            gradient.velocity += tangential_scale
+                * sample.motion.dtangential_dvelocity;
+            gradient.acceleration += tangential_scale
+                * sample.motion.dtangential_dacceleration;
+
+            const double omega = sample.motion.angular_velocity;
+            const double omega_density = 0.5
+                * w.traversal_angular_velocity * omega * omega;
+            density += state_gate * omega_density;
+            sample_terms.traversal_angular_velocity += state_gate * omega_density;
+            const double omega_scale = state_gate
+                * w.traversal_angular_velocity * omega;
+            gradient.velocity += omega_scale
+                * sample.motion.dangular_velocity_dvelocity;
+            gradient.acceleration += omega_scale
+                * sample.motion.dangular_velocity_dacceleration;
+
+            const Eigen::Vector2d& heading = sample.direction;
+            const Eigen::Vector2d& terrain = traversal.direction;
+            const double cross = cross_2d(heading, terrain);
+            const double align_density = 0.5 * w.traversal_alignment
+                * cross * cross;
+            density += state_gate * align_density;
+            sample_terms.traversal_alignment += state_gate * align_density;
+            const double cross_scale = state_gate * w.traversal_alignment * cross;
+            gradient.velocity += cross_scale * sample.direction_jacobian.transpose()
+                * Eigen::Vector2d(terrain.y(), -terrain.x());
+            if (traversal.source_sample >= 0) {
+                const Sample& source = samples[static_cast<size_t>(
+                    traversal.source_sample
+                )];
+                lookahead_position_gradient[static_cast<size_t>(
+                    traversal.source_sample
+                )] += dt * cross_scale
+                    * source.terrain_direction_jacobian.transpose()
+                    * perpendicular(heading);
+            }
+        }
+
+        gradient.position += (1.0 - current_runup_gate)
+            * traversal_base_density[static_cast<size_t>(index)]
+            * sample.body_gate_position_gradient;
+
+        // (i) 膨胀方向场仅负责禁止方向；允许方向的对齐由 traversal gate 处理。
+        if (ws.terrain_constraints && w.prohibited_traversal > 0.0
+            && sample.terrain_gate > 0.0 && sample.direction_norm > EPS) {
             const double gate = sample.terrain_gate;
             const Eigen::Vector2d& terrain = sample.terrain_direction;
             const Eigen::Matrix2d& terrain_jacobian = sample.terrain_direction_jacobian;
             const Eigen::Vector2d& heading = sample.direction;
-            double terrain_density = 0.0;
-
-            // 对齐罚：车身方向与台阶方向的叉积应为零（同向或反向均可）。
-            const double cross = cross_2d(heading, terrain);
             const double alignment = heading.dot(terrain);
-            const double align_density = w.traversal_alignment * 0.5 * cross * cross;
-            terrain_density += align_density;
-            density += gate * align_density;
-            sample_terms.traversal_alignment += gate * align_density;
-            const double cross_scale = gate * w.traversal_alignment * cross;
-            gradient.velocity += cross_scale * sample.direction_jacobian.transpose()
-                * Eigen::Vector2d(terrain.y(), -terrain.x());
-            gradient.position += cross_scale * terrain_jacobian.transpose()
-                * perpendicular(heading);
-
-            // 单向禁止仅表示对应 up/down traversal mode 缺失。
             const uint8_t label = sample.terrain_label;
             const bool directional = label >= static_cast<uint8_t>(TerrainType::SLOPE);
             const bool up_allowed = ws.terrain_constraints->selected_mode(label, true);
@@ -698,7 +799,6 @@ double MincoOptimizer::accumulate_penalties(
                 ? violation(-alignment) : 0.0;
             const double prohibited_density = 0.5 * w.prohibited_traversal
                 * (prohibited_up * prohibited_up + prohibited_down * prohibited_down);
-            terrain_density += prohibited_density;
             density += gate * prohibited_density;
             sample_terms.prohibited_traversal += gate * prohibited_density;
             const double alignment_scale = gate * w.prohibited_traversal
@@ -706,8 +806,8 @@ double MincoOptimizer::accumulate_penalties(
             gradient.velocity += alignment_scale
                 * sample.direction_jacobian.transpose() * terrain;
             gradient.position += alignment_scale * terrain_jacobian.transpose() * heading;
-
-            gradient.position += terrain_density * sample.terrain_gate_position_gradient;
+            gradient.position += prohibited_density
+                * sample.terrain_gate_position_gradient;
         }
 
         // ── 非局部助跑项：arc = dt·speed 的伴随，以及位置源梯度 ──
@@ -726,7 +826,13 @@ double MincoOptimizer::accumulate_penalties(
             terms->angular_acceleration += dt * sample_terms.angular_acceleration;
             terms->lateral_acceleration += dt * sample_terms.lateral_acceleration;
             terms->directed_regularity += dt * sample_terms.directed_regularity;
+            terms->traversal_velocity_window +=
+                dt * sample_terms.traversal_velocity_window;
             terms->traversal_alignment += dt * sample_terms.traversal_alignment;
+            terms->traversal_tangential_acceleration +=
+                dt * sample_terms.traversal_tangential_acceleration;
+            terms->traversal_angular_velocity +=
+                dt * sample_terms.traversal_angular_velocity;
             terms->prohibited_traversal += dt * sample_terms.prohibited_traversal;
             terms->runup_curvature += dt * sample_terms.runup_curvature;
         }

@@ -27,7 +27,7 @@ namespace nav_executor {
 // 目标：
 //   J = w_energy·∫‖jerk‖² + w_time·ΣT
 //     + Σ_采样点 [ 障碍 + 物理动力学包络 + 有向正则性
-//                 + 膨胀方向场对齐 + 禁止方向 + 助跑区 κ² ]
+//                 + runup-to-exit 速度窗/方向/运动正则 + 禁止方向 ]
 class MincoOptimizer {
 public:
     struct Weights {
@@ -40,7 +40,10 @@ public:
         double angular_acceleration = 100.0;
         double lateral_acceleration = 100.0;
         double directed_regularity = 1000.0;
+        double traversal_velocity_window = 1600.0;
         double traversal_alignment = 200.0;
+        double traversal_tangential_acceleration = 10.0;
+        double traversal_angular_velocity = 10.0;
         double prohibited_traversal = 1000.0;
         double runup_curvature = 100.0;       // 台阶场及其助跑区内的 κ² 正则
     };
@@ -95,14 +98,19 @@ public:
         double angular_acceleration = 0.0;
         double lateral_acceleration = 0.0;
         double directed_regularity = 0.0;
+        double traversal_velocity_window = 0.0;
         double traversal_alignment = 0.0;
+        double traversal_tangential_acceleration = 0.0;
+        double traversal_angular_velocity = 0.0;
         double prohibited_traversal = 0.0;
         double runup_curvature = 0.0;
         [[nodiscard]] double total() const {
             return energy + time + obstacle + velocity + tangential_acceleration
                 + angular_velocity + angular_acceleration + lateral_acceleration
-                + directed_regularity
-                + traversal_alignment + prohibited_traversal + runup_curvature;
+                + directed_regularity + traversal_velocity_window
+                + traversal_alignment + traversal_tangential_acceleration
+                + traversal_angular_velocity + prohibited_traversal
+                + runup_curvature;
         }
     };
 
