@@ -28,50 +28,48 @@ bool finite_positive(const double value) {
 }
 
 void validate_options(const LbfgsMinimizer::Options& options) {
-    const auto& trust = options.trust_region;
+    const auto& step_control = options.step_control;
     if (options.max_iterations <= 0 || options.max_function_evaluations <= 0
         || options.history_size <= 0) {
         throw std::invalid_argument("L-BFGS iteration, evaluation, and history limits must be positive");
     }
-    if (!finite_positive(options.first_order_tolerance)
-        || !finite_positive(options.relative_cost_tolerance)
+    if (!finite_positive(options.gradient_tolerance)
+        || !finite_positive(options.cost_window_relative_tolerance)
+        || !finite_positive(options.cost_plateau_gradient_tolerance)
+        || options.cost_plateau_gradient_tolerance < options.gradient_tolerance
         || !finite_positive(options.scaled_step_tolerance)
-        || !finite_positive(options.curvature_relative_threshold)
-        || options.curvature_relative_threshold >= 1.0) {
+        || !finite_positive(options.curvature_cosine_threshold)
+        || options.curvature_cosine_threshold >= 1.0) {
         throw std::invalid_argument("L-BFGS convergence or curvature tolerance is invalid");
     }
-    if (options.cost_convergence_window <= 0) {
+    if (options.cost_window_size <= 0) {
         throw std::invalid_argument("L-BFGS cost convergence window must be positive");
     }
-    if (!finite_positive(trust.initial_radius)
-        || !finite_positive(trust.min_radius)
-        || !finite_positive(trust.max_radius)
-        || trust.min_radius > trust.initial_radius
-        || trust.initial_radius > trust.max_radius) {
-        throw std::invalid_argument("L-BFGS trust-region radii are invalid");
+    if (!finite_positive(step_control.initial_step_cap)
+        || !finite_positive(step_control.min_step_cap)
+        || !finite_positive(step_control.max_step_cap)
+        || step_control.min_step_cap > step_control.initial_step_cap
+        || step_control.initial_step_cap > step_control.max_step_cap) {
+        throw std::invalid_argument("L-BFGS step caps are invalid");
     }
-    if (!std::isfinite(trust.acceptance_ratio)
-        || !std::isfinite(trust.shrink_ratio)
-        || !std::isfinite(trust.expansion_ratio)
-        || trust.acceptance_ratio < 0.0
-        || trust.acceptance_ratio >= trust.shrink_ratio
-        || trust.shrink_ratio >= trust.expansion_ratio
-        || trust.expansion_ratio >= 1.0) {
-        throw std::invalid_argument("L-BFGS trust-region reduction ratios are invalid");
+    if (!finite_positive(step_control.expansion_min_model_ratio)
+        || step_control.expansion_min_model_ratio >= 1.0
+        || !finite_positive(step_control.backtrack_factor)
+        || step_control.backtrack_factor >= 1.0
+        || !std::isfinite(step_control.expansion_factor)
+        || step_control.expansion_factor <= 1.0) {
+        throw std::invalid_argument("L-BFGS step-control factors are invalid");
     }
-    if (!finite_positive(trust.shrink_factor) || trust.shrink_factor >= 1.0
-        || !std::isfinite(trust.expansion_factor) || trust.expansion_factor <= 1.0) {
-        throw std::invalid_argument("L-BFGS trust-region radius factors are invalid");
+    if (step_control.max_rejections_per_iteration <= 0
+        || step_control.recovery_after_rejections <= 0
+        || step_control.recovery_after_rejections
+            >= step_control.max_rejections_per_iteration) {
+        throw std::invalid_argument("L-BFGS step-control rejection limits are invalid");
     }
-    if (trust.max_consecutive_rejections <= 0
-        || trust.history_reset_after_rejections <= 0
-        || trust.history_reset_after_rejections >= trust.max_consecutive_rejections) {
-        throw std::invalid_argument("L-BFGS trust-region rejection limits are invalid");
-    }
-    if (!std::isfinite(options.history_acceptance_ratio)
-        || options.history_acceptance_ratio < trust.acceptance_ratio
-        || options.history_acceptance_ratio >= 1.0) {
-        throw std::invalid_argument("L-BFGS history acceptance ratio is invalid");
+    if (!std::isfinite(options.history_update_min_model_ratio)
+        || options.history_update_min_model_ratio < 0.0
+        || options.history_update_min_model_ratio >= 1.0) {
+        throw std::invalid_argument("L-BFGS history model-ratio threshold is invalid");
     }
 }
 
@@ -124,13 +122,14 @@ double infinity_norm(const Eigen::VectorXd& value) {
 
 std::string_view LbfgsMinimizer::status_string(const Status status) noexcept {
     switch (status) {
-        case Status::FIRST_ORDER_CONVERGED: return "FIRST_ORDER_CONVERGED";
-        case Status::COST_CONVERGED: return "COST_CONVERGED";
-        case Status::MAX_ITERATIONS: return "MAX_ITERATIONS";
-        case Status::MAX_EVALUATIONS: return "MAX_EVALUATIONS";
-        case Status::TRUST_REGION_TOO_SMALL: return "TRUST_REGION_TOO_SMALL";
-        case Status::STAGNATED: return "STAGNATED";
-        case Status::INITIAL_EVALUATION_NONFINITE: return "INITIAL_EVALUATION_NONFINITE";
+        case Status::CONVERGED_FIRST_ORDER: return "CONVERGED_FIRST_ORDER";
+        case Status::CONVERGED_COST: return "CONVERGED_COST";
+        case Status::ITERATION_LIMIT: return "ITERATION_LIMIT";
+        case Status::EVALUATION_LIMIT: return "EVALUATION_LIMIT";
+        case Status::STALLED_SMALL_STEP: return "STALLED_SMALL_STEP";
+        case Status::STALLED_LINE_SEARCH: return "STALLED_LINE_SEARCH";
+        case Status::STALLED_COST_PLATEAU: return "STALLED_COST_PLATEAU";
+        case Status::INVALID_INITIAL_EVALUATION: return "INVALID_INITIAL_EVALUATION";
         case Status::NUMERICAL_FAILURE: return "NUMERICAL_FAILURE";
     }
     return "UNKNOWN";
@@ -146,11 +145,11 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
     const Eigen::VectorXd variable_scales = validate_blocks_and_make_scales(variable_count, blocks);
 
     Result result;
-    double radius = opt_.trust_region.initial_radius;
-    result.initial_radius = radius;
-    result.final_radius = radius;
-    result.min_radius = radius;
-    result.max_radius = radius;
+    double step_cap = opt_.step_control.initial_step_cap;
+    result.initial_step_cap = step_cap;
+    result.final_step_cap = step_cap;
+    result.min_step_cap = step_cap;
+    result.max_step_cap = step_cap;
 
     Eigen::VectorXd raw_gradient = Eigen::VectorXd::Constant(
         variable_count, std::numeric_limits<double>::quiet_NaN()
@@ -161,15 +160,15 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
     const bool initial_gradient_finite = raw_gradient.size() == variable_count
         && raw_gradient.allFinite();
     if (!std::isfinite(raw_cost) || !initial_gradient_finite) {
-        result.status = Status::INITIAL_EVALUATION_NONFINITE;
+        result.status = Status::INVALID_INITIAL_EVALUATION;
         result.initial_grad_inf_norm = initial_gradient_finite
             ? infinity_norm(raw_gradient)
             : std::numeric_limits<double>::infinity();
         result.grad_inf_norm = result.initial_grad_inf_norm;
-        result.scaled_grad_max_block_norm = std::numeric_limits<double>::infinity();
-        result.first_order_optimality = std::numeric_limits<double>::infinity();
+        result.scaled_gradient_max_block_norm = std::numeric_limits<double>::infinity();
         return result;
     }
+    result.has_finite_incumbent = true;
     result.initial_grad_inf_norm = infinity_norm(raw_gradient);
 
     const Eigen::VectorXd initial_variable_scaled_gradient =
@@ -177,20 +176,18 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
     if (!initial_variable_scaled_gradient.allFinite()) {
         result.status = Status::NUMERICAL_FAILURE;
         result.grad_inf_norm = result.initial_grad_inf_norm;
-        result.scaled_grad_max_block_norm = std::numeric_limits<double>::infinity();
-        result.first_order_optimality = std::numeric_limits<double>::infinity();
+        result.scaled_gradient_max_block_norm = std::numeric_limits<double>::infinity();
         return result;
     }
     const double initial_scaled_block_norm = block_norm(initial_variable_scaled_gradient, blocks);
     if (!std::isfinite(initial_scaled_block_norm)) {
         result.status = Status::NUMERICAL_FAILURE;
         result.grad_inf_norm = result.initial_grad_inf_norm;
-        result.scaled_grad_max_block_norm = initial_scaled_block_norm;
-        result.first_order_optimality = std::numeric_limits<double>::infinity();
+        result.scaled_gradient_max_block_norm = initial_scaled_block_norm;
         return result;
     }
     // 初始 scaled gradient 只用于调理算法内部的目标量级，使目标整体常数缩放不改变
-    // L-BFGS 与 trust-region 的轨迹。收敛判据不能复用这一固定基准，否则种子处一次性
+    // L-BFGS 与 step-control 的轨迹。收敛判据不能复用这一固定基准，否则种子处一次性
     // 的巨大罚项会永久放宽后续的一阶驻点要求。
     const double objective_scale = initial_scaled_block_norm > 0.0
         ? 1.0 / initial_scaled_block_norm
@@ -198,8 +195,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
     if (!finite_positive(objective_scale)) {
         result.status = Status::NUMERICAL_FAILURE;
         result.grad_inf_norm = result.initial_grad_inf_norm;
-        result.scaled_grad_max_block_norm = initial_scaled_block_norm;
-        result.first_order_optimality = std::numeric_limits<double>::infinity();
+        result.scaled_gradient_max_block_norm = initial_scaled_block_norm;
         return result;
     }
     result.objective_scale = objective_scale;
@@ -208,29 +204,30 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
     if (!gradient.allFinite()) {
         result.status = Status::NUMERICAL_FAILURE;
         result.grad_inf_norm = result.initial_grad_inf_norm;
-        result.scaled_grad_max_block_norm = initial_scaled_block_norm;
-        result.first_order_optimality = std::numeric_limits<double>::infinity();
+        result.scaled_gradient_max_block_norm = initial_scaled_block_norm;
         return result;
     }
 
+    enum class SolverMode { LBFGS, STEEPEST_DESCENT_RECOVERY };
+
     std::deque<HistoryPair> history;
+    std::deque<double> accepted_cost_window {raw_cost};
     int accepted_iterations = 0;
     double last_relative_cost_reduction = 0.0;
-    int consecutive_small_cost_reductions = 0;
-    bool force_steepest_direction = false;
+    double window_relative_cost_reduction = 0.0;
+    SolverMode mode = SolverMode::LBFGS;
 
     const auto update_incumbent_diagnostics = [&]() {
         const Eigen::VectorXd variable_scaled_gradient =
             variable_scales.array() * raw_gradient.array();
         result.cost = raw_cost;
         result.grad_inf_norm = infinity_norm(raw_gradient);
-        result.scaled_grad_max_block_norm = block_norm(variable_scaled_gradient, blocks);
-        result.first_order_optimality = result.scaled_grad_max_block_norm
-            / std::max(1.0, std::abs(raw_cost));
+        result.scaled_gradient_max_block_norm = block_norm(variable_scaled_gradient, blocks);
         result.accepted_iterations = accepted_iterations;
+        result.made_progress = accepted_iterations > 0;
         result.last_relative_cost_reduction = last_relative_cost_reduction;
-        result.consecutive_small_cost_reductions = consecutive_small_cost_reductions;
-        result.final_radius = radius;
+        result.window_relative_cost_reduction = window_relative_cost_reduction;
+        result.final_step_cap = step_cap;
     };
     const auto finish = [&](const Status status) {
         result.status = status;
@@ -241,6 +238,28 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         if (history.empty()) return;
         history.clear();
         ++result.history_resets;
+    };
+    const auto reset_cost_window = [&]() {
+        accepted_cost_window.clear();
+        accepted_cost_window.push_back(raw_cost);
+        window_relative_cost_reduction = 0.0;
+    };
+    const auto update_window_reduction = [&]() {
+        if (accepted_cost_window.size()
+            < static_cast<size_t>(opt_.cost_window_size + 1)) {
+            window_relative_cost_reduction = 0.0;
+            return false;
+        }
+        const double oldest_cost = accepted_cost_window.front();
+        window_relative_cost_reduction = (oldest_cost - raw_cost)
+            / std::max(1.0, std::abs(oldest_cost));
+        return window_relative_cost_reduction <= opt_.cost_window_relative_tolerance;
+    };
+    const auto enter_recovery = [&]() {
+        reset_history();
+        reset_cost_window();
+        mode = SolverMode::STEEPEST_DESCENT_RECOVERY;
+        ++result.cost_plateau_recoveries;
     };
     const auto lbfgs_direction = [&]() -> Eigen::VectorXd {
         Eigen::VectorXd q = gradient;
@@ -284,24 +303,43 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
 
     while (accepted_iterations < opt_.max_iterations) {
         update_incumbent_diagnostics();
-        if (result.first_order_optimality <= opt_.first_order_tolerance) {
-            return finish(Status::FIRST_ORDER_CONVERGED);
+        if (result.scaled_gradient_max_block_norm <= opt_.gradient_tolerance) {
+            return finish(Status::CONVERGED_FIRST_ORDER);
         }
-        if (consecutive_small_cost_reductions >= opt_.cost_convergence_window) {
-            return finish(Status::COST_CONVERGED);
+        const bool cost_window_full = accepted_cost_window.size()
+            >= static_cast<size_t>(opt_.cost_window_size + 1);
+        if (update_window_reduction()) {
+            if (result.scaled_gradient_max_block_norm
+                <= opt_.cost_plateau_gradient_tolerance) {
+                return finish(Status::CONVERGED_COST);
+            }
+            if (mode == SolverMode::STEEPEST_DESCENT_RECOVERY) {
+                return finish(Status::STALLED_COST_PLATEAU);
+            }
+            enter_recovery();
+        } else if (cost_window_full
+            && mode == SolverMode::STEEPEST_DESCENT_RECOVERY) {
+            // 恢复窗口取得了足够的累计收益，重新允许构建 L-BFGS 历史。
+            mode = SolverMode::LBFGS;
+            reset_cost_window();
         }
         if (result.function_evaluations >= opt_.max_function_evaluations) {
-            return finish(Status::MAX_EVALUATIONS);
+            return finish(Status::EVALUATION_LIMIT);
         }
 
-        bool using_steepest_direction = force_steepest_direction || history.empty();
+        bool using_steepest_direction =
+            mode == SolverMode::STEEPEST_DESCENT_RECOVERY || history.empty();
         Eigen::VectorXd direction = using_steepest_direction
             ? steepest_direction() : lbfgs_direction();
-        force_steepest_direction = false;
         double directional_derivative = gradient.dot(direction);
         if (!direction.allFinite() || !std::isfinite(directional_derivative)
             || directional_derivative >= 0.0) {
+            if (using_steepest_direction) {
+                return finish(Status::NUMERICAL_FAILURE);
+            }
             reset_history();
+            reset_cost_window();
+            mode = SolverMode::STEEPEST_DESCENT_RECOVERY;
             direction = steepest_direction();
             using_steepest_direction = true;
             directional_derivative = gradient.dot(direction);
@@ -312,44 +350,45 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         }
 
         int consecutive_rejections = 0;
-        bool steepest_rescue_attempted = using_steepest_direction;
         while (true) {
             if (result.function_evaluations >= opt_.max_function_evaluations) {
-                return finish(Status::MAX_EVALUATIONS);
+                return finish(Status::EVALUATION_LIMIT);
             }
 
             const double direction_norm = block_norm(direction, blocks);
             if (!std::isfinite(direction_norm) || direction_norm <= 0.0) {
                 return finish(Status::NUMERICAL_FAILURE);
             }
-            const double alpha = std::min(1.0, radius / direction_norm);
+            const double alpha = std::min(1.0, step_cap / direction_norm);
             const Eigen::VectorXd step = alpha * direction;
             const double step_norm = block_norm(step, blocks);
             if (!std::isfinite(step_norm)) {
                 return finish(Status::NUMERICAL_FAILURE);
             }
             if (step_norm <= opt_.scaled_step_tolerance) {
-                if (!history.empty()) {
+                if (!using_steepest_direction) {
                     reset_history();
+                    reset_cost_window();
+                    mode = SolverMode::STEEPEST_DESCENT_RECOVERY;
                     direction = steepest_direction();
                     using_steepest_direction = true;
-                    steepest_rescue_attempted = true;
                     continue;
                 }
-                return finish(Status::STAGNATED);
+                return finish(Status::STALLED_SMALL_STEP);
             }
 
-            const bool boundary_step = step_norm >= BOUNDARY_FRACTION * radius;
-            if (boundary_step) ++result.boundary_steps;
+            const bool capped_step = step_norm >= BOUNDARY_FRACTION * step_cap;
+            if (capped_step) ++result.step_cap_hits;
 
             const double step_derivative = gradient.dot(step);
             const double predicted_reduction = -(1.0 - 0.5 * alpha) * step_derivative;
             if (!std::isfinite(predicted_reduction) || predicted_reduction <= 0.0) {
-                if (!history.empty()) {
+                if (!using_steepest_direction) {
                     reset_history();
+                    reset_cost_window();
+                    mode = SolverMode::STEEPEST_DESCENT_RECOVERY;
                     direction = steepest_direction();
                     using_steepest_direction = true;
-                    steepest_rescue_attempted = true;
                     continue;
                 }
                 return finish(Status::NUMERICAL_FAILURE);
@@ -376,81 +415,88 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
             }
 
             double actual_reduction = -std::numeric_limits<double>::infinity();
-            double reduction_ratio = -std::numeric_limits<double>::infinity();
+            double model_ratio = -std::numeric_limits<double>::infinity();
             if (trial_finite) {
                 // 先消去 raw 目标中的常数偏置，再施加归一化尺度。
                 actual_reduction = (raw_cost - trial_raw_cost) * objective_scale;
-                reduction_ratio = actual_reduction / predicted_reduction;
-                if (!std::isfinite(reduction_ratio)) trial_finite = false;
+                model_ratio = actual_reduction / predicted_reduction;
+                if (!std::isfinite(model_ratio)) trial_finite = false;
             }
             if (!trial_finite) ++result.nonfinite_trials;
 
             result.last_actual_reduction = actual_reduction;
             result.last_predicted_reduction = predicted_reduction;
-            result.last_reduction_ratio = reduction_ratio;
+            result.last_model_ratio = model_ratio;
 
-            const double previous_radius = radius;
-            const bool attempted_at_min_radius = previous_radius <= opt_.trust_region.min_radius;
+            const double previous_step_cap = step_cap;
+            const bool attempted_at_min_step_cap =
+                previous_step_cap <= opt_.step_control.min_step_cap;
             const bool accepted = trial_finite
                 && actual_reduction >= ARMIJO_C1 * (-step_derivative);
             if (!accepted) {
-                radius = std::max(
-                    opt_.trust_region.min_radius,
-                    opt_.trust_region.shrink_factor * std::min(previous_radius, step_norm)
+                step_cap = std::max(
+                    opt_.step_control.min_step_cap,
+                    opt_.step_control.backtrack_factor
+                        * std::min(previous_step_cap, step_norm)
                 );
-                if (radius < previous_radius) ++result.radius_shrinks;
-            } else if (reduction_ratio > opt_.trust_region.expansion_ratio && boundary_step) {
-                radius = std::min(
-                    opt_.trust_region.max_radius,
-                    opt_.trust_region.expansion_factor * previous_radius
+                if (step_cap < previous_step_cap) ++result.step_cap_shrinks;
+            } else if (model_ratio > opt_.step_control.expansion_min_model_ratio
+                && capped_step) {
+                step_cap = std::min(
+                    opt_.step_control.max_step_cap,
+                    opt_.step_control.expansion_factor * previous_step_cap
                 );
-                if (radius > previous_radius) ++result.radius_expansions;
+                if (step_cap > previous_step_cap) ++result.step_cap_expansions;
             }
-            result.min_radius = std::min(result.min_radius, radius);
-            result.max_radius = std::max(result.max_radius, radius);
-            result.final_radius = radius;
+            result.min_step_cap = std::min(result.min_step_cap, step_cap);
+            result.max_step_cap = std::max(result.max_step_cap, step_cap);
+            result.final_step_cap = step_cap;
 
             if (!accepted) {
                 ++result.rejected_trials;
                 ++consecutive_rejections;
 
                 const bool repeated_interior_step = alpha == 1.0
-                    && radius >= direction_norm;
-                if (!steepest_rescue_attempted
-                    && (attempted_at_min_radius || repeated_interior_step
-                        || consecutive_rejections >= opt_.trust_region.history_reset_after_rejections)) {
+                    && step_cap >= direction_norm;
+                if (!using_steepest_direction
+                    && (attempted_at_min_step_cap || repeated_interior_step
+                        || consecutive_rejections
+                            >= opt_.step_control.recovery_after_rejections)) {
                     reset_history();
+                    reset_cost_window();
+                    mode = SolverMode::STEEPEST_DESCENT_RECOVERY;
                     direction = steepest_direction();
                     using_steepest_direction = true;
-                    steepest_rescue_attempted = true;
+                    consecutive_rejections = 0;
                     continue;
                 }
-                if (attempted_at_min_radius || repeated_interior_step
-                    || consecutive_rejections >= opt_.trust_region.max_consecutive_rejections) {
-                    return finish(Status::STAGNATED);
+                if (attempted_at_min_step_cap || repeated_interior_step
+                    || consecutive_rejections
+                        >= opt_.step_control.max_rejections_per_iteration) {
+                    return finish(Status::STALLED_LINE_SEARCH);
                 }
                 continue;
             }
 
             const Eigen::VectorXd y = trial_gradient - gradient;
-            const bool history_eligible = consecutive_rejections == 0
-                && reduction_ratio >= opt_.history_acceptance_ratio;
+            const bool history_eligible = mode == SolverMode::LBFGS
+                && consecutive_rejections == 0
+                && model_ratio >= opt_.history_update_min_model_ratio;
             if (!history_eligible) {
                 reset_history();
-                force_steepest_direction = true;
             }
             bool history_updated = false;
             if (history_eligible && y.allFinite()) {
                 const double sy = step.dot(y);
                 const double s_norm = step.stableNorm();
                 const double y_norm = y.stableNorm();
-                const double relative_curvature = s_norm > 0.0 && y_norm > 0.0
+                const double curvature_cosine = s_norm > 0.0 && y_norm > 0.0
                     ? (sy / s_norm) / y_norm
                     : 0.0;
                 const double inverse_curvature = 1.0 / sy;
-                if (std::isfinite(sy) && std::isfinite(relative_curvature)
+                if (std::isfinite(sy) && std::isfinite(curvature_cosine)
                     && finite_positive(inverse_curvature)
-                    && relative_curvature > opt_.curvature_relative_threshold) {
+                    && curvature_cosine > opt_.curvature_cosine_threshold) {
                     if (static_cast<int>(history.size()) >= opt_.history_size) {
                         history.pop_front();
                     }
@@ -467,28 +513,37 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
 
             last_relative_cost_reduction = (raw_cost - trial_raw_cost)
                 / std::max(1.0, std::abs(raw_cost));
-            if (last_relative_cost_reduction <= opt_.relative_cost_tolerance) {
-                ++consecutive_small_cost_reductions;
-            } else {
-                consecutive_small_cost_reductions = 0;
-            }
             x = trial_x;
             raw_cost = trial_raw_cost;
             raw_gradient = std::move(trial_raw_gradient);
             gradient = std::move(trial_gradient);
             ++accepted_iterations;
+
+            accepted_cost_window.push_back(raw_cost);
+            while (accepted_cost_window.size()
+                > static_cast<size_t>(opt_.cost_window_size + 1)) {
+                accepted_cost_window.pop_front();
+            }
+            if (mode == SolverMode::STEEPEST_DESCENT_RECOVERY
+                && model_ratio >= opt_.history_update_min_model_ratio) {
+                // 恢复是否成功由局部模型可信度决定，不能再依赖含常数基线的总 cost。
+                mode = SolverMode::LBFGS;
+                reset_cost_window();
+            }
             break;
         }
     }
 
     update_incumbent_diagnostics();
-    if (result.first_order_optimality <= opt_.first_order_tolerance) {
-        return finish(Status::FIRST_ORDER_CONVERGED);
+    if (result.scaled_gradient_max_block_norm <= opt_.gradient_tolerance) {
+        return finish(Status::CONVERGED_FIRST_ORDER);
     }
-    if (consecutive_small_cost_reductions >= opt_.cost_convergence_window) {
-        return finish(Status::COST_CONVERGED);
+    if (update_window_reduction()
+        && result.scaled_gradient_max_block_norm
+            <= opt_.cost_plateau_gradient_tolerance) {
+        return finish(Status::CONVERGED_COST);
     }
-    return finish(Status::MAX_ITERATIONS);
+    return finish(Status::ITERATION_LIMIT);
 }
 
 } // namespace nav_executor

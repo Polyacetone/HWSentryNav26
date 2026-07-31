@@ -62,13 +62,14 @@ public:
         double max_virtual_time_scale = 20.0;
         int max_function_evaluations = 4000;
         int history_size = 8;
-        double first_order_tolerance = 1e-5;
-        double relative_cost_tolerance = 1e-5;
-        int cost_convergence_window = 10;
+        double gradient_tolerance = 1e-5;
+        double cost_window_relative_tolerance = 1e-5;
+        int cost_window_size = 10;
+        double cost_plateau_gradient_tolerance = 1e-4;
         double scaled_step_tolerance = 1e-12;
-        LbfgsMinimizer::TrustRegionOptions trust_region;
-        double curvature_relative_threshold = 1e-8;
-        double history_acceptance_ratio = 0.25;
+        LbfgsMinimizer::StepControlOptions step_control;
+        double curvature_cosine_threshold = 1e-8;
+        double history_update_min_model_ratio = 0.25;
     };
 
     struct Params {
@@ -118,31 +119,31 @@ public:
         MincoTrajectory trajectory;
         bool success = false;
         double cost = 0.0;
-        LbfgsMinimizer::Status optimizer_status = LbfgsMinimizer::Status::MAX_ITERATIONS;
+        LbfgsMinimizer::Status optimizer_status = LbfgsMinimizer::Status::ITERATION_LIMIT;
         int accepted_iterations = 0;
         int function_evaluations = 0;
         int trial_evaluations = 0;
         int rejected_trials = 0;
         int nonfinite_trials = 0;
-        double final_grad_inf_norm = 0.0; // raw mixed-coordinate gradient，仅作兼容诊断
-        double final_scaled_grad_max_block_norm = 0.0;
-        double final_first_order_optimality = 0.0;
+        double final_grad_inf_norm = 0.0; // raw mixed-coordinate gradient
+        double final_scaled_gradient_max_block_norm = 0.0;
 
-        double initial_radius = 0.0;
-        double final_radius = 0.0;
-        double min_radius = 0.0;
-        double max_radius = 0.0;
-        int radius_shrinks = 0;
-        int radius_expansions = 0;
-        int boundary_steps = 0;
+        double initial_step_cap = 0.0;
+        double final_step_cap = 0.0;
+        double min_step_cap = 0.0;
+        double max_step_cap = 0.0;
+        int step_cap_shrinks = 0;
+        int step_cap_expansions = 0;
+        int step_cap_hits = 0;
         int history_updates = 0;
         int history_skips = 0;
         int history_resets = 0;
         double last_relative_cost_reduction = 0.0;
-        int consecutive_small_cost_reductions = 0;
+        double window_relative_cost_reduction = 0.0;
+        int cost_plateau_recoveries = 0;
         double last_actual_reduction = 0.0;
         double last_predicted_reduction = 0.0;
-        double last_reduction_ratio = 0.0;
+        double last_model_ratio = 0.0;
 
         [[nodiscard]] std::string_view optimizer_status_string() const noexcept {
             return LbfgsMinimizer::status_string(optimizer_status);

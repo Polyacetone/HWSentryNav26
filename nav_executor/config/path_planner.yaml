@@ -91,23 +91,22 @@
           max_virtual_time_scale: 20.0 # softplus Jacobian 很小时 virtual-time scale 的上限
           max_function_evaluations: 4000 # 含初始评估及所有 rejected trial
           history_size: 8 # 保留的 L-BFGS (s,y) 对数
-          first_order_tolerance: 1.0e-5 # max_block ‖D_b g_b‖₂ / max(1,|f|) 一阶最优性阈值
-          relative_cost_tolerance: 1.0e-5 # accepted step 的相对目标改善低于此值时计入实际收益收敛窗口
-          cost_convergence_window: 10 # 连续多少次低收益 accepted step 后判为 COST_CONVERGED
+          gradient_tolerance: 1.0e-5 # max_block ‖D_b g_b‖₂ 绝对一阶最优性阈值
+          cost_window_relative_tolerance: 1.0e-5 # accepted incumbent 窗口首尾的累计相对目标改善阈值
+          cost_window_size: 10 # 实际收益判定所覆盖的 accepted step 数
+          cost_plateau_gradient_tolerance: 1.0e-4 # cost plateau 还须满足的宽松梯度阈值，否则进入恢复
           scaled_step_tolerance: 1.0e-12 # 归一化 block 步长停滞阈值
-          trust_region:
-            initial_radius: 0.5 # Armijo 首次试探的 max-step cap（无量纲 block 坐标）
-            min_radius: 1.0e-10 # 最小 max-step cap（无量纲 block 坐标）
-            max_radius: 2.0 # 最大 max-step cap（无量纲 block 坐标）
-            acceptance_ratio: 0.1 # 保留兼容；Armijo 不使用此接受阈值
-            shrink_ratio: 0.25 # 保留兼容；Armijo 不使用此阈值
-            expansion_ratio: 0.75 # rho 超过此值的高可信边界步才扩大 max-step cap
-            shrink_factor: 0.25 # Armijo 拒绝后的 max-step cap 回溯因子
+          step_control:
+            initial_step_cap: 0.5 # Armijo 首次试探的最大归一化 block 步长
+            min_step_cap: 1.0e-10 # 最小归一化 block 步长上限
+            max_step_cap: 2.0 # 最大归一化 block 步长上限
+            expansion_min_model_ratio: 0.75 # rho 超过此值的 capped step 才扩大步长上限
+            backtrack_factor: 0.25 # Armijo 拒绝后的步长上限回退因子
             expansion_factor: 2.0 # 高可信边界步的 max-step cap 扩大因子
-            max_consecutive_rejections: 20 # Armijo 连续拒绝上限
-            history_reset_after_rejections: 3 # 达到此次数触发归一化 -gradient rescue
-          curvature_relative_threshold: 1.0e-8 # sy > eps*||s||*||y|| 才接受曲率对
-          history_acceptance_ratio: 0.25 # 低模型可信度的 accepted step 不写入历史
+            max_rejections_per_iteration: 20 # 单次 accepted iteration 内的 Armijo 拒绝上限
+            recovery_after_rejections: 3 # 达到此次数切换到归一化负梯度恢复
+          curvature_cosine_threshold: 1.0e-8 # sy/(||s||·||y||) 超过此值才接受曲率对
+          history_update_min_model_ratio: 0.25 # rho 低于此值的 accepted step 不写入历史
         min_segment_time: 0.05 # 每段动力学见证的最短物理时长（秒）
 
       environment_validation: # 环境验收：路径与代价地图、方向地形的关系

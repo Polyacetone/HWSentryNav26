@@ -18,53 +18,55 @@ public:
         double scale = 1.0;
     };
 
-    struct TrustRegionOptions {
-        double initial_radius = 0.5;
-        double min_radius = 1e-10;
-        double max_radius = 2.0;
-        double acceptance_ratio = 0.1;
-        double shrink_ratio = 0.25;
-        double expansion_ratio = 0.75;
-        double shrink_factor = 0.25;
+    struct StepControlOptions {
+        double initial_step_cap = 0.5;
+        double min_step_cap = 1e-10;
+        double max_step_cap = 2.0;
+        double expansion_min_model_ratio = 0.75;
+        double backtrack_factor = 0.25;
         double expansion_factor = 2.0;
-        int max_consecutive_rejections = 20;
-        int history_reset_after_rejections = 3;
+        int max_rejections_per_iteration = 20;
+        int recovery_after_rejections = 3;
     };
 
     struct Options {
         int max_iterations = 200;
         int max_function_evaluations = 400;
         int history_size = 8;
-        // 一阶最优性阈值：max_block ‖D_b g_b‖₂ / max(1, |f|)。
-        // D_b 是调用方提供的变量物理尺度，与算法内部的目标归一化无关。
-        double first_order_tolerance = 1e-5;
-        // 连续 accepted step 的 raw 目标相对改善均不超过该值时，按实际收益收敛。
-        double relative_cost_tolerance = 1e-5;
-        int cost_convergence_window = 10;
+        // 一阶最优性阈值：max_block ‖D_b g_b‖₂。D_b 是调用方提供的变量物理
+        // 尺度。使用绝对梯度，避免不可控的大 cost 基线放宽驻点判据。
+        double gradient_tolerance = 1e-5;
+        // accepted incumbent 窗口首尾的 raw 目标相对改善阈值。
+        double cost_window_relative_tolerance = 1e-5;
+        int cost_window_size = 10;
+        // cost plateau 只有在一阶最优性也低于该宽松阈值时才是收敛，否则进入恢复。
+        double cost_plateau_gradient_tolerance = 1e-4;
         double scaled_step_tolerance = 1e-12;
-        TrustRegionOptions trust_region;
-        double curvature_relative_threshold = 1e-8;
-        double history_acceptance_ratio = 0.25;
+        StepControlOptions step_control;
+        double curvature_cosine_threshold = 1e-8;
+        double history_update_min_model_ratio = 0.25;
     };
 
     enum class Status {
-        FIRST_ORDER_CONVERGED,
-        COST_CONVERGED,
-        MAX_ITERATIONS,
-        MAX_EVALUATIONS,
-        TRUST_REGION_TOO_SMALL,
-        STAGNATED,
-        INITIAL_EVALUATION_NONFINITE,
+        CONVERGED_FIRST_ORDER,
+        CONVERGED_COST,
+        ITERATION_LIMIT,
+        EVALUATION_LIMIT,
+        STALLED_SMALL_STEP,
+        STALLED_LINE_SEARCH,
+        STALLED_COST_PLATEAU,
+        INVALID_INITIAL_EVALUATION,
         NUMERICAL_FAILURE,
     };
 
     struct Result {
-        Status status = Status::MAX_ITERATIONS;
+        Status status = Status::ITERATION_LIMIT;
+        bool has_finite_incumbent = false;
+        bool made_progress = false;
         double cost = 0.0; // 当前有限 incumbent 的 raw cost
         double initial_grad_inf_norm = 0.0; // raw gradient
         double grad_inf_norm = 0.0;         // raw gradient
-        double scaled_grad_max_block_norm = 0.0;
-        double first_order_optimality = 0.0;
+        double scaled_gradient_max_block_norm = 0.0;
         double objective_scale = 1.0;
 
         int accepted_iterations = 0;
@@ -73,13 +75,13 @@ public:
         int rejected_trials = 0;
         int nonfinite_trials = 0;
 
-        double initial_radius = 0.0;
-        double final_radius = 0.0;
-        double min_radius = 0.0;
-        double max_radius = 0.0;
-        int radius_shrinks = 0;
-        int radius_expansions = 0;
-        int boundary_steps = 0;
+        double initial_step_cap = 0.0;
+        double final_step_cap = 0.0;
+        double min_step_cap = 0.0;
+        double max_step_cap = 0.0;
+        int step_cap_shrinks = 0;
+        int step_cap_expansions = 0;
+        int step_cap_hits = 0;
 
         int history_updates = 0;
         int history_skips = 0;
@@ -87,9 +89,15 @@ public:
 
         double last_actual_reduction = 0.0;    // 归一化目标
         double last_predicted_reduction = 0.0; // 归一化目标
-        double last_reduction_ratio = 0.0;
+        double last_model_ratio = 0.0;
         double last_relative_cost_reduction = 0.0; // raw 目标，以上一个 accepted cost 归一
-        int consecutive_small_cost_reductions = 0;
+        double window_relative_cost_reduction = 0.0;
+        int cost_plateau_recoveries = 0;
+
+        [[nodiscard]] bool converged() const noexcept {
+            return status == Status::CONVERGED_FIRST_ORDER
+                || status == Status::CONVERGED_COST;
+        }
     };
 
     using CostFunction = std::function<double(const Eigen::VectorXd& x, Eigen::VectorXd& grad)>;

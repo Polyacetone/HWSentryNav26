@@ -682,17 +682,18 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         RCLCPP_DEBUG(
             logger_,
             "Plan #%lu [minco] status=%.*s time=%.2f ms cost=%.3g->%.3g "
-            "grad=%.3g->%.3g (scaled=%.3g, first-order=%.3g) "
-            "iterations=%d/%d rejected=%d nonfinite=%d",
+            "grad=%.3g->%.3g (scaled=%.3g) "
+            "iterations=%d/%d rejected=%d nonfinite=%d step-cap=%.3g "
+            "window-df=%.3g plateau-recoveries=%d",
             static_cast<unsigned long>(req.goal.id),
             static_cast<int>(status.size()), status.data(),
             std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
             opt.seed_costs.total(), opt.final_costs.total(),
             opt.initial_grad_inf_norm, opt.final_grad_inf_norm,
-            opt.final_scaled_grad_max_block_norm,
-            opt.final_first_order_optimality,
+            opt.final_scaled_gradient_max_block_norm,
             opt.accepted_iterations, opt.function_evaluations,
-            opt.rejected_trials, opt.nonfinite_trials
+            opt.rejected_trials, opt.nonfinite_trials, opt.final_step_cap,
+            opt.window_relative_cost_reduction, opt.cost_plateau_recoveries
         );
         RCLCPP_DEBUG(
             logger_,

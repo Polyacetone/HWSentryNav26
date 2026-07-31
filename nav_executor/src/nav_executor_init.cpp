@@ -619,24 +619,23 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .max_virtual_time_scale = declare_parameter<double>("path_planner.minco.optimizer.max_virtual_time_scale"),
             .max_function_evaluations = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.max_function_evaluations")),
             .history_size = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.history_size")),
-            .first_order_tolerance = declare_parameter<double>("path_planner.minco.optimizer.first_order_tolerance"),
-            .relative_cost_tolerance = declare_parameter<double>("path_planner.minco.optimizer.relative_cost_tolerance"),
-            .cost_convergence_window = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.cost_convergence_window")),
+            .gradient_tolerance = declare_parameter<double>("path_planner.minco.optimizer.gradient_tolerance"),
+            .cost_window_relative_tolerance = declare_parameter<double>("path_planner.minco.optimizer.cost_window_relative_tolerance"),
+            .cost_window_size = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.cost_window_size")),
+            .cost_plateau_gradient_tolerance = declare_parameter<double>("path_planner.minco.optimizer.cost_plateau_gradient_tolerance"),
             .scaled_step_tolerance = declare_parameter<double>("path_planner.minco.optimizer.scaled_step_tolerance"),
-            .trust_region = {
-                .initial_radius = declare_parameter<double>("path_planner.minco.optimizer.trust_region.initial_radius"),
-                .min_radius = declare_parameter<double>("path_planner.minco.optimizer.trust_region.min_radius"),
-                .max_radius = declare_parameter<double>("path_planner.minco.optimizer.trust_region.max_radius"),
-                .acceptance_ratio = declare_parameter<double>("path_planner.minco.optimizer.trust_region.acceptance_ratio"),
-                .shrink_ratio = declare_parameter<double>("path_planner.minco.optimizer.trust_region.shrink_ratio"),
-                .expansion_ratio = declare_parameter<double>("path_planner.minco.optimizer.trust_region.expansion_ratio"),
-                .shrink_factor = declare_parameter<double>("path_planner.minco.optimizer.trust_region.shrink_factor"),
-                .expansion_factor = declare_parameter<double>("path_planner.minco.optimizer.trust_region.expansion_factor"),
-                .max_consecutive_rejections = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.trust_region.max_consecutive_rejections")),
-                .history_reset_after_rejections = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.trust_region.history_reset_after_rejections")),
+            .step_control = {
+                .initial_step_cap = declare_parameter<double>("path_planner.minco.optimizer.step_control.initial_step_cap"),
+                .min_step_cap = declare_parameter<double>("path_planner.minco.optimizer.step_control.min_step_cap"),
+                .max_step_cap = declare_parameter<double>("path_planner.minco.optimizer.step_control.max_step_cap"),
+                .expansion_min_model_ratio = declare_parameter<double>("path_planner.minco.optimizer.step_control.expansion_min_model_ratio"),
+                .backtrack_factor = declare_parameter<double>("path_planner.minco.optimizer.step_control.backtrack_factor"),
+                .expansion_factor = declare_parameter<double>("path_planner.minco.optimizer.step_control.expansion_factor"),
+                .max_rejections_per_iteration = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.step_control.max_rejections_per_iteration")),
+                .recovery_after_rejections = static_cast<int>(declare_parameter<int>("path_planner.minco.optimizer.step_control.recovery_after_rejections")),
             },
-            .curvature_relative_threshold = declare_parameter<double>("path_planner.minco.optimizer.curvature_relative_threshold"),
-            .history_acceptance_ratio = declare_parameter<double>("path_planner.minco.optimizer.history_acceptance_ratio"),
+            .curvature_cosine_threshold = declare_parameter<double>("path_planner.minco.optimizer.curvature_cosine_threshold"),
+            .history_update_min_model_ratio = declare_parameter<double>("path_planner.minco.optimizer.history_update_min_model_ratio"),
         },
         .min_segment_time = declare_parameter<double>("path_planner.minco.min_segment_time"),
         .runup_body_norm_lo = declare_parameter<double>("path_planner.minco.runup.body_norm_lo"),
@@ -763,7 +762,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "MINCO sample and iteration counts must be positive"
     );
     const auto& minco_optimizer = c.minco.optimizer;
-    const auto& trust_region = minco_optimizer.trust_region;
+    const auto& step_control = minco_optimizer.step_control;
     require_parameter(
         positive_finite(minco_optimizer.position_scale)
         && positive_finite(minco_optimizer.physical_time_scale)
@@ -774,47 +773,43 @@ PlannerConfig NavExecutorNode::load_planner_config(
     require_parameter(
         minco_optimizer.max_function_evaluations > 0
         && minco_optimizer.history_size > 0
-        && positive_finite(minco_optimizer.first_order_tolerance)
-        && positive_finite(minco_optimizer.relative_cost_tolerance)
-        && minco_optimizer.cost_convergence_window > 0
+        && positive_finite(minco_optimizer.gradient_tolerance)
+        && positive_finite(minco_optimizer.cost_window_relative_tolerance)
+        && minco_optimizer.cost_window_size > 0
+        && positive_finite(minco_optimizer.cost_plateau_gradient_tolerance)
+        && minco_optimizer.cost_plateau_gradient_tolerance
+            >= minco_optimizer.gradient_tolerance
         && positive_finite(minco_optimizer.scaled_step_tolerance),
         "MINCO optimizer limits and convergence tolerances are invalid"
     );
     require_parameter(
-        positive_finite(trust_region.min_radius)
-        && positive_finite(trust_region.initial_radius)
-        && positive_finite(trust_region.max_radius)
-        && trust_region.min_radius <= trust_region.initial_radius
-        && trust_region.initial_radius <= trust_region.max_radius,
-        "MINCO optimizer trust-region radii are invalid"
+        positive_finite(step_control.min_step_cap)
+        && positive_finite(step_control.initial_step_cap)
+        && positive_finite(step_control.max_step_cap)
+        && step_control.min_step_cap <= step_control.initial_step_cap
+        && step_control.initial_step_cap <= step_control.max_step_cap,
+        "MINCO optimizer step caps are invalid"
     );
     require_parameter(
-        std::isfinite(trust_region.acceptance_ratio)
-        && std::isfinite(trust_region.shrink_ratio)
-        && std::isfinite(trust_region.expansion_ratio)
-        && trust_region.acceptance_ratio >= 0.0
-        && trust_region.acceptance_ratio < trust_region.shrink_ratio
-        && trust_region.shrink_ratio < trust_region.expansion_ratio
-        && trust_region.expansion_ratio < 1.0,
-        "MINCO optimizer trust-region reduction ratios are invalid"
+        std::isfinite(step_control.expansion_min_model_ratio)
+        && step_control.expansion_min_model_ratio > 0.0
+        && step_control.expansion_min_model_ratio < 1.0
+        && positive_finite(step_control.backtrack_factor)
+        && step_control.backtrack_factor < 1.0
+        && std::isfinite(step_control.expansion_factor)
+        && step_control.expansion_factor > 1.0
+        && step_control.max_rejections_per_iteration > 0
+        && step_control.recovery_after_rejections > 0
+        && step_control.recovery_after_rejections
+            < step_control.max_rejections_per_iteration,
+        "MINCO optimizer step-control factors or rejection limits are invalid"
     );
     require_parameter(
-        positive_finite(trust_region.shrink_factor)
-        && trust_region.shrink_factor < 1.0
-        && std::isfinite(trust_region.expansion_factor)
-        && trust_region.expansion_factor > 1.0
-        && trust_region.max_consecutive_rejections > 0
-        && trust_region.history_reset_after_rejections > 0
-        && trust_region.history_reset_after_rejections
-            < trust_region.max_consecutive_rejections,
-        "MINCO optimizer trust-region factors or rejection limits are invalid"
-    );
-    require_parameter(
-        positive_finite(minco_optimizer.curvature_relative_threshold)
-        && minco_optimizer.curvature_relative_threshold < 1.0
-        && std::isfinite(minco_optimizer.history_acceptance_ratio)
-        && minco_optimizer.history_acceptance_ratio >= trust_region.acceptance_ratio
-        && minco_optimizer.history_acceptance_ratio < 1.0,
+        positive_finite(minco_optimizer.curvature_cosine_threshold)
+        && minco_optimizer.curvature_cosine_threshold < 1.0
+        && std::isfinite(minco_optimizer.history_update_min_model_ratio)
+        && minco_optimizer.history_update_min_model_ratio >= 0.0
+        && minco_optimizer.history_update_min_model_ratio < 1.0,
         "MINCO optimizer curvature parameters are invalid"
     );
     require_parameter(

@@ -960,13 +960,17 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     options.max_iterations = params_.max_iterations;
     options.max_function_evaluations = params_.optimizer.max_function_evaluations;
     options.history_size = params_.optimizer.history_size;
-    options.first_order_tolerance = params_.optimizer.first_order_tolerance;
-    options.relative_cost_tolerance = params_.optimizer.relative_cost_tolerance;
-    options.cost_convergence_window = params_.optimizer.cost_convergence_window;
+    options.gradient_tolerance = params_.optimizer.gradient_tolerance;
+    options.cost_window_relative_tolerance =
+        params_.optimizer.cost_window_relative_tolerance;
+    options.cost_window_size = params_.optimizer.cost_window_size;
+    options.cost_plateau_gradient_tolerance =
+        params_.optimizer.cost_plateau_gradient_tolerance;
     options.scaled_step_tolerance = params_.optimizer.scaled_step_tolerance;
-    options.trust_region = params_.optimizer.trust_region;
-    options.curvature_relative_threshold = params_.optimizer.curvature_relative_threshold;
-    options.history_acceptance_ratio = params_.optimizer.history_acceptance_ratio;
+    options.step_control = params_.optimizer.step_control;
+    options.curvature_cosine_threshold = params_.optimizer.curvature_cosine_threshold;
+    options.history_update_min_model_ratio =
+        params_.optimizer.history_update_min_model_ratio;
     LbfgsMinimizer solver(options);
 
     std::vector<LbfgsMinimizer::VariableBlock> variable_blocks;
@@ -1018,33 +1022,30 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     result.nonfinite_trials = lr.nonfinite_trials;
     result.initial_grad_inf_norm = lr.initial_grad_inf_norm;
     result.final_grad_inf_norm = lr.grad_inf_norm;
-    result.final_scaled_grad_max_block_norm = lr.scaled_grad_max_block_norm;
-    result.final_first_order_optimality = lr.first_order_optimality;
-    result.initial_radius = lr.initial_radius;
-    result.final_radius = lr.final_radius;
-    result.min_radius = lr.min_radius;
-    result.max_radius = lr.max_radius;
-    result.radius_shrinks = lr.radius_shrinks;
-    result.radius_expansions = lr.radius_expansions;
-    result.boundary_steps = lr.boundary_steps;
+    result.final_scaled_gradient_max_block_norm =
+        lr.scaled_gradient_max_block_norm;
+    result.initial_step_cap = lr.initial_step_cap;
+    result.final_step_cap = lr.final_step_cap;
+    result.min_step_cap = lr.min_step_cap;
+    result.max_step_cap = lr.max_step_cap;
+    result.step_cap_shrinks = lr.step_cap_shrinks;
+    result.step_cap_expansions = lr.step_cap_expansions;
+    result.step_cap_hits = lr.step_cap_hits;
     result.history_updates = lr.history_updates;
     result.history_skips = lr.history_skips;
     result.history_resets = lr.history_resets;
     result.last_relative_cost_reduction = lr.last_relative_cost_reduction;
-    result.consecutive_small_cost_reductions = lr.consecutive_small_cost_reductions;
+    result.window_relative_cost_reduction = lr.window_relative_cost_reduction;
+    result.cost_plateau_recoveries = lr.cost_plateau_recoveries;
     result.last_actual_reduction = lr.last_actual_reduction;
     result.last_predicted_reduction = lr.last_predicted_reduction;
-    result.last_reduction_ratio = lr.last_reduction_ratio;
+    result.last_model_ratio = lr.last_model_ratio;
 
-    const bool failed_initial_evaluation =
-        lr.status == LbfgsMinimizer::Status::INITIAL_EVALUATION_NONFINITE;
-    const bool numerical_failure =
-        lr.status == LbfgsMinimizer::Status::NUMERICAL_FAILURE;
-    // 初值恰好满足一阶最优性是正常优化结果；除此之外，没有 accepted step 就只剩
-    // 原始 seed，不能作为优化失败后的隐式回退发布。
-    const bool seed_only_incumbent = lr.accepted_iterations == 0
-        && lr.status != LbfgsMinimizer::Status::FIRST_ORDER_CONVERGED;
-    if (failed_initial_evaluation || numerical_failure || seed_only_incumbent) {
+    // 求解终止原因与 incumbent 可用性正交。初值恰好收敛可以发布；除此之外，必须
+    // 至少取得一次 accepted progress，避免把失败后的原始 seed 当成优化结果。
+    const bool publishable_incumbent = lr.has_finite_incumbent
+        && (lr.converged() || lr.made_progress);
+    if (!publishable_incumbent) {
         result.error = "L-BFGS terminated with "
             + std::string(LbfgsMinimizer::status_string(lr.status))
             + " without a publishable optimized result (cost=" + std::to_string(lr.cost)
