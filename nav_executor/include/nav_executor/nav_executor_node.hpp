@@ -24,7 +24,7 @@
 #include <interfaces/msg/idle_chassis_mode_override.hpp>
 #include <interfaces/msg/nav_executor_diag.hpp>
 
-#include <nav_executor/common/environment/world_context.hpp>
+#include <nav_executor/common/environment/obstacle_semantics.hpp>
 #include <nav_executor/common/tracking/route_tracker.hpp>
 #include <nav_executor/task_manager/task_manager.hpp>
 #include <nav_executor/path_executor/path_executor.hpp>
@@ -65,6 +65,7 @@ private:
     // ─── 工具 ───
     bool get_chassis_pose(Eigen::Vector3d& chassis_pose) const;
     void try_init_step_mask();
+    void refresh_planner_obstacles();
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     nav_msgs::msg::Path trajectory_to_nav_msg(const MincoTrajectory& trajectory) const;
     visualization_msgs::msg::Marker trajectory_to_marker(const AnnotatedPath& path) const;
@@ -105,7 +106,7 @@ private:
     double remaining_energy_filter_alpha_{};
     double prediction_dt_{};
     double dynamic_prediction_horizon_seconds_{};
-    double dynamic_prediction_weight_decay_{};
+    int obstacle_occupied_threshold_{};
     double path_publish_sample_resolution_{};
     double debug_velocity_color_min_{};
     double debug_velocity_color_max_{};
@@ -129,7 +130,7 @@ private:
     // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_;
     CostMap::ConstPtr current_cost_map_;              // cost_maps[0]，当前帧动态
-    CostMap::ConstPtr merged_prediction_cost_map_;    // planner 用：global + 时域融合动态
+    PlannerObstacleView planner_obstacles_;
     std::vector<CostMap::ConstPtr> prediction_maps_;  // cost_maps[1..N]
     DirectionMap::ConstPtr global_direction_map_;
 

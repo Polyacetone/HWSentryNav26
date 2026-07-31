@@ -241,13 +241,14 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         mpc_controller_->reset_warm_start();
     }
 
-    if (prev_state == MotionState::HAZARD_RECOVERY
-        && input.environment.masked_global_cost_map && input.environment.masked_direction_map) {
+    const FollowerObstacleView* const obstacles = input.environment.obstacles;
+    if (prev_state == MotionState::HAZARD_RECOVERY && obstacles
+        && obstacles->hard_route_cost && obstacles->route_direction) {
         safety_monitor_.update_recovery_goal_if_needed(
             input.observation.chassis_pose_map,
-            *input.environment.masked_global_cost_map,
-            *input.environment.masked_direction_map,
-            input.environment.base_direction_map,
+            *obstacles->hard_route_cost,
+            *obstacles->route_direction,
+            obstacles->base_direction.get(),
             input.observation.stamp
         );
     }
@@ -310,9 +311,10 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     fsm_input.no_progress_detected = no_progress_detected;
 
     const bool is_hazard_now = !command_blocked
-        && input.environment.masked_global_cost_map && input.environment.masked_direction_map
+        && obstacles && obstacles->hard_route_cost && obstacles->route_direction
         && safety_monitor_.compute_is_hazard(
-            *input.environment.masked_global_cost_map, *input.environment.masked_direction_map, input.observation.chassis_pose_map.head<2>()
+            *obstacles->hard_route_cost, *obstacles->route_direction,
+            input.observation.chassis_pose_map.head<2>()
         );
     fsm_input.is_hazard_now = is_hazard_now;
     const double published_command_velocity = has_last_command_output_
@@ -323,9 +325,10 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         input.observation.stamp
     );
     fsm_input.is_recovery_safe = !command_blocked
-        && input.environment.final_cost_map && input.environment.masked_direction_map
+        && obstacles && obstacles->hard_route_cost && obstacles->route_direction
         && safety_monitor_.check_recovery_safe(
-            *input.environment.final_cost_map, *input.environment.masked_direction_map, input.observation.chassis_pose_map.head<2>(), input.observation.stamp
+            *obstacles->hard_route_cost, *obstacles->route_direction,
+            input.observation.chassis_pose_map.head<2>(), input.observation.stamp
         );
     fsm_input.chassis_pos_map = input.observation.chassis_pose_map.head<2>();
     fsm_input.command_velocity = mpc_command_state_.x();
@@ -549,7 +552,9 @@ ExecutorOutput PathExecutor::execute_idle() {
 
 ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool check_lethal_status) {
     ExecutorOutput out;
-    if (!input.intent.active_path || !input.environment.final_cost_map || !input.environment.masked_global_cost_map || !input.environment.masked_direction_map) {
+    const FollowerObstacleView* const obstacles = input.environment.obstacles;
+    if (!input.intent.active_path || !obstacles || !obstacles->soft_current_cost
+        || !obstacles->hard_route_cost || !obstacles->route_direction) {
         return out;
     }
 
@@ -563,7 +568,8 @@ ExecutorOutput PathExecutor::execute_follow(const ExecutorInput& input, bool che
         path, input.intent.active_path->speed_profile,
         input.observation.chassis_pose_map, input.observation.chassis_state,
         input.route->arc_length, input.route->path_speed,
-        *input.environment.final_cost_map, *input.environment.masked_global_cost_map, input.environment.per_step_cost_maps, input.environment.prediction_dt,
+        *obstacles->soft_current_cost, *obstacles->hard_route_cost,
+        obstacles->soft_prediction_cost_ptrs, obstacles->prediction_dt,
         step_controller_.effective_capability(),
         input.intent.active_path->step_constraint_schedule,
         check_lethal_status
@@ -647,11 +653,13 @@ ExecutorOutput PathExecutor::execute_spin(const ExecutorInput& input) {
 
 ExecutorOutput PathExecutor::execute_prepare_spin(const ExecutorInput& input) {
     ExecutorOutput out;
-    if (!input.environment.final_cost_map) return out;
+    const FollowerObstacleView* const obstacles = input.environment.obstacles;
+    if (!obstacles || !obstacles->soft_current_cost) return out;
 
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_stop(
-        input.observation.chassis_pose_map, input.observation.chassis_state, *input.environment.final_cost_map
+        input.observation.chassis_pose_map, input.observation.chassis_state,
+        *obstacles->soft_current_cost
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Stop) solve failed: %s", result.error().c_str());
@@ -673,14 +681,15 @@ ExecutorOutput PathExecutor::execute_prepare_spin(const ExecutorInput& input) {
 
 ExecutorOutput PathExecutor::execute_recovery(const ExecutorInput& input) {
     ExecutorOutput out;
-    if (!input.environment.final_cost_map || !input.environment.masked_direction_map) return out;
+    const FollowerObstacleView* const obstacles = input.environment.obstacles;
+    if (!obstacles || !obstacles->soft_current_cost || !obstacles->route_direction) return out;
 
-    if (input.environment.masked_global_cost_map) {
+    if (obstacles->hard_route_cost) {
         safety_monitor_.update_recovery_goal_if_needed(
             input.observation.chassis_pose_map,
-            *input.environment.masked_global_cost_map,
-            *input.environment.masked_direction_map,
-            input.environment.base_direction_map,
+            *obstacles->hard_route_cost,
+            *obstacles->route_direction,
+            obstacles->base_direction.get(),
             input.observation.stamp
         );
     }
@@ -696,7 +705,8 @@ ExecutorOutput PathExecutor::execute_recovery(const ExecutorInput& input) {
 
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_hold(
-        *recovery_goal, input.observation.chassis_pose_map, input.observation.chassis_state, *input.environment.final_cost_map
+        *recovery_goal, input.observation.chassis_pose_map, input.observation.chassis_state,
+        *obstacles->soft_current_cost
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Recovery) solve failed: %s", result.error().c_str());
@@ -729,11 +739,14 @@ ExecutorOutput PathExecutor::execute_stuck_reverse() {
 
 ExecutorOutput PathExecutor::execute_fixed(const ExecutorInput& input) {
     ExecutorOutput out;
-    if (!input.environment.final_cost_map || !input.environment.masked_direction_map || !input.intent.hold_goal) return out;
+    const FollowerObstacleView* const obstacles = input.environment.obstacles;
+    if (!obstacles || !obstacles->soft_current_cost || !obstacles->route_direction
+        || !input.intent.hold_goal) return out;
 
     const SolveTimer timer;
     const auto result = mpc_controller_->solve_hold(
-        *input.intent.hold_goal, input.observation.chassis_pose_map, input.observation.chassis_state, *input.environment.final_cost_map
+        *input.intent.hold_goal, input.observation.chassis_pose_map, input.observation.chassis_state,
+        *obstacles->soft_current_cost
     );
     if (!result) {
         RCLCPP_ERROR(logger_, "MPCSolver(Fixed) solve failed: %s", result.error().c_str());

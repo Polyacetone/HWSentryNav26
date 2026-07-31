@@ -187,12 +187,12 @@ class SimConfig:
 
     # 障碍物种类列表（每项为 ObstacleSpec 实例，可自由增删）
     OBSTACLE_SPECS: tuple = (
-        # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
-        # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
-        # ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
-        # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
-        # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
-        # ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
+        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
+        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
+        ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
+        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
+        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
+        ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
     )
 
     # --- Frame 约定 ---

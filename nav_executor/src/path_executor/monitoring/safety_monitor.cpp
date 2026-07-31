@@ -65,7 +65,7 @@ bool SafetyMonitor::compute_is_hazard(
 // ═══════════════════════ 恢复安全判断 ═══════════════════════
 
 bool SafetyMonitor::check_recovery_safe(
-    const CostMap& final_cost_map,
+    const CostMap& hard_route_cost,
     const DirectionMap& direction_map,
     const Eigen::Vector2d& pos,
     const std::chrono::steady_clock::time_point stamp
@@ -77,7 +77,7 @@ bool SafetyMonitor::check_recovery_safe(
     }
 
     const auto sample = recovery_helpers::sample_fields(
-        final_cost_map,
+        hard_route_cost,
         direction_map,
         pos
     );

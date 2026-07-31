@@ -15,6 +15,7 @@
 #include <nav_executor/path_executor/monitoring/safety_monitor.hpp>
 #include <nav_executor/common/trajectory/annotated_path.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
+#include <nav_executor/common/environment/obstacle_semantics.hpp>
 #include <nav_executor/path_executor/mpc/mpc_solver.hpp>
 
 namespace nav_executor {
@@ -53,14 +54,7 @@ struct MotionObservation {
 };
 
 struct MotionEnvironment {
-    const CostMap* final_cost_map = nullptr;          // masked_global + current_dynamic
-    const CostMap* masked_global_cost_map = nullptr;  // global + step_cost_layer
-    const DirectionMap* masked_direction_map = nullptr;
-    const DirectionMap* base_direction_map = nullptr;
-    const CostMap* current_dynamic_cost_map = nullptr;
-    std::vector<const CostMap*> per_step_cost_maps;
-    std::vector<const CostMap*> per_step_dynamic_cost_maps;
-    double prediction_dt = 0.0;
+    const FollowerObstacleView* obstacles = nullptr;
 };
 
 struct ExecutorInput {

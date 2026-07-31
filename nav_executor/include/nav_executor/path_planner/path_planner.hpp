@@ -20,6 +20,7 @@
 #include <nav_executor/path_planner/search/state_lattice_astar.hpp>
 #include <nav_executor/path_planner/trajectory/minco_optimizer.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
+#include <nav_executor/common/environment/obstacle_semantics.hpp>
 #include <nav_executor/path_planner/trajectory/step_annotator.hpp>
 #include <nav_executor/path_planner/search/step_routing_mask.hpp>
 #include <nav_executor/path_planner/trajectory/speed_profile_optimizer.hpp>
@@ -48,8 +49,7 @@ struct PlanRequest {
     double current_velocity = 0.0;
 
     // 地图快照
-    CostMap::ConstPtr global_cost_map;   // 全局先验（用于严格可行性检查）
-    CostMap::ConstPtr merged_cost_map;   // global + 时域融合动态障碍物（A* / 样条用）
+    PlannerObstacleView obstacles;
     DirectionMap::ConstPtr direction_map; // 方向场（含地形标签）
     TerrainTraversalConstraints terrain_constraints;
     PerformanceState performance;

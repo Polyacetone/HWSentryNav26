@@ -377,7 +377,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     result.plan_generation = req.plan_generation;
     result.goal_pos = req.goal.position_map;
 
-    if (!req.global_cost_map || !req.merged_cost_map || !req.direction_map) {
+    if (!req.obstacles.global_static || !req.obstacles.hard_cost || !req.direction_map) {
         result.failure_reason = "map snapshot incomplete";
         result.kind = PlanResult::Kind::FAILED;
         return result;
@@ -394,8 +394,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
 
     // 地形合法性只由严格本体上的局部边约束决定。blocked_cost_layer 包含
     // 膨胀 halo，融合后会把本应仅用于软塑形的方向场变成硬障碍。
-    const CostMap& global_feasibility_cost = *req.global_cost_map;
-    const CostMap& planning_cost_map = *req.merged_cost_map;
+    const CostMap& global_feasibility_cost = *req.obstacles.global_static;
+    const CostMap& planning_cost_map = *req.obstacles.hard_cost;
 
     Eigen::Vector2d start_map = req.current_pos_map;
     Eigen::Vector2d goal_plan = goal_map;
@@ -408,10 +408,10 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         if (!is_map_point_feasible(global_feasibility_cost, *req.direction_map, start_map)) return fail("Start is not feasible on global map");
     }
 
-    // ── 起点 nudge（merged 上最近 free）──
+    // ── 起点 nudge（只按全局静态障碍检查）──
     {
         const auto nudged = nudge_point_to_free(
-            planning_cost_map, *req.direction_map, start_map, config_.nudge_max_distance
+            global_feasibility_cost, *req.direction_map, start_map, config_.nudge_max_distance
         );
         if (!nudged) return fail("Cannot nudge start to a free cell");
         start_map = *nudged;
@@ -437,12 +437,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         }
     }
 
-    // ── 终点 merged 检查 / nudge（取决于 fixed）──
+    // fixed goal 额外复核地形本体上的动态占用；普通 goal 的 nudge 只按全局静态障碍检查。
     if (fixed) {
         if (!is_map_point_feasible(planning_cost_map, *req.direction_map, goal_map)) return fail("Fixed goal is occupied by a dynamic obstacle");
     } else {
         const auto nudged = nudge_point_to_free(
-            planning_cost_map, *req.direction_map, goal_map, config_.nudge_max_distance
+            global_feasibility_cost, *req.direction_map, goal_map, config_.nudge_max_distance
         );
         if (!nudged) return fail("Cannot nudge goal to a free cell");
         goal_plan = *nudged;

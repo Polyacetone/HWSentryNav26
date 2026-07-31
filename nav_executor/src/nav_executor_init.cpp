@@ -80,6 +80,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         mpc_params.follow.normal_profile,
         mpc_params.follow.capability_profiles
     );
+    obstacle_occupied_threshold_ = planner_config.occupied_threshold;
     planner_ = std::make_unique<PathPlanner>(
         planner_config, step_routing_mask_, get_logger().get_child("planner")
     );
@@ -135,14 +136,11 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         .enable = declare_parameter<bool>("task_manager.route_monitor.step_block.enable"),
         .lookahead_distance = declare_parameter<double>("task_manager.route_monitor.step_block.lookahead_distance"),
         .sample_resolution = declare_parameter<double>("task_manager.route_monitor.step_block.sample_resolution"),
-        .obstacle_cost_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.obstacle_cost_threshold"),
         .predicted_obstacle_ratio_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.predicted_obstacle_ratio_threshold")
     };
     require_parameter(
         nonnegative_finite(step_block_params_.lookahead_distance)
         && positive_finite(step_block_params_.sample_resolution)
-        && step_block_params_.obstacle_cost_threshold >= 0.0
-        && step_block_params_.obstacle_cost_threshold <= 255.0
         && step_block_params_.predicted_obstacle_ratio_threshold >= 0.0
         && step_block_params_.predicted_obstacle_ratio_threshold <= 1.0,
         "route_monitor step_block parameters are invalid"
@@ -154,10 +152,8 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     remaining_energy_filter_alpha_ = declare_parameter<double>("node.remaining_energy_filter_alpha");
     path_publish_sample_resolution_ = declare_parameter<double>("node.path_publish_sample_resolution");
     dynamic_prediction_horizon_seconds_ = declare_parameter<double>("path_planner.dynamic_prediction.horizon_seconds");
-    dynamic_prediction_weight_decay_ = declare_parameter<double>("path_planner.dynamic_prediction.weight_decay");
     require_parameter(positive_finite(path_publish_sample_resolution_), "path publish sample_resolution must be finite and positive");
     require_parameter(nonnegative_finite(dynamic_prediction_horizon_seconds_), "dynamic prediction horizon_seconds must be finite and non-negative");
-    require_parameter(dynamic_prediction_weight_decay_ >= 0.0 && dynamic_prediction_weight_decay_ <= 1.0, "dynamic prediction weight_decay must be in [0, 1]");
 
     global_cost_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         declare_parameter<std::string>("node.topics.global_cost_map_sub"), 1,
@@ -175,6 +171,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
                 global_cost_map_->geometry.width(), global_cost_map_->geometry.height(),
                 global_cost_map_->geometry.resolution());
             try_init_step_mask();
+            refresh_planner_obstacles();
             global_cost_map_sub_.reset();
         }
     );
@@ -201,6 +198,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
             );
             RCLCPP_INFO(get_logger(), "Received global direction map");
             try_init_step_mask();
+            refresh_planner_obstacles();
             global_direction_map_sub_.reset();
         }
     );
@@ -269,6 +267,23 @@ void NavExecutorNode::try_init_step_mask() {
         RCLCPP_INFO(get_logger(), "StepRoutingMask initialized");
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Failed to initialize StepRoutingMask: %s", e.what());
+    }
+}
+
+void NavExecutorNode::refresh_planner_obstacles() {
+    try {
+        planner_obstacles_ = build_planner_obstacle_view(
+            ObstacleLayers {
+                .global_static = global_cost_map_,
+                .dynamic_current = current_cost_map_,
+                .dynamic_predictions = prediction_maps_,
+                .base_direction = global_direction_map_,
+            },
+            prediction_dt_, dynamic_prediction_horizon_seconds_
+        );
+    } catch (const std::exception& error) {
+        planner_obstacles_ = {};
+        RCLCPP_ERROR(get_logger(), "Failed to build planner obstacle view: %s", error.what());
     }
 }
 

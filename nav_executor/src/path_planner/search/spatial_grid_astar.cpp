@@ -196,7 +196,7 @@ SpatialGridAstar::Result SpatialGridAstar::search(
             });
         }
     }
-    result.error = "spatial grid A* found no path on the merged cost map";
+    result.error = "spatial grid A* found no path through hard planner obstacles";
     return result;
 }
 

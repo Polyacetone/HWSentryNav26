@@ -36,15 +36,16 @@ std::optional<ReplanReason> check_projection_guard(const RouteMonitorInput& in, 
     }
     const Eigen::Vector2d proj_map = in.route.reference_position;
 
-    if (!in.masked_global_cost_map || in.proj_guard.cost_max < 0.0 || in.proj_guard.cost_max >= 255.0) {
+    if (!in.obstacles || !in.obstacles->hard_route_cost
+        || in.proj_guard.cost_max < 0.0 || in.proj_guard.cost_max >= 255.0) {
         return std::nullopt;
     }
 
     const auto max_cost = recovery_helpers::max_cost_along_segment(
-        *in.masked_global_cost_map, pos_map, proj_map, in.proj_guard.cost_samples
+        *in.obstacles->hard_route_cost, pos_map, proj_map, in.proj_guard.cost_samples
     );
     if (!max_cost) {
-        RCLCPP_WARN(logger, "RouteMonitor: projection segment out of masked_global_cost_map bounds");
+        RCLCPP_WARN(logger, "RouteMonitor: projection segment out of hard route cost bounds");
         return ReplanReason::PROJECTION_OUT_OF_MAP;
     }
     if (*max_cost > in.proj_guard.cost_max) {
@@ -90,14 +91,14 @@ BlockSampleGrid build_block_sample_grid(
     return grid;
 }
 
-// per_step_dynamic_cost_maps[i] 是 t = (i+1) * prediction_dt 时刻的预测帧。取时间上
-// 最近的一帧；超出预测时域的样本没有判定依据，返回空。
+// dynamic_timeline[i] 是 t = i * prediction_dt 时刻的帧，索引 0 为当前帧。
+// 取时间上最近的一帧；超出预测时域的样本没有判定依据，返回空。
 std::optional<size_t> prediction_frame_index(
     const size_t frame_count,
     const double prediction_dt,
     const double arrival_time
 ) {
-    const long long nearest = std::llround(arrival_time / prediction_dt) - 1;
+    const long long nearest = std::llround(arrival_time / prediction_dt);
     if (nearest >= static_cast<long long>(frame_count)) return std::nullopt;
     return static_cast<size_t>(std::max<long long>(0, nearest));
 }
@@ -131,10 +132,10 @@ std::optional<BlockSampleStats> sample_predicted_block_stats(
                 0.0, speed_profile.eval_arc_length(sample_progress).time - route_time
             );
             const auto frame_index = prediction_frame_index(
-                in.per_step_dynamic_cost_maps.size(), in.prediction_dt, arrival_time
+                in.obstacles->dynamic_timeline.size(), in.obstacles->prediction_dt, arrival_time
             );
             if (!frame_index) continue;
-            const CostMap* const cost_map = in.per_step_dynamic_cost_maps[*frame_index];
+            const CostMap::ConstPtr& cost_map = in.obstacles->dynamic_timeline[*frame_index];
             if (!cost_map) return std::nullopt;
 
             const Eigen::Vector2d pos = path.eval_arc_length(sample_progress).p;
@@ -142,7 +143,7 @@ std::optional<BlockSampleStats> sample_predicted_block_stats(
             if (!cost) return std::nullopt;
 
             stats.step_sample_count++;
-            if (cost->value >= in.step_block.obstacle_cost_threshold) {
+            if (cost->value >= static_cast<double>(in.obstacles->occupied_threshold)) {
                 stats.blocked_step_sample_count++;
             }
         }
@@ -152,12 +153,12 @@ std::optional<BlockSampleStats> sample_predicted_block_stats(
 }
 
 // 无预测序列时退化为当前帧判定：样本取方向场的台阶物理本体格。
-// 前置条件：base_direction_map 非空。
+// 前置条件：base_direction 非空。
 std::optional<BlockSampleStats> sample_current_block_stats(
     const RouteMonitorInput& in,
     const MincoTrajectory& path
 ) {
-    const DirectionMap& direction_map = *in.base_direction_map;
+    const DirectionMap& direction_map = *in.obstacles->base_direction;
     // 本体判定读取原始格点，采样间距必须细于半个格宽，否则会漏过整格台阶。
     const BlockSampleGrid grid = build_block_sample_grid(
         in, path, std::min(
@@ -173,10 +174,10 @@ std::optional<BlockSampleStats> sample_current_block_stats(
         if (!direction_map.is_terrain_body_cell(*terrain_cell)) continue;
 
         bool blocked_dynamic = false;
-        if (in.current_dynamic_cost_map) {
-            const auto cost = in.current_dynamic_cost_map->sample_map(pos);
+        if (!in.obstacles->dynamic_timeline.empty()) {
+            const auto cost = in.obstacles->dynamic_timeline.front()->sample_map(pos);
             if (!cost) return std::nullopt;
-            blocked_dynamic = cost->value >= in.step_block.obstacle_cost_threshold;
+            blocked_dynamic = cost->value >= static_cast<double>(in.obstacles->occupied_threshold);
         }
 
         stats.step_sample_count++;
@@ -194,10 +195,11 @@ std::optional<ReplanReason> check_step_blocked(
     if (!p.enable) return std::nullopt;
 
     // 预测模式需要完整的预测帧序列与计划速度剖面：帧索引由计划到达时刻推出。
-    const bool using_predicted = !in.per_step_dynamic_cost_maps.empty()
-        && in.prediction_dt > 0.0
+    if (!in.obstacles) return std::nullopt;
+    const bool using_predicted = in.obstacles->dynamic_timeline.size() > 1
+        && in.obstacles->prediction_dt > 0.0
         && !in.active_path->speed_profile.empty();
-    if (!using_predicted && !in.base_direction_map) return std::nullopt;
+    if (!using_predicted && !in.obstacles->base_direction) return std::nullopt;
 
     const auto stats = using_predicted
         ? sample_predicted_block_stats(in, path)

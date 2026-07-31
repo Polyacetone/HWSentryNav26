@@ -2,15 +2,14 @@
   ros__parameters:
     path_planner:
       traversability:
-        occupied_threshold: 100 # 格子代价值超过该值就认为不可通行（0~255）
+        occupied_threshold: 100 # 统一动态占用阈值；格子代价值 >= 该值视为不可通行（0~255）
         on_step_threshold: 0.1 # 起点、终点和 nudge 候选处的插值方向场模长须低于该值；覆盖整个膨胀场安全区
 
       nudge:
-        max_distance: 1.0 # 在 cost_map 的 merged 图层上搜索空闲格子的最大 BFS 半径（米）
+        max_distance: 1.0 # 在全局静态障碍地图上搜索空闲格子的最大 BFS 半径（米）
 
       dynamic_prediction:
-        horizon_seconds: 2.0 # 融合局部代价地图预测帧的时间窗口，0 表示只用当前帧
-        weight_decay: 0.6 # 时间窗口内各预测帧的权重线性衰减系数 [0,1]，1 表示不衰减
+        horizon_seconds: 2.0 # 地形本体动态障碍的逐格 max 预测窗口，0 表示只用当前帧
 
       planner:
         goal_reached_distance: 0.5 # 机器人到终点距离小于该值时认为已到达，直接标记 COMPLETE

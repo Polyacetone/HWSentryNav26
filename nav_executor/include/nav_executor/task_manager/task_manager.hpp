@@ -55,8 +55,7 @@ struct PlanRequestSnapshot {
     Eigen::Vector2d current_pos_map = Eigen::Vector2d::Zero();
     double current_yaw = 0.0;
     double current_velocity = 0.0;
-    CostMap::ConstPtr global_cost_map;
-    CostMap::ConstPtr merged_cost_map;
+    PlannerObstacleView obstacles;
     DirectionMap::ConstPtr direction_map;
     TerrainTraversalConstraints terrain_constraints;
     PerformanceState performance;

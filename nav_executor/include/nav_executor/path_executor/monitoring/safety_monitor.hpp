@@ -29,7 +29,7 @@ public:
     ) const;
 
     bool check_recovery_safe(
-        const CostMap& final_cost_map,
+        const CostMap& hard_route_cost,
         const DirectionMap& direction_map,
         const Eigen::Vector2d& pos,
         std::chrono::steady_clock::time_point stamp

@@ -118,47 +118,7 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
         prediction_maps_.push_back(received_maps[i]);
     }
 
-    // planner 用：global + 时域融合动态
-    CostMap::ConstPtr fused_dynamic;
-    if (dynamic_prediction_horizon_seconds_ <= 0.0 || msg->maps.size() <= 1 || msg->prediction_dt <= 0.0) {
-        fused_dynamic = current_cost_map_;
-    } else {
-        const size_t n = std::min(msg->maps.size(), static_cast<size_t>(std::ceil(dynamic_prediction_horizon_seconds_ / msg->prediction_dt)) + 1);
-        const double inv_denom = n > 1 ? 1.0 / static_cast<double>(n - 1) : 0.0;
-        std::vector<double> frame_weights(n);
-        double total_weight = 0.0;
-        for (size_t i = 0; i < n; i++) {
-            frame_weights[i] = std::max(0.0, 1.0 - dynamic_prediction_weight_decay_ * static_cast<double>(i) * inv_denom);
-            total_weight += frame_weights[i];
-        }
-        if (total_weight <= 0.0) {
-            fused_dynamic = current_cost_map_;
-        } else {
-            const size_t total = global_cost_map_->data.size();
-            std::vector<double> accum(total, 0.0);
-            for (size_t i = 0; i < n; i++) {
-                const double weight = frame_weights[i];
-                if (weight <= 0.0) continue;
-                const CostMap& frame = *received_maps[i];
-                for (size_t j = 0; j < total; j++) accum[j] += static_cast<double>(frame.data[j]) * weight;
-            }
-            std::vector<uint8_t> result(total);
-            for (size_t j = 0; j < total; j++) {
-                const uint32_t u = static_cast<uint32_t>(accum[j] / total_weight + 0.5);
-                result[j] = u > 255u ? 255u : static_cast<uint8_t>(u);
-            }
-            fused_dynamic = std::make_shared<CostMap>(
-                global_cost_map_->geometry, std::move(result)
-            );
-        }
-    }
-
-    try {
-        merged_prediction_cost_map_ = std::make_shared<CostMap>(global_cost_map_->merge(*fused_dynamic));
-    } catch (const std::exception& e) {
-        RCLCPP_ERROR(get_logger(), "Failed to merge planner cost map: %s", e.what());
-        merged_prediction_cost_map_ = global_cost_map_;
-    }
+    refresh_planner_obstacles();
 }
 
 // ROS 回调只写缓存；任务/运动状态转移在 control_tick 中完成。
@@ -209,13 +169,12 @@ void NavExecutorNode::control_tick() {
 
     const auto stamp = control_stamp;
 
-    const CostLayers cost_layers {
-        .global = global_cost_map_,
-        .current_dynamic = current_cost_map_,
-        .planner_merged = merged_prediction_cost_map_,
-        .prediction_dynamic = prediction_maps_,
+    const ObstacleLayers obstacle_layers {
+        .global_static = global_cost_map_,
+        .dynamic_current = current_cost_map_,
+        .dynamic_predictions = prediction_maps_,
+        .base_direction = global_direction_map_,
     };
-    const DirectionLayers direction_layers { .global = global_direction_map_ };
     const PerformanceState performance {
         .high_performance = remaining_energy_buffercap_filtered_ >= traversal_configuration_.high_performance_buffercap_threshold
             && remaining_energy_supercap_filtered_ >= traversal_configuration_.high_performance_supercap_threshold
@@ -247,8 +206,14 @@ void NavExecutorNode::control_tick() {
     previous_motion_feedback_.step_phase = step_preview.phase;
     previous_motion_feedback_.preemptible = step_preview.preemptible;
 
-    RouteContext route_context = build_route_context(cost_layers, direction_layers, active_path_before_update);
-    if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) {
+    FollowerObstacleView follower_obstacles = build_follower_obstacle_view(
+        obstacle_layers,
+        active_path_before_update ? active_path_before_update->step_cost_layer : nullptr,
+        active_path_before_update ? active_path_before_update->masked_direction_map : nullptr,
+        prediction_dt_, obstacle_occupied_threshold_
+    );
+    if (!follower_obstacles.hard_route_cost || !follower_obstacles.soft_current_cost
+        || !follower_obstacles.route_direction) {
         publish_diagnostics(
             interfaces::msg::NavExecutorDiag::CYCLE_ROUTE_CONTEXT_UNAVAILABLE_BEFORE_TASK,
             diagnostic_stamp,
@@ -266,12 +231,11 @@ void NavExecutorNode::control_tick() {
     task_input.stamp = stamp;
     pending_goal_.reset();
 
-    if (merged_prediction_cost_map_) {
+    if (planner_obstacles_.hard_cost) {
         task_input.plan_snapshot.current_pos_map = chassis_pose_map.head<2>();
         task_input.plan_snapshot.current_yaw = chassis_pose_map.z();
         task_input.plan_snapshot.current_velocity = chassis_state_.velocity;
-        task_input.plan_snapshot.global_cost_map = global_cost_map_;
-        task_input.plan_snapshot.merged_cost_map = merged_prediction_cost_map_;
+        task_input.plan_snapshot.obstacles = planner_obstacles_;
         task_input.plan_snapshot.direction_map = global_direction_map_;
         task_input.plan_snapshot.terrain_constraints = terrain_constraints;
         task_input.plan_snapshot.performance = performance;
@@ -291,11 +255,7 @@ void NavExecutorNode::control_tick() {
         rm.active_path = active_path_before_update;
         rm.route = *route_estimate;
         rm.chassis_pos_map = chassis_pose_map.head<2>();
-        rm.masked_global_cost_map = route_context.masked_global.get();
-        rm.current_dynamic_cost_map = current_cost_map_.get();
-        rm.per_step_dynamic_cost_maps = route_context.prediction_dynamic_ptrs;
-        rm.prediction_dt = prediction_dt_;
-        rm.base_direction_map = global_direction_map_.get();
+        rm.obstacles = &follower_obstacles;
         rm.proj_guard = proj_guard_params_;
         rm.step_block = step_block_params_;
         rm.performance = performance_replan_params_;
@@ -315,8 +275,14 @@ void NavExecutorNode::control_tick() {
         );
     }
 
-    route_context = build_route_context(cost_layers, direction_layers, task_output.command.active_path);
-    if (!route_context.masked_global || !route_context.control_final || !route_context.masked_direction) {
+    follower_obstacles = build_follower_obstacle_view(
+        obstacle_layers,
+        task_output.command.active_path ? task_output.command.active_path->step_cost_layer : nullptr,
+        task_output.command.active_path ? task_output.command.active_path->masked_direction_map : nullptr,
+        prediction_dt_, obstacle_occupied_threshold_
+    );
+    if (!follower_obstacles.hard_route_cost || !follower_obstacles.soft_current_cost
+        || !follower_obstacles.route_direction) {
         publish_diagnostics(
             interfaces::msg::NavExecutorDiag::CYCLE_ROUTE_CONTEXT_UNAVAILABLE_AFTER_TASK,
             diagnostic_stamp,
@@ -341,14 +307,7 @@ void NavExecutorNode::control_tick() {
     ein.observation.chassis_leg_mode = chassis_leg_mode_;
     ein.observation.comp_stage = comp_stage_;
     ein.observation.stamp = stamp;
-    ein.environment.final_cost_map = route_context.control_final.get();
-    ein.environment.masked_global_cost_map = route_context.masked_global.get();
-    ein.environment.masked_direction_map = route_context.masked_direction.get();
-    ein.environment.base_direction_map = global_direction_map_.get();
-    ein.environment.current_dynamic_cost_map = current_cost_map_.get();
-    ein.environment.per_step_cost_maps = std::move(route_context.prediction_with_step_mask_ptrs);
-    ein.environment.per_step_dynamic_cost_maps = std::move(route_context.prediction_dynamic_ptrs);
-    ein.environment.prediction_dt = prediction_dt_;
+    ein.environment.obstacles = &follower_obstacles;
 
     last_control_chassis_state_sequence_ = chassis_state_sequence_;
     ExecutorOutput out = executor_->update(ein);
@@ -387,16 +346,16 @@ void NavExecutorNode::control_tick() {
         nav_msgs::msg::OccupancyGrid grid_msg;
         grid_msg.header.stamp = now();
         grid_msg.header.frame_id = "map";
-        const GridGeometry& geometry = route_context.control_final->geometry;
+        const GridGeometry& geometry = follower_obstacles.soft_current_cost->geometry;
         grid_msg.info.width = static_cast<uint32_t>(geometry.width());
         grid_msg.info.height = static_cast<uint32_t>(geometry.height());
         grid_msg.info.resolution = static_cast<float>(geometry.resolution());
         grid_msg.info.origin.position.x = geometry.origin().x();
         grid_msg.info.origin.position.y = geometry.origin().y();
         grid_msg.info.origin.orientation.w = 1.0;
-        grid_msg.data.resize(route_context.control_final->data.size());
-        for (size_t idx = 0; idx < route_context.control_final->data.size(); idx++) {
-            grid_msg.data[idx] = static_cast<int8_t>(route_context.control_final->data[idx]);
+        grid_msg.data.resize(follower_obstacles.soft_current_cost->data.size());
+        for (size_t idx = 0; idx < follower_obstacles.soft_current_cost->data.size(); idx++) {
+            grid_msg.data[idx] = static_cast<int8_t>(follower_obstacles.soft_current_cost->data[idx]);
         }
         debug_final_cost_map_pub_->publish(grid_msg);
     }

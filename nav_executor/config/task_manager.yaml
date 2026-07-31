@@ -28,7 +28,6 @@
           enable: true # 是否启用"台阶被动态障碍物堵住"检测并触发全局重规划
           lookahead_distance: 5.0 # 沿当前全局路径向前检查距离 (m)
           sample_resolution: 0.2 # 路径空间积分分辨率上限；非预测模式会进一步限制到方向地图分辨率的一半
-          obstacle_cost_threshold: 100.0 # 动态障碍物代价值 >= 该值视为被障碍物占据
           predicted_obstacle_ratio_threshold: 0.8 # 预测地图模式下，台阶样本中被占据比例超过该阈值则触发重规划；每个台阶样本按计划到达时刻取对应预测帧，超出预测时域的台阶不计入
         performance:
           lookahead_distance: 6.0 # 性能下降时检查尚未进入 prepare 阶段的跨越段

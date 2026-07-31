@@ -232,8 +232,7 @@ bool TaskManager::maybe_submit_plan(
     request.current_pos_map = snapshot.current_pos_map;
     request.current_yaw = snapshot.current_yaw;
     request.current_velocity = snapshot.current_velocity;
-    request.global_cost_map = snapshot.global_cost_map;
-    request.merged_cost_map = snapshot.merged_cost_map;
+    request.obstacles = snapshot.obstacles;
     request.direction_map = snapshot.direction_map;
     request.terrain_constraints = snapshot.terrain_constraints;
     request.performance = snapshot.performance;
