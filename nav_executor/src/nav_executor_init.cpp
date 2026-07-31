@@ -514,6 +514,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .yaw_bias_seconds_per_rad = declare_parameter<double>(
             "path_planner.planner.start_yaw_relaxation.yaw_bias_seconds_per_rad"
         ),
+        .max_discarded_velocity = declare_parameter<double>(
+            "path_planner.planner.start_yaw_relaxation.max_discarded_velocity"
+        ),
     };
     const ShapingDynamicsLimits shaping_dynamics {
         .velocity_max = declare_parameter<double>("path_planner.shaping_dynamics.velocity_max"),
@@ -657,6 +660,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.max_spacing"),
             .step_max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.step_max_spacing"),
             .curvature_refine_threshold = declare_parameter<double>("path_planner.speed_profile.discretization.curvature_refine_threshold"),
+            .envelope_sample_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.envelope_sample_spacing"),
         },
         .objective = {
             .traversal_window = declare_parameter<double>("path_planner.speed_profile.objective.traversal_window"),
@@ -664,13 +668,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .global_speed_reward = declare_parameter<double>("path_planner.speed_profile.objective.global_speed_reward"),
             .velocity_scale = declare_parameter<double>("path_planner.speed_profile.objective.velocity_scale"),
         },
-        .validation = {
-            .sample_spacing = declare_parameter<double>("path_planner.speed_profile.validation.sample_spacing"),
-            .velocity_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.velocity_tolerance"),
-            .acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.acceleration_tolerance"),
-            .angular_velocity_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.angular_velocity_tolerance"),
-            .angular_acceleration_tolerance = declare_parameter<double>("path_planner.speed_profile.validation.angular_acceleration_tolerance"),
-        },
+        .stationary_velocity_threshold = declare_parameter<double>(
+            "path_planner.speed_profile.stationary_velocity_threshold"
+        ),
         .normal_profile = normal_profile,
         .step_profiles = step_profiles,
     };
@@ -682,7 +682,8 @@ PlannerConfig NavExecutorNode::load_planner_config(
     require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
     require_parameter(
         nonnegative_finite(c.start_yaw_relaxation.root_bias_seconds)
-            && nonnegative_finite(c.start_yaw_relaxation.yaw_bias_seconds_per_rad),
+            && nonnegative_finite(c.start_yaw_relaxation.yaw_bias_seconds_per_rad)
+            && nonnegative_finite(c.start_yaw_relaxation.max_discarded_velocity),
         "start yaw relaxation parameters are invalid"
     );
     require_parameter(
@@ -845,16 +846,13 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(speed_profile.discretization.step_max_spacing)
         && speed_profile.discretization.step_max_spacing <= speed_profile.discretization.max_spacing
         && positive_finite(speed_profile.discretization.curvature_refine_threshold)
+        && positive_finite(speed_profile.discretization.envelope_sample_spacing)
         && nonnegative_finite(speed_profile.objective.traversal_window)
         && nonnegative_finite(speed_profile.objective.lateral_acceleration)
         && nonnegative_finite(speed_profile.objective.global_speed_reward)
         && positive_finite(speed_profile.objective.velocity_scale)
-        && positive_finite(speed_profile.validation.sample_spacing)
-        && nonnegative_finite(speed_profile.validation.velocity_tolerance)
-        && nonnegative_finite(speed_profile.validation.acceleration_tolerance)
-        && nonnegative_finite(speed_profile.validation.angular_velocity_tolerance)
-        && nonnegative_finite(speed_profile.validation.angular_acceleration_tolerance),
-        "speed profile discretization, objective, or validation parameters are invalid"
+        && nonnegative_finite(speed_profile.stationary_velocity_threshold),
+        "speed profile discretization, objective, or stationary threshold is invalid"
     );
     const auto overlaps = [](const double speed_max, const TraversalVelocityWindow& window) {
         return window.min <= std::min(speed_max, window.max);

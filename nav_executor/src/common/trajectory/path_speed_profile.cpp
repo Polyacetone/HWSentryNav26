@@ -37,10 +37,6 @@ SpeedProfileState PathSpeedProfile::eval_arc_length(const double arc_length) con
     SpeedProfileState result;
     result.arc_length = arc_length;
     result.velocity = std::sqrt(std::max(velocity_squared, 0.0));
-    result.acceleration = lower.acceleration;
-    result.velocity_upper = std::lerp(
-        lower.velocity_upper, upper.velocity_upper, fraction
-    );
     const double distance = arc_length - lower.arc_length;
     const double velocity_sum = lower.velocity + result.velocity;
     result.time = lower.time + (velocity_sum > 1e-12

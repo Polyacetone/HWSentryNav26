@@ -22,9 +22,8 @@ const char* speed_profile_selection_string(
     using Selection = SpeedProfileOptimizer::Diagnostics::Selection;
     switch (selection) {
         case Selection::OPTIMAL: return "OPTIMAL";
-        case Selection::SEED_OPTIMAL_NO_SOFT_CONSTRAINT:
-            return "SEED_OPTIMAL_NO_SOFT_CONSTRAINT";
-        case Selection::FALLBACK: return "FALLBACK";
+        case Selection::CLOSED_FORM_NO_SOFT_CONSTRAINT:
+            return "CLOSED_FORM_NO_SOFT_CONSTRAINT";
     }
     return "UNKNOWN";
 }
@@ -563,34 +562,47 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     );
     const double speed_bin_width = config_.state_lattice.dynamics.velocity_max
         / static_cast<double>(config_.state_lattice.speed_bin_count - 1);
-    const int start_speed_bin = std::clamp(
-        static_cast<int>(std::floor(clamped_start_speed / speed_bin_width + 1e-12)),
-        0,
-        config_.state_lattice.speed_bin_count - 1
-    );
+    const auto quantize_speed = [&](const double speed) {
+        return std::clamp(
+            static_cast<int>(std::floor(speed / speed_bin_width + 1e-12)),
+            0,
+            config_.state_lattice.speed_bin_count - 1
+        );
+    };
+    const int start_speed_bin = quantize_speed(clamped_start_speed);
     std::vector<StateLatticeAstar::SearchRoot> roots {{
         .key = {0, 0, 0, start_speed_bin},
         .relaxation_bias = 0.0,
         .relaxed = false,
     }};
-    // 只有执行时标已可判为静止时才允许放松起始航向；directed_speed_min 是 MINCO
-    // 的数值正则下限，不是静止判据，更不能用量化后的 speed bin 代替物理判定。
-    const bool start_direction_relaxable =
-        measured_start_speed <= config_.speed_profile.validation.velocity_tolerance;
-    if (start_direction_relaxable) {
-        for (int heading = 1; heading < frame.heading_bins; ++heading) {
-            const double yaw_change = std::abs(wrap_angle(
-                2.0 * std::numbers::pi * static_cast<double>(heading)
-                    / static_cast<double>(frame.heading_bins)
-            ));
-            roots.push_back({
-                .key = {0, 0, heading, 0},
-                .relaxation_bias = config_.start_yaw_relaxation.root_bias_seconds
-                    + config_.start_yaw_relaxation.yaw_bias_seconds_per_rad
-                        * yaw_change,
-                .relaxed = true,
-            });
+    const Eigen::Vector2d measured_start_velocity = measured_start_speed
+        * Eigen::Vector2d(std::cos(req.current_yaw), std::sin(req.current_yaw));
+    for (int heading = 1; heading < frame.heading_bins; ++heading) {
+        const double yaw_offset = wrap_angle(
+            2.0 * std::numbers::pi * static_cast<double>(heading)
+                / static_cast<double>(frame.heading_bins)
+        );
+        const double candidate_yaw = req.current_yaw + yaw_offset;
+        const Eigen::Vector2d candidate_tangent(
+            std::cos(candidate_yaw), std::sin(candidate_yaw)
+        );
+        const double projected_speed = std::max(
+            0.0, measured_start_velocity.dot(candidate_tangent)
+        );
+        const double discarded_velocity = (
+            measured_start_velocity - projected_speed * candidate_tangent
+        ).norm();
+        if (discarded_velocity
+            > config_.start_yaw_relaxation.max_discarded_velocity + 1e-12) {
+            continue;
         }
+        roots.push_back({
+            .key = {0, 0, heading, quantize_speed(projected_speed)},
+            .relaxation_bias = config_.start_yaw_relaxation.root_bias_seconds
+                + config_.start_yaw_relaxation.yaw_bias_seconds_per_rad
+                    * std::abs(yaw_offset),
+            .relaxed = true,
+        });
     }
     const StateLatticeAstar lattice(config_.state_lattice, primitive_library_);
     const auto lattice_result = lattice.search(
@@ -632,7 +644,18 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         config_.minco.directed_speed_min
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
-    if (!start_direction_relaxable) {
+    if (lattice_result.diagnostics.selected_relaxed_root) {
+        const Eigen::Vector2d relaxed_tangent = speed_witness.tangents.front().normalized();
+        const double projected_speed = std::max(
+            0.0, measured_start_velocity.dot(relaxed_tangent)
+        );
+        minco_seed.tangents.front() = relaxed_tangent;
+        // MINCO 用非零速度定义零投影时的几何朝向；真实执行速度由后续速度剖面保留。
+        minco_seed.states.front().vel = relaxed_tangent * std::max(
+            projected_speed, config_.minco.directed_speed_min
+        );
+        minco_seed.states.front().acc.setZero();
+    } else {
         const Eigen::Vector2d measured_start_tangent(
             std::cos(req.current_yaw), std::sin(req.current_yaw)
         );
@@ -742,14 +765,6 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         speed_diagnostics.traversal_window_cost,
         speed_diagnostics.lateral_acceleration_cost
     );
-    if (speed_diagnostics.selection
-        == SpeedProfileOptimizer::Diagnostics::Selection::FALLBACK) {
-        std::string warning = "using validated reachable speed-profile fallback";
-        if (!speed_diagnostics.fallback_reason.empty()) {
-            warning += ": " + speed_diagnostics.fallback_reason;
-        }
-        result.warnings.push_back(std::move(warning));
-    }
     size_t speed_window_violation_count = 0;
     double worst_speed_window_violation = 0.0;
     size_t worst_speed_window_segment = 0;
@@ -768,13 +783,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         RCLCPP_DEBUG(
             logger_,
             "Plan #%lu [speed-warning] step=%zu s=%.2f m under=%.3g over=%.3g m/s "
-            "limit=%.2f target=[%.2f,%.2f] m/s",
+            "target=[%.2f,%.2f] m/s",
             static_cast<unsigned long>(req.goal.id),
             violation.segment_index,
             violation.arc_length,
             violation.max_under_speed,
             violation.max_over_speed,
-            violation.hard_velocity_upper,
             violation.target.min,
             violation.target.max
         );

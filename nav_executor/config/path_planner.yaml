@@ -16,8 +16,9 @@
         goal_reached_distance: 0.5 # 机器人到终点距离小于该值时认为已到达，直接标记 COMPLETE
         seed_resample_distance: 0.5 # 全局动力学搜索见证的路径点重采样间隔（米），决定 MINCO 分成多少段
         start_yaw_relaxation:
-          root_bias_seconds: 0.67 # 静止时使用松弛航向根的固定 OPEN 排序偏置（秒）
+          root_bias_seconds: 0.67 # 使用松弛航向根的固定 OPEN 排序偏置（秒）
           yaw_bias_seconds_per_rad: 0.17 # 松弛根相对实测 yaw 每旋转 1 rad 的排序偏置（秒/rad）
+          max_discarded_velocity: 0.5 # 真实速度投影到候选航向后，允许丢弃的速度分量上限（m/s）
 
       shaping_dynamics: # State-lattice/MINCO 共用；只让动力学塑造几何，不生成最终参考速度。
         velocity_max: 3.0 # 动力学见证的线速度上限（m/s）
@@ -115,17 +116,13 @@
           max_spacing: 0.15 # 平坦区域最大弧长节点间隔 (m)
           step_max_spacing: 0.05 # capability blend 与台阶区域最大节点间隔 (m)
           curvature_refine_threshold: 0.15 # 区间曲率变化超过该值时递归细分 (1/m)
+          envelope_sample_spacing: 0.025 # 区间内动力学包络的采样间隔 (m)
         objective:
           traversal_window: 20.0 # 台阶平方速度窗松弛的弧长积分权重
           lateral_acceleration: 18.0 # 侧向加速度超限的弧长积分权重；阈值来自当前 capability
           global_speed_reward: 0.05 # 无更重要目标时提高平方速度的小权重
           velocity_scale: 2.2 # 平方速度目标的无量纲归一参考速度 (m/s)，保持两类目标权重比例
-        validation:
-          sample_spacing: 0.025 # 独立物理验收网格间隔 (m)
-          velocity_tolerance: 0.02 # 速度硬包络容差 (m/s)
-          acceleration_tolerance: 0.05 # 切向加速度容差 (m/s²)
-          angular_velocity_tolerance: 0.05 # 角速度容差 (rad/s)
-          angular_acceleration_tolerance: 0.10 # 角加速度容差 (rad/s²)
+        stationary_velocity_threshold: 0.1 # 小于该值的路径切向初速度按静止处理 (m/s)
 
       step:
         detection: # 物理边界固定按原始格点 direction magnitude > 0.95 判定

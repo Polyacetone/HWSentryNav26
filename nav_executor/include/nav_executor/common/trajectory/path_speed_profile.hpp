@@ -8,8 +8,6 @@ struct SpeedProfileState {
     double arc_length = 0.0;
     double time = 0.0;
     double velocity = 0.0;
-    double acceleration = 0.0;
-    double velocity_upper = 0.0;
 };
 
 // 固定空间路径上的不可变速度参数化。区间内 v² 对弧长线性，因此切向加速度恒定。

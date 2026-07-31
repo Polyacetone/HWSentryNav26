@@ -85,6 +85,7 @@ struct PlannerConfig {
     struct StartYawRelaxationParams {
         double root_bias_seconds;
         double yaw_bias_seconds_per_rad;
+        double max_discarded_velocity;
     } start_yaw_relaxation;
 
     // 环境验收只检查路径与地图的关系。

@@ -18,7 +18,7 @@ constexpr double INF = std::numeric_limits<double>::infinity();
 // 「节点上界」和「相邻差分上界」两类约束，因此把角加速度预算等分给两项：
 //   κ'·z        → 节点上界 z ≤ SHARE·α_max/|κ'|
 //   κ·(dz/ds)/2 → 差分上界，等价于把切向加速度收紧到 SHARE·α_max/|κ|
-// 等分保证两项之和恒不超过 α_max，因此独立物理验收不会因此触发 fallback。
+// 等分保证两项之和恒不超过 α_max，以保守包络塑造速度解。
 constexpr double ANGULAR_ACCELERATION_SHARE = 0.5;
 
 struct NodeLimit {
@@ -277,7 +277,9 @@ std::vector<NodeLimit> build_limits(
     for (size_t i = 0; i + 1 < nodes.size(); ++i) {
         const double distance = nodes[i + 1] - nodes[i];
         const int samples = std::max(
-            1, static_cast<int>(std::ceil(distance / params.validation.sample_spacing))
+            1, static_cast<int>(std::ceil(
+                distance / params.discretization.envelope_sample_spacing
+            ))
         );
         double interval_upper = INF;
         double interval_acceleration = INF;
@@ -347,26 +349,16 @@ std::optional<std::vector<double>> reachable_seed(
 
 PathSpeedProfile make_profile(
     const std::vector<double>& nodes,
-    const std::vector<NodeLimit>& limits,
     const std::vector<double>& speed_squared
 ) {
     std::vector<SpeedProfileState> states(nodes.size());
     double time = 0.0;
     for (size_t i = 0; i < nodes.size(); ++i) {
         const double velocity = std::sqrt(std::max(speed_squared[i], 0.0));
-        double acceleration = 0.0;
-        if (i + 1 < nodes.size()) {
-            acceleration = (speed_squared[i + 1] - speed_squared[i])
-                / (2.0 * (nodes[i + 1] - nodes[i]));
-        } else if (i > 0) {
-            acceleration = states[i - 1].acceleration;
-        }
         states[i] = {
             .arc_length = nodes[i],
             .time = time,
             .velocity = velocity,
-            .acceleration = acceleration,
-            .velocity_upper = std::sqrt(std::max(limits[i].speed_squared_upper, 0.0)),
         };
         if (i + 1 < nodes.size()) {
             const double next_velocity = std::sqrt(std::max(speed_squared[i + 1], 0.0));
@@ -488,14 +480,12 @@ ChainProblem build_chain_problem(
     return problem;
 }
 
-// 独立速度剖面证书：在与优化解耦的密网格上核验全部硬约束，包括未做等分近似的
-// 真实角加速度 dω/dt = κ'v² + κ·a_t。侧向加速度与台阶速度窗是软约束，不作拒绝。
-bool validate_profile(
-    const SpeedProfileOptimizer::Params& params,
+// 发布契约只保证弧长时标在数学上可用。动力学包络负责塑造优化问题，不能把其
+// 离散近似或轻微物理超限再次放大为发布拒绝。
+bool validate_profile_contract(
     const MincoTrajectory& geometry,
-    const std::vector<StepPlanSegment>& segments,
     const PathSpeedProfile& profile,
-    const double initial_speed_squared,
+    const double initial_velocity,
     std::string& error
 ) {
     if (profile.empty() || !std::isfinite(profile.total_time())
@@ -504,85 +494,34 @@ bool validate_profile(
         return false;
     }
     const auto& states = profile.states();
-    if (std::abs(states.front().velocity - std::sqrt(std::max(initial_speed_squared, 0.0)))
-            > params.validation.velocity_tolerance
-        || std::abs(states.back().velocity) > params.validation.velocity_tolerance) {
+    const double total_length = geometry.total_arc_length();
+    const double numerical_tolerance = 64.0
+        * std::numeric_limits<double>::epsilon();
+    const double length_tolerance = numerical_tolerance
+        * std::max(total_length, 1.0);
+    const double velocity_tolerance = numerical_tolerance
+        * std::max(initial_velocity, 1.0);
+    if (std::abs(states.front().arc_length) > length_tolerance
+        || std::abs(states.back().arc_length - total_length) > length_tolerance) {
+        error = "speed profile does not cover the complete trajectory arc length";
+        return false;
+    }
+    if (std::abs(states.front().time) > numerical_tolerance) {
+        error = "speed profile does not start at zero time";
+        return false;
+    }
+    if (std::abs(states.front().velocity - initial_velocity) > velocity_tolerance
+        || std::abs(states.back().velocity) > velocity_tolerance) {
         error = "speed profile violates an endpoint velocity constraint";
         return false;
     }
     for (size_t i = 0; i < states.size(); ++i) {
         if (!std::isfinite(states[i].arc_length) || !std::isfinite(states[i].time)
-            || !std::isfinite(states[i].velocity) || !std::isfinite(states[i].acceleration)
+            || !std::isfinite(states[i].velocity)
             || states[i].velocity < 0.0
             || (i > 0 && (states[i].arc_length <= states[i - 1].arc_length
                 || states[i].time <= states[i - 1].time))) {
             error = "speed profile contains non-finite or non-monotone states";
-            return false;
-        }
-    }
-
-    const double total_length = geometry.total_arc_length();
-    const int samples = std::max(
-        1, static_cast<int>(std::ceil(total_length / params.validation.sample_spacing))
-    );
-    for (int i = 0; i <= samples; ++i) {
-        const double progress = total_length * static_cast<double>(i)
-            / static_cast<double>(samples);
-        const SpeedProfileState state = profile.eval_arc_length(progress);
-        const TrajSample sample = geometry.eval_arc_length(progress);
-        const CapabilityProfile capability = capability_at(params, segments, progress);
-        const auto& dynamics = capability.command_dynamics;
-        const auto exceeds = [](const double value, const double limit, const double tolerance) {
-            return std::abs(value) > limit + tolerance;
-        };
-
-        // 起点速度是不可修改的当前事实，只能以最大减速度收敛到局部包络。
-        const double initial_deceleration_max = capability_at(
-            params, segments, 0.0
-        ).command_dynamics.velocity_rate_max;
-        const double reachable_upper = std::sqrt(std::max(
-            initial_speed_squared - 2.0 * initial_deceleration_max * progress, 0.0
-        ));
-        const double velocity_upper = std::max(
-            std::sqrt(local_envelope(params, segments, sample, progress).speed_squared_upper),
-            reachable_upper
-        );
-        if (state.velocity > velocity_upper + params.validation.velocity_tolerance) {
-            error = "speed profile violates the local velocity envelope at s="
-                + std::to_string(progress);
-            return false;
-        }
-        if (exceeds(
-                state.acceleration, dynamics.velocity_rate_max,
-                params.validation.acceleration_tolerance
-            )) {
-            error = "speed profile violates tangential acceleration at s="
-                + std::to_string(progress);
-            return false;
-        }
-        if (exceeds(
-                sample.kappa * state.velocity, angular_velocity_magnitude_max(capability),
-                params.validation.angular_velocity_tolerance
-            )) {
-            error = "speed profile violates angular velocity at s=" + std::to_string(progress);
-            return false;
-        }
-        const double angular_acceleration =
-            sample.kappa_rate * state.velocity * state.velocity
-                + sample.kappa * state.acceleration;
-        if (exceeds(
-                angular_acceleration,
-                dynamics.angular_velocity_rate_max,
-                params.validation.angular_acceleration_tolerance
-            )) {
-            error = "speed profile violates angular acceleration at s="
-                + std::to_string(progress)
-                + ": alpha=" + std::to_string(angular_acceleration)
-                + " limit=" + std::to_string(dynamics.angular_velocity_rate_max)
-                + " kappa=" + std::to_string(sample.kappa)
-                + " kappa_rate=" + std::to_string(sample.kappa_rate)
-                + " velocity=" + std::to_string(state.velocity)
-                + " acceleration=" + std::to_string(state.acceleration);
             return false;
         }
     }
@@ -610,7 +549,6 @@ std::vector<SpeedProfileOptimizer::StepWindowViolation> step_violations(
             if (std::max(under, over)
                 > std::max(violation.max_under_speed, violation.max_over_speed)) {
                 violation.arc_length = state.arc_length;
-                violation.hard_velocity_upper = state.velocity_upper;
             }
             violation.max_under_speed = std::max(violation.max_under_speed, under);
             violation.max_over_speed = std::max(violation.max_over_speed, over);
@@ -643,7 +581,7 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
         0.0, current_velocity_map.dot(tangent)
     );
     const double initial_velocity = projected_initial_velocity
-            <= params_.validation.velocity_tolerance
+            <= params_.stationary_velocity_threshold
         ? 0.0
         : projected_initial_velocity;
     const double initial_speed_squared = initial_velocity * initial_velocity;
@@ -660,13 +598,13 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
         result.error = seed_error;
         return result;
     }
-    const PathSpeedProfile seed_profile = make_profile(nodes, limits, *seed_squared);
-    std::string validation_error;
-    if (!validate_profile(
-            params_, geometry, step_segments, seed_profile,
-            initial_speed_squared, validation_error
+    const PathSpeedProfile seed_profile = make_profile(nodes, *seed_squared);
+    std::string contract_error;
+    if (!validate_profile_contract(
+            geometry, seed_profile, initial_velocity, contract_error
         )) {
-        result.error = "reachable seed rejected: " + validation_error;
+        result.error = "reachable solution violates the profile contract: "
+            + contract_error;
         return result;
     }
 
@@ -684,7 +622,7 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
     PathSpeedProfile selected = seed_profile;
     if (windows.empty() && lateral_constraints.empty()) {
         result.diagnostics.selection =
-            Diagnostics::Selection::SEED_OPTIMAL_NO_SOFT_CONSTRAINT;
+            Diagnostics::Selection::CLOSED_FORM_NO_SOFT_CONSTRAINT;
     } else {
         const ChainProblem problem = build_chain_problem(
             params_, nodes, limits, windows, lateral_constraints, initial_speed_squared
@@ -695,39 +633,43 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
         result.diagnostics.solve_ms = optimized_result.solve_ms;
 
         if (optimized_result.status != PiecewiseQuadraticChainSolver::Status::OPTIMAL) {
-            result.diagnostics.fallback_reason = optimized_result.error.empty()
+            result.error = optimized_result.error.empty()
                 ? "chain solver did not return an optimal result"
                 : optimized_result.error;
+            return result;
         } else if (optimized_result.value.size() != nodes.size()) {
-            result.diagnostics.fallback_reason =
-                "chain solution dimension does not match the node count";
+            result.error = "chain solution dimension does not match the node count";
+            return result;
         } else if (!std::all_of(
                 optimized_result.value.begin(), optimized_result.value.end(),
-                [](const double value) { return std::isfinite(value); }
-            )) {
-            result.diagnostics.fallback_reason = "chain solution contains non-finite values";
-        } else {
-            const double speed_squared_scale = params_.objective.velocity_scale
-                * params_.objective.velocity_scale;
-            std::vector<double> optimized_squared(nodes.size());
-            std::transform(
-                optimized_result.value.begin(), optimized_result.value.end(),
-                optimized_squared.begin(),
-                [speed_squared_scale](const double value) {
-                    return std::max(value * speed_squared_scale, 0.0);
+                [](const double value) {
+                    return std::isfinite(value) && value >= -EPS;
                 }
-            );
-            PathSpeedProfile optimized = make_profile(nodes, limits, optimized_squared);
-            if (validate_profile(
-                    params_, geometry, step_segments, optimized,
-                    initial_speed_squared, validation_error
-                )) {
-                selected = std::move(optimized);
-                result.diagnostics.selection = Diagnostics::Selection::OPTIMAL;
-            } else {
-                result.diagnostics.fallback_reason = validation_error;
-            }
+            )) {
+            result.error = "chain solution contains a non-finite or negative value";
+            return result;
         }
+
+        const double speed_squared_scale = params_.objective.velocity_scale
+            * params_.objective.velocity_scale;
+        std::vector<double> optimized_squared(nodes.size());
+        std::transform(
+            optimized_result.value.begin(), optimized_result.value.end(),
+            optimized_squared.begin(),
+            [speed_squared_scale](const double value) {
+                return std::max(value * speed_squared_scale, 0.0);
+            }
+        );
+        PathSpeedProfile optimized = make_profile(nodes, optimized_squared);
+        if (!validate_profile_contract(
+                geometry, optimized, initial_velocity, contract_error
+            )) {
+            result.error = "optimized solution violates the profile contract: "
+                + contract_error;
+            return result;
+        }
+        selected = std::move(optimized);
+        result.diagnostics.selection = Diagnostics::Selection::OPTIMAL;
     }
 
     result.diagnostics.result_total_time = selected.total_time();

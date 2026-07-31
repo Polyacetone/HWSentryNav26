@@ -932,14 +932,16 @@ MincoOptimizer::Result MincoOptimizer::optimize(
 
     const bool failed_initial_evaluation =
         lr.status == LbfgsMinimizer::Status::INITIAL_EVALUATION_NONFINITE;
-    const bool terminal_failure_without_progress = lr.accepted_iterations == 0
-        && (lr.status == LbfgsMinimizer::Status::TRUST_REGION_TOO_SMALL
-            || lr.status == LbfgsMinimizer::Status::STAGNATED
-            || lr.status == LbfgsMinimizer::Status::NUMERICAL_FAILURE);
-    if (failed_initial_evaluation || terminal_failure_without_progress) {
+    const bool numerical_failure =
+        lr.status == LbfgsMinimizer::Status::NUMERICAL_FAILURE;
+    // 初值恰好满足一阶最优性是正常优化结果；除此之外，没有 accepted step 就只剩
+    // 原始 seed，不能作为优化失败后的隐式回退发布。
+    const bool seed_only_incumbent = lr.accepted_iterations == 0
+        && lr.status != LbfgsMinimizer::Status::FIRST_ORDER_CONVERGED;
+    if (failed_initial_evaluation || numerical_failure || seed_only_incumbent) {
         result.error = "L-BFGS terminated with "
             + std::string(LbfgsMinimizer::status_string(lr.status))
-            + " before accepting a step (cost=" + std::to_string(lr.cost)
+            + " without a publishable optimized result (cost=" + std::to_string(lr.cost)
             + ", |grad|_inf=" + std::to_string(lr.grad_inf_norm)
             + ", evals=" + std::to_string(lr.function_evaluations)
             + ", rejected=" + std::to_string(lr.rejected_trials) + ")";
