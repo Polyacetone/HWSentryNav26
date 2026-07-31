@@ -20,14 +20,14 @@ public:
 
     struct TrustRegionOptions {
         double initial_radius = 0.5;
-        double min_radius = 1e-6;
+        double min_radius = 1e-10;
         double max_radius = 2.0;
         double acceptance_ratio = 0.1;
         double shrink_ratio = 0.25;
         double expansion_ratio = 0.75;
         double shrink_factor = 0.25;
         double expansion_factor = 2.0;
-        int max_consecutive_rejections = 12;
+        int max_consecutive_rejections = 20;
         int history_reset_after_rejections = 3;
     };
 
@@ -41,7 +41,7 @@ public:
         // 连续 accepted step 的 raw 目标相对改善均不超过该值时，按实际收益收敛。
         double relative_cost_tolerance = 1e-5;
         int cost_convergence_window = 10;
-        double scaled_step_tolerance = 1e-8;
+        double scaled_step_tolerance = 1e-12;
         TrustRegionOptions trust_region;
         double curvature_relative_threshold = 1e-8;
         double history_acceptance_ratio = 0.25;

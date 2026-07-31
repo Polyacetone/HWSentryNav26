@@ -555,8 +555,9 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         .xy_resolution = config_.motion_primitives.xy_resolution,
         .heading_bins = config_.motion_primitives.heading_bins,
     };
+    const double measured_start_speed = std::max(req.current_velocity, 0.0);
     const double clamped_start_speed = std::clamp(
-        std::max(req.current_velocity, 0.0),
+        measured_start_speed,
         0.0,
         config_.state_lattice.dynamics.velocity_max
     );
@@ -572,8 +573,11 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         .relaxation_bias = 0.0,
         .relaxed = false,
     }};
-    // 仅静止离散根允许改变初始航向；非零速度的航向必须保持实测方向。
-    if (start_speed_bin == 0) {
+    // 只有执行时标已可判为静止时才允许放松起始航向；directed_speed_min 是 MINCO
+    // 的数值正则下限，不是静止判据，更不能用量化后的 speed bin 代替物理判定。
+    const bool start_direction_relaxable =
+        measured_start_speed <= config_.speed_profile.validation.velocity_tolerance;
+    if (start_direction_relaxable) {
         for (int heading = 1; heading < frame.heading_bins; ++heading) {
             const double yaw_change = std::abs(wrap_angle(
                 2.0 * std::numbers::pi * static_cast<double>(heading)
@@ -622,12 +626,20 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     }
 
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
-    const auto minco_seed = build_minco_seed(
+    auto minco_seed = build_minco_seed(
         speed_witness,
         config_.seed_resample_distance,
         config_.minco.directed_speed_min
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
+    if (!start_direction_relaxable) {
+        const Eigen::Vector2d measured_start_tangent(
+            std::cos(req.current_yaw), std::sin(req.current_yaw)
+        );
+        minco_seed.tangents.front() = measured_start_tangent;
+        minco_seed.states.front().vel = measured_start_speed * measured_start_tangent;
+        minco_seed.states.front().acc.setZero();
+    }
     // ── [5] MINCO 物理时标见证 + 连续几何联合塑形 ──
     MincoOptimizer optimizer(config_.minco);
     const auto minco_start = std::chrono::steady_clock::now();
@@ -643,51 +655,21 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto minco_done = std::chrono::steady_clock::now();
 
     if (config_.enable_diagnostics && opt.diagnostics_valid) {
-        const auto& s = opt.seed_costs;
-        const auto& f = opt.final_costs;
         const std::string_view status = opt.optimizer_status_string();
         RCLCPP_DEBUG(
             logger_,
-            "MINCO optimizer: status=%.*s accepted=%d evals=%d trials=%d rejected=%d nonfinite=%d | "
-            "raw |grad|_inf %.3g -> %.3g (pos=%.3g, virtual_time=%.3g), "
-            "scaled_max_block=%.3g, first_order=%.3g | "
-            "radius initial=%.3g final=%.3g range=[%.3g,%.3g] shrink=%d expand=%d boundary=%d | "
-            "history update=%d skip=%d reset=%d | last actual=%.3g predicted=%.3g rho=%.3g | "
-            "cost_tail relative=%.3g count=%d/%d",
+            "Plan #%lu [minco] status=%.*s time=%.2f ms cost=%.3g->%.3g "
+            "grad=%.3g->%.3g (scaled=%.3g, first-order=%.3g) "
+            "iterations=%d/%d rejected=%d nonfinite=%d",
+            static_cast<unsigned long>(req.goal.id),
             static_cast<int>(status.size()), status.data(),
-            opt.accepted_iterations, opt.function_evaluations, opt.trial_evaluations,
-            opt.rejected_trials, opt.nonfinite_trials,
+            std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
+            opt.seed_costs.total(), opt.final_costs.total(),
             opt.initial_grad_inf_norm, opt.final_grad_inf_norm,
-            opt.final_grad_pos_inf_norm, opt.final_grad_time_inf_norm,
             opt.final_scaled_grad_max_block_norm,
             opt.final_first_order_optimality,
-            opt.initial_radius, opt.final_radius, opt.min_radius, opt.max_radius,
-            opt.radius_shrinks, opt.radius_expansions, opt.boundary_steps,
-            opt.history_updates, opt.history_skips, opt.history_resets,
-            opt.last_actual_reduction, opt.last_predicted_reduction, opt.last_reduction_ratio,
-            opt.last_relative_cost_reduction,
-            opt.consecutive_small_cost_reductions,
-            config_.minco.optimizer.cost_convergence_window
-        );
-        RCLCPP_DEBUG(
-            logger_,
-            "MINCO objective: cost %.3g -> %.3g witness_time=%.2f s | "
-            "waypoints free=%d disp(sum=%.3f m, max=%.3f m) | "
-            "seed[energy=%.3g time=%.3g obstacle=%.3g v=%.3g at=%.3g omega=%.3g "
-            "alpha=%.3g alat=%.3g directed=%.3g align=%.3g prohibited=%.3g runup=%.3g] "
-            "final[energy=%.3g time=%.3g obstacle=%.3g v=%.3g at=%.3g omega=%.3g "
-            "alpha=%.3g alat=%.3g directed=%.3g align=%.3g prohibited=%.3g runup=%.3g]",
-            s.total(), f.total(),
-            opt.trajectory.total_time(),
-            opt.free_waypoint_count, opt.waypoint_total_displacement, opt.waypoint_max_displacement,
-            s.energy, s.time, s.obstacle, s.velocity, s.tangential_acceleration,
-            s.angular_velocity, s.angular_acceleration, s.lateral_acceleration,
-            s.directed_regularity, s.traversal_alignment, s.prohibited_traversal,
-            s.runup_curvature,
-            f.energy, f.time, f.obstacle, f.velocity, f.tangential_acceleration,
-            f.angular_velocity, f.angular_acceleration, f.lateral_acceleration,
-            f.directed_regularity, f.traversal_alignment, f.prohibited_traversal,
-            f.runup_curvature
+            opt.accepted_iterations, opt.function_evaluations,
+            opt.rejected_trials, opt.nonfinite_trials
         );
     }
     if (opt.trajectory.empty()) return fail("MINCO produced empty trajectory");
@@ -747,16 +729,15 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const auto& speed_diagnostics = speed_result.diagnostics;
     RCLCPP_DEBUG(
         logger_,
-        "Speed profile: selection=%s nodes=%d constraints=(step=%d,lateral=%d) "
-        "breakpoints=%d solve=%.3f ms travel=%.2f s "
-        "cost=(speed=%.3g,step=%.3g,lateral=%.3g)",
+        "Plan #%lu [speed] selection=%s solve=%.3f ms travel=%.2f s "
+        "nodes=%d constraints=(step=%d,lateral=%d) cost=(speed=%.3g,step=%.3g,lateral=%.3g)",
+        static_cast<unsigned long>(req.goal.id),
         speed_profile_selection_string(speed_diagnostics.selection),
+        speed_diagnostics.solve_ms,
+        speed_diagnostics.result_total_time,
         speed_diagnostics.node_count,
         speed_diagnostics.traversal_window_constraint_count,
         speed_diagnostics.lateral_acceleration_constraint_count,
-        speed_diagnostics.max_breakpoints,
-        speed_diagnostics.solve_ms,
-        speed_diagnostics.result_total_time,
         speed_diagnostics.speed_reward_cost,
         speed_diagnostics.traversal_window_cost,
         speed_diagnostics.lateral_acceleration_cost
@@ -786,8 +767,9 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         }
         RCLCPP_DEBUG(
             logger_,
-            "Step #%zu speed window violation at s=%.2f: under=%.2f over=%.2f "
-            "hard_max=%.2f target=[%.2f,%.2f]",
+            "Plan #%lu [speed-warning] step=%zu s=%.2f m under=%.3g over=%.3g m/s "
+            "limit=%.2f target=[%.2f,%.2f] m/s",
+            static_cast<unsigned long>(req.goal.id),
             violation.segment_index,
             violation.arc_length,
             violation.max_under_speed,
@@ -823,55 +805,27 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         ).norm();
     }
     const int segment_count = opt.trajectory.segment_count();
-    const int variable_count = 2 * std::max(segment_count - 1, 0) + segment_count; // 平坦：2D 路点 + 段时长
     const auto& search_diagnostics = lattice_result.diagnostics;
     RCLCPP_DEBUG(
-        logger_, "Plan done (%.2f ms): Src(%.2f,%.2f)->Dst(%.2f,%.2f) %s, %zu step segments; "
-        "spatial=%.2f ms, reference=%.2f ms, guide=%.2f ms, lattice=%.2f ms, MINCO=%.2f ms, "
-        "spatial_search[exp=%d open=%zu raw_cells=%zu passages=%zu raw_length=%.2f smoothed_length=%.2f corridor_cells=%zu], "
-        "witness_length=%.2f m, witness_states=%zu, "
-        "search[root=%s bias=%.3f time=%.2f exp=%d states=%d improved=%d "
-        "transitions=%d terminal=%d open=%zu stale=%zu "
-        "geometry_cache=%zu hits=%zu terrain_spans=%zu corridor_rejections=%zu], "
-        "primitives[count=%zu pos_res=%.3g heading_res=%.3g], "
-        "segments=%d, vars=%d, optimizer=%.*s, accepted=%d, evals=%d, "
-        "first_order=%.3g, scaled_grad=%.3g, raw_grad=%.3g",
+        logger_, "Plan #%lu [done] total=%.2f ms src=(%.2f,%.2f) dst=(%.2f,%.2f)%s "
+        "path=%.2f m/%.2f s segments=%d steps=%zu | "
+        "stages=(spatial=%.2f,reference=%.2f,guide=%.2f,lattice=%.2f,minco=%.2f) ms | "
+        "search=(spatial_exp=%d,lattice_exp=%d,states=%d,corridor_reject=%zu)",
+        static_cast<unsigned long>(req.goal.id),
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
-        fixed ? "[FIXED]" : "", result.path->step_segments.size(),
+        fixed ? " fixed" : "",
+        seed_path_length, result.path->speed_profile.total_time(), segment_count,
+        result.path->step_segments.size(),
         std::chrono::duration<double, std::milli>(spatial_done - plan_start).count(),
         std::chrono::duration<double, std::milli>(reference_done - spatial_done).count(),
         std::chrono::duration<double, std::milli>(guide_done - reference_done).count(),
         std::chrono::duration<double, std::milli>(lattice_done - guide_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
-        spatial_route.expansions, spatial_route.open_peak,
-        spatial_route.raw_path.size(), spatial_route.passages.size(),
-        reference_path.raw_length, reference_path.smoothed_length,
-        guide_field.corridor_cell_count(),
-        seed_path_length, speed_witness.positions.size(),
-        search_diagnostics.selected_relaxed_root ? "relaxed-yaw" : "strict",
-        search_diagnostics.selected_relaxation_bias,
-        search_diagnostics.search_time,
+        spatial_route.expansions,
         search_diagnostics.expansions,
         search_diagnostics.generated_states,
-        search_diagnostics.improved_states,
-        search_diagnostics.transition_candidates,
-        search_diagnostics.terminal_attempts,
-        search_diagnostics.open_peak,
-        search_diagnostics.stale_queue_entries,
-        search_diagnostics.geometry_cache_entries,
-        search_diagnostics.geometry_cache_hits,
-        search_diagnostics.terrain_spans_checked,
-        search_diagnostics.corridor_rejections,
-        primitive_library_.primitive_count(),
-        primitive_library_.max_position_residual(),
-        primitive_library_.max_heading_residual(),
-        segment_count, variable_count,
-        static_cast<int>(opt.optimizer_status_string().size()), opt.optimizer_status_string().data(),
-        opt.accepted_iterations, opt.function_evaluations,
-        opt.final_first_order_optimality,
-        opt.final_scaled_grad_max_block_norm,
-        opt.final_grad_inf_norm
+        search_diagnostics.corridor_rejections
     );
 
     return result;

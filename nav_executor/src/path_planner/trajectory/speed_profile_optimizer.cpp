@@ -567,14 +567,22 @@ bool validate_profile(
             error = "speed profile violates angular velocity at s=" + std::to_string(progress);
             return false;
         }
+        const double angular_acceleration =
+            sample.kappa_rate * state.velocity * state.velocity
+                + sample.kappa * state.acceleration;
         if (exceeds(
-                sample.kappa_rate * state.velocity * state.velocity
-                    + sample.kappa * state.acceleration,
+                angular_acceleration,
                 dynamics.angular_velocity_rate_max,
                 params.validation.angular_acceleration_tolerance
             )) {
             error = "speed profile violates angular acceleration at s="
-                + std::to_string(progress);
+                + std::to_string(progress)
+                + ": alpha=" + std::to_string(angular_acceleration)
+                + " limit=" + std::to_string(dynamics.angular_velocity_rate_max)
+                + " kappa=" + std::to_string(sample.kappa)
+                + " kappa_rate=" + std::to_string(sample.kappa_rate)
+                + " velocity=" + std::to_string(state.velocity)
+                + " acceleration=" + std::to_string(state.acceleration);
             return false;
         }
     }
@@ -631,7 +639,13 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
     // 起点速度取当前速度在有向路径切线上的前向投影。
     const TrajSample start = geometry.eval_arc_length(0.0);
     const Eigen::Vector2d tangent(std::cos(start.theta), std::sin(start.theta));
-    const double initial_velocity = std::max(0.0, current_velocity_map.dot(tangent));
+    const double projected_initial_velocity = std::max(
+        0.0, current_velocity_map.dot(tangent)
+    );
+    const double initial_velocity = projected_initial_velocity
+            <= params_.validation.velocity_tolerance
+        ? 0.0
+        : projected_initial_velocity;
     const double initial_speed_squared = initial_velocity * initial_velocity;
     // 起点是不可修改的当前事实；局部包络从下一空间位置开始约束。
     limits.front().speed_squared_upper = std::max(

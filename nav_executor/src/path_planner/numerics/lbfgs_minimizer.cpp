@@ -275,6 +275,12 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         }
         return -direction;
     };
+    const auto steepest_direction = [&]() -> Eigen::VectorXd {
+        const double norm = block_norm(gradient, blocks);
+        Eigen::VectorXd direction = -gradient;
+        if (finite_positive(norm)) direction /= norm;
+        return direction;
+    };
 
     while (accepted_iterations < opt_.max_iterations) {
         update_incumbent_diagnostics();
@@ -282,20 +288,21 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
             return finish(Status::FIRST_ORDER_CONVERGED);
         }
         if (consecutive_small_cost_reductions >= opt_.cost_convergence_window) {
-            return finish(Status::STAGNATED);
+            return finish(Status::COST_CONVERGED);
         }
         if (result.function_evaluations >= opt_.max_function_evaluations) {
             return finish(Status::MAX_EVALUATIONS);
         }
 
         bool using_steepest_direction = force_steepest_direction || history.empty();
-        Eigen::VectorXd direction = using_steepest_direction ? -gradient : lbfgs_direction();
+        Eigen::VectorXd direction = using_steepest_direction
+            ? steepest_direction() : lbfgs_direction();
         force_steepest_direction = false;
         double directional_derivative = gradient.dot(direction);
         if (!direction.allFinite() || !std::isfinite(directional_derivative)
             || directional_derivative >= 0.0) {
             reset_history();
-            direction = -gradient;
+            direction = steepest_direction();
             using_steepest_direction = true;
             directional_derivative = gradient.dot(direction);
         }
@@ -324,7 +331,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
             if (step_norm <= opt_.scaled_step_tolerance) {
                 if (!history.empty()) {
                     reset_history();
-                    direction = -gradient;
+                    direction = steepest_direction();
                     using_steepest_direction = true;
                     steepest_rescue_attempted = true;
                     continue;
@@ -340,7 +347,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
             if (!std::isfinite(predicted_reduction) || predicted_reduction <= 0.0) {
                 if (!history.empty()) {
                     reset_history();
-                    direction = -gradient;
+                    direction = steepest_direction();
                     using_steepest_direction = true;
                     steepest_rescue_attempted = true;
                     continue;
@@ -413,7 +420,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
                     && (attempted_at_min_radius || repeated_interior_step
                         || consecutive_rejections >= opt_.trust_region.history_reset_after_rejections)) {
                     reset_history();
-                    direction = -gradient;
+                    direction = steepest_direction();
                     using_steepest_direction = true;
                     steepest_rescue_attempted = true;
                     continue;
@@ -479,7 +486,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         return finish(Status::FIRST_ORDER_CONVERGED);
     }
     if (consecutive_small_cost_reductions >= opt_.cost_convergence_window) {
-        return finish(Status::STAGNATED);
+        return finish(Status::COST_CONVERGED);
     }
     return finish(Status::MAX_ITERATIONS);
 }

@@ -240,7 +240,7 @@ bool TaskManager::maybe_submit_plan(
 
     planner_->submit(request);
     RCLCPP_DEBUG(
-        logger_, "Submitted plan request for goal #%lu generation=%lu",
+        logger_, "Plan #%lu queued (generation=%lu)",
         static_cast<unsigned long>(current_goal_->id),
         static_cast<unsigned long>(plan_generation_)
     );

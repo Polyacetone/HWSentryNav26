@@ -62,7 +62,7 @@ public:
         double first_order_tolerance = 1e-5;
         double relative_cost_tolerance = 1e-5;
         int cost_convergence_window = 10;
-        double scaled_step_tolerance = 1e-8;
+        double scaled_step_tolerance = 1e-12;
         LbfgsMinimizer::TrustRegionOptions trust_region;
         double curvature_relative_threshold = 1e-8;
         double history_acceptance_ratio = 0.25;

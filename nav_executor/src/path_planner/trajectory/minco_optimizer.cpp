@@ -11,10 +11,10 @@ namespace {
 constexpr int DIM = MincoMinJerk::DIM;
 constexpr int NCOEF = MincoMinJerk::NCOEF;
 constexpr double EPS = 1e-9;
-// 速度模长的平滑正则尺度 (m/s)。有向正则性罚把 ‖p_τ‖ 推离零，因此这里只需
-// 一个远小于工作速度的数值下限来保证 |v|、方向及其雅可比处处可微。
-constexpr double SPEED_REG = 1e-4;
-constexpr double SPEED_REG_SQ = SPEED_REG * SPEED_REG;
+// 真实速度、积分测度与弧长使用近零平滑尺度；方向和运动学分母另用
+// directed_speed_min 调理，避免静止附近的角动力学奇异污染真实弧长。
+constexpr double MEASURE_SPEED_REG = 1e-4;
+constexpr double MEASURE_SPEED_REG_SQ = MEASURE_SPEED_REG * MEASURE_SPEED_REG;
 
 inline double violation(const double g) { return std::max(g, 0.0); }
 
@@ -56,9 +56,11 @@ struct CurvatureJet {
 
 CurvatureJet curvature_jet(
     const Eigen::Vector2d& velocity,
-    const Eigen::Vector2d& acceleration
+    const Eigen::Vector2d& acceleration,
+    const double speed_regularization
 ) {
-    const double speed_squared = velocity.squaredNorm() + SPEED_REG_SQ;
+    const double speed_squared = velocity.squaredNorm()
+        + speed_regularization * speed_regularization;
     const double speed = std::sqrt(speed_squared);
     const double speed3 = speed_squared * speed;
     const double speed5 = speed3 * speed_squared;
@@ -94,9 +96,11 @@ struct MotionJet {
 MotionJet motion_jet(
     const Eigen::Vector2d& velocity,
     const Eigen::Vector2d& acceleration,
-    const Eigen::Vector2d& jerk
+    const Eigen::Vector2d& jerk,
+    const double speed_regularization
 ) {
-    const double speed_squared = velocity.squaredNorm() + SPEED_REG_SQ;
+    const double speed_squared = velocity.squaredNorm()
+        + speed_regularization * speed_regularization;
     const double speed = std::sqrt(speed_squared);
     const double speed3 = speed_squared * speed;
     const double speed4 = speed_squared * speed_squared;
@@ -280,6 +284,9 @@ double MincoOptimizer::accumulate_penalties(
     const auto& w = params_.weights;
     const auto& dynamics = params_.dynamics;
     const int samples_per_segment = std::max(params_.samples_per_segment, 1);
+    const double kinematic_speed_regularization = std::max(
+        params_.directed_speed_min, MEASURE_SPEED_REG
+    );
 
     double cost = 0.0;
     grad_c.setZero(NCOEF * n, DIM);
@@ -319,16 +326,26 @@ double MincoOptimizer::accumulate_penalties(
                 + tangent_end * fraction;
             if (seed_blend.norm() > EPS) sample.seed_tangent = seed_blend.normalized();
 
-            const double speed_squared = sample.velocity.squaredNorm() + SPEED_REG_SQ;
+            const double speed_squared = sample.velocity.squaredNorm()
+                + MEASURE_SPEED_REG_SQ;
             sample.speed = std::sqrt(speed_squared);
             sample.speed_gradient = sample.velocity / sample.speed;
-            sample.direction = sample.velocity / sample.speed;
-            sample.direction_jacobian = Eigen::Matrix2d::Identity() / sample.speed
+            const double direction_speed_squared = sample.velocity.squaredNorm()
+                + kinematic_speed_regularization * kinematic_speed_regularization;
+            const double direction_speed = std::sqrt(direction_speed_squared);
+            sample.direction = sample.velocity / direction_speed;
+            sample.direction_jacobian = Eigen::Matrix2d::Identity() / direction_speed
                 - sample.velocity * sample.velocity.transpose()
-                    / (speed_squared * sample.speed);
-            sample.curvature = curvature_jet(sample.velocity, sample.acceleration);
+                    / (direction_speed_squared * direction_speed);
+            sample.curvature = curvature_jet(
+                sample.velocity, sample.acceleration, kinematic_speed_regularization
+            );
+            // 首端速度是执行期不可修改的真实边界，必须用近真实分母塑形其角动力学；
+            // 内部点仍使用有向速度下限调理，避免零速奇异重新主导目标函数。
+            const bool start_boundary = segment == 0 && index == 0;
             sample.motion = motion_jet(
-                sample.velocity, sample.acceleration, sample.jerk
+                sample.velocity, sample.acceleration, sample.jerk,
+                start_boundary ? MEASURE_SPEED_REG : kinematic_speed_regularization
             );
             sample.arc_measure = sample.dt * sample.speed;
 
