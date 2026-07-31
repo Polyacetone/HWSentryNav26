@@ -27,6 +27,27 @@
 #include <map_server/prediction_cost_map_renderer.hpp>
 #include <map_server/utils.hpp>
 
+namespace {
+
+void validate_inflation_params(
+    const char* param_group,
+    const map_server::map_utils::MapInflationParams& params
+) {
+    if (!std::isfinite(params.full_cost_radius_m)
+        || params.full_cost_radius_m < 0.0
+        || !std::isfinite(params.cutoff_radius_m)
+        || params.cutoff_radius_m < params.full_cost_radius_m
+        || !std::isfinite(params.decay_rate_per_m)
+        || params.decay_rate_per_m < 0.0
+        || !std::isfinite(params.direction_non_body_magnitude_cap)
+        || params.direction_non_body_magnitude_cap <= 0.0
+        || params.direction_non_body_magnitude_cap > 0.9) {
+        throw std::invalid_argument(std::string("invalid ") + param_group + " parameters");
+    }
+}
+
+} // anonymous namespace
+
 namespace map_server {
 
 class MapServerNode: public rclcpp::Node {
@@ -64,7 +85,8 @@ private:
     bool enable_prediction_with_cloud_;
     bool enable_prediction_without_cloud_;
 
-    map_utils::MapInflationParams map_inflation_params_{};
+    map_utils::MapInflationParams global_inflation_params_{}; // global_map.inflation.*，静态障碍物（全局导航地图）
+    map_utils::MapInflationParams local_inflation_params_{}; // local_map.inflation.*，动态障碍物（局部代价地图/预测帧）
     cv::Mat global_direction_map_, global_cost_map_;
     bool global_nav_map_initialized_ = false;
     std::chrono::steady_clock::time_point initialize_time_;
@@ -107,7 +129,30 @@ private:
 
 MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_server", options) {
     constexpr std::array RENAMED_PARAMETERS {
-        std::pair {"map_inflation.decay_alpha", "map_inflation.decay_rate_per_m"},
+        std::pair {
+            "map_inflation.decay_alpha",
+            "global_map.inflation.decay_rate_per_m"
+        },
+        std::pair {
+            "map_inflation.robot_radius_m",
+            "global_map.inflation.full_cost_radius_m"
+        },
+        std::pair {
+            "map_inflation.full_cost_radius_m",
+            "global_map.inflation.full_cost_radius_m"
+        },
+        std::pair {
+            "map_inflation.cutoff_radius_m",
+            "global_map.inflation.cutoff_radius_m"
+        },
+        std::pair {
+            "map_inflation.decay_rate_per_m",
+            "global_map.inflation.decay_rate_per_m"
+        },
+        std::pair {
+            "map_inflation.direction_non_body_magnitude_cap",
+            "global_map.inflation.direction_non_body_magnitude_cap"
+        },
         std::pair {
             "local_map.cell_obstacle_point_threshold",
             "local_map.min_projected_point_density_per_m2"
@@ -143,25 +188,24 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_serv
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     robot_color_wait_timeout_ = declare_parameter<double>("global_map.robot_color_wait_timeout");
-    map_inflation_params_ = {
-        .robot_radius_m = declare_parameter<double>("map_inflation.robot_radius_m"),
-        .cutoff_radius_m = declare_parameter<double>("map_inflation.cutoff_radius_m"),
-        .decay_rate_per_m = declare_parameter<double>("map_inflation.decay_rate_per_m"),
+    global_inflation_params_ = {
+        .full_cost_radius_m = declare_parameter<double>("global_map.inflation.full_cost_radius_m"),
+        .cutoff_radius_m = declare_parameter<double>("global_map.inflation.cutoff_radius_m"),
+        .decay_rate_per_m = declare_parameter<double>("global_map.inflation.decay_rate_per_m"),
         .direction_non_body_magnitude_cap = declare_parameter<double>(
-            "map_inflation.direction_non_body_magnitude_cap"
+            "global_map.inflation.direction_non_body_magnitude_cap"
         ),
     };
-    if (!std::isfinite(map_inflation_params_.robot_radius_m)
-        || map_inflation_params_.robot_radius_m < 0.0
-        || !std::isfinite(map_inflation_params_.cutoff_radius_m)
-        || map_inflation_params_.cutoff_radius_m < map_inflation_params_.robot_radius_m
-        || !std::isfinite(map_inflation_params_.decay_rate_per_m)
-        || map_inflation_params_.decay_rate_per_m < 0.0
-        || !std::isfinite(map_inflation_params_.direction_non_body_magnitude_cap)
-        || map_inflation_params_.direction_non_body_magnitude_cap <= 0.0
-        || map_inflation_params_.direction_non_body_magnitude_cap > 0.9) {
-        throw std::invalid_argument("invalid map_inflation parameters");
-    }
+    validate_inflation_params("global_map.inflation", global_inflation_params_);
+
+    local_inflation_params_ = {
+        .full_cost_radius_m = declare_parameter<double>("local_map.inflation.full_cost_radius_m"),
+        .cutoff_radius_m = declare_parameter<double>("local_map.inflation.cutoff_radius_m"),
+        .decay_rate_per_m = declare_parameter<double>("local_map.inflation.decay_rate_per_m"),
+        // 方向场仅存在于静态导航地图，动态膨胀不使用该字段；填有效值以通过统一校验。
+        .direction_non_body_magnitude_cap = 0.9,
+    };
+    validate_inflation_params("local_map.inflation", local_inflation_params_);
 
     local_map_params_ = {
         .cloud_accumulate_frames = (size_t)declare_parameter<int>("local_map.cloud_accumulate_frames"),
@@ -274,7 +318,6 @@ void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::Sh
         robot_status_sub_.reset();
         return;
     }
-    global_nav_map_initialized_ = true;
 
     std::string nav_map_filename;
     if (msg->robot_color) {
@@ -290,6 +333,8 @@ void MapServerNode::robot_status_callback(const interfaces::msg::RobotStatus::Sh
 
     try {
         load_nav_map(nav_map_path);
+        // 地图几何与分辨率回填完成后才置位，避免点云回调在半初始化状态下建图。
+        global_nav_map_initialized_ = true;
         RCLCPP_INFO(
             get_logger(), "Loaded terrain msgpack (%s) size=%dx%d resolution=%.3f, "
             "cost_map=%s, direction_map=%s",
@@ -310,11 +355,12 @@ void MapServerNode::timer_callback() {
         // 超时未收到机器人颜色，使用默认全局导航地图
         if (std::chrono::duration<double>(now_time - initialize_time_).count() > robot_color_wait_timeout_) {
             RCLCPP_ERROR(get_logger(), "Robot color not initialized within timeout %.2f seconds, loading default global navmap", robot_color_wait_timeout_);
-            global_nav_map_initialized_ = true;
             std::string default_nav_map_filename = declare_parameter<std::string>("global_map.default_nav_map_filename");
             std::string default_nav_map_path = ament_index_cpp::get_package_share_directory("map_server") + "/maps/" + default_nav_map_filename;
             try {
                 load_nav_map(default_nav_map_path);
+                // 与 robot_status_callback 一致：加载完成后才置位，点云回调不会看到半初始化状态。
+                global_nav_map_initialized_ = true;
                 RCLCPP_INFO(get_logger(), "Loaded default terrain msgpack size=%dx%d", map_size_x_, map_size_y_);
             } catch (const std::exception& e) {
                 RCLCPP_FATAL(get_logger(), "Failed to load default navmap: %s", e.what());
@@ -372,7 +418,7 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
     // 动态障碍物分析
     cv::Mat obstacle_mask = create_obstacle_mask(denoised_dynamic_points);
     cv::Mat local_cost_map = map_utils::inflate_cost_map_bounded(
-        obstacle_mask, map_inflation_params_
+        obstacle_mask, local_inflation_params_
     );
 
     // 根据当前模式（是否有全局点云）选择 prediction 开关
@@ -385,7 +431,7 @@ void MapServerNode::local_cloud_callback(sensor_msgs::msg::PointCloud2::SharedPt
         if (!object_tracker_) {
             object_tracker_ = std::make_unique<ObjectTracker>(map_size_x_, map_size_y_, map_resolution_, tracker_params_);
             prediction_renderer_ = std::make_unique<PredictionCostMapRenderer>(
-                map_size_x_, map_size_y_, tracker_params_.prediction_steps, map_inflation_params_
+                map_size_x_, map_size_y_, tracker_params_.prediction_steps, local_inflation_params_
             );
             last_tracker_update_time_ = std::chrono::steady_clock::now();
         }
@@ -694,7 +740,7 @@ cv::Mat MapServerNode::create_obstacle_mask(const small_gicp::PointCloud& dynami
 }
 
 void MapServerNode::load_nav_map(const std::string& filename) {
-    auto maps = map_utils::load_navigation_maps(filename, map_inflation_params_);
+    auto maps = map_utils::load_navigation_maps(filename, global_inflation_params_);
     if (maps.direction_overlaps.cell_count > 0) {
         std::ostringstream details;
         details << "pairs={";
@@ -734,7 +780,8 @@ void MapServerNode::load_nav_map(const std::string& filename) {
         );
     }
     map_resolution_ = maps.resolution;
-    map_inflation_params_.resolution = map_resolution_;
+    global_inflation_params_.resolution = map_resolution_;
+    local_inflation_params_.resolution = map_resolution_;
     map_size_x_ = maps.width;
     map_size_y_ = maps.height;
     min_points_per_cell_ = map_utils::minimum_density_count(

@@ -6,13 +6,12 @@
       accumulated_cloud_pub_topic: "/map_server/debug/accumulated_local_cloud" # 累积局部点云发布话题名称
       dynamic_points_pub_topic: "/map_server/debug/dynamic_obstacle_points" # 动态障碍物点云发布话题名称
 
-    map_inflation: # 全局与局部统一的代价地图/方向场膨胀参数，使用物理距离计算
-      robot_radius_m: 0.1 # 膨胀平台半径（米）；障碍代价保持255，方向场非本体保持到独立 cap
-      cutoff_radius_m: 0.3 # 膨胀截断半径（米），超过该距离不再膨胀
-      decay_rate_per_m: 24.0 # 指数衰减率（1/m），对应原0.05m分辨率下decay_alpha=1.2的物理衰减曲线
-      direction_non_body_magnitude_cap: 0.9 # 非原始方向地形本体格的模长上限；uint8 向下量化为 229/255，本体固定为 1
-
     global_map:
+      inflation: # 静态障碍物（全局导航地图）的代价地图/方向场膨胀参数，使用物理距离计算
+        full_cost_radius_m: 0.1 # 满代价半径（米）：该半径内障碍代价保持255，方向场本体模长保持1.0
+        cutoff_radius_m: 0.3 # 膨胀截断半径（米），超过该距离不再膨胀
+        decay_rate_per_m: 24.0 # 指数衰减率（1/m），对应原0.05m分辨率下decay_alpha=1.2的物理衰减曲线
+        direction_non_body_magnitude_cap: 0.9 # 非原始方向地形本体格的模长上限；uint8 向下量化为 229/255，本体固定为 1
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图
       robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
       blue_nav_map_filename: "test.msgpack" # 全局导航地图路径（蓝方）
@@ -25,6 +24,10 @@
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
 
     local_map:
+      inflation: # 动态障碍物（局部代价地图/预测帧）的膨胀参数，使用物理距离计算；可独立于静态障碍物（global_map.inflation）调参
+        full_cost_radius_m: 0.2 # 满代价半径（米）：该半径内障碍代价保持255
+        cutoff_radius_m: 0.4 # 膨胀截断半径（米），超过该距离不再膨胀
+        decay_rate_per_m: 16.0 # 指数衰减率（1/m）
       bypass_dynamic_obstacle: false # 是否绕过动态障碍物检测（开启后发布全空的局部代价地图，用于调试）
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       local_cost_maps_pub_topic: "/map_server/local_cost_maps" # 局部代价地图序列发布话题（maps[0]=当前帧，maps[1..N]=预测帧）

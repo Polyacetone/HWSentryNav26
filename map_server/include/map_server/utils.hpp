@@ -28,7 +28,7 @@ struct TerrainMapData {
 };
 
 struct MapInflationParams {
-    double robot_radius_m;
+    double full_cost_radius_m; // 满代价半径：该半径内障碍代价保持255、方向场模长保持1.0（膨胀平台）
     double cutoff_radius_m;
     double decay_rate_per_m;
     double direction_non_body_magnitude_cap; // (0, 0.9]，须与本体 magnitude=1 保持可分离

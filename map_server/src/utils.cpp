@@ -51,11 +51,11 @@ void validate_common_inflation_params(const MapInflationParams& params) {
     if (!std::isfinite(params.resolution) || params.resolution <= 0.0) {
         throw std::invalid_argument("map inflation resolution must be finite and positive");
     }
-    if (!std::isfinite(params.robot_radius_m) || params.robot_radius_m < 0.0
+    if (!std::isfinite(params.full_cost_radius_m) || params.full_cost_radius_m < 0.0
         || !std::isfinite(params.cutoff_radius_m)
-        || params.cutoff_radius_m < params.robot_radius_m) {
+        || params.cutoff_radius_m < params.full_cost_radius_m) {
         throw std::invalid_argument(
-            "map inflation radii require 0 <= robot_radius_m <= cutoff_radius_m"
+            "map inflation radii require 0 <= full_cost_radius_m <= cutoff_radius_m"
         );
     }
     if (!std::isfinite(params.decay_rate_per_m) || params.decay_rate_per_m < 0.0) {
@@ -295,11 +295,11 @@ cv::Mat inflate_cost_map(
             if (bin_mask.at<uint8_t>(y, x)) continue;
 
             const double distance_m = static_cast<double>(dist_row[x]) * params.resolution;
-            if (distance_m <= params.robot_radius_m) {
+            if (distance_m <= params.full_cost_radius_m) {
                 out_row[x] = 255;
             } else if (distance_m <= params.cutoff_radius_m) {
                 const float v = 255.0f * static_cast<float>(std::exp(
-                    -params.decay_rate_per_m * (distance_m - params.robot_radius_m)
+                    -params.decay_rate_per_m * (distance_m - params.full_cost_radius_m)
                 ));
                 out_row[x] = static_cast<uint8_t>(std::clamp(v, 0.0f, 255.0f));
             }
@@ -457,10 +457,10 @@ InflatedDirectionField inflate_direction_field(
                         if (distance_m > params.cutoff_radius_m) continue;
 
                         double magnitude = 1.0;
-                        if (distance_m > params.robot_radius_m) {
+                        if (distance_m > params.full_cost_radius_m) {
                             magnitude = std::exp(
                                 -params.decay_rate_per_m
-                                * (distance_m - params.robot_radius_m)
+                                * (distance_m - params.full_cost_radius_m)
                             );
                         }
 
