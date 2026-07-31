@@ -660,7 +660,11 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             std::cos(req.current_yaw), std::sin(req.current_yaw)
         );
         minco_seed.tangents.front() = measured_start_tangent;
-        minco_seed.states.front().vel = measured_start_speed * measured_start_tangent;
+        // 实测速度 ≤ 0（静止/倒退）时也必须有向非零边界，否则首段起点导数
+        // 为零会被轨迹数值校验判为 cusp；真实执行起步速度由速度剖面保留。
+        minco_seed.states.front().vel = measured_start_tangent * std::max(
+            measured_start_speed, config_.minco.directed_speed_min
+        );
         minco_seed.states.front().acc.setZero();
     }
     // ── [5] MINCO 物理时标见证 + 连续几何联合塑形 ──

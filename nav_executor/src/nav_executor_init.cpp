@@ -150,6 +150,14 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     };
 
     remaining_energy_filter_alpha_ = declare_parameter<double>("node.remaining_energy_filter_alpha");
+    const double chassis_status_timeout_seconds = declare_parameter<double>("node.chassis_status_timeout_seconds");
+    require_parameter(
+        positive_finite(chassis_status_timeout_seconds),
+        "chassis_status_timeout_seconds must be finite and positive"
+    );
+    chassis_status_timeout_ = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(chassis_status_timeout_seconds)
+    );
     path_publish_sample_resolution_ = declare_parameter<double>("node.path_publish_sample_resolution");
     dynamic_prediction_horizon_seconds_ = declare_parameter<double>("path_planner.dynamic_prediction.horizon_seconds");
     require_parameter(positive_finite(path_publish_sample_resolution_), "path publish sample_resolution must be finite and positive");

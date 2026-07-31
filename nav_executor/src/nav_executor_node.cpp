@@ -60,6 +60,7 @@ void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStat
     remaining_energy_buffercap_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_buffercap)
         + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_buffercap_filtered_;
     chassis_state_valid_ = true;
+    last_chassis_status_time_ = std::chrono::steady_clock::now();
 }
 
 void NavExecutorNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -155,8 +156,10 @@ void NavExecutorNode::control_tick() {
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_INVALID_CHASSIS_STATE);
         return;
     }
-    if (chassis_state_sequence_ == 0
-        || chassis_state_sequence_ == last_control_chassis_state_sequence_) {
+    // 不要求每周期都有新序列号：底盘状态与控制 tick 同为 20Hz 时，相位对齐/抖动
+    // 会导致交替跳过、有效控制率减半。这里只做断流检测（状态流死亡则停发指令），
+    // 状态短期重复由 PathExecutor 的 observer 去重逻辑处理。
+    if (control_stamp - last_chassis_status_time_ > chassis_status_timeout_) {
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_NO_NEW_CHASSIS_STATE);
         return;
     }
@@ -309,7 +312,6 @@ void NavExecutorNode::control_tick() {
     ein.observation.stamp = stamp;
     ein.environment.obstacles = &follower_obstacles;
 
-    last_control_chassis_state_sequence_ = chassis_state_sequence_;
     ExecutorOutput out = executor_->update(ein);
 
     previous_motion_feedback_.goal_reached = out.goal_reached;

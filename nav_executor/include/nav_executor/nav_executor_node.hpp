@@ -139,7 +139,11 @@ private:
 
     ChassisMotionState chassis_state_{};
     uint64_t chassis_state_sequence_ = 0;
-    uint64_t last_control_chassis_state_sequence_ = 0;
+    // 底盘状态流 liveness：最后一次有效 ChassisStatus 的接收时刻。
+    // 控制 tick 不要求每周期都有新序列号（20Hz 状态与 20Hz 控制同频时会因相位抖动
+    // 导致控制率减半），只要求状态流没有断流；断流则停止发令（fail-safe）。
+    std::chrono::steady_clock::time_point last_chassis_status_time_{};
+    std::chrono::steady_clock::duration chassis_status_timeout_{std::chrono::milliseconds(100)};
     bool chassis_state_valid_ = false;
     uint8_t chassis_leg_mode_ = 4;
     uint8_t comp_stage_ = 4;
