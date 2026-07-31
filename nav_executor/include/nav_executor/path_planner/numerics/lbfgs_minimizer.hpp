@@ -8,8 +8,8 @@
 
 namespace nav_executor {
 
-// block-scaled trust-region L-BFGS。调用方提供完整的变量 block 与物理尺度；
-// 算法在无量纲缩放坐标内维护历史，并沿 L-BFGS 方向做 trust-region 径向截断。
+// block-scaled L-BFGS。调用方提供完整的变量 block 与物理尺度；算法在无量纲缩放
+// 坐标内维护历史，并以自适应 max-step cap 初始化 Armijo 回溯。
 class LbfgsMinimizer {
 public:
     struct VariableBlock {

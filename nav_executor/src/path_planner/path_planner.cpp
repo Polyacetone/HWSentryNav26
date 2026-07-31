@@ -652,7 +652,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             "raw |grad|_inf %.3g -> %.3g (pos=%.3g, virtual_time=%.3g), "
             "scaled_max_block=%.3g, first_order=%.3g | "
             "radius initial=%.3g final=%.3g range=[%.3g,%.3g] shrink=%d expand=%d boundary=%d | "
-            "history update=%d skip=%d reset=%d | cost_tail relative=%.3g count=%d/%d",
+            "history update=%d skip=%d reset=%d | last actual=%.3g predicted=%.3g rho=%.3g | "
+            "cost_tail relative=%.3g count=%d/%d",
             static_cast<int>(status.size()), status.data(),
             opt.accepted_iterations, opt.function_evaluations, opt.trial_evaluations,
             opt.rejected_trials, opt.nonfinite_trials,
@@ -663,6 +664,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             opt.initial_radius, opt.final_radius, opt.min_radius, opt.max_radius,
             opt.radius_shrinks, opt.radius_expansions, opt.boundary_steps,
             opt.history_updates, opt.history_skips, opt.history_resets,
+            opt.last_actual_reduction, opt.last_predicted_reduction, opt.last_reduction_ratio,
             opt.last_relative_cost_reduction,
             opt.consecutive_small_cost_reductions,
             config_.minco.optimizer.cost_convergence_window

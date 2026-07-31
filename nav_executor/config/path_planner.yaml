@@ -80,7 +80,7 @@
           body_norm_hi: 0.95 # 助跑源门控上界；仅物理本体附近达到完整强度
           saturation_length: 0.05 # 往前看台阶暴露量时的饱和弧长（米），暴露量超过此尺度后助跑惩罚不再增加
           transition_distance: 0.1 # 助跑区边界往外平滑过渡的弧长宽度（米），让助跑效果逐渐消失而非突然截断
-        max_iterations: 2000 # trust-region L-BFGS 最大 accepted step 数
+        max_iterations: 2000 # block-scaled Armijo L-BFGS 最大 accepted step 数
         optimizer:
           position_scale: 0.5 # 每个 2D waypoint block 的物理尺度（米）
           physical_time_scale: 0.1 # 每个 time block 的目标物理尺度（秒）
@@ -89,19 +89,19 @@
           history_size: 8 # 保留的 L-BFGS (s,y) 对数
           first_order_tolerance: 1.0e-5 # max_block ‖D_b g_b‖₂ / max(1,|f|) 一阶最优性阈值
           relative_cost_tolerance: 1.0e-5 # accepted step 的相对目标改善低于此值时计入实际收益收敛窗口
-          cost_convergence_window: 10 # 连续多少次低收益 accepted step 后返回 COST_CONVERGED
+          cost_convergence_window: 10 # 连续多少次低收益 accepted step 后判为 STAGNATED
           scaled_step_tolerance: 1.0e-8 # 归一化 block 步长停滞阈值
           trust_region:
-            initial_radius: 0.5 # trust-region 初始半径（米）
-            min_radius: 1.0e-6 # trust-region 最小半径（米）
-            max_radius: 2.0 # trust-region 最大半径（米）
-            acceptance_ratio: 0.1 # 归一化 trial step 的 accepted ratio 阈值，低于此值就缩小 trust-region
-            shrink_ratio: 0.25 # trust-region 缩小比例
-            expansion_ratio: 0.75 # trust-region 扩大比例
-            shrink_factor: 0.25 # trust-region 缩小因子，低于 acceptance_ratio 时才缩小
-            expansion_factor: 2.0 # trust-region 扩大因子，高于 acceptance_ratio 时才扩大
-            max_consecutive_rejections: 12 # 连续 rejected trial 超过此值就强制缩小 trust-region
-            history_reset_after_rejections: 3 # 连续 rejected trial 超过此值就清空 L-BFGS 历史，避免陷入局部最优
+            initial_radius: 0.5 # Armijo 首次试探的 max-step cap（无量纲 block 坐标）
+            min_radius: 1.0e-6 # 最小 max-step cap（无量纲 block 坐标）
+            max_radius: 2.0 # 最大 max-step cap（无量纲 block 坐标）
+            acceptance_ratio: 0.1 # 保留兼容；Armijo 不使用此接受阈值
+            shrink_ratio: 0.25 # 保留兼容；Armijo 不使用此阈值
+            expansion_ratio: 0.75 # rho 超过此值的高可信边界步才扩大 max-step cap
+            shrink_factor: 0.25 # Armijo 拒绝后的 max-step cap 回溯因子
+            expansion_factor: 2.0 # 高可信边界步的 max-step cap 扩大因子
+            max_consecutive_rejections: 12 # Armijo 连续拒绝上限
+            history_reset_after_rejections: 3 # 保留兼容；达到此次数触发 -gradient rescue
           curvature_relative_threshold: 1.0e-8 # sy > eps*||s||*||y|| 才接受曲率对
           history_acceptance_ratio: 0.25 # 低模型可信度的 accepted step 不写入历史
         min_segment_time: 0.05 # 每段动力学见证的最短物理时长（秒）

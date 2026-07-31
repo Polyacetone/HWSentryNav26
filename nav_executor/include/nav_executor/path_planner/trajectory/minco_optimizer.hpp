@@ -132,6 +132,9 @@ public:
         int history_resets = 0;
         double last_relative_cost_reduction = 0.0;
         int consecutive_small_cost_reductions = 0;
+        double last_actual_reduction = 0.0;
+        double last_predicted_reduction = 0.0;
+        double last_reduction_ratio = 0.0;
 
         [[nodiscard]] std::string_view optimizer_status_string() const noexcept {
             return LbfgsMinimizer::status_string(optimizer_status);

@@ -909,6 +909,9 @@ MincoOptimizer::Result MincoOptimizer::optimize(
     result.history_resets = lr.history_resets;
     result.last_relative_cost_reduction = lr.last_relative_cost_reduction;
     result.consecutive_small_cost_reductions = lr.consecutive_small_cost_reductions;
+    result.last_actual_reduction = lr.last_actual_reduction;
+    result.last_predicted_reduction = lr.last_predicted_reduction;
+    result.last_reduction_ratio = lr.last_reduction_ratio;
 
     const bool failed_initial_evaluation =
         lr.status == LbfgsMinimizer::Status::INITIAL_EVALUATION_NONFINITE;

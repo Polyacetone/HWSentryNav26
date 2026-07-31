@@ -15,7 +15,7 @@ namespace {
 constexpr double GAMMA_MIN = 1e-6;
 constexpr double GAMMA_MAX = 1e6;
 constexpr double BOUNDARY_FRACTION = 0.9;
-constexpr double PREDICTION_EPS_FACTOR = 10.0;
+constexpr double ARMIJO_C1 = 1e-4;
 
 struct HistoryPair {
     Eigen::VectorXd s;
@@ -217,6 +217,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
     int accepted_iterations = 0;
     double last_relative_cost_reduction = 0.0;
     int consecutive_small_cost_reductions = 0;
+    bool force_steepest_direction = false;
 
     const auto update_incumbent_diagnostics = [&]() {
         const Eigen::VectorXd variable_scaled_gradient =
@@ -281,18 +282,21 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
             return finish(Status::FIRST_ORDER_CONVERGED);
         }
         if (consecutive_small_cost_reductions >= opt_.cost_convergence_window) {
-            return finish(Status::COST_CONVERGED);
+            return finish(Status::STAGNATED);
         }
         if (result.function_evaluations >= opt_.max_function_evaluations) {
             return finish(Status::MAX_EVALUATIONS);
         }
 
-        Eigen::VectorXd direction = lbfgs_direction();
+        bool using_steepest_direction = force_steepest_direction || history.empty();
+        Eigen::VectorXd direction = using_steepest_direction ? -gradient : lbfgs_direction();
+        force_steepest_direction = false;
         double directional_derivative = gradient.dot(direction);
         if (!direction.allFinite() || !std::isfinite(directional_derivative)
             || directional_derivative >= 0.0) {
             reset_history();
             direction = -gradient;
+            using_steepest_direction = true;
             directional_derivative = gradient.dot(direction);
         }
         if (!direction.allFinite() || !std::isfinite(directional_derivative)
@@ -301,7 +305,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         }
 
         int consecutive_rejections = 0;
-        bool history_reset_at_current = false;
+        bool steepest_rescue_attempted = using_steepest_direction;
         while (true) {
             if (result.function_evaluations >= opt_.max_function_evaluations) {
                 return finish(Status::MAX_EVALUATIONS);
@@ -321,6 +325,8 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
                 if (!history.empty()) {
                     reset_history();
                     direction = -gradient;
+                    using_steepest_direction = true;
+                    steepest_rescue_attempted = true;
                     continue;
                 }
                 return finish(Status::STAGNATED);
@@ -331,24 +337,15 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
 
             const double step_derivative = gradient.dot(step);
             const double predicted_reduction = -(1.0 - 0.5 * alpha) * step_derivative;
-            // floor 只依赖当前局部模型，不让目标常数偏置参与状态机。
-            const double prediction_floor = PREDICTION_EPS_FACTOR
-                * std::numeric_limits<double>::epsilon() * std::abs(step_derivative);
-            if (!std::isfinite(predicted_reduction) || predicted_reduction < 0.0) {
+            if (!std::isfinite(predicted_reduction) || predicted_reduction <= 0.0) {
                 if (!history.empty()) {
                     reset_history();
                     direction = -gradient;
+                    using_steepest_direction = true;
+                    steepest_rescue_attempted = true;
                     continue;
                 }
                 return finish(Status::NUMERICAL_FAILURE);
-            }
-            if (predicted_reduction <= prediction_floor) {
-                if (!history.empty()) {
-                    reset_history();
-                    direction = -gradient;
-                    continue;
-                }
-                return finish(Status::STAGNATED);
             }
 
             const Eigen::VectorXd trial_x = x
@@ -387,10 +384,12 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
 
             const double previous_radius = radius;
             const bool attempted_at_min_radius = previous_radius <= opt_.trust_region.min_radius;
-            if (!trial_finite || reduction_ratio < opt_.trust_region.shrink_ratio) {
+            const bool accepted = trial_finite
+                && actual_reduction >= ARMIJO_C1 * (-step_derivative);
+            if (!accepted) {
                 radius = std::max(
                     opt_.trust_region.min_radius,
-                    opt_.trust_region.shrink_factor * step_norm
+                    opt_.trust_region.shrink_factor * std::min(previous_radius, step_norm)
                 );
                 if (radius < previous_radius) ++result.radius_shrinks;
             } else if (reduction_ratio > opt_.trust_region.expansion_ratio && boundary_step) {
@@ -404,31 +403,37 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
             result.max_radius = std::max(result.max_radius, radius);
             result.final_radius = radius;
 
-            const bool accepted = trial_finite
-                && reduction_ratio >= opt_.trust_region.acceptance_ratio;
             if (!accepted) {
                 ++result.rejected_trials;
                 ++consecutive_rejections;
 
-                if (!history_reset_at_current
-                    && consecutive_rejections >= opt_.trust_region.history_reset_after_rejections
-                    && !history.empty()) {
+                const bool repeated_interior_step = alpha == 1.0
+                    && radius >= direction_norm;
+                if (!steepest_rescue_attempted
+                    && (attempted_at_min_radius || repeated_interior_step
+                        || consecutive_rejections >= opt_.trust_region.history_reset_after_rejections)) {
                     reset_history();
-                    history_reset_at_current = true;
                     direction = -gradient;
+                    using_steepest_direction = true;
+                    steepest_rescue_attempted = true;
+                    continue;
                 }
-
-                if (attempted_at_min_radius
+                if (attempted_at_min_radius || repeated_interior_step
                     || consecutive_rejections >= opt_.trust_region.max_consecutive_rejections) {
-                    return finish(Status::TRUST_REGION_TOO_SMALL);
+                    return finish(Status::STAGNATED);
                 }
                 continue;
             }
 
             const Eigen::VectorXd y = trial_gradient - gradient;
+            const bool history_eligible = consecutive_rejections == 0
+                && reduction_ratio >= opt_.history_acceptance_ratio;
+            if (!history_eligible) {
+                reset_history();
+                force_steepest_direction = true;
+            }
             bool history_updated = false;
-            if (reduction_ratio >= opt_.history_acceptance_ratio
-                && y.allFinite()) {
+            if (history_eligible && y.allFinite()) {
                 const double sy = step.dot(y);
                 const double s_norm = step.stableNorm();
                 const double y_norm = y.stableNorm();
@@ -474,7 +479,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         return finish(Status::FIRST_ORDER_CONVERGED);
     }
     if (consecutive_small_cost_reductions >= opt_.cost_convergence_window) {
-        return finish(Status::COST_CONVERGED);
+        return finish(Status::STAGNATED);
     }
     return finish(Status::MAX_ITERATIONS);
 }
