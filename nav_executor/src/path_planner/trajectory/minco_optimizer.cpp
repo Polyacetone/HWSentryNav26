@@ -202,18 +202,39 @@ struct PolynomialBasis {
     }
 };
 
+// 助跑源。value 是本体门控与 label 双线性权重、方向混合权重的乘积，全部连续，
+// 因此源的出现与消失都是渐变而非阶跃。
 struct RunupSource {
     double value = 0.0;
     double radius = 0.0;
     TraversalVelocityWindow velocity_window;
+    // ∂value/∂position：含 body_gate 与 label 权重两条路径。
     Eigen::Vector2d position_gradient = Eigen::Vector2d::Zero();
+    // ∂value/∂velocity：来自上/下行方向混合权重。
+    Eigen::Vector2d velocity_gradient = Eigen::Vector2d::Zero();
 };
 
+// 前视窗口内所有助跑源的加权汇总。方向与速度窗都是权重归一化的平均值，避免
+// 「第一个有效源」这种离散选择在源排序交换时产生代价跳变。
 struct TraversalContext {
     bool valid = false;
-    int source_sample = -1;
+    double weight_total = 0.0;   // Σ w_k，速度窗加权平均的归一化分母
+    double summed_norm = 0.0;    // ‖Σ w_k d̂_k‖，方向归一化的分母（≠ weight_total）
+    TraversalVelocityWindow velocity_window; // 归一化后的加权平均窗
+    Eigen::Vector2d direction = Eigen::Vector2d::Zero(); // 归一化后的加权平均方向
+};
+
+// context 聚合中单个源的贡献，供伴随回传按同一权重分摊。source/source_index
+// 精确定位贡献来自哪个采样点的哪一个源，回传时不能跨源平摊。
+struct TraversalContribution {
+    int sample = -1;
+    int source_index = -1;
+    double weight = 0.0;          // source.value · distance_gate
+    double distance_gate = 0.0;
+    double dgate_ddistance = 0.0; // ∂distance_gate/∂前视弧长
+    double source_value = 0.0;
+    Eigen::Vector2d direction = Eigen::Vector2d::Zero(); // 该源的地形方向
     TraversalVelocityWindow velocity_window;
-    Eigen::Vector2d direction = Eigen::Vector2d::Zero();
 };
 
 // 每个采样点的完整几何与地形快照。罚项与非局部助跑回传都基于这份缓存，
@@ -238,7 +259,6 @@ struct Sample {
     MotionJet motion;
     double arc_measure = 0.0;               // dt · speed
 
-    uint8_t terrain_label = static_cast<uint8_t>(TerrainType::FLAT);
     double direction_norm = 0.0;
     Eigen::Vector2d terrain_direction = Eigen::Vector2d::Zero();
     Eigen::Matrix2d terrain_direction_jacobian = Eigen::Matrix2d::Zero();
@@ -246,8 +266,11 @@ struct Sample {
     Eigen::Vector2d terrain_gate_position_gradient = Eigen::Vector2d::Zero();
     double body_gate = 0.0;
     Eigen::Vector2d body_gate_position_gradient = Eigen::Vector2d::Zero();
-    std::array<RunupSource, TERRAIN_LABEL_COUNT - 2> sources {};
+    // 每个方向性 label 各占一个上行源与一个下行源。
+    std::array<RunupSource, 2 * (TERRAIN_LABEL_COUNT - 2)> sources {};
     int source_count = 0;
+    // 各 label 的双线性权重及其位置导数，用于让禁止方向罚跨 cell 连续。
+    DirectionMap::LabelWeights label_weights;
 };
 
 // 采样点罚的梯度累加器：对物理量的偏导，最终经 β 映射回多项式系数。
@@ -360,51 +383,89 @@ double MincoOptimizer::accumulate_penalties(
             sample.arc_measure = sample.dt * sample.speed;
 
             if (ws.direction_map && ws.terrain_constraints) {
-                const auto field = ws.direction_map->sample_map(sample.position);
-                const auto terrain_cell =
-                    ws.direction_map->geometry.containing_cell(sample.position);
-                if (field && terrain_cell) {
-                    const double norm = field->value.norm();
-                    sample.terrain_label =
-                        ws.direction_map->terrain_label_at_cell(*terrain_cell);
-                    sample.direction_norm = norm;
-                    if (norm > EPS) {
-                        const Eigen::Vector2d direction = field->value / norm;
-                        sample.terrain_direction = direction;
-                        sample.terrain_direction_jacobian = (
-                            (Eigen::Matrix2d::Identity() - direction * direction.transpose())
-                                / norm
-                        ) * field->jacobian;
-                        const Eigen::Vector2d dnorm_dposition =
-                            field->jacobian.transpose() * direction;
-                        const auto [terrain_gate, dterrain_gate] = smoothstep_gate(
-                            norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi
-                        );
-                        sample.terrain_gate = terrain_gate;
-                        sample.terrain_gate_position_gradient =
-                            dterrain_gate * dnorm_dposition;
+                // 越出方向图 footprint 时复制边界值而非整体归零，避免地形罚在
+                // 图边界从满强度阶跃到 0。
+                const auto field =
+                    ws.direction_map->sample_map_clamped(sample.position);
+                const double norm = field.value.norm();
+                sample.direction_norm = norm;
+                sample.label_weights =
+                    ws.direction_map->label_weights_clamped(sample.position);
+                if (norm > EPS) {
+                    const Eigen::Vector2d direction = field.value / norm;
+                    sample.terrain_direction = direction;
+                    sample.terrain_direction_jacobian = (
+                        (Eigen::Matrix2d::Identity() - direction * direction.transpose())
+                            / norm
+                    ) * field.jacobian;
+                    const Eigen::Vector2d dnorm_dposition =
+                        field.jacobian.transpose() * direction;
+                    const auto [terrain_gate, dterrain_gate] = smoothstep_gate(
+                        norm, params_.terrain_gate.norm_lo, params_.terrain_gate.norm_hi
+                    );
+                    sample.terrain_gate = terrain_gate;
+                    sample.terrain_gate_position_gradient =
+                        dterrain_gate * dnorm_dposition;
 
-                        const auto [body_gate, dbody_gate] = smoothstep_gate(
-                            norm, params_.runup_body_norm_lo, params_.runup_body_norm_hi
+                    const auto [body_gate, dbody_gate] = smoothstep_gate(
+                        norm, params_.runup_body_norm_lo, params_.runup_body_norm_hi
+                    );
+                    if (body_gate > 0.0) {
+                        const Eigen::Vector2d dbody_gate_dposition =
+                            dbody_gate * dnorm_dposition;
+                        sample.body_gate = body_gate;
+                        sample.body_gate_position_gradient = dbody_gate_dposition;
+
+                        // 上/下行不再由 v·d̂ 的符号硬切：在 ±directed_speed_min
+                        // 带内平滑混合两侧 mode，使禁止方向的源渐隐而非骤然消失。
+                        const double directed = sample.velocity.dot(direction);
+                        const double band = std::max(
+                            params_.directed_speed_min, MEASURE_SPEED_REG
                         );
-                        if (body_gate > 0.0) {
-                            const Eigen::Vector2d dbody_gate_dposition =
-                                dbody_gate * dnorm_dposition;
-                            sample.body_gate = body_gate;
-                            sample.body_gate_position_gradient =
-                                dbody_gate_dposition;
-                            const bool going_up = sample.velocity.dot(direction) >= 0.0;
-                            const uint8_t label = sample.terrain_label;
-                            const TraversalMode* rule =
-                                ws.terrain_constraints->selected_mode(label, going_up);
-                            if (rule) {
-                                sample.sources[static_cast<size_t>(sample.source_count++)] =
-                                    RunupSource {
-                                        .value = body_gate,
-                                        .radius = rule->run_up,
-                                        .velocity_window = rule->velocity_window,
-                                        .position_gradient = dbody_gate_dposition,
-                                    };
+                        const auto [up_weight, dup_weight] = smoothstep_gate(
+                            directed, -band, band
+                        );
+                        // ∂directed/∂v = d̂；方向本身随位置变化的项经
+                        // terrain_direction_jacobian 进入位置梯度。
+                        const Eigen::Vector2d ddirected_dposition =
+                            sample.terrain_direction_jacobian.transpose()
+                            * sample.velocity;
+
+                        // label 按双线性权重混合，跨 cell 时参数连续过渡。
+                        for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE);
+                             label < TERRAIN_LABEL_COUNT; ++label) {
+                            const double label_weight =
+                                sample.label_weights.weights[label];
+                            if (label_weight <= 0.0) continue;
+                            const Eigen::Vector2d& dlabel_weight =
+                                sample.label_weights.dweights[label];
+                            for (const bool is_up : {true, false}) {
+                                const TraversalMode* rule =
+                                    ws.terrain_constraints->selected_mode(label, is_up);
+                                if (!rule) continue;
+                                const double direction_weight =
+                                    is_up ? up_weight : 1.0 - up_weight;
+                                if (direction_weight <= 0.0) continue;
+                                const double ddirection_weight =
+                                    is_up ? dup_weight : -dup_weight;
+                                const double value =
+                                    body_gate * label_weight * direction_weight;
+                                if (value <= 0.0) continue;
+                                sample.sources[
+                                    static_cast<size_t>(sample.source_count++)
+                                ] = RunupSource {
+                                    .value = value,
+                                    .radius = rule->run_up,
+                                    .velocity_window = rule->velocity_window,
+                                    .position_gradient =
+                                        dbody_gate_dposition * label_weight
+                                            * direction_weight
+                                        + body_gate * dlabel_weight * direction_weight
+                                        + body_gate * label_weight
+                                            * ddirection_weight * ddirected_dposition,
+                                    .velocity_gradient = body_gate * label_weight
+                                        * ddirection_weight * direction,
+                                };
                             }
                         }
                     }
@@ -434,29 +495,69 @@ double MincoOptimizer::accumulate_penalties(
     std::vector<TraversalContext> traversal_contexts(
         static_cast<size_t>(sample_count)
     );
+    // 每个采样点的 context 由哪些源按什么权重合成，供 alignment 与速度窗的
+    // 非局部伴随按同一权重分摊。
+    std::vector<std::vector<TraversalContribution>> traversal_contributions(
+        static_cast<size_t>(sample_count)
+    );
     for (int i = 0; i < sample_count; ++i) {
         double distance = 0.0;
         double exposure = 0.0;
         TraversalContext& context = traversal_contexts[static_cast<size_t>(i)];
+        auto& contributions = traversal_contributions[static_cast<size_t>(i)];
         for (int j = i; j < sample_count; ++j) {
             const Sample& future = samples[static_cast<size_t>(j)];
             for (int index = 0; index < future.source_count; ++index) {
                 const RunupSource& source = future.sources[static_cast<size_t>(index)];
-                const auto [distance_gate, unused] = runup_distance_gate(
+                const auto [distance_gate, dgate_ddistance] = runup_distance_gate(
                     distance, source.radius, params_.runup_transition_distance
                 );
-                (void)unused;
                 exposure += source.value * distance_gate * future.arc_measure;
-                if (!context.valid && source.value > 0.0 && distance_gate > 0.0
+                // 全部在范围内的源按 value·distance_gate 加权累加，取代
+                // 「第一个有效源」的离散选择。
+                if (source.value > 0.0 && distance_gate > 0.0
                     && future.terrain_direction.squaredNorm() > EPS) {
+                    const double weight = source.value * distance_gate;
                     context.valid = true;
-                    context.source_sample = j;
-                    context.velocity_window = source.velocity_window;
-                    context.direction = future.terrain_direction;
+                    context.weight_total += weight;
+                    context.direction += weight * future.terrain_direction;
+                    context.velocity_window.min +=
+                        weight * source.velocity_window.min;
+                    context.velocity_window.max +=
+                        weight * source.velocity_window.max;
+                    contributions.push_back(TraversalContribution {
+                        .sample = j,
+                        .source_index = index,
+                        .weight = weight,
+                        .distance_gate = distance_gate,
+                        .dgate_ddistance = dgate_ddistance,
+                        .source_value = source.value,
+                        .direction = future.terrain_direction,
+                        .velocity_window = source.velocity_window,
+                    });
                 }
             }
             distance += future.arc_measure;
             if (distance > lookahead_limit) break;
+        }
+        if (context.valid && context.weight_total > 0.0) {
+            const double inverse_weight = 1.0 / context.weight_total;
+            context.velocity_window.min *= inverse_weight;
+            context.velocity_window.max *= inverse_weight;
+            const Eigen::Vector2d summed = context.direction;
+            const double summed_norm = summed.norm();
+            if (summed_norm > EPS) {
+                context.direction = summed / summed_norm;
+                context.summed_norm = summed_norm;
+            } else {
+                // 前视窗口内的方向互相抵消（例如两侧对向台阶）：没有可用的
+                // 对齐参考，退回不施加方向罚。
+                context.valid = false;
+                contributions.clear();
+            }
+        } else {
+            context.valid = false;
+            contributions.clear();
         }
         runup_exposure[static_cast<size_t>(i)] = exposure;
         runup_gate[static_cast<size_t>(i)] = 1.0 - std::exp(
@@ -497,8 +598,96 @@ double MincoOptimizer::accumulate_penalties(
     std::vector<Eigen::Vector2d> lookahead_position_gradient(
         static_cast<size_t>(sample_count), Eigen::Vector2d::Zero()
     );
+    // 源强度还依赖速度（上/下行混合权重），需要与位置梯度并行的非局部通道。
+    std::vector<Eigen::Vector2d> lookahead_velocity_gradient(
+        static_cast<size_t>(sample_count), Eigen::Vector2d::Zero()
+    );
     std::vector<double> arc_measure_gradient(static_cast<size_t>(sample_count), 0.0);
     std::vector<double> arc_range_difference(static_cast<size_t>(sample_count + 1), 0.0);
+
+    // ── context 的非局部伴随 ──
+    // context.direction = normalize(Σ_k w_k d̂_k)，velocity_window 为同一权重的
+    // 加权平均，w_k = value_k · distance_gate_k。三条依赖都要回传：源方向 d̂_k、
+    // 源强度 value_k，以及 distance_gate_k 所依赖的前视弧长。最后一条必须在
+    // arc_range_difference 做前缀和之前累加，因此这里先于罚项主循环求值。
+    for (int i = 0; i < sample_count; ++i) {
+        const Sample& sample = samples[static_cast<size_t>(i)];
+        const TraversalContext& traversal = traversal_contexts[static_cast<size_t>(i)];
+        const auto& contributions = traversal_contributions[static_cast<size_t>(i)];
+        if (!traversal.valid || contributions.empty()
+            || traversal.weight_total <= 0.0 || traversal.summed_norm <= 0.0) {
+            continue;
+        }
+        const double state_gate = 1.0
+            - (1.0 - runup_gate[static_cast<size_t>(i)]) * (1.0 - sample.body_gate);
+        if (state_gate <= 0.0) continue;
+
+        const double dt = sample.dt;
+        const Eigen::Vector2d& heading = sample.direction;
+        const Eigen::Vector2d& terrain = traversal.direction;
+        const double cross = cross_2d(heading, terrain);
+        const double cross_scale = state_gate * w.traversal_alignment * cross;
+        const double speed_under = violation(
+            traversal.velocity_window.min - sample.speed
+        );
+        const double speed_over = violation(
+            sample.speed - traversal.velocity_window.max
+        );
+        // 对 cost 的导数，含积分测度 dt。
+        const double dcost_dwindow_min = dt * state_gate
+            * w.traversal_velocity_window * speed_under;
+        const double dcost_dwindow_max = -dt * state_gate
+            * w.traversal_velocity_window * speed_over;
+        // d̂ = Σ/‖Σ‖ ⇒ ∂d̂/∂Σ = (I − d̂d̂ᵀ)/‖Σ‖。归一化分母是 ‖Σ‖ 而非 Σw_k：
+        // 两者仅在所有源方向平行时才相等。
+        const Eigen::Vector2d dcost_ddirection =
+            dt * cross_scale * perpendicular(heading);
+        const Eigen::Vector2d dcost_dsummed = (
+            Eigen::Matrix2d::Identity() - terrain * terrain.transpose()
+        ) * dcost_ddirection / traversal.summed_norm;
+        const double inverse_weight = 1.0 / traversal.weight_total;
+
+        for (const TraversalContribution& contribution : contributions) {
+            const auto source_index = static_cast<size_t>(contribution.sample);
+            const Sample& source = samples[source_index];
+            // (1) 经该源的地形方向 d̂_k：∂Σ/∂d̂_k = w_k·I。
+            lookahead_position_gradient[source_index] +=
+                contribution.weight
+                * source.terrain_direction_jacobian.transpose() * dcost_dsummed;
+            // (2) 经权重 w_k：方向侧 ∂Σ/∂w_k = d̂_k；窗侧为加权平均的偏导。
+            const double dcost_dweight =
+                dcost_dsummed.dot(contribution.direction)
+                + (
+                    dcost_dwindow_min * (
+                        contribution.velocity_window.min
+                        - traversal.velocity_window.min
+                    )
+                    + dcost_dwindow_max * (
+                        contribution.velocity_window.max
+                        - traversal.velocity_window.max
+                    )
+                ) * inverse_weight;
+            if (dcost_dweight == 0.0) continue;
+            // (2a) w_k = value_k · distance_gate_k 的 value 一侧。
+            const double value_scale =
+                dcost_dweight * contribution.distance_gate;
+            const RunupSource& contributing_source =
+                source.sources[static_cast<size_t>(contribution.source_index)];
+            lookahead_position_gradient[source_index] +=
+                value_scale * contributing_source.position_gradient;
+            lookahead_velocity_gradient[source_index] +=
+                value_scale * contributing_source.velocity_gradient;
+            // (2b) distance_gate 一侧：前视弧长是 [i, j) 区间内 arc_measure 之和，
+            // 用区间差分累加，随后与 exposure 通道共享同一前缀和。
+            if (contribution.sample > i && contribution.dgate_ddistance != 0.0) {
+                const double range_scale = dcost_dweight
+                    * contribution.source_value * contribution.dgate_ddistance;
+                arc_range_difference[static_cast<size_t>(i)] += range_scale;
+                arc_range_difference[source_index] -= range_scale;
+            }
+        }
+    }
+
     for (int i = 0; i < sample_count; ++i) {
         const Sample& current = samples[static_cast<size_t>(i)];
         const double dcost_dexposure = current.dt
@@ -518,9 +707,12 @@ double MincoOptimizer::accumulate_penalties(
                     distance, source.radius, params_.runup_transition_distance
                 );
                 if (distance_gate <= 0.0 && dgate_ddistance == 0.0) continue;
+                const double source_scale =
+                    dcost_dexposure * distance_gate * future.arc_measure;
                 lookahead_position_gradient[static_cast<size_t>(j)] +=
-                    dcost_dexposure * distance_gate * future.arc_measure
-                    * source.position_gradient;
+                    source_scale * source.position_gradient;
+                lookahead_velocity_gradient[static_cast<size_t>(j)] +=
+                    source_scale * source.velocity_gradient;
                 arc_measure_gradient[static_cast<size_t>(j)] +=
                     dcost_dexposure * source.value * distance_gate;
 
@@ -590,21 +782,30 @@ double MincoOptimizer::accumulate_penalties(
         StateGradient gradient;
         CostTerms sample_terms;
 
-        // (a) 障碍罚：双线性插值 map 坐标梯度；越界时按到边界的距离外推。
+        // (a) 障碍罚：双线性插值 map 坐标梯度。越界时在被复制的边界值之上叠加
+        // 距离斜坡，而不是替换为常数 1 + d/res —— 后者会在 footprint 边界让
+        // 自由区的罚从 ≈0 阶跃到满值。
         if (ws.cost_map && w.obstacle > 0.0) {
-            double value = 0.0;
-            Eigen::Vector2d value_gradient = Eigen::Vector2d::Zero();
-            if (const auto cost_sample = ws.cost_map->sample_map(sample.position)) {
-                value = cost_sample->value / 255.0;
-                value_gradient = cost_sample->gradient / 255.0;
-            } else {
-                const Eigen::Vector2d clamped =
-                    ws.cost_map->geometry.clamp_to_footprint(sample.position);
-                const Eigen::Vector2d delta = sample.position - clamped;
-                const double distance = std::sqrt(delta.squaredNorm() + EPS);
-                value = 1.0 + distance / ws.cost_map->geometry.resolution();
-                value_gradient = delta
-                    / (distance * ws.cost_map->geometry.resolution());
+            const auto cost_sample = ws.cost_map->sample_map_clamped(sample.position);
+            double value = cost_sample.value / 255.0;
+            Eigen::Vector2d value_gradient = cost_sample.gradient / 255.0;
+            const Eigen::Vector2d clamped =
+                ws.cost_map->geometry.clamp_to_footprint(sample.position);
+            const Eigen::Vector2d delta = sample.position - clamped;
+            const double outside_squared = delta.squaredNorm();
+            if (outside_squared > 0.0) {
+                // 斜坡取 d²/(2·res·reg)（d<reg）与 d−reg/2 的 C1 拼接：边界处
+                // 值与梯度都为 0，避免 sqrt 在 d→0 处的无界导数与常数偏置。
+                const double regularization = EPS;
+                const double distance = std::sqrt(outside_squared);
+                const double resolution = ws.cost_map->geometry.resolution();
+                if (distance < regularization) {
+                    value += 0.5 * outside_squared / (resolution * regularization);
+                    value_gradient += delta / (resolution * regularization);
+                } else {
+                    value += (distance - 0.5 * regularization) / resolution;
+                    value_gradient += delta / (distance * resolution);
+                }
             }
             const double obstacle = w.obstacle * 0.5 * value * value;
             density += obstacle;
@@ -729,6 +930,7 @@ double MincoOptimizer::accumulate_penalties(
             sample_terms.traversal_velocity_window += state_gate * speed_density;
             gradient.velocity += state_gate * w.traversal_velocity_window
                 * (speed_over - speed_under) * sample.speed_gradient;
+            // 速度窗与对齐方向对 context 权重的依赖由上方的 context 伴随统一回传。
 
             const double tangential = sample.motion.tangential_acceleration;
             const double tangential_density = 0.5
@@ -765,16 +967,6 @@ double MincoOptimizer::accumulate_penalties(
             const double cross_scale = state_gate * w.traversal_alignment * cross;
             gradient.velocity += cross_scale * sample.direction_jacobian.transpose()
                 * Eigen::Vector2d(terrain.y(), -terrain.x());
-            if (traversal.source_sample >= 0) {
-                const Sample& source = samples[static_cast<size_t>(
-                    traversal.source_sample
-                )];
-                lookahead_position_gradient[static_cast<size_t>(
-                    traversal.source_sample
-                )] += dt * cross_scale
-                    * source.terrain_direction_jacobian.transpose()
-                    * perpendicular(heading);
-            }
         }
 
         gradient.position += (1.0 - current_runup_gate)
@@ -789,23 +981,39 @@ double MincoOptimizer::accumulate_penalties(
             const Eigen::Matrix2d& terrain_jacobian = sample.terrain_direction_jacobian;
             const Eigen::Vector2d& heading = sample.direction;
             const double alignment = heading.dot(terrain);
-            const uint8_t label = sample.terrain_label;
-            const bool directional = label >= static_cast<uint8_t>(TerrainType::SLOPE);
-            const bool up_allowed = ws.terrain_constraints->selected_mode(label, true);
-            const bool down_allowed = ws.terrain_constraints->selected_mode(label, false);
-            const double prohibited_up = directional && !up_allowed
-                ? violation(alignment) : 0.0;
-            const double prohibited_down = directional && !down_allowed
-                ? violation(-alignment) : 0.0;
-            const double prohibited_density = 0.5 * w.prohibited_traversal
-                * (prohibited_up * prohibited_up + prohibited_down * prohibited_down);
+            // label 不再取单格硬值：按双线性权重对各 label 的禁止性加权，
+            // 使罚在 label 边界连续过渡。
+            double prohibited_density = 0.0;
+            double alignment_scale = 0.0;
+            Eigen::Vector2d label_weight_gradient = Eigen::Vector2d::Zero();
+            for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE);
+                 label < TERRAIN_LABEL_COUNT; ++label) {
+                const double label_weight = sample.label_weights.weights[label];
+                if (label_weight <= 0.0) continue;
+                const bool up_allowed =
+                    ws.terrain_constraints->selected_mode(label, true);
+                const bool down_allowed =
+                    ws.terrain_constraints->selected_mode(label, false);
+                const double prohibited_up = up_allowed
+                    ? 0.0 : violation(alignment);
+                const double prohibited_down = down_allowed
+                    ? 0.0 : violation(-alignment);
+                const double label_density = 0.5 * w.prohibited_traversal
+                    * (prohibited_up * prohibited_up
+                        + prohibited_down * prohibited_down);
+                prohibited_density += label_weight * label_density;
+                alignment_scale += label_weight * w.prohibited_traversal
+                    * (prohibited_up - prohibited_down);
+                label_weight_gradient +=
+                    label_density * sample.label_weights.dweights[label];
+            }
             density += gate * prohibited_density;
             sample_terms.prohibited_traversal += gate * prohibited_density;
-            const double alignment_scale = gate * w.prohibited_traversal
-                * (prohibited_up - prohibited_down);
+            alignment_scale *= gate;
             gradient.velocity += alignment_scale
                 * sample.direction_jacobian.transpose() * terrain;
             gradient.position += alignment_scale * terrain_jacobian.transpose() * heading;
+            gradient.position += gate * label_weight_gradient;
             gradient.position += prohibited_density
                 * sample.terrain_gate_position_gradient;
         }
@@ -815,6 +1023,8 @@ double MincoOptimizer::accumulate_penalties(
         const Eigen::Vector2d arc_velocity_gradient = arc_adjoint * sample.speed_gradient;
         const Eigen::Vector2d& lookahead_position =
             lookahead_position_gradient[static_cast<size_t>(index)];
+        const Eigen::Vector2d& lookahead_velocity =
+            lookahead_velocity_gradient[static_cast<size_t>(index)];
 
         cost += dt * density;
         if (terms) {
@@ -843,7 +1053,7 @@ double MincoOptimizer::accumulate_penalties(
         const Eigen::Vector2d position_gradient = dt * gradient.position
             + lookahead_position;
         const Eigen::Vector2d velocity_gradient = dt * gradient.velocity
-            + dt * arc_velocity_gradient;
+            + dt * arc_velocity_gradient + lookahead_velocity;
         const Eigen::Vector2d acceleration_gradient = dt * gradient.acceleration;
         const Eigen::Vector2d jerk_gradient = dt * gradient.jerk;
         for (int k = 0; k < NCOEF; ++k) {

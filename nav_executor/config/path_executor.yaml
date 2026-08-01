@@ -121,11 +121,11 @@
         environment_weights:
           obstacle: 8.0 # 避障权重（全局+局部融合代价）
         terminal_weights:
-          position: 0.6 # horizon 末端相对对应参考点的位置权重
-          heading: 0.6 # horizon 末端航向权重
-          velocity: 0.6 # horizon 末端有向投影速度参考权重
-          angular_velocity: 0.6 # horizon 末端角速度参考权重
-          remaining_progress: 0.6 # horizon 末端剩余路径弧长线性代价
+          position: 0.0 # horizon 末端相对对应参考点的位置权重
+          heading: 0.0 # horizon 末端航向权重
+          velocity: 0.0 # horizon 末端有向投影速度参考权重
+          angular_velocity: 0.0 # horizon 末端角速度参考权重
+          remaining_progress: 0.0 # horizon 末端剩余路径弧长线性代价
 
       # ═══════════════════════════════════════════════
       #  Stop — 停止求解器

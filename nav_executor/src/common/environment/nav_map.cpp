@@ -184,6 +184,12 @@ std::optional<CostMap::CostSample> CostMap::sample_map(
     const Eigen::Vector2d& position_map
 ) const {
     if (!geometry.contains_map_point(position_map)) return std::nullopt;
+    return sample_map_clamped(position_map);
+}
+
+CostMap::CostSample CostMap::sample_map_clamped(
+    const Eigen::Vector2d& position_map
+) const {
     const BilinearStencil stencil = centered_bilinear_stencil(geometry, position_map);
     CostSample sample {.value = 0.0, .gradient = Eigen::Vector2d::Zero()};
     for (size_t i = 0; i < stencil.cells.size(); ++i) {
@@ -314,6 +320,12 @@ std::optional<DirectionMap::DirectionSample> DirectionMap::sample_map(
     const Eigen::Vector2d& position_map
 ) const {
     if (!geometry.contains_map_point(position_map)) return std::nullopt;
+    return sample_map_clamped(position_map);
+}
+
+DirectionMap::DirectionSample DirectionMap::sample_map_clamped(
+    const Eigen::Vector2d& position_map
+) const {
     const BilinearStencil stencil = centered_bilinear_stencil(geometry, position_map);
     DirectionSample result {
         .value = Eigen::Vector2d::Zero(),
@@ -323,6 +335,19 @@ std::optional<DirectionMap::DirectionSample> DirectionMap::sample_map(
         const Eigen::Vector2d raw = raw_direction_at_cell(stencil.cells[i]);
         result.value += stencil.weights[i] * raw;
         result.jacobian += raw * stencil.weight_gradients[i].transpose();
+    }
+    return result;
+}
+
+DirectionMap::LabelWeights DirectionMap::label_weights_clamped(
+    const Eigen::Vector2d& position_map
+) const {
+    const BilinearStencil stencil = centered_bilinear_stencil(geometry, position_map);
+    LabelWeights result;
+    for (size_t i = 0; i < stencil.cells.size(); ++i) {
+        const size_t label = terrain_label_at_cell(stencil.cells[i]);
+        result.weights[label] += stencil.weights[i];
+        result.dweights[label] += stencil.weight_gradients[i];
     }
     return result;
 }

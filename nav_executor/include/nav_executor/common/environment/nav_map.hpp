@@ -182,6 +182,13 @@ public:
     [[nodiscard]] std::optional<CostSample> sample_map(
         const Eigen::Vector2d& position_map
     ) const;
+    // Same stencil as sample_map but defined everywhere: outside the footprint the
+    // boundary value is replicated instead of reported as missing, and the
+    // gradient component normal to the exceeded edge is zero. Callers that need a
+    // penalty continuous across the footprint edge add their own distance ramp.
+    [[nodiscard]] CostSample sample_map_clamped(
+        const Eigen::Vector2d& position_map
+    ) const;
 
     const GridGeometry geometry;
     const std::vector<uint8_t> data;
@@ -217,12 +224,32 @@ private:
     decode_mat(const cv::Mat& mat);
 
 public:
+    // Bilinear label weights over the sampling stencil. Weight w of label L is the
+    // summed stencil weight of the cells carrying L, so a penalty formed as
+    // sum_L w_L * f(L) is continuous across cell boundaries. dweights holds
+    // d(w_L)/d(position) in map units. Labels outside the footprint replicate the
+    // boundary cell, matching sample_map_clamped.
+    struct LabelWeights {
+        std::array<double, TERRAIN_LABEL_COUNT> weights {};
+        // Eigen fixed-size vectors are not zero-initialized by `{}`; fill explicitly.
+        std::array<Eigen::Vector2d, TERRAIN_LABEL_COUNT> dweights {};
+
+        LabelWeights() { dweights.fill(Eigen::Vector2d::Zero()); }
+    };
+
     [[nodiscard]] Eigen::Vector2d raw_direction_at_cell(const Eigen::Vector2i& cell) const;
     [[nodiscard]] double raw_magnitude_at_cell(const Eigen::Vector2i& cell) const;
     [[nodiscard]] bool is_terrain_body_cell(const Eigen::Vector2i& cell) const;
     [[nodiscard]] uint8_t terrain_label_at_cell(const Eigen::Vector2i& cell) const;
     // Uses the same map-space centered stencil and edge replication as CostMap.
     [[nodiscard]] std::optional<DirectionSample> sample_map(
+        const Eigen::Vector2d& position_map
+    ) const;
+    // Footprint-clamped counterparts; see CostMap::sample_map_clamped.
+    [[nodiscard]] DirectionSample sample_map_clamped(
+        const Eigen::Vector2d& position_map
+    ) const;
+    [[nodiscard]] LabelWeights label_weights_clamped(
         const Eigen::Vector2d& position_map
     ) const;
 
