@@ -669,6 +669,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .curvature = declare_parameter<double>("path_planner.minco.penalty_weights.curvature"),
             .curvature_rate = declare_parameter<double>("path_planner.minco.penalty_weights.curvature_rate"),
             .directed_regularity = declare_parameter<double>("path_planner.minco.penalty_weights.directed_regularity"),
+            .traversal_velocity_window = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_velocity_window"),
             .traversal_alignment = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_alignment"),
             .prohibited_traversal = declare_parameter<double>("path_planner.minco.penalty_weights.prohibited_traversal"),
             .runup_curvature = declare_parameter<double>("path_planner.minco.penalty_weights.runup_curvature"),
@@ -850,6 +851,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && nonnegative_finite(minco_weights.curvature)
         && nonnegative_finite(minco_weights.curvature_rate)
         && nonnegative_finite(minco_weights.directed_regularity)
+        && nonnegative_finite(minco_weights.traversal_velocity_window)
         && nonnegative_finite(minco_weights.traversal_alignment)
         && nonnegative_finite(minco_weights.prohibited_traversal)
         && nonnegative_finite(minco_weights.runup_curvature),

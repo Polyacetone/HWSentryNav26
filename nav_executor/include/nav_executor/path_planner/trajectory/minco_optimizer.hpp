@@ -15,18 +15,18 @@ namespace nav_executor {
 // ── MINCO 几何塑形优化器 ──
 //
 // 决策变量 = 内部路点 Q（DIM×(N-1)）+ MINCO 参数时长 T（经正性重参数化）。T 只
-// 调理多项式参数化及 min-jerk 正则，不表达执行速度。固定几何上的唯一物理时标由
-// PathSpeedProfile 给出。
+// 作为内部速度见证参与 min-jerk 正则和台阶速度窗塑形，不成为执行速度。固定几何上
+// 的唯一执行时标仍由 PathSpeedProfile 给出。
 //
 // 关键不变量：
 //   1. 边界由单位切向与曲率描述，不接收伪造的物理速度；
-//   2. 几何罚项只使用曲率、弧长曲率变化率和方向等时标不变量；
+//   2. 除台阶速度窗外，几何罚项只使用曲率、弧长曲率变化率和方向等时标不变量；
 //   3. MINCO 参数时长绝不写入最终 PathSpeedProfile。
 //
 // 目标：
 //   J = w_energy·∫‖p'''‖² + w_time·ΣT
 //     + ∫_弧长 [ 障碍 + 曲率/曲率变化率包络 + 有向正则性
-//               + runup-to-exit 方向/曲率正则 + 禁止方向 ] ds
+//               + runup-to-exit 速度窗/方向/曲率正则 + 禁止方向 ] ds
 class MincoOptimizer {
 public:
     struct Weights {
@@ -36,6 +36,7 @@ public:
         double curvature = 100.0;
         double curvature_rate = 100.0;
         double directed_regularity = 1000.0;
+        double traversal_velocity_window = 1600.0;
         double traversal_alignment = 200.0;
         double prohibited_traversal = 1000.0;
         double runup_curvature = 100.0;       // 台阶场及其助跑区内的 κ² 正则
@@ -89,13 +90,14 @@ public:
         double curvature = 0.0;
         double curvature_rate = 0.0;
         double directed_regularity = 0.0;
+        double traversal_velocity_window = 0.0;
         double traversal_alignment = 0.0;
         double prohibited_traversal = 0.0;
         double runup_curvature = 0.0;
         [[nodiscard]] double total() const {
             return energy + time + obstacle + curvature + curvature_rate
-                + directed_regularity + traversal_alignment + prohibited_traversal
-                + runup_curvature;
+                + directed_regularity + traversal_velocity_window
+                + traversal_alignment + prohibited_traversal + runup_curvature;
         }
     };
 

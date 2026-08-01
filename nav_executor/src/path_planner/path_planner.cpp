@@ -682,7 +682,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         RCLCPP_DEBUG(
             logger_,
             "Plan #%lu [minco-geometry] curvature=%.3g->%.3g rate=%.3g->%.3g "
-            "directed=%.3g->%.3g align=%.3g->%.3g runup=%.3g->%.3g",
+            "directed=%.3g->%.3g window=%.3g->%.3g align=%.3g->%.3g "
+            "runup=%.3g->%.3g",
             static_cast<unsigned long>(req.goal.id),
             opt.seed_costs.curvature,
             opt.final_costs.curvature,
@@ -690,6 +691,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             opt.final_costs.curvature_rate,
             opt.seed_costs.directed_regularity,
             opt.final_costs.directed_regularity,
+            opt.seed_costs.traversal_velocity_window,
+            opt.final_costs.traversal_velocity_window,
             opt.seed_costs.traversal_alignment,
             opt.final_costs.traversal_alignment,
             opt.seed_costs.runup_curvature,

@@ -154,6 +154,7 @@ struct PolynomialBasis {
 struct RunupSource {
     double value = 0.0;
     double radius = 0.0;
+    TraversalVelocityWindow velocity_window;
     // ∂value/∂position：含 body_gate 与 label 权重两条路径。
     Eigen::Vector2d position_gradient = Eigen::Vector2d::Zero();
     // ∂value/∂velocity：来自上/下行方向混合权重。
@@ -164,8 +165,10 @@ struct RunupSource {
 // 「第一个有效源」这种离散选择在源排序交换时产生代价跳变。
 struct TraversalContext {
     bool valid = false;
+    bool direction_valid = false;
     double weight_total = 0.0;   // Σ w_k
     double summed_norm = 0.0;    // ‖Σ w_k d̂_k‖，方向归一化的分母（≠ weight_total）
+    TraversalVelocityWindow velocity_window; // 归一化后的加权平均窗
     Eigen::Vector2d direction = Eigen::Vector2d::Zero(); // 归一化后的加权平均方向
 };
 
@@ -179,6 +182,7 @@ struct TraversalContribution {
     double dgate_ddistance = 0.0; // ∂distance_gate/∂前视弧长
     double source_value = 0.0;
     Eigen::Vector2d direction = Eigen::Vector2d::Zero(); // 该源的地形方向
+    TraversalVelocityWindow velocity_window;
 };
 
 // 每个采样点的完整几何与地形快照。罚项与非局部助跑回传都基于这份缓存，
@@ -389,6 +393,7 @@ double MincoOptimizer::accumulate_penalties(
                                 ] = RunupSource {
                                     .value = value,
                                     .radius = rule->run_up,
+                                    .velocity_window = rule->velocity_window,
                                     .position_gradient =
                                         dbody_gate_dposition * label_weight
                                             * direction_weight
@@ -454,6 +459,10 @@ double MincoOptimizer::accumulate_penalties(
                     context.valid = true;
                     context.weight_total += weight;
                     context.direction += weight * future.terrain_direction;
+                    context.velocity_window.min +=
+                        weight * source.velocity_window.min;
+                    context.velocity_window.max +=
+                        weight * source.velocity_window.max;
                     contributions.push_back(TraversalContribution {
                         .sample = j,
                         .source_index = index,
@@ -462,6 +471,7 @@ double MincoOptimizer::accumulate_penalties(
                         .dgate_ddistance = dgate_ddistance,
                         .source_value = source.value,
                         .direction = future.terrain_direction,
+                        .velocity_window = source.velocity_window,
                     });
                 }
             }
@@ -469,16 +479,19 @@ double MincoOptimizer::accumulate_penalties(
             if (distance > lookahead_limit) break;
         }
         if (context.valid && context.weight_total > 0.0) {
+            const double inverse_weight = 1.0 / context.weight_total;
+            context.velocity_window.min *= inverse_weight;
+            context.velocity_window.max *= inverse_weight;
             const Eigen::Vector2d summed = context.direction;
             const double summed_norm = summed.norm();
             if (summed_norm > EPS) {
                 context.direction = summed / summed_norm;
                 context.summed_norm = summed_norm;
+                context.direction_valid = true;
             } else {
                 // 前视窗口内的方向互相抵消（例如两侧对向台阶）：没有可用的
-                // 对齐参考，退回不施加方向罚。
-                context.valid = false;
-                contributions.clear();
+                // 对齐参考，但速度窗仍使用全部源的加权平均。
+                context.direction.setZero();
             }
         } else {
             context.valid = false;
@@ -501,8 +514,18 @@ double MincoOptimizer::accumulate_penalties(
         double base_density = 0.5 * w.runup_curvature
             * sample.curvature.kappa * sample.curvature.kappa;
         if (context.valid) {
-            const double cross = cross_2d(sample.direction, context.direction);
-            base_density += 0.5 * w.traversal_alignment * cross * cross;
+            const double speed_under = violation(
+                context.velocity_window.min - sample.speed
+            );
+            const double speed_over = violation(
+                sample.speed - context.velocity_window.max
+            );
+            base_density += 0.5 * w.traversal_velocity_window
+                * (speed_under * speed_under + speed_over * speed_over);
+            if (context.direction_valid) {
+                const double cross = cross_2d(sample.direction, context.direction);
+                base_density += 0.5 * w.traversal_alignment * cross * cross;
+            }
         }
         traversal_base_density[static_cast<size_t>(i)] = base_density;
     }
@@ -526,7 +549,7 @@ double MincoOptimizer::accumulate_penalties(
         const TraversalContext& traversal = traversal_contexts[static_cast<size_t>(i)];
         const auto& contributions = traversal_contributions[static_cast<size_t>(i)];
         if (!traversal.valid || contributions.empty()
-            || traversal.weight_total <= 0.0 || traversal.summed_norm <= 0.0) {
+            || traversal.weight_total <= 0.0) {
             continue;
         }
         const double state_gate = 1.0
@@ -536,15 +559,30 @@ double MincoOptimizer::accumulate_penalties(
         const double integration_measure = sample.arc_measure;
         const Eigen::Vector2d& heading = sample.direction;
         const Eigen::Vector2d& terrain = traversal.direction;
-        const double cross = cross_2d(heading, terrain);
+        const double cross = traversal.direction_valid
+            ? cross_2d(heading, terrain) : 0.0;
         const double cross_scale = state_gate * w.traversal_alignment * cross;
+        const double speed_under = violation(
+            traversal.velocity_window.min - sample.speed
+        );
+        const double speed_over = violation(
+            sample.speed - traversal.velocity_window.max
+        );
+        const double dcost_dwindow_min = integration_measure * state_gate
+            * w.traversal_velocity_window * speed_under;
+        const double dcost_dwindow_max = -integration_measure * state_gate
+            * w.traversal_velocity_window * speed_over;
         // d̂ = Σ/‖Σ‖ ⇒ ∂d̂/∂Σ = (I − d̂d̂ᵀ)/‖Σ‖。归一化分母是 ‖Σ‖ 而非 Σw_k：
         // 两者仅在所有源方向平行时才相等。
         const Eigen::Vector2d dcost_ddirection =
             integration_measure * cross_scale * perpendicular(heading);
-        const Eigen::Vector2d dcost_dsummed = (
-            Eigen::Matrix2d::Identity() - terrain * terrain.transpose()
-        ) * dcost_ddirection / traversal.summed_norm;
+        Eigen::Vector2d dcost_dsummed = Eigen::Vector2d::Zero();
+        if (traversal.direction_valid) {
+            dcost_dsummed = (
+                Eigen::Matrix2d::Identity() - terrain * terrain.transpose()
+            ) * dcost_ddirection / traversal.summed_norm;
+        }
+        const double inverse_weight = 1.0 / traversal.weight_total;
         for (const TraversalContribution& contribution : contributions) {
             const auto source_index = static_cast<size_t>(contribution.sample);
             const Sample& source = samples[source_index];
@@ -554,7 +592,17 @@ double MincoOptimizer::accumulate_penalties(
                 * source.terrain_direction_jacobian.transpose() * dcost_dsummed;
             // (2) 经权重 w_k：方向侧 ∂Σ/∂w_k = d̂_k；窗侧为加权平均的偏导。
             const double dcost_dweight =
-                dcost_dsummed.dot(contribution.direction);
+                dcost_dsummed.dot(contribution.direction)
+                + inverse_weight * (
+                    dcost_dwindow_min * (
+                        contribution.velocity_window.min
+                        - traversal.velocity_window.min
+                    )
+                    + dcost_dwindow_max * (
+                        contribution.velocity_window.max
+                        - traversal.velocity_window.max
+                    )
+                );
             if (dcost_dweight == 0.0) continue;
             // (2a) w_k = value_k · distance_gate_k 的 value 一侧。
             const double value_scale =
@@ -753,8 +801,24 @@ double MincoOptimizer::accumulate_penalties(
             gradient.acceleration += scale * jet.dkappa_dacceleration;
         }
 
-        // 地形方向对齐同样只依赖几何切向。
+        // 速度窗使用 MINCO 内部速度见证，只负责联合塑形，不会写入执行速度剖面。
         if (state_gate > 0.0 && traversal.valid) {
+            const double speed_under = violation(
+                traversal.velocity_window.min - sample.speed
+            );
+            const double speed_over = violation(
+                sample.speed - traversal.velocity_window.max
+            );
+            const double speed_density = 0.5 * w.traversal_velocity_window
+                * (speed_under * speed_under + speed_over * speed_over);
+            density += state_gate * speed_density;
+            sample_terms.traversal_velocity_window += state_gate * speed_density;
+            gradient.velocity += state_gate * w.traversal_velocity_window
+                * (speed_over - speed_under) * sample.speed_gradient;
+        }
+
+        // 地形方向对齐同样只依赖几何切向。
+        if (state_gate > 0.0 && traversal.direction_valid) {
             const Eigen::Vector2d& heading = sample.direction;
             const Eigen::Vector2d& terrain = traversal.direction;
             const double cross = cross_2d(heading, terrain);
@@ -832,6 +896,8 @@ double MincoOptimizer::accumulate_penalties(
             terms->curvature_rate += integration_measure * sample_terms.curvature_rate;
             terms->directed_regularity +=
                 integration_measure * sample_terms.directed_regularity;
+            terms->traversal_velocity_window +=
+                integration_measure * sample_terms.traversal_velocity_window;
             terms->traversal_alignment +=
                 integration_measure * sample_terms.traversal_alignment;
             terms->prohibited_traversal +=

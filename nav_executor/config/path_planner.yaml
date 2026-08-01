@@ -72,6 +72,7 @@
           curvature: 100.0 # 几何曲率超限惩罚
           curvature_rate: 100.0 # 弧长曲率变化率超限惩罚
           directed_regularity: 1000.0 # 有向正则性，排除内部零速点、尖点与逆向
+          traversal_velocity_window: 1600.0 # runup 起点至地形出口的 MINCO 内部速度见证窗
           traversal_alignment: 1600.0 # runup 起点至地形出口的方向对齐软约束
           prohibited_traversal: 1000.0 # 往地形禁止方向行驶的惩罚
           runup_curvature: 100.0 # runup 起点至地形出口的 κ² 正则
