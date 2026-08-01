@@ -25,14 +25,14 @@ struct RouteTrackerParams {
     // 假设权重低于领先假设该比例时被淘汰。
     double hypothesis_prune_ratio;
 
-    // 观测代价的归一化尺度：位置 (m)、航向 (rad)、速度方向 (m/s)。
-    double position_scale;
-    double heading_scale;
-    double velocity_scale;
-    // 路径方向速度与实测速度不一致时的转移代价尺度 (m)。
-    double transition_scale;
-    // 路径方向速度的一阶滤波系数。
-    double path_speed_filter_alpha;
+    // 统一 (s, nu) 状态估计器的残差标准差。
+    double position_sigma;
+    double velocity_sigma;
+    double progress_sigma;
+    double profile_speed_sigma;
+    double speed_dynamics_sigma;
+    // 实际路径速度状态的物理上界 (m/s)。
+    double max_path_speed;
 };
 
 enum class RouteTrackingStatus : uint8_t {
@@ -53,7 +53,7 @@ struct RouteEstimate {
 // 有向路径进度观测器。
 //
 // 进度是有向路径上的时序状态，不是每帧独立的最近点：
-//   - 观测同时使用位置、航向和速度方向，因此空间相邻但切向相反的回头弯分支可以区分；
+//   - 位置与地图系速度矢量共同观测 (s, nu)，速度剖面仅作为 nu 的弱先验；
 //   - 维护多个竞争的弧长假设，错误分支随后续观测被淘汰，不会因单次错误最近点永久锁死；
 //   - 前进跟随时进度单调不减，杜绝沿错误分支回退。
 class RouteTracker {

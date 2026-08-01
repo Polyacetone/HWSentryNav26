@@ -5,14 +5,6 @@
 
 namespace nav_executor {
 
-namespace {
-
-double wrap_angle(const double angle) {
-    return std::atan2(std::sin(angle), std::cos(angle));
-}
-
-} // anonymous namespace
-
 RouteTracker::RouteTracker(RouteTrackerParams params) : params_(params) {}
 
 void RouteTracker::reset() {
@@ -43,25 +35,9 @@ std::optional<RouteEstimate> RouteTracker::update(
     const double total_length = geometry.total_arc_length();
     const Eigen::Vector2d position = chassis_pose_map.head<2>();
     const double heading = chassis_pose_map.z();
-    const Eigen::Vector2d heading_axis(std::cos(heading), std::sin(heading));
-    const Eigen::Vector2d velocity_map = chassis_velocity * heading_axis;
-    const double measured_path_speed = std::max(0.0, chassis_velocity);
+    const Eigen::Vector2d velocity_map = chassis_velocity
+        * Eigen::Vector2d(std::cos(heading), std::sin(heading));
     const double spacing = params_.hypothesis_spacing;
-
-    // 观测代价：位置、航向和速度方向共同判定有向分支。空间相邻但切向相反的
-    // 回头弯分支在航向与速度项上代价迥异，因此不会被误选。
-    const auto observation_cost = [&](const double arc_length, const double path_speed) {
-        const TrajSample sample = geometry.eval_arc_length(arc_length);
-        const Eigen::Vector2d tangent(std::cos(sample.theta), std::sin(sample.theta));
-        const double position_residual = (position - sample.p).norm() / params_.position_scale;
-        const double heading_residual =
-            wrap_angle(heading - sample.theta) / params_.heading_scale;
-        const double velocity_residual =
-            (velocity_map - path_speed * tangent).norm() / params_.velocity_scale;
-        return position_residual * position_residual
-            + heading_residual * heading_residual
-            + velocity_residual * velocity_residual;
-    };
 
     // 在 [lo, hi] 上按 hypothesis_spacing 枚举有向进度候选，端点必取。
     const auto for_each_candidate = [&](const double lo, const double hi, auto&& visit) {
@@ -74,45 +50,84 @@ std::optional<RouteEstimate> RouteTracker::update(
         if (hi > lo) visit(hi);
     };
 
+    const double dt = last_stamp_
+        ? std::clamp(
+            std::chrono::duration<double>(stamp - *last_stamp_).count(),
+            0.0, params_.prediction_time_limit
+        )
+        : 0.0;
+    const bool initializing = hypotheses_.empty();
+    const std::vector<Hypothesis> initial_state {{
+        .arc_length = 0.0,
+        .path_speed = 0.0,
+        .cost = 0.0,
+    }};
+    const std::vector<Hypothesis>& previous_states = initializing
+        ? initial_state
+        : hypotheses_;
+
+    const double velocity_weight = 1.0 / std::pow(params_.velocity_sigma, 2);
+    const double progress_weight = 1.0 / std::pow(params_.progress_sigma, 2);
+    const bool has_speed_profile = !path_->speed_profile.empty();
+    const double profile_weight = has_speed_profile
+        ? 1.0 / std::pow(params_.profile_speed_sigma, 2)
+        : 0.0;
+    const double dynamics_weight = 1.0 / std::pow(params_.speed_dynamics_sigma, 2);
+
     std::vector<Hypothesis> candidates;
-    if (hypotheses_.empty()) {
-        // 新路径只在起点附近建立初始进度，覆盖规划延迟但禁止跳到后段。
-        const double initial_hi = std::min(total_length, params_.initial_search_distance);
-        for_each_candidate(0.0, initial_hi, [&](const double arc_length) {
+    for (const Hypothesis& previous : previous_states) {
+        const double nominal_advance = previous.path_speed * dt;
+        const double lo = initializing ? 0.0 : reported_arc_length_;
+        const double hi = initializing
+            ? std::min(total_length, params_.initial_search_distance)
+            : std::min(
+                total_length,
+                previous.arc_length + 2.0 * nominal_advance + spacing
+            );
+        for_each_candidate(lo, std::max(lo, hi), [&](const double arc_length) {
+            const TrajSample sample = geometry.eval_arc_length(arc_length);
+            const Eigen::Vector2d tangent(std::cos(sample.theta), std::sin(sample.theta));
+            const double profile_speed = !has_speed_profile
+                ? previous.path_speed
+                : path_->speed_profile.eval_arc_length(arc_length).velocity;
+
+            // 固定 s 后，统一后验关于 nu 是一维二次函数，可直接求其受限最小值。
+            const double half_dt = 0.5 * dt;
+            const double progress_offset = arc_length - previous.arc_length
+                - half_dt * previous.path_speed;
+            const double denominator = velocity_weight + profile_weight + dynamics_weight
+                + progress_weight * half_dt * half_dt;
+            const double numerator = velocity_weight * tangent.dot(velocity_map)
+                + profile_weight * profile_speed
+                + dynamics_weight * previous.path_speed
+                + progress_weight * half_dt * progress_offset;
+            const double path_speed = std::clamp(
+                numerator / denominator, 0.0, params_.max_path_speed
+            );
+            const double predicted = previous.arc_length
+                + half_dt * (previous.path_speed + path_speed);
+            const double position_residual =
+                (position - sample.p).norm() / params_.position_sigma;
+            const double velocity_residual =
+                (velocity_map - path_speed * tangent).norm() / params_.velocity_sigma;
+            const double progress_residual =
+                (arc_length - predicted) / params_.progress_sigma;
+            const double profile_residual = has_speed_profile
+                ? (path_speed - profile_speed) / params_.profile_speed_sigma
+                : 0.0;
+            const double dynamics_residual =
+                (path_speed - previous.path_speed) / params_.speed_dynamics_sigma;
             candidates.push_back({
                 .arc_length = arc_length,
-                .path_speed = measured_path_speed,
-                .cost = observation_cost(arc_length, measured_path_speed),
+                .path_speed = path_speed,
+                .cost = previous.cost
+                    + position_residual * position_residual
+                    + velocity_residual * velocity_residual
+                    + progress_residual * progress_residual
+                    + profile_residual * profile_residual
+                    + dynamics_residual * dynamics_residual,
             });
         });
-    } else {
-        const double dt = last_stamp_
-            ? std::clamp(
-                std::chrono::duration<double>(stamp - *last_stamp_).count(),
-                0.0, params_.prediction_time_limit
-            )
-            : 0.0;
-        for (const Hypothesis& previous : hypotheses_) {
-            const double path_speed = std::lerp(
-                previous.path_speed, measured_path_speed, params_.path_speed_filter_alpha
-            );
-            // 路径域运动模型：s_k = s_{k-1} + Δt·(ν_{k-1}+ν_k)/2。
-            const double advance = 0.5 * (previous.path_speed + path_speed) * dt;
-            const double predicted = previous.arc_length + advance;
-            // 进度允许观测噪声，但不允许回退：候选下界同时不低于已上报进度，
-            // 因此分支切换也无法让对外可见的弧长后退。
-            const double lo = std::max(previous.arc_length, reported_arc_length_);
-            const double hi = std::min(total_length, predicted + advance + spacing);
-            for_each_candidate(lo, std::max(lo, hi), [&](const double arc_length) {
-                const double transition = (arc_length - predicted) / params_.transition_scale;
-                candidates.push_back({
-                    .arc_length = arc_length,
-                    .path_speed = path_speed,
-                    .cost = previous.cost + transition * transition
-                        + observation_cost(arc_length, path_speed),
-                });
-            });
-        }
     }
     if (candidates.empty()) {
         reset();

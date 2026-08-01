@@ -97,11 +97,17 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         .hypothesis_spacing = declare_parameter<double>("task_manager.route_tracker.hypothesis_spacing"),
         .max_hypotheses = static_cast<int>(declare_parameter<int>("task_manager.route_tracker.max_hypotheses")),
         .hypothesis_prune_ratio = declare_parameter<double>("task_manager.route_tracker.hypothesis_prune_ratio"),
-        .position_scale = declare_parameter<double>("task_manager.route_tracker.position_scale"),
-        .heading_scale = declare_parameter<double>("task_manager.route_tracker.heading_scale"),
-        .velocity_scale = declare_parameter<double>("task_manager.route_tracker.velocity_scale"),
-        .transition_scale = declare_parameter<double>("task_manager.route_tracker.transition_scale"),
-        .path_speed_filter_alpha = declare_parameter<double>("task_manager.route_tracker.path_speed_filter_alpha"),
+        .position_sigma = declare_parameter<double>("task_manager.route_tracker.position_sigma"),
+        .velocity_sigma = declare_parameter<double>("task_manager.route_tracker.velocity_sigma"),
+        .progress_sigma = declare_parameter<double>("task_manager.route_tracker.progress_sigma"),
+        .profile_speed_sigma = declare_parameter<double>("task_manager.route_tracker.profile_speed_sigma"),
+        .speed_dynamics_sigma = declare_parameter<double>("task_manager.route_tracker.speed_dynamics_sigma"),
+        .max_path_speed = std::max({
+            mpc_params.follow.normal_profile.command_envelope.velocity.max,
+            mpc_params.follow.capability_profiles[0].command_envelope.velocity.max,
+            mpc_params.follow.capability_profiles[1].command_envelope.velocity.max,
+            mpc_params.follow.capability_profiles[2].command_envelope.velocity.max,
+        }),
     };
     require_parameter(
         nonnegative_finite(route_tracker_params_.initial_search_distance)
@@ -116,16 +122,13 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         "route_tracker hypothesis parameters are invalid"
     );
     require_parameter(
-        positive_finite(route_tracker_params_.position_scale)
-        && positive_finite(route_tracker_params_.heading_scale)
-        && positive_finite(route_tracker_params_.velocity_scale)
-        && positive_finite(route_tracker_params_.transition_scale),
-        "route_tracker observation scales must be finite and positive"
-    );
-    require_parameter(
-        route_tracker_params_.path_speed_filter_alpha > 0.0
-        && route_tracker_params_.path_speed_filter_alpha <= 1.0,
-        "route_tracker.path_speed_filter_alpha must be in (0, 1]"
+        positive_finite(route_tracker_params_.position_sigma)
+        && positive_finite(route_tracker_params_.velocity_sigma)
+        && positive_finite(route_tracker_params_.progress_sigma)
+        && positive_finite(route_tracker_params_.profile_speed_sigma)
+        && positive_finite(route_tracker_params_.speed_dynamics_sigma)
+        && positive_finite(route_tracker_params_.max_path_speed),
+        "route_tracker estimator scales and speed limit must be finite and positive"
     );
     route_tracker_ = std::make_unique<RouteTracker>(route_tracker_params_);
     proj_guard_params_ = {

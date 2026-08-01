@@ -4,18 +4,18 @@
       goal_equivalence_distance: 0.3 # goal-to-goal 去重阈值 (m)
       plan_cooldown: 0.5 # 同一 goal 失败重试冷却 (s)
 
-      route_tracker: # 有向路径进度观测器：位置 + 航向 + 速度方向 + 历史共同判定当前所处的有向分支。
+      route_tracker: # 统一 (s, nu) 有向路径状态估计器：位置和速度矢量为观测，规划速度为弱先验。
         initial_search_distance: 0.5 # 新路径仅允许在起点附近建立初始进度，覆盖规划延迟但禁止跳到后段 (m)
         max_tracking_error: 2.0 # 机器人与有向参考点超过该距离时视为跟踪丢失 (m)
         prediction_time_limit: 0.2 # 状态掉帧后最多积分这么久的路径速度 (s)
         hypothesis_spacing: 0.05 # 有向进度候选的弧长间距 (m)
         max_hypotheses: 6 # 同时保留的竞争分支上限
         hypothesis_prune_ratio: 3.0 # 代价超过领先假设该比例裕度的分支被淘汰
-        position_scale: 0.25 # 位置观测残差归一尺度 (m)
-        heading_scale: 0.35 # 航向观测残差归一尺度 (rad)
-        velocity_scale: 0.5 # 速度方向观测残差归一尺度 (m/s)
-        transition_scale: 0.1 # 路径域运动模型的弧长转移残差尺度 (m)
-        path_speed_filter_alpha: 0.4 # 路径方向速度一阶滤波系数
+        position_sigma: 0.20 # 位置观测标准差 (m)
+        velocity_sigma: 0.30 # 地图系速度矢量观测标准差 (m/s)
+        progress_sigma: 0.15 # 梯形积分进度模型标准差 (m)
+        profile_speed_sigma: 0.80 # 规划速度弱先验标准差 (m/s)
+        speed_dynamics_sigma: 0.30 # 实际路径速度帧间动态标准差 (m/s)
 
       # ═══════════════════════════════════════════════
       #  RouteMonitor — 路径监控（投影连线 + 台阶阻塞）
