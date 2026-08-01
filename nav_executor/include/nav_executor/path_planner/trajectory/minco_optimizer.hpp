@@ -8,42 +8,35 @@
 #include <nav_executor/common/trajectory/minco_trajectory.hpp>
 #include <nav_executor/path_planner/numerics/lbfgs_minimizer.hpp>
 #include <nav_executor/path_planner/trajectory/minco_minjerk.hpp>
-#include <nav_executor/path_planner/trajectory/shaping_dynamics.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
 
 namespace nav_executor {
 
-// ── MINCO 时空塑形优化器 ──
+// ── MINCO 几何塑形优化器 ──
 //
-// 决策变量 = 内部路点 Q（DIM×(N-1)）+ 物理段时长 T（秒，经正性重参数化）。T 仅是
-// 动力学塑形见证：速度、切向加速度、角速度、角加速度和侧向加速度通过 Q/T 联合影响
-// 空间曲线，但该时标不会成为参考速度。固定几何上的唯一执行时标由 PathSpeedProfile 给出。
+// 决策变量 = 内部路点 Q（DIM×(N-1)）+ MINCO 参数时长 T（经正性重参数化）。T 只
+// 调理多项式参数化及 min-jerk 正则，不表达执行速度。固定几何上的唯一物理时标由
+// PathSpeedProfile 给出。
 //
 // 关键不变量：
-//   1. 有向正则性 v·t̂_seed ≥ directed_speed_min > 0，排除内部零速点、尖点与逆向；
-//   2. State-lattice 与 MINCO 共用 ShapingDynamicsLimits，搜索见证与连续见证语义一致；
-//   3. MINCO 时标只塑形，绝不写入最终 PathSpeedProfile。
+//   1. 边界由单位切向与曲率描述，不接收伪造的物理速度；
+//   2. 几何罚项只使用曲率、弧长曲率变化率和方向等时标不变量；
+//   3. MINCO 参数时长绝不写入最终 PathSpeedProfile。
 //
 // 目标：
-//   J = w_energy·∫‖jerk‖² + w_time·ΣT
-//     + Σ_采样点 [ 障碍 + 物理动力学包络 + 有向正则性
-//                 + runup-to-exit 速度窗/方向/运动正则 + 禁止方向 ]
+//   J = w_energy·∫‖p'''‖² + w_time·ΣT
+//     + ∫_弧长 [ 障碍 + 曲率/曲率变化率包络 + 有向正则性
+//               + runup-to-exit 方向/曲率正则 + 禁止方向 ] ds
 class MincoOptimizer {
 public:
     struct Weights {
-        double energy = 1.0;                   // 物理 jerk 能量
-        double time = 16.0;                    // 见证总时长
+        double energy = 1.0;                   // 参数域 min-jerk 正则
+        double time = 16.0;                    // 参数区间总长度
         double obstacle = 1000.0;
-        double velocity = 100.0;
-        double tangential_acceleration = 100.0;
-        double angular_velocity = 100.0;
-        double angular_acceleration = 100.0;
-        double lateral_acceleration = 100.0;
+        double curvature = 100.0;
+        double curvature_rate = 100.0;
         double directed_regularity = 1000.0;
-        double traversal_velocity_window = 1600.0;
         double traversal_alignment = 200.0;
-        double traversal_tangential_acceleration = 10.0;
-        double traversal_angular_velocity = 10.0;
         double prohibited_traversal = 1000.0;
         double runup_curvature = 100.0;       // 台阶场及其助跑区内的 κ² 正则
     };
@@ -74,8 +67,8 @@ public:
 
     struct Params {
         Weights weights;
-        ShapingDynamicsLimits dynamics;
-        double directed_speed_min = 0.05;
+        GeometryLimits geometry;
+        double directed_cosine_min = 0.1;
         TerrainGate terrain_gate;
         int samples_per_segment = 16;   // 每段约束采样点数
         int max_iterations = 200;
@@ -93,24 +86,15 @@ public:
         double energy = 0.0;
         double time = 0.0;
         double obstacle = 0.0;
-        double velocity = 0.0;
-        double tangential_acceleration = 0.0;
-        double angular_velocity = 0.0;
-        double angular_acceleration = 0.0;
-        double lateral_acceleration = 0.0;
+        double curvature = 0.0;
+        double curvature_rate = 0.0;
         double directed_regularity = 0.0;
-        double traversal_velocity_window = 0.0;
         double traversal_alignment = 0.0;
-        double traversal_tangential_acceleration = 0.0;
-        double traversal_angular_velocity = 0.0;
         double prohibited_traversal = 0.0;
         double runup_curvature = 0.0;
         [[nodiscard]] double total() const {
-            return energy + time + obstacle + velocity + tangential_acceleration
-                + angular_velocity + angular_acceleration + lateral_acceleration
-                + directed_regularity + traversal_velocity_window
-                + traversal_alignment + traversal_tangential_acceleration
-                + traversal_angular_velocity + prohibited_traversal
+            return energy + time + obstacle + curvature + curvature_rate
+                + directed_regularity + traversal_alignment + prohibited_traversal
                 + runup_curvature;
         }
     };
@@ -167,14 +151,10 @@ public:
 
     explicit MincoOptimizer(Params params);
 
-    // 由平坦 seed 初始化并优化。
-    //   seed_states：N+1 个 2D 边界全状态（含 head/tail 的 pos/vel/acc，仅 x,y）；
-    //   seed_durations：N 段动力学见证初始时长（秒）；
-    //   seed_tangents：N+1 个边界处的 A* 有向单位切向，定义有向正则性参考方向。
+    // 由几何 seed 初始化并优化。边界中的 tangent 必须为非零有向切向。
     Result optimize(
-        const std::vector<MincoMinJerk::BoundaryPVA>& seed_states,
+        const std::vector<GeometricBoundary>& seed_boundaries,
         const std::vector<double>& seed_durations,
-        const std::vector<Eigen::Vector2d>& seed_tangents,
         const CostMap& cost_map,
         const DirectionMap& direction_map,
         const TerrainTraversalConstraints& terrain_constraints

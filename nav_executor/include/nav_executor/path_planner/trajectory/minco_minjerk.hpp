@@ -9,6 +9,13 @@
 
 namespace nav_executor {
 
+// 几何边界：切向只定义朝向，曲率和位置均与时标无关。
+struct GeometricBoundary {
+    Eigen::Vector2d position = Eigen::Vector2d::Zero();
+    Eigen::Vector2d tangent = Eigen::Vector2d::UnitX();
+    double curvature = 0.0;
+};
+
 // 五次 MINCO 的系数消元与梯度回传。内部节点保持速度至四阶导连续。
 // 矩阵带宽固定，使用带状部分主元 LU 避免随段数立方增长。
 class MincoMinJerk {
@@ -16,19 +23,14 @@ public:
     static constexpr int DIM = 2;   // x, y（平坦输出）
     static constexpr int NCOEF = 6;
 
-    struct BoundaryPVA {
-        Eigen::Matrix<double, DIM, 1> pos = Eigen::Matrix<double, DIM, 1>::Zero();
-        Eigen::Matrix<double, DIM, 1> vel = Eigen::Matrix<double, DIM, 1>::Zero();
-        Eigen::Matrix<double, DIM, 1> acc = Eigen::Matrix<double, DIM, 1>::Zero();
-    };
-
     void reset(int segment_count);
 
-    void generate(
+    [[nodiscard]] bool generate(
         const std::vector<double>& times,
-        const BoundaryPVA& head,
-        const BoundaryPVA& tail,
-        const Eigen::Matrix<double, DIM, Eigen::Dynamic>& waypoints
+        const GeometricBoundary& head,
+        const GeometricBoundary& tail,
+        const Eigen::Matrix<double, DIM, Eigen::Dynamic>& waypoints,
+        GeometryLimits geometry_limits
     );
 
     [[nodiscard]] int segment_count() const { return segment_count_; }
@@ -55,6 +57,14 @@ private:
 
     int segment_count_ = 0;
     std::vector<double> times_;
+    GeometricBoundary head_;
+    GeometricBoundary tail_;
+    GeometryLimits geometry_limits_;
+    double head_scale_ = 0.0;
+    double tail_scale_ = 0.0;
+    Eigen::Vector2d head_scale_gradient_ = Eigen::Vector2d::Zero();
+    Eigen::Vector2d tail_scale_gradient_ = Eigen::Vector2d::Zero();
+    bool factorized_ = false;
     BandedSystem banded_;           // M 的带状 LU（部分主元）
     Eigen::MatrixXd b_;             // 6N×2（右端项 / 求解后为系数）
     Eigen::MatrixXd coeffs_;        // 6N×2

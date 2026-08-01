@@ -548,6 +548,13 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .angular_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.angular_acceleration_max"),
         .lateral_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.lateral_acceleration_max"),
     };
+    const GeometryLimits geometry_limits {
+        .curvature_max = declare_parameter<double>("path_planner.geometry.curvature_max"),
+        .curvature_rate_max = declare_parameter<double>("path_planner.geometry.curvature_rate_max"),
+        .tangent_regularization = declare_parameter<double>(
+            "path_planner.geometry.tangent_regularization"
+        ),
+    };
     c.motion_primitives.xy_resolution = declare_parameter<double>(
         "path_planner.state_lattice.xy_resolution"
     );
@@ -572,9 +579,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
     c.motion_primitives.straight_length = declare_parameter<double>(
         "path_planner.motion_primitives.straight_length"
     );
-    c.motion_primitives.curvature_max = declare_parameter<double>(
-        "path_planner.motion_primitives.curvature_max"
-    );
+    c.motion_primitives.curvature_max = geometry_limits.curvature_max;
     c.spatial_astar = {
         .obstacle_weight = declare_parameter<double>(
             "path_planner.spatial_astar.obstacle_weight"
@@ -615,21 +620,15 @@ PlannerConfig NavExecutorNode::load_planner_config(
             .energy = declare_parameter<double>("path_planner.minco.penalty_weights.energy"),
             .time = declare_parameter<double>("path_planner.minco.penalty_weights.time"),
             .obstacle = declare_parameter<double>("path_planner.minco.penalty_weights.obstacle"),
-            .velocity = declare_parameter<double>("path_planner.minco.penalty_weights.velocity"),
-            .tangential_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.tangential_acceleration"),
-            .angular_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.angular_velocity"),
-            .angular_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.angular_acceleration"),
-            .lateral_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.lateral_acceleration"),
+            .curvature = declare_parameter<double>("path_planner.minco.penalty_weights.curvature"),
+            .curvature_rate = declare_parameter<double>("path_planner.minco.penalty_weights.curvature_rate"),
             .directed_regularity = declare_parameter<double>("path_planner.minco.penalty_weights.directed_regularity"),
-            .traversal_velocity_window = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_velocity_window"),
             .traversal_alignment = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_alignment"),
-            .traversal_tangential_acceleration = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_tangential_acceleration"),
-            .traversal_angular_velocity = declare_parameter<double>("path_planner.minco.penalty_weights.traversal_angular_velocity"),
             .prohibited_traversal = declare_parameter<double>("path_planner.minco.penalty_weights.prohibited_traversal"),
             .runup_curvature = declare_parameter<double>("path_planner.minco.penalty_weights.runup_curvature"),
         },
-        .dynamics = shaping_dynamics,
-        .directed_speed_min = declare_parameter<double>("path_planner.minco.directed_speed_min"),
+        .geometry = geometry_limits,
+        .directed_cosine_min = declare_parameter<double>("path_planner.minco.directed_cosine_min"),
         .terrain_gate = {
             .norm_lo = declare_parameter<double>("path_planner.minco.terrain_gate.norm_lo"),
             .norm_hi = declare_parameter<double>("path_planner.minco.terrain_gate.norm_hi"),
@@ -696,6 +695,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .stationary_velocity_threshold = declare_parameter<double>(
             "path_planner.speed_profile.stationary_velocity_threshold"
         ),
+        .geometry = geometry_limits,
         .normal_profile = normal_profile,
         .step_profiles = step_profiles,
     };
@@ -718,7 +718,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(shaping_dynamics.angular_acceleration_max)
         && positive_finite(shaping_dynamics.lateral_acceleration_max)
         && positive_finite(c.motion_primitives.xy_resolution)
-        && positive_finite(c.motion_primitives.curvature_max)
+        && positive_finite(geometry_limits.curvature_max)
+        && positive_finite(geometry_limits.curvature_rate_max)
+        && positive_finite(geometry_limits.tangent_regularization)
         && positive_finite(c.motion_primitives.straight_length)
         && nonnegative_finite(c.spatial_astar.obstacle_weight)
         && positive_finite(c.reference_path.resample_spacing)
@@ -753,25 +755,20 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "lattice pose/speed bins and expansion limit must be valid"
     );
     require_parameter(
-        positive_finite(c.minco.directed_speed_min)
-        && c.minco.directed_speed_min <= shaping_dynamics.velocity_max,
-        "MINCO directed_speed_min must be positive and not exceed shaping velocity_max"
+        std::isfinite(c.minco.directed_cosine_min)
+        && c.minco.directed_cosine_min > 0.0
+        && c.minco.directed_cosine_min < 1.0,
+        "MINCO directed_cosine_min must be in (0, 1)"
     );
     const auto& minco_weights = c.minco.weights;
     require_parameter(
         nonnegative_finite(minco_weights.energy)
         && nonnegative_finite(minco_weights.time)
         && nonnegative_finite(minco_weights.obstacle)
-        && nonnegative_finite(minco_weights.velocity)
-        && nonnegative_finite(minco_weights.tangential_acceleration)
-        && nonnegative_finite(minco_weights.angular_velocity)
-        && nonnegative_finite(minco_weights.angular_acceleration)
-        && nonnegative_finite(minco_weights.lateral_acceleration)
+        && nonnegative_finite(minco_weights.curvature)
+        && nonnegative_finite(minco_weights.curvature_rate)
         && nonnegative_finite(minco_weights.directed_regularity)
-        && nonnegative_finite(minco_weights.traversal_velocity_window)
         && nonnegative_finite(minco_weights.traversal_alignment)
-        && nonnegative_finite(minco_weights.traversal_tangential_acceleration)
-        && nonnegative_finite(minco_weights.traversal_angular_velocity)
         && nonnegative_finite(minco_weights.prohibited_traversal)
         && nonnegative_finite(minco_weights.runup_curvature),
         "MINCO penalty weights must be finite and non-negative"

@@ -10,16 +10,16 @@ namespace nav_executor {
 namespace {
 
 constexpr double MIN_SEGMENT_DURATION = 1e-6;
-constexpr double TANGENT_EPS = 1e-9;
-
 } // anonymous namespace
 
 MincoTrajectory::MincoTrajectory(
     std::vector<double> durations,
-    std::vector<CoefBlock> coeffs
+    std::vector<CoefBlock> coeffs,
+    const GeometryLimits geometry_limits
 )
     : durations_(std::move(durations)),
-      coeffs_(std::move(coeffs)) {
+      coeffs_(std::move(coeffs)),
+      geometry_limits_(geometry_limits) {
     cumulative_times_.assign(durations_.size() + 1, 0.0);
     std::partial_sum(durations_.begin(), durations_.end(), cumulative_times_.begin() + 1);
     total_time_ = cumulative_times_.empty() ? 0.0 : cumulative_times_.back();
@@ -173,7 +173,7 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
     out.dp_dtau = vel_t * time_scale;
     out.ddp_dtau = acc_t * time_scale * time_scale;
     out.ds_dtau = out.dp_dtau.norm();
-    if (out.ds_dtau <= TANGENT_EPS) return out;
+    if (!std::isfinite(out.ds_dtau) || out.ds_dtau == 0.0) return out;
 
     const Eigen::Vector2d third = jerk_t * time_scale * time_scale * time_scale;
     const auto cross = [](const Eigen::Vector2d& a, const Eigen::Vector2d& b) {
@@ -181,14 +181,21 @@ TrajSample MincoTrajectory::sample_at(const int segment, const double local_t) c
     };
     // 发布前的数值验收排除检测到的内部 cusp。
     out.theta = std::atan2(out.dp_dtau.y(), out.dp_dtau.x());
-    const double speed = out.ds_dtau;
-    const double speed_cubed = speed * speed * speed;
-    out.kappa = cross(out.dp_dtau, out.ddp_dtau) / speed_cubed;
+    // 正则尺度定义在单段归一化参数 u=t/T_i 下，换到全局 τ 后与导数同比缩放。
+    // 因而曲率与曲率变化率在任意全局时标缩放下保持不变。
+    const double duration = durations_[static_cast<size_t>(segment)];
+    const double tangent_regularization = geometry_limits_.tangent_regularization
+        * total_time_ / duration;
+    const double speed_squared = out.dp_dtau.squaredNorm()
+        + tangent_regularization * tangent_regularization;
+    const double speed = std::sqrt(speed_squared);
+    const double speed_cubed = speed_squared * speed;
+    const double turn = cross(out.dp_dtau, out.ddp_dtau);
+    out.kappa = turn / speed_cubed;
     // dκ/ds = (1/|p'|)·d/dτ[ det(p',p'')/|p'|³ ]，其中 d/dτ det(p',p'') = det(p',p''')。
-    out.kappa_rate = (
-        cross(out.dp_dtau, third) / speed_cubed
-        - 3.0 * out.kappa * out.dp_dtau.dot(out.ddp_dtau) / (speed * speed)
-    ) / speed;
+    out.kappa_rate = cross(out.dp_dtau, third) / (speed_squared * speed_squared)
+        - 3.0 * turn * out.dp_dtau.dot(out.ddp_dtau)
+            / (speed_squared * speed_squared * speed_squared);
     return out;
 }
 
@@ -211,6 +218,7 @@ TrajSample MincoTrajectory::eval_time(const double t) const {
     out.p = edge.p + edge.dp_dtau * dtau;
     out.ddp_dtau = Eigen::Vector2d::Zero();
     out.kappa = 0.0;
+    out.kappa_rate = 0.0;
     return out;
 }
 

@@ -19,12 +19,17 @@
           yaw_bias_seconds_per_rad: 0.17 # 松弛根相对实测 yaw 每旋转 1 rad 的排序偏置（秒/rad）
           max_discarded_velocity: 0.5 # 真实速度投影到候选航向后，允许丢弃的速度分量上限（m/s）
 
-      shaping_dynamics: # State-lattice/MINCO 共用；只让动力学塑造几何，不生成最终参考速度。
+      shaping_dynamics: # 仅供 state-lattice 构造可达搜索见证；不进入 MINCO 几何目标。
         velocity_max: 3.0 # 动力学见证的线速度上限（m/s）
         tangential_acceleration_max: 1.5 # 标量速度变化率 |d speed/dt| 上限（m/s²）
         angular_velocity_max: 6.0 # 角速度上限（rad/s）
         angular_acceleration_max: 7.0 # 角加速度上限（rad/s²）
         lateral_acceleration_max: 2.0 # 侧向加速度 |κ|v² 上限（m/s²）
+
+      geometry: # MINCO 与执行速度包络共用的时标不变几何边界。
+        curvature_max: 4.0 # 最小转弯半径 0.25 m 对应的最大曲率（1/m）
+        curvature_rate_max: 8.0 # 曲率在弧长上的最大变化率（1/m²）
+        tangent_regularization: 1.0e-6 # 单段归一化参数下的几何切向正则尺度（m）
 
       spatial_astar:
         obstacle_weight: 1.0 # 归一化障碍软代价乘数；1.0 表示接近占据阈值时边代价约翻倍
@@ -54,24 +59,16 @@
         curvature_magnitudes: [1.0, 4.0, 0.25, 1.0, 0.0625, 0.25] # 三个长度带各自的两个 nominal 曲率幅值
         band_lengths: [0.32, 0.63, 1.26] # 与曲率带对应的原语长度（米）
         straight_length: 1.26 # nominal 直行动作长度（米）
-        curvature_max: 4.0 # nominal 原语允许的最大几何曲率（1/m）
-
       minco:
-        directed_speed_min: 0.05 # 见证速度沿种子方向的正则下限，仅用于排除尖点和逆向（m/s）
+        directed_cosine_min: 0.1 # 曲线切向与种子方向的最小余弦；无速度量纲
         penalty_weights:
-          energy: 1.0 # 物理 min-jerk 能量权重
-          time: 16.0 # 动力学见证总时长权重；只参与几何塑形
+          energy: 1.0 # 参数域 min-jerk 正则权重
+          time: 16.0 # MINCO 参数区间总长度权重；不进入执行时标
           obstacle: 1000.0 # 障碍物权重：撞墙的惩罚，越大越不可能穿墙
-          velocity: 100.0 # 见证线速度超限惩罚
-          tangential_acceleration: 100.0 # 切向加速度 |d speed/dt| 超限惩罚
-          angular_velocity: 100.0 # 角速度超限惩罚
-          angular_acceleration: 100.0 # 角加速度超限惩罚
-          lateral_acceleration: 100.0 # 侧向加速度 |κ|v² 超限惩罚
+          curvature: 100.0 # 几何曲率超限惩罚
+          curvature_rate: 100.0 # 弧长曲率变化率超限惩罚
           directed_regularity: 1000.0 # 有向正则性：排除内部零速点、尖点与逆向
-          traversal_velocity_window: 1600.0 # runup 起点至台阶出口的地形目标速度窗软约束
           traversal_alignment: 1600.0 # runup 起点至台阶出口的方向对齐软约束
-          traversal_tangential_acceleration: 10.0 # runup 起点至台阶出口的 a_t² 正则
-          traversal_angular_velocity: 10.0 # runup 起点至台阶出口的 ω² 正则
           prohibited_traversal: 1000.0 # 往台阶禁止方向（如逆行）走的惩罚
           runup_curvature: 100.0 # runup 起点至台阶出口的 κ² 正则
         terrain_gate:
@@ -106,7 +103,7 @@
             recovery_after_rejections: 3 # 达到此次数切换到归一化负梯度恢复
           curvature_cosine_threshold: 1.0e-8 # sy/(||s||·||y||) 超过此值才接受曲率对
           history_update_min_model_ratio: 0.25 # rho 低于此值的 accepted step 不写入历史
-        min_segment_time: 0.05 # 每段动力学见证的最短物理时长（秒）
+        min_segment_time: 0.05 # 每段 MINCO 参数区间下限；种子与优化统一使用
 
       environment_validation: # 环境验收：路径与代价地图、方向地形的关系
         samples_per_segment: 20 # 每段空间曲线的碰撞与地形检查采样数下限

@@ -28,11 +28,10 @@ const char* speed_profile_selection_string(
     return "UNKNOWN";
 }
 
-// 全局动力学搜索见证 → MINCO 平坦边界状态 + 物理见证时长 + 有向切向。
+// 全局搜索见证 → MINCO 几何边界 + 参数时长。
 struct MincoSeed {
-    std::vector<MincoMinJerk::BoundaryPVA> states; // 2D pos/vel/acc
+    std::vector<GeometricBoundary> boundaries;
     std::vector<double> durations;
-    std::vector<Eigen::Vector2d> tangents;         // 边界处的 A* 有向单位切向
 };
 
 struct EnvironmentValidationReport {
@@ -41,19 +40,19 @@ struct EnvironmentValidationReport {
 };
 
 // 距离和显著转向点会保留；段时长严格累加 A* 返回的真实逐边时长。
-// tangents 记录 A* 的有向性，供 MINCO 有向正则性软罚使用。
+// tangent/curvature 是时标不变的几何量；段时长只初始化 MINCO 参数化。
 MincoSeed build_minco_seed(
     const SpeedWitness& witness,
     const double resample_distance,
-    const double directed_speed_min
+    const double min_segment_time
 ) {
     MincoSeed seed;
     if (witness.positions.size() < 2
         || witness.tangents.size() != witness.positions.size()
-        || witness.velocities.size() != witness.positions.size()
+        || witness.curvatures.size() != witness.positions.size()
         || witness.durations.size() + 1 != witness.positions.size()
-        || !std::isfinite(directed_speed_min)
-        || directed_speed_min <= 0.0) return seed;
+        || !std::isfinite(min_segment_time)
+        || min_segment_time <= 0.0) return seed;
 
     std::vector<size_t> selected {0};
     const double distance_threshold = std::max(resample_distance, 0.05);
@@ -77,16 +76,17 @@ MincoSeed build_minco_seed(
     selected.push_back(witness.positions.size() - 1);
 
     const size_t n = selected.size();
-    seed.states.resize(n);
-    seed.tangents.resize(n);
+    seed.boundaries.resize(n);
     for (size_t i = 0; i < n; ++i) {
         const size_t selected_index = selected[i];
-        seed.states[i].pos = witness.positions[selected_index];
-        seed.states[i].vel = witness.velocities[selected_index];
-        seed.states[i].acc.setZero();
         const Eigen::Vector2d& tangent = witness.tangents[selected_index];
-        if (!tangent.allFinite() || tangent.norm() <= 1e-9) return {};
-        seed.tangents[i] = tangent.normalized();
+        if (!tangent.allFinite() || tangent.norm() <= 1e-9
+            || !std::isfinite(witness.curvatures[selected_index])) return {};
+        seed.boundaries[i] = {
+            .position = witness.positions[selected_index],
+            .tangent = tangent.normalized(),
+            .curvature = witness.curvatures[selected_index],
+        };
     }
     seed.durations.resize(n - 1);
     for (size_t i = 0; i + 1 < n; ++i) {
@@ -94,17 +94,8 @@ MincoSeed build_minco_seed(
         for (size_t edge = selected[i]; edge < selected[i + 1]; ++edge) {
             duration += witness.durations[edge];
         }
-        seed.durations[i] = std::max(duration, 0.1);
+        seed.durations[i] = std::max(duration, min_segment_time);
     }
-
-    // MINCO 时标只塑形几何，首尾导数必须保持有向非零；真实起步和停车速度
-    // 由后续 PathSpeedProfile 独立确定。
-    seed.states.front().vel = seed.tangents.front()
-        * std::max(seed.states.front().vel.norm(), directed_speed_min);
-    seed.states.back().vel = seed.tangents.back()
-        * std::max(seed.states.back().vel.norm(), directed_speed_min);
-    seed.states.front().acc.setZero();
-    seed.states.back().acc.setZero();
 
     return seed;
 }
@@ -641,39 +632,24 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     auto minco_seed = build_minco_seed(
         speed_witness,
         config_.seed_resample_distance,
-        config_.minco.directed_speed_min
+        config_.minco.min_segment_time
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
     if (lattice_result.diagnostics.selected_relaxed_root) {
         const Eigen::Vector2d relaxed_tangent = speed_witness.tangents.front().normalized();
-        const double projected_speed = std::max(
-            0.0, measured_start_velocity.dot(relaxed_tangent)
-        );
-        minco_seed.tangents.front() = relaxed_tangent;
-        // MINCO 用非零速度定义零投影时的几何朝向；真实执行速度由后续速度剖面保留。
-        minco_seed.states.front().vel = relaxed_tangent * std::max(
-            projected_speed, config_.minco.directed_speed_min
-        );
-        minco_seed.states.front().acc.setZero();
+        minco_seed.boundaries.front().tangent = relaxed_tangent;
     } else {
         const Eigen::Vector2d measured_start_tangent(
             std::cos(req.current_yaw), std::sin(req.current_yaw)
         );
-        minco_seed.tangents.front() = measured_start_tangent;
-        // 实测速度 ≤ 0（静止/倒退）时也必须有向非零边界，否则首段起点导数
-        // 为零会被轨迹数值校验判为 cusp；真实执行起步速度由速度剖面保留。
-        minco_seed.states.front().vel = measured_start_tangent * std::max(
-            measured_start_speed, config_.minco.directed_speed_min
-        );
-        minco_seed.states.front().acc.setZero();
+        minco_seed.boundaries.front().tangent = measured_start_tangent;
     }
-    // ── [5] MINCO 物理时标见证 + 连续几何联合塑形 ──
+    // ── [5] MINCO 参数化 + 连续几何联合塑形 ──
     MincoOptimizer optimizer(config_.minco);
     const auto minco_start = std::chrono::steady_clock::now();
     const auto opt = optimizer.optimize(
-        minco_seed.states,
+        minco_seed.boundaries,
         minco_seed.durations,
-        minco_seed.tangents,
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints
@@ -701,17 +677,17 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         );
         RCLCPP_DEBUG(
             logger_,
-            "Plan #%lu [minco-traversal] window=%.3g->%.3g align=%.3g->%.3g "
-            "accel=%.3g->%.3g omega=%.3g->%.3g curvature=%.3g->%.3g",
+            "Plan #%lu [minco-geometry] curvature=%.3g->%.3g rate=%.3g->%.3g "
+            "directed=%.3g->%.3g align=%.3g->%.3g runup=%.3g->%.3g",
             static_cast<unsigned long>(req.goal.id),
-            opt.seed_costs.traversal_velocity_window,
-            opt.final_costs.traversal_velocity_window,
+            opt.seed_costs.curvature,
+            opt.final_costs.curvature,
+            opt.seed_costs.curvature_rate,
+            opt.final_costs.curvature_rate,
+            opt.seed_costs.directed_regularity,
+            opt.final_costs.directed_regularity,
             opt.seed_costs.traversal_alignment,
             opt.final_costs.traversal_alignment,
-            opt.seed_costs.traversal_tangential_acceleration,
-            opt.final_costs.traversal_tangential_acceleration,
-            opt.seed_costs.traversal_angular_velocity,
-            opt.final_costs.traversal_angular_velocity,
             opt.seed_costs.runup_curvature,
             opt.final_costs.runup_curvature
         );

@@ -55,7 +55,7 @@ struct MotionPrimitive {
 struct SpeedWitness {
     std::vector<Eigen::Vector2d> positions;
     std::vector<Eigen::Vector2d> tangents;
-    std::vector<Eigen::Vector2d> velocities;
+    std::vector<double> curvatures;
     std::vector<double> durations;
 };
 

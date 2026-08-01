@@ -33,6 +33,7 @@ public:
             double velocity_scale;
         } objective;
         double stationary_velocity_threshold;
+        GeometryLimits geometry;
 
         CapabilityProfile normal_profile;
         std::array<CapabilityProfile, 3> step_profiles;

@@ -155,6 +155,7 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         variable_count, std::numeric_limits<double>::quiet_NaN()
     );
     double raw_cost = cost_fn(x, raw_gradient);
+    const double initial_raw_cost = raw_cost;
     result.function_evaluations = 1;
     result.cost = raw_cost;
     const bool initial_gradient_finite = raw_gradient.size() == variable_count
@@ -224,7 +225,10 @@ LbfgsMinimizer::Result LbfgsMinimizer::minimize(
         result.grad_inf_norm = infinity_norm(raw_gradient);
         result.scaled_gradient_max_block_norm = block_norm(variable_scaled_gradient, blocks);
         result.accepted_iterations = accepted_iterations;
-        result.made_progress = accepted_iterations > 0;
+        const double relative_progress = (initial_raw_cost - raw_cost)
+            / std::max(1.0, std::abs(initial_raw_cost));
+        result.made_progress = std::isfinite(relative_progress)
+            && relative_progress >= opt_.cost_window_relative_tolerance;
         result.last_relative_cost_reduction = last_relative_cost_reduction;
         result.window_relative_cost_reduction = window_relative_cost_reduction;
         result.final_step_cap = step_cap;

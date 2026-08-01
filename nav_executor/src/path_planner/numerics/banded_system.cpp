@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace nav_executor {
 
@@ -19,7 +20,12 @@ void BandedSystem::reset() {
     storage_.setZero();
 }
 
-void BandedSystem::factorize_lu() {
+bool BandedSystem::factorize_lu() {
+    if (n_ <= 0 || !storage_.allFinite()) return false;
+    const double matrix_scale = storage_.cwiseAbs().maxCoeff();
+    if (!std::isfinite(matrix_scale) || matrix_scale == 0.0) return false;
+    const double pivot_tolerance = 64.0 * std::numeric_limits<double>::epsilon()
+        * static_cast<double>(std::max(n_, 1)) * matrix_scale;
     for (int j = 0; j < n_; ++j) {
         const int km = std::min(kl_, n_ - 1 - j);       // 列 j 的次对角元个数
         const int ju = std::min(n_ - 1, j + kl_ + ku_); // U 填充后受影响的末列
@@ -35,7 +41,7 @@ void BandedSystem::factorize_lu() {
         }
         pivots_[static_cast<size_t>(j)] = pivot_row;
 
-        if (pivot_mag == 0.0) continue;
+        if (!std::isfinite(pivot_mag) || pivot_mag <= pivot_tolerance) return false;
 
         // 行交换：跨列 [j, ju] 交换 j 与 pivot_row。
         if (pivot_row != j) {
@@ -58,6 +64,7 @@ void BandedSystem::factorize_lu() {
             }
         }
     }
+    return storage_.allFinite();
 }
 
 void BandedSystem::solve(Eigen::Ref<Eigen::MatrixXd> b) const {

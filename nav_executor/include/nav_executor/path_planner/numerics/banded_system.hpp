@@ -16,7 +16,8 @@ public:
     double& ref(const int i, const int j) { return storage_(super_ + i - j, j); }
     [[nodiscard]] double at(const int i, const int j) const { return storage_(super_ + i - j, j); }
 
-    void factorize_lu();
+    // 返回 false 表示矩阵在相对主元判据下奇异或近奇异。
+    [[nodiscard]] bool factorize_lu();
 
     void solve(Eigen::Ref<Eigen::MatrixXd> b) const;
 

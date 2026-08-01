@@ -812,13 +812,12 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     result.diagnostics.search_time = terminal->total_time;
 
     const SpatialPose root_pose = pose_of(frame, root.key);
-    const double root_speed = speed_of(root.key.speed);
     const Eigen::Vector2d root_tangent(
         std::cos(root_pose.heading), std::sin(root_pose.heading)
     );
     result.witness.positions.push_back(root_pose.position);
     result.witness.tangents.push_back(root_tangent);
-    result.witness.velocities.push_back(root_speed * root_tangent);
+    result.witness.curvatures.push_back(0.0);
     const auto append_geometry = [&](const GeometryResult& geometry,
                                      const double velocity_start,
                                      const double velocity_end) {
@@ -832,6 +831,9 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             ));
         };
         for (const GeometryEdge& edge : geometry.edges) {
+            if (result.witness.positions.size() == 1) {
+                result.witness.curvatures.front() = edge.curvature;
+            }
             const double from_speed = velocity_at(edge.s_begin);
             const double to_speed = velocity_at(edge.s_end);
             const Eigen::Vector2d tangent(
@@ -839,7 +841,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             );
             result.witness.positions.push_back(edge.to.position);
             result.witness.tangents.push_back(tangent);
-            result.witness.velocities.push_back(to_speed * tangent);
+            result.witness.curvatures.push_back(edge.curvature);
             result.witness.durations.push_back(
                 2.0 * edge.length / (from_speed + to_speed)
             );
@@ -865,7 +867,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     }
     if (result.witness.durations.empty()
         || result.witness.positions.size() != result.witness.tangents.size()
-        || result.witness.positions.size() != result.witness.velocities.size()
+        || result.witness.positions.size() != result.witness.curvatures.size()
         || result.witness.positions.size() != result.witness.durations.size() + 1) {
         result.error = "corridor state-lattice witness reconstruction failed";
         return result;

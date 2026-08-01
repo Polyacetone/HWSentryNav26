@@ -149,7 +149,11 @@ LocalEnvelope local_envelope(
     const auto& command = capability.command_envelope;
     const auto& dynamics = capability.command_dynamics;
     const double curvature = std::abs(sample.kappa);
-    const double curvature_rate = std::abs(sample.kappa_rate);
+    // MINCO 已用同一几何上界塑形 κ'。速度包络仍对数值超调做物理限幅，避免
+    // 单个离散尖峰通过 1/|κ'| 把相邻两个执行节点压到近零速度。
+    const double curvature_rate = std::min(
+        std::abs(sample.kappa_rate), params.geometry.curvature_rate_max
+    );
     const double angular_budget = ANGULAR_ACCELERATION_SHARE
         * dynamics.angular_velocity_rate_max;
 
@@ -660,6 +664,9 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
                 return std::max(value * speed_squared_scale, 0.0);
             }
         );
+        // 端点是精确边界条件，不把链求解器的浮点残差发布为非零起停速度。
+        optimized_squared.front() = initial_speed_squared;
+        optimized_squared.back() = 0.0;
         PathSpeedProfile optimized = make_profile(nodes, optimized_squared);
         if (!validate_profile_contract(
                 geometry, optimized, initial_velocity, contract_error

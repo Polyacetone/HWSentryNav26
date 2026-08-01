@@ -4,6 +4,8 @@
 
 #include <Eigen/Core>
 
+#include <nav_executor/common/trajectory/geometry_limits.hpp>
+
 namespace nav_executor {
 
 // 轨迹曲线的求值结果。发布前的数值验收排除非有限值和检测到的内部 cusp。
@@ -18,9 +20,9 @@ struct TrajSample {
     double kappa_rate = 0.0; // dκ/ds，与 κ 同源；速度剖面用它约束角加速度
 };
 
-// 逐段五次多项式前向轨迹，内部节点保持速度至四阶导连续。构造时的物理时间仅是
-// MINCO 动力学塑形见证；执行层不读取它，统一以累计弧长和 PathSpeedProfile 确定时标。
-// tau 与该见证时间线性对应，只用于参数化几何求值。
+// 逐段五次多项式前向轨迹，内部节点保持一至四阶参数导数连续。构造时的段时长
+// 只是 MINCO 参数化坐标；执行层不读取它，统一以累计弧长和 PathSpeedProfile 确定时标。
+// tau 与该参数坐标线性对应，只用于几何求值。
 class MincoTrajectory {
 public:
     static constexpr int DIM = 2;               // x, y（平坦输出）
@@ -34,12 +36,13 @@ public:
     MincoTrajectory() = default;
     MincoTrajectory(
         std::vector<double> durations,
-        std::vector<CoefBlock> coeffs
+        std::vector<CoefBlock> coeffs,
+        GeometryLimits geometry_limits
     );
 
     [[nodiscard]] bool empty() const { return durations_.empty(); }
     [[nodiscard]] int segment_count() const { return static_cast<int>(durations_.size()); }
-    [[nodiscard]] double total_time() const { return total_time_; } // 动力学塑形见证时长
+    [[nodiscard]] double total_time() const { return total_time_; } // MINCO 参数区间总长度
     [[nodiscard]] double total_arc_length() const { return total_arc_length_; }
     [[nodiscard]] double length() const { return total_arc_length_; }
     // 第 boundary_index 个段边界对应的 tau，合法范围 [0, segment_count()]。
@@ -56,7 +59,7 @@ public:
 
     // 按归一化 MINCO 参数求值；超出 [0, 1] 时沿端点切线线性外推。
     [[nodiscard]] TrajSample eval(double tau) const;
-    // 按 MINCO 动力学见证时间 t∈[0,total_time] 求值，不是执行期参考时间。
+    // 按 MINCO 参数坐标 t∈[0,total_time] 求值，不是执行期参考时间。
     [[nodiscard]] TrajSample eval_time(double t) const;
     // 按累计弧长 s∈[0,total_arc_length] 求值；弧长是跟随层唯一的路径进度坐标。
     [[nodiscard]] TrajSample eval_arc_length(double arc_length) const;
@@ -76,9 +79,10 @@ private:
 
     void compute_arc_length();
 
-    std::vector<double> durations_;         // 每段动力学塑形见证时长 T_i
+    std::vector<double> durations_;         // 每段 MINCO 参数区间 T_i
     std::vector<double> cumulative_times_;  // 前缀和，size = segment_count+1，首元素 0
     std::vector<CoefBlock> coeffs_;         // 每段系数（2D 平坦输出）
+    GeometryLimits geometry_limits_;
     double total_time_ = 0.0;
     double total_arc_length_ = 0.0;
     std::vector<double> arc_taus_;          // 每段均匀细分的 τ 节点，显式包含所有段边界

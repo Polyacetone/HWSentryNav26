@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace nav_executor {
 
@@ -11,10 +12,6 @@ namespace {
 constexpr int DIM = MincoMinJerk::DIM;
 constexpr int NCOEF = MincoMinJerk::NCOEF;
 constexpr double EPS = 1e-9;
-// 真实速度、积分测度与弧长使用近零平滑尺度；方向和运动学分母另用
-// directed_speed_min 调理，避免静止附近的角动力学奇异污染真实弧长。
-constexpr double MEASURE_SPEED_REG = 1e-4;
-constexpr double MEASURE_SPEED_REG_SQ = MEASURE_SPEED_REG * MEASURE_SPEED_REG;
 
 inline double violation(const double g) { return std::max(g, 0.0); }
 
@@ -47,102 +44,60 @@ inline std::pair<double, double> runup_distance_gate(
     return {x * x * (3.0 - 2.0 * x), -6.0 * x * (1.0 - x) / transition};
 }
 
-// 真实几何曲率及其对 (v, a) 的解析梯度。
+// 时标不变的曲率 jet。输入仍是时间导数，但先转换到单段归一化参数 u=t/T；
+// 返回梯度再通过链式法则换回时间导数坐标。
 struct CurvatureJet {
     double kappa = 0.0;
+    double kappa_rate = 0.0;
     Eigen::Vector2d dkappa_dvelocity = Eigen::Vector2d::Zero();
     Eigen::Vector2d dkappa_dacceleration = Eigen::Vector2d::Zero();
+    Eigen::Vector2d dkappa_rate_dvelocity = Eigen::Vector2d::Zero();
+    Eigen::Vector2d dkappa_rate_dacceleration = Eigen::Vector2d::Zero();
+    Eigen::Vector2d dkappa_rate_djerk = Eigen::Vector2d::Zero();
 };
 
 CurvatureJet curvature_jet(
     const Eigen::Vector2d& velocity,
     const Eigen::Vector2d& acceleration,
-    const double speed_regularization
+    const Eigen::Vector2d& jerk,
+    const double duration,
+    const double tangent_regularization
 ) {
-    const double speed_squared = velocity.squaredNorm()
-        + speed_regularization * speed_regularization;
-    const double speed = std::sqrt(speed_squared);
-    const double speed3 = speed_squared * speed;
-    const double speed5 = speed3 * speed_squared;
-
-    const double turn = cross_2d(velocity, acceleration);
+    const Eigen::Vector2d first = duration * velocity;
+    const Eigen::Vector2d second = duration * duration * acceleration;
+    const Eigen::Vector2d third = duration * duration * duration * jerk;
+    const double q = first.squaredNorm()
+        + tangent_regularization * tangent_regularization;
+    const double speed = std::sqrt(q);
+    const double q2 = q * q;
+    const double q3 = q2 * q;
+    const double q4 = q3 * q;
+    const double turn = cross_2d(first, second);
+    const double twist = cross_2d(first, third);
+    const double stretch = first.dot(second);
+    const Eigen::Vector2d dturn_dfirst(second.y(), -second.x());
+    const Eigen::Vector2d dturn_dsecond = perpendicular(first);
+    const Eigen::Vector2d dtwist_dfirst(third.y(), -third.x());
+    const Eigen::Vector2d dtwist_dthird = perpendicular(first);
 
     CurvatureJet jet;
-    jet.kappa = turn / speed3;
-    jet.dkappa_dvelocity = Eigen::Vector2d(acceleration.y(), -acceleration.x()) / speed3
-        - 3.0 * turn * velocity / speed5;
-    jet.dkappa_dacceleration = perpendicular(velocity) / speed3;
-    return jet;
-}
-
-// 物理时间下的平坦输出动力学，以及对 (v,a,j) 的解析梯度。
-struct MotionJet {
-    double tangential_acceleration = 0.0;
-    double angular_velocity = 0.0;
-    double angular_acceleration = 0.0;
-    double lateral_acceleration = 0.0;
-
-    Eigen::Vector2d dtangential_dvelocity = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dtangential_dacceleration = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dangular_velocity_dvelocity = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dangular_velocity_dacceleration = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dangular_acceleration_dvelocity = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dangular_acceleration_dacceleration = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dangular_acceleration_djerk = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dlateral_dvelocity = Eigen::Vector2d::Zero();
-    Eigen::Vector2d dlateral_dacceleration = Eigen::Vector2d::Zero();
-};
-
-MotionJet motion_jet(
-    const Eigen::Vector2d& velocity,
-    const Eigen::Vector2d& acceleration,
-    const Eigen::Vector2d& jerk,
-    const double speed_regularization
-) {
-    const double speed_squared = velocity.squaredNorm()
-        + speed_regularization * speed_regularization;
-    const double speed = std::sqrt(speed_squared);
-    const double speed3 = speed_squared * speed;
-    const double speed4 = speed_squared * speed_squared;
-    const double turn = cross_2d(velocity, acceleration);
-    const double twist = cross_2d(velocity, jerk);
-    const double tangential_numerator = velocity.dot(acceleration);
-    const Eigen::Vector2d dturn_dvelocity(acceleration.y(), -acceleration.x());
-    const Eigen::Vector2d dturn_dacceleration = perpendicular(velocity);
-    const Eigen::Vector2d dtwist_dvelocity(jerk.y(), -jerk.x());
-    const Eigen::Vector2d dtwist_djerk = perpendicular(velocity);
-
-    MotionJet jet;
-    jet.tangential_acceleration = tangential_numerator / speed;
-    jet.dtangential_dvelocity = acceleration / speed
-        - tangential_numerator * velocity / speed3;
-    jet.dtangential_dacceleration = velocity / speed;
-
-    jet.angular_velocity = turn / speed_squared;
-    jet.dangular_velocity_dvelocity = dturn_dvelocity / speed_squared
-        - 2.0 * turn * velocity / speed4;
-    jet.dangular_velocity_dacceleration = dturn_dacceleration / speed_squared;
-
-    jet.lateral_acceleration = turn / speed;
-    jet.dlateral_dvelocity = dturn_dvelocity / speed - turn * velocity / speed3;
-    jet.dlateral_dacceleration = dturn_dacceleration / speed;
-
-    // alpha=d/dt[det(v,a)/|v|²]
-    //       =det(v,j)/|v|² - 2det(v,a)(v·a)/|v|⁴。
-    jet.angular_acceleration = twist / speed_squared
-        - 2.0 * turn * tangential_numerator / speed4;
-    jet.dangular_acceleration_dvelocity =
-        dtwist_dvelocity / speed_squared
-        - 2.0 * twist * velocity / speed4
-        - 2.0 * (
-            dturn_dvelocity * tangential_numerator + turn * acceleration
-        ) / speed4
-        + 8.0 * turn * tangential_numerator * velocity
-            / (speed4 * speed_squared);
-    jet.dangular_acceleration_dacceleration = -2.0 * (
-        dturn_dacceleration * tangential_numerator + turn * velocity
-    ) / speed4;
-    jet.dangular_acceleration_djerk = dtwist_djerk / speed_squared;
+    jet.kappa = turn / (q * speed);
+    jet.kappa_rate = twist / q2 - 3.0 * turn * stretch / q3;
+    const Eigen::Vector2d dkappa_dfirst = dturn_dfirst / (q * speed)
+        - 3.0 * turn * first / (q2 * speed);
+    const Eigen::Vector2d dkappa_dsecond = dturn_dsecond / (q * speed);
+    const Eigen::Vector2d dkappa_rate_dfirst = dtwist_dfirst / q2
+        - 4.0 * twist * first / q3
+        - 3.0 * (dturn_dfirst * stretch + turn * second) / q3
+        + 18.0 * turn * stretch * first / q4;
+    const Eigen::Vector2d dkappa_rate_dsecond = -3.0
+        * (dturn_dsecond * stretch + turn * first) / q3;
+    const Eigen::Vector2d dkappa_rate_dthird = dtwist_dthird / q2;
+    jet.dkappa_dvelocity = duration * dkappa_dfirst;
+    jet.dkappa_dacceleration = duration * duration * dkappa_dsecond;
+    jet.dkappa_rate_dvelocity = duration * dkappa_rate_dfirst;
+    jet.dkappa_rate_dacceleration = duration * duration * dkappa_rate_dsecond;
+    jet.dkappa_rate_djerk = duration * duration * duration * dkappa_rate_dthird;
     return jet;
 }
 
@@ -207,7 +162,6 @@ struct PolynomialBasis {
 struct RunupSource {
     double value = 0.0;
     double radius = 0.0;
-    TraversalVelocityWindow velocity_window;
     // ∂value/∂position：含 body_gate 与 label 权重两条路径。
     Eigen::Vector2d position_gradient = Eigen::Vector2d::Zero();
     // ∂value/∂velocity：来自上/下行方向混合权重。
@@ -218,9 +172,8 @@ struct RunupSource {
 // 「第一个有效源」这种离散选择在源排序交换时产生代价跳变。
 struct TraversalContext {
     bool valid = false;
-    double weight_total = 0.0;   // Σ w_k，速度窗加权平均的归一化分母
+    double weight_total = 0.0;   // Σ w_k
     double summed_norm = 0.0;    // ‖Σ w_k d̂_k‖，方向归一化的分母（≠ weight_total）
-    TraversalVelocityWindow velocity_window; // 归一化后的加权平均窗
     Eigen::Vector2d direction = Eigen::Vector2d::Zero(); // 归一化后的加权平均方向
 };
 
@@ -234,7 +187,6 @@ struct TraversalContribution {
     double dgate_ddistance = 0.0; // ∂distance_gate/∂前视弧长
     double source_value = 0.0;
     Eigen::Vector2d direction = Eigen::Vector2d::Zero(); // 该源的地形方向
-    TraversalVelocityWindow velocity_window;
 };
 
 // 每个采样点的完整几何与地形快照。罚项与非局部助跑回传都基于这份缓存，
@@ -251,12 +203,11 @@ struct Sample {
     Eigen::Vector2d snap = Eigen::Vector2d::Zero();
     Eigen::Vector2d seed_tangent = Eigen::Vector2d::UnitX();
 
-    double speed = 0.0;                     // sqrt(‖v‖² + SPEED_REG²)
+    double speed = 0.0;                     // ‖dp/dt‖，只用于构造弧长积分测度
     Eigen::Vector2d speed_gradient = Eigen::Vector2d::Zero();
     Eigen::Vector2d direction = Eigen::Vector2d::Zero();
     Eigen::Matrix2d direction_jacobian = Eigen::Matrix2d::Zero();
     CurvatureJet curvature;
-    MotionJet motion;
     double arc_measure = 0.0;               // dt · speed
 
     double direction_norm = 0.0;
@@ -289,8 +240,8 @@ struct MincoOptimizer::Workspace {
     int n_waypoints = 0; // n_segments - 1
 
     MincoMinJerk minco;
-    MincoMinJerk::BoundaryPVA head;
-    MincoMinJerk::BoundaryPVA tail;
+    GeometricBoundary head;
+    GeometricBoundary tail;
     std::vector<Eigen::Vector2d> seed_tangents; // 段边界处的有向单位切向，size = n+1
 
     const CostMap* cost_map = nullptr;
@@ -305,7 +256,7 @@ struct MincoOptimizer::Workspace {
 MincoOptimizer::MincoOptimizer(Params params)
     : params_(std::move(params)) {}
 
-// 采样点罚 + 物理 min-jerk 能量 + 见证时长；梯度累积到 grad_c / grad_t_explicit。
+// 几何采样罚 + 参数域 min-jerk 正则；梯度累积到 grad_c / grad_t_explicit。
 double MincoOptimizer::accumulate_penalties(
     Workspace& ws,
     Eigen::MatrixXd& grad_c,
@@ -315,11 +266,7 @@ double MincoOptimizer::accumulate_penalties(
     const auto& coeffs = ws.minco.coefficients();
     const int n = ws.n_segments;
     const auto& w = params_.weights;
-    const auto& dynamics = params_.dynamics;
     const int samples_per_segment = std::max(params_.samples_per_segment, 1);
-    const double kinematic_speed_regularization = std::max(
-        params_.directed_speed_min, MEASURE_SPEED_REG
-    );
 
     double cost = 0.0;
     grad_c.setZero(NCOEF * n, DIM);
@@ -359,26 +306,22 @@ double MincoOptimizer::accumulate_penalties(
                 + tangent_end * fraction;
             if (seed_blend.norm() > EPS) sample.seed_tangent = seed_blend.normalized();
 
-            const double speed_squared = sample.velocity.squaredNorm()
-                + MEASURE_SPEED_REG_SQ;
-            sample.speed = std::sqrt(speed_squared);
-            sample.speed_gradient = sample.velocity / sample.speed;
-            const double direction_speed_squared = sample.velocity.squaredNorm()
-                + kinematic_speed_regularization * kinematic_speed_regularization;
-            const double direction_speed = std::sqrt(direction_speed_squared);
-            sample.direction = sample.velocity / direction_speed;
-            sample.direction_jacobian = Eigen::Matrix2d::Identity() / direction_speed
-                - sample.velocity * sample.velocity.transpose()
-                    / (direction_speed_squared * direction_speed);
-            sample.curvature = curvature_jet(
-                sample.velocity, sample.acceleration, kinematic_speed_regularization
+            sample.speed = sample.velocity.norm();
+            if (sample.speed > 0.0) sample.speed_gradient = sample.velocity / sample.speed;
+            const Eigen::Vector2d normalized_tangent = duration * sample.velocity;
+            const double direction_norm_squared = normalized_tangent.squaredNorm()
+                + params_.geometry.tangent_regularization
+                    * params_.geometry.tangent_regularization;
+            const double direction_norm = std::sqrt(direction_norm_squared);
+            sample.direction = normalized_tangent / direction_norm;
+            sample.direction_jacobian = duration * (
+                Eigen::Matrix2d::Identity() / direction_norm
+                - normalized_tangent * normalized_tangent.transpose()
+                    / (direction_norm_squared * direction_norm)
             );
-            // 首端速度是执行期不可修改的真实边界，必须用近真实分母塑形其角动力学；
-            // 内部点仍使用有向速度下限调理，避免零速奇异重新主导目标函数。
-            const bool start_boundary = segment == 0 && index == 0;
-            sample.motion = motion_jet(
-                sample.velocity, sample.acceleration, sample.jerk,
-                start_boundary ? MEASURE_SPEED_REG : kinematic_speed_regularization
+            sample.curvature = curvature_jet(
+                sample.velocity, sample.acceleration, sample.jerk, duration,
+                params_.geometry.tangent_regularization
             );
             sample.arc_measure = sample.dt * sample.speed;
 
@@ -416,12 +359,10 @@ double MincoOptimizer::accumulate_penalties(
                         sample.body_gate = body_gate;
                         sample.body_gate_position_gradient = dbody_gate_dposition;
 
-                        // 上/下行不再由 v·d̂ 的符号硬切：在 ±directed_speed_min
+                        // 上/下行不再由符号硬切：在几何方向余弦带内平滑混合
                         // 带内平滑混合两侧 mode，使禁止方向的源渐隐而非骤然消失。
-                        const double directed = sample.velocity.dot(direction);
-                        const double band = std::max(
-                            params_.directed_speed_min, MEASURE_SPEED_REG
-                        );
+                        const double directed = sample.direction.dot(direction);
+                        const double band = params_.directed_cosine_min;
                         const auto [up_weight, dup_weight] = smoothstep_gate(
                             directed, -band, band
                         );
@@ -429,7 +370,7 @@ double MincoOptimizer::accumulate_penalties(
                         // terrain_direction_jacobian 进入位置梯度。
                         const Eigen::Vector2d ddirected_dposition =
                             sample.terrain_direction_jacobian.transpose()
-                            * sample.velocity;
+                            * sample.direction;
 
                         // label 按双线性权重混合，跨 cell 时参数连续过渡。
                         for (uint8_t label = static_cast<uint8_t>(TerrainType::SLOPE);
@@ -456,7 +397,6 @@ double MincoOptimizer::accumulate_penalties(
                                 ] = RunupSource {
                                     .value = value,
                                     .radius = rule->run_up,
-                                    .velocity_window = rule->velocity_window,
                                     .position_gradient =
                                         dbody_gate_dposition * label_weight
                                             * direction_weight
@@ -464,7 +404,8 @@ double MincoOptimizer::accumulate_penalties(
                                         + body_gate * label_weight
                                             * ddirection_weight * ddirected_dposition,
                                     .velocity_gradient = body_gate * label_weight
-                                        * ddirection_weight * direction,
+                                        * ddirection_weight
+                                        * sample.direction_jacobian.transpose() * direction,
                                 };
                             }
                         }
@@ -521,10 +462,6 @@ double MincoOptimizer::accumulate_penalties(
                     context.valid = true;
                     context.weight_total += weight;
                     context.direction += weight * future.terrain_direction;
-                    context.velocity_window.min +=
-                        weight * source.velocity_window.min;
-                    context.velocity_window.max +=
-                        weight * source.velocity_window.max;
                     contributions.push_back(TraversalContribution {
                         .sample = j,
                         .source_index = index,
@@ -533,7 +470,6 @@ double MincoOptimizer::accumulate_penalties(
                         .dgate_ddistance = dgate_ddistance,
                         .source_value = source.value,
                         .direction = future.terrain_direction,
-                        .velocity_window = source.velocity_window,
                     });
                 }
             }
@@ -541,9 +477,6 @@ double MincoOptimizer::accumulate_penalties(
             if (distance > lookahead_limit) break;
         }
         if (context.valid && context.weight_total > 0.0) {
-            const double inverse_weight = 1.0 / context.weight_total;
-            context.velocity_window.min *= inverse_weight;
-            context.velocity_window.max *= inverse_weight;
             const Eigen::Vector2d summed = context.direction;
             const double summed_norm = summed.norm();
             if (summed_norm > EPS) {
@@ -573,22 +506,9 @@ double MincoOptimizer::accumulate_penalties(
     for (int i = 0; i < sample_count; ++i) {
         const Sample& sample = samples[static_cast<size_t>(i)];
         const TraversalContext& context = traversal_contexts[static_cast<size_t>(i)];
-        double base_density = 0.5 * w.runup_curvature * sample.speed
+        double base_density = 0.5 * w.runup_curvature
             * sample.curvature.kappa * sample.curvature.kappa;
         if (context.valid) {
-            const double speed_under = violation(
-                context.velocity_window.min - sample.speed
-            );
-            const double speed_over = violation(
-                sample.speed - context.velocity_window.max
-            );
-            base_density += 0.5 * w.traversal_velocity_window
-                * (speed_under * speed_under + speed_over * speed_over);
-            base_density += 0.5 * w.traversal_tangential_acceleration
-                * sample.motion.tangential_acceleration
-                * sample.motion.tangential_acceleration;
-            base_density += 0.5 * w.traversal_angular_velocity
-                * sample.motion.angular_velocity * sample.motion.angular_velocity;
             const double cross = cross_2d(sample.direction, context.direction);
             base_density += 0.5 * w.traversal_alignment * cross * cross;
         }
@@ -606,9 +526,8 @@ double MincoOptimizer::accumulate_penalties(
     std::vector<double> arc_range_difference(static_cast<size_t>(sample_count + 1), 0.0);
 
     // ── context 的非局部伴随 ──
-    // context.direction = normalize(Σ_k w_k d̂_k)，velocity_window 为同一权重的
-    // 加权平均，w_k = value_k · distance_gate_k。三条依赖都要回传：源方向 d̂_k、
-    // 源强度 value_k，以及 distance_gate_k 所依赖的前视弧长。最后一条必须在
+    // context.direction = normalize(Σ_k w_k d̂_k)，w_k = value_k · distance_gate_k。
+    // 三条依赖都要回传：源方向 d̂_k、源强度 value_k，以及 distance_gate_k 所依赖的前视弧长。最后一条必须在
     // arc_range_difference 做前缀和之前累加，因此这里先于罚项主循环求值。
     for (int i = 0; i < sample_count; ++i) {
         const Sample& sample = samples[static_cast<size_t>(i)];
@@ -622,31 +541,18 @@ double MincoOptimizer::accumulate_penalties(
             - (1.0 - runup_gate[static_cast<size_t>(i)]) * (1.0 - sample.body_gate);
         if (state_gate <= 0.0) continue;
 
-        const double dt = sample.dt;
+        const double integration_measure = sample.arc_measure;
         const Eigen::Vector2d& heading = sample.direction;
         const Eigen::Vector2d& terrain = traversal.direction;
         const double cross = cross_2d(heading, terrain);
         const double cross_scale = state_gate * w.traversal_alignment * cross;
-        const double speed_under = violation(
-            traversal.velocity_window.min - sample.speed
-        );
-        const double speed_over = violation(
-            sample.speed - traversal.velocity_window.max
-        );
-        // 对 cost 的导数，含积分测度 dt。
-        const double dcost_dwindow_min = dt * state_gate
-            * w.traversal_velocity_window * speed_under;
-        const double dcost_dwindow_max = -dt * state_gate
-            * w.traversal_velocity_window * speed_over;
         // d̂ = Σ/‖Σ‖ ⇒ ∂d̂/∂Σ = (I − d̂d̂ᵀ)/‖Σ‖。归一化分母是 ‖Σ‖ 而非 Σw_k：
         // 两者仅在所有源方向平行时才相等。
         const Eigen::Vector2d dcost_ddirection =
-            dt * cross_scale * perpendicular(heading);
+            integration_measure * cross_scale * perpendicular(heading);
         const Eigen::Vector2d dcost_dsummed = (
             Eigen::Matrix2d::Identity() - terrain * terrain.transpose()
         ) * dcost_ddirection / traversal.summed_norm;
-        const double inverse_weight = 1.0 / traversal.weight_total;
-
         for (const TraversalContribution& contribution : contributions) {
             const auto source_index = static_cast<size_t>(contribution.sample);
             const Sample& source = samples[source_index];
@@ -656,17 +562,7 @@ double MincoOptimizer::accumulate_penalties(
                 * source.terrain_direction_jacobian.transpose() * dcost_dsummed;
             // (2) 经权重 w_k：方向侧 ∂Σ/∂w_k = d̂_k；窗侧为加权平均的偏导。
             const double dcost_dweight =
-                dcost_dsummed.dot(contribution.direction)
-                + (
-                    dcost_dwindow_min * (
-                        contribution.velocity_window.min
-                        - traversal.velocity_window.min
-                    )
-                    + dcost_dwindow_max * (
-                        contribution.velocity_window.max
-                        - traversal.velocity_window.max
-                    )
-                ) * inverse_weight;
+                dcost_dsummed.dot(contribution.direction);
             if (dcost_dweight == 0.0) continue;
             // (2a) w_k = value_k · distance_gate_k 的 value 一侧。
             const double value_scale =
@@ -690,7 +586,7 @@ double MincoOptimizer::accumulate_penalties(
 
     for (int i = 0; i < sample_count; ++i) {
         const Sample& current = samples[static_cast<size_t>(i)];
-        const double dcost_dexposure = current.dt
+        const double dcost_dexposure = current.arc_measure
             * traversal_base_density[static_cast<size_t>(i)]
             * (1.0 - current.body_gate)
             * std::exp(-runup_exposure[static_cast<size_t>(i)]
@@ -733,7 +629,7 @@ double MincoOptimizer::accumulate_penalties(
         arc_measure_gradient[static_cast<size_t>(i)] += accumulated_range_gradient;
     }
 
-    // ── 段级项：物理 min-jerk 能量与见证时长 ──
+    // ── 段级项：参数域 min-jerk 能量与参数区间长度 ──
     for (int segment = 0; segment < n; ++segment) {
         const double duration = ws.times[static_cast<size_t>(segment)];
         const int c_off = NCOEF * segment;
@@ -776,8 +672,6 @@ double MincoOptimizer::accumulate_penalties(
     for (int index = 0; index < sample_count; ++index) {
         const Sample& sample = samples[static_cast<size_t>(index)];
         const CurvatureJet& jet = sample.curvature;
-        const double dt = sample.dt;
-
         double density = 0.0;
         StateGradient gradient;
         CostTerms sample_terms;
@@ -813,84 +707,38 @@ double MincoOptimizer::accumulate_penalties(
             gradient.position += w.obstacle * value * value_gradient;
         }
 
-        // (b) 见证速度上界。该速度只参与 Q/T 联合塑形，不会成为最终参考速度。
+        // (b) 纯几何曲率上界。
         {
-            const double over = violation(sample.speed - dynamics.velocity_max);
-            const double penalty = w.velocity * 0.5 * over * over;
-            density += penalty;
-            sample_terms.velocity += penalty;
-            gradient.velocity += w.velocity * over * sample.speed_gradient;
+            const ScalarConstraintGradient penalty = symmetric_limit_penalty(
+                jet.kappa, params_.geometry.curvature_max, w.curvature
+            );
+            density += penalty.penalty;
+            sample_terms.curvature += penalty.penalty;
+            gradient.velocity += penalty.derivative * jet.dkappa_dvelocity;
+            gradient.acceleration += penalty.derivative * jet.dkappa_dacceleration;
         }
 
-        // (c) 有向正则性 v·t̂_seed ≥ directed_speed_min。
+        // (c) 弧长曲率变化率上界。该量不含任何物理速度分母。
         {
-            const double directed = sample.velocity.dot(sample.seed_tangent);
-            const double under = violation(params_.directed_speed_min - directed);
+            const ScalarConstraintGradient penalty = symmetric_limit_penalty(
+                jet.kappa_rate, params_.geometry.curvature_rate_max, w.curvature_rate
+            );
+            density += penalty.penalty;
+            sample_terms.curvature_rate += penalty.penalty;
+            gradient.velocity += penalty.derivative * jet.dkappa_rate_dvelocity;
+            gradient.acceleration += penalty.derivative * jet.dkappa_rate_dacceleration;
+            gradient.jerk += penalty.derivative * jet.dkappa_rate_djerk;
+        }
+
+        // (d) 有向几何正则性：只约束切线方向余弦，不约束伪物理速度。
+        {
+            const double directed = sample.direction.dot(sample.seed_tangent);
+            const double under = violation(params_.directed_cosine_min - directed);
             const double penalty = w.directed_regularity * 0.5 * under * under;
             density += penalty;
             sample_terms.directed_regularity += penalty;
-            gradient.velocity -= w.directed_regularity * under * sample.seed_tangent;
-        }
-
-        // (d) 标量速度变化率 a_t=d|v|/dt，与搜索层的 dz/ds=2a_t 语义一致。
-        {
-            const ScalarConstraintGradient penalty = symmetric_limit_penalty(
-                sample.motion.tangential_acceleration,
-                dynamics.tangential_acceleration_max,
-                w.tangential_acceleration
-            );
-            density += penalty.penalty;
-            sample_terms.tangential_acceleration += penalty.penalty;
-            gradient.velocity += penalty.derivative
-                * sample.motion.dtangential_dvelocity;
-            gradient.acceleration += penalty.derivative
-                * sample.motion.dtangential_dacceleration;
-        }
-
-        // (e) 角速度 omega=dtheta/dt。
-        {
-            const ScalarConstraintGradient penalty = symmetric_limit_penalty(
-                sample.motion.angular_velocity,
-                dynamics.angular_velocity_max,
-                w.angular_velocity
-            );
-            density += penalty.penalty;
-            sample_terms.angular_velocity += penalty.penalty;
-            gradient.velocity += penalty.derivative
-                * sample.motion.dangular_velocity_dvelocity;
-            gradient.acceleration += penalty.derivative
-                * sample.motion.dangular_velocity_dacceleration;
-        }
-
-        // (f) 角加速度 alpha=domega/dt，包含曲率变化率与切向加速度的完整耦合。
-        {
-            const ScalarConstraintGradient penalty = symmetric_limit_penalty(
-                sample.motion.angular_acceleration,
-                dynamics.angular_acceleration_max,
-                w.angular_acceleration
-            );
-            density += penalty.penalty;
-            sample_terms.angular_acceleration += penalty.penalty;
-            gradient.velocity += penalty.derivative
-                * sample.motion.dangular_acceleration_dvelocity;
-            gradient.acceleration += penalty.derivative
-                * sample.motion.dangular_acceleration_dacceleration;
-            gradient.jerk += penalty.derivative
-                * sample.motion.dangular_acceleration_djerk;
-        }
-
-        // (g) 侧向加速度 a_lat=kappa*v²。与切向加速度分开，避免隐式摩擦圆。
-        {
-            const ScalarConstraintGradient penalty = symmetric_limit_penalty(
-                sample.motion.lateral_acceleration,
-                dynamics.lateral_acceleration_max,
-                w.lateral_acceleration
-            );
-            density += penalty.penalty;
-            sample_terms.lateral_acceleration += penalty.penalty;
-            gradient.velocity += penalty.derivative * sample.motion.dlateral_dvelocity;
-            gradient.acceleration += penalty.derivative
-                * sample.motion.dlateral_dacceleration;
+            gradient.velocity -= w.directed_regularity * under
+                * sample.direction_jacobian.transpose() * sample.seed_tangent;
         }
 
         // (h) runup 起点至台阶出口的统一 traversal gate。
@@ -904,59 +752,17 @@ double MincoOptimizer::accumulate_penalties(
         const double regularization_density = 0.5 * w.runup_curvature
             * jet.kappa * jet.kappa;
         if (state_gate > 0.0) {
-            const double weighted_density = sample.speed * state_gate
-                * regularization_density;
+            const double weighted_density = state_gate * regularization_density;
             density += weighted_density;
             sample_terms.runup_curvature += weighted_density;
-            const double scale = sample.speed * state_gate
+            const double scale = state_gate
                 * w.runup_curvature * jet.kappa;
             gradient.velocity += scale * jet.dkappa_dvelocity;
-            gradient.velocity += state_gate * regularization_density
-                * sample.speed_gradient;
             gradient.acceleration += scale * jet.dkappa_dacceleration;
         }
 
-        // 速度窗、方向对齐、切向加速度与角速度正则共享严格的 traversal gate。
+        // 地形方向对齐同样只依赖几何切向。
         if (state_gate > 0.0 && traversal.valid) {
-            const double speed_under = violation(
-                traversal.velocity_window.min - sample.speed
-            );
-            const double speed_over = violation(
-                sample.speed - traversal.velocity_window.max
-            );
-            const double speed_density = 0.5 * w.traversal_velocity_window
-                * (speed_under * speed_under + speed_over * speed_over);
-            density += state_gate * speed_density;
-            sample_terms.traversal_velocity_window += state_gate * speed_density;
-            gradient.velocity += state_gate * w.traversal_velocity_window
-                * (speed_over - speed_under) * sample.speed_gradient;
-            // 速度窗与对齐方向对 context 权重的依赖由上方的 context 伴随统一回传。
-
-            const double tangential = sample.motion.tangential_acceleration;
-            const double tangential_density = 0.5
-                * w.traversal_tangential_acceleration * tangential * tangential;
-            density += state_gate * tangential_density;
-            sample_terms.traversal_tangential_acceleration +=
-                state_gate * tangential_density;
-            const double tangential_scale = state_gate
-                * w.traversal_tangential_acceleration * tangential;
-            gradient.velocity += tangential_scale
-                * sample.motion.dtangential_dvelocity;
-            gradient.acceleration += tangential_scale
-                * sample.motion.dtangential_dacceleration;
-
-            const double omega = sample.motion.angular_velocity;
-            const double omega_density = 0.5
-                * w.traversal_angular_velocity * omega * omega;
-            density += state_gate * omega_density;
-            sample_terms.traversal_angular_velocity += state_gate * omega_density;
-            const double omega_scale = state_gate
-                * w.traversal_angular_velocity * omega;
-            gradient.velocity += omega_scale
-                * sample.motion.dangular_velocity_dvelocity;
-            gradient.acceleration += omega_scale
-                * sample.motion.dangular_velocity_dacceleration;
-
             const Eigen::Vector2d& heading = sample.direction;
             const Eigen::Vector2d& terrain = traversal.direction;
             const double cross = cross_2d(heading, terrain);
@@ -1026,36 +832,33 @@ double MincoOptimizer::accumulate_penalties(
         const Eigen::Vector2d& lookahead_velocity =
             lookahead_velocity_gradient[static_cast<size_t>(index)];
 
-        cost += dt * density;
+        const double integration_measure = sample.arc_measure;
+        cost += integration_measure * density;
         if (terms) {
-            terms->obstacle += dt * sample_terms.obstacle;
-            terms->velocity += dt * sample_terms.velocity;
-            terms->tangential_acceleration +=
-                dt * sample_terms.tangential_acceleration;
-            terms->angular_velocity += dt * sample_terms.angular_velocity;
-            terms->angular_acceleration += dt * sample_terms.angular_acceleration;
-            terms->lateral_acceleration += dt * sample_terms.lateral_acceleration;
-            terms->directed_regularity += dt * sample_terms.directed_regularity;
-            terms->traversal_velocity_window +=
-                dt * sample_terms.traversal_velocity_window;
-            terms->traversal_alignment += dt * sample_terms.traversal_alignment;
-            terms->traversal_tangential_acceleration +=
-                dt * sample_terms.traversal_tangential_acceleration;
-            terms->traversal_angular_velocity +=
-                dt * sample_terms.traversal_angular_velocity;
-            terms->prohibited_traversal += dt * sample_terms.prohibited_traversal;
-            terms->runup_curvature += dt * sample_terms.runup_curvature;
+            terms->obstacle += integration_measure * sample_terms.obstacle;
+            terms->curvature += integration_measure * sample_terms.curvature;
+            terms->curvature_rate += integration_measure * sample_terms.curvature_rate;
+            terms->directed_regularity +=
+                integration_measure * sample_terms.directed_regularity;
+            terms->traversal_alignment +=
+                integration_measure * sample_terms.traversal_alignment;
+            terms->prohibited_traversal +=
+                integration_measure * sample_terms.prohibited_traversal;
+            terms->runup_curvature +=
+                integration_measure * sample_terms.runup_curvature;
         }
 
-        // 物理量梯度（含积分测度）经 β 映射回 grad_c。
+        // 几何量梯度（含弧长积分测度）经 β 映射回 grad_c。
         const PolynomialBasis basis(sample.local_time);
         const int c_off = NCOEF * sample.segment;
-        const Eigen::Vector2d position_gradient = dt * gradient.position
+        const Eigen::Vector2d position_gradient = integration_measure * gradient.position
             + lookahead_position;
-        const Eigen::Vector2d velocity_gradient = dt * gradient.velocity
-            + dt * arc_velocity_gradient + lookahead_velocity;
-        const Eigen::Vector2d acceleration_gradient = dt * gradient.acceleration;
-        const Eigen::Vector2d jerk_gradient = dt * gradient.jerk;
+        const Eigen::Vector2d velocity_gradient = integration_measure * gradient.velocity
+            + sample.dt * density * sample.speed_gradient
+            + sample.dt * arc_velocity_gradient + lookahead_velocity;
+        const Eigen::Vector2d acceleration_gradient =
+            integration_measure * gradient.acceleration;
+        const Eigen::Vector2d jerk_gradient = integration_measure * gradient.jerk;
         for (int k = 0; k < NCOEF; ++k) {
             for (int d = 0; d < DIM; ++d) {
                 grad_c(c_off + k, d) +=
@@ -1068,8 +871,8 @@ double MincoOptimizer::accumulate_penalties(
 
         // 显式 T 梯度：积分测度 ρ/S、arc 测度，以及采样横坐标随 T 的漂移。
         const double inv_samples = 1.0 / static_cast<double>(samples_per_segment);
-        grad_t_explicit(sample.segment) += density * inv_samples;
-        grad_t_explicit(sample.segment) += arc_adjoint * sample.speed * inv_samples;
+        grad_t_explicit(sample.segment) +=
+            (density + arc_adjoint) * sample.speed * inv_samples;
         grad_t_explicit(sample.segment) += sample.time_fraction * (
             position_gradient.dot(sample.velocity)
             + velocity_gradient.dot(sample.acceleration)
@@ -1098,7 +901,12 @@ double MincoOptimizer::evaluate(
         );
     }
 
-    ws.minco.generate(ws.times, ws.head, ws.tail, ws.waypoints);
+    if (!ws.minco.generate(
+            ws.times, ws.head, ws.tail, ws.waypoints, params_.geometry
+        )) {
+        grad.setConstant(vars.size(), std::numeric_limits<double>::quiet_NaN());
+        return std::numeric_limits<double>::infinity();
+    }
 
     Eigen::MatrixXd grad_c;
     Eigen::VectorXd grad_t_explicit;
@@ -1121,28 +929,40 @@ double MincoOptimizer::evaluate(
 }
 
 MincoOptimizer::Result MincoOptimizer::optimize(
-    const std::vector<MincoMinJerk::BoundaryPVA>& seed_states,
+    const std::vector<GeometricBoundary>& seed_boundaries,
     const std::vector<double>& seed_durations,
-    const std::vector<Eigen::Vector2d>& seed_tangents,
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints
 ) const {
     Result result;
     const int n = static_cast<int>(seed_durations.size());
-    if (n < 1 || static_cast<int>(seed_states.size()) != n + 1
-        || static_cast<int>(seed_tangents.size()) != n + 1) {
-        result.error = "seed size mismatch: " + std::to_string(seed_states.size())
-            + " states and " + std::to_string(seed_tangents.size())
-            + " tangents for " + std::to_string(n) + " segments (need n+1)";
+    if (n < 1 || static_cast<int>(seed_boundaries.size()) != n + 1) {
+        result.error = "seed size mismatch: " + std::to_string(seed_boundaries.size())
+            + " geometric boundaries for " + std::to_string(n)
+            + " segments (need n+1)";
+        return result;
+    }
+    if (!std::all_of(seed_boundaries.begin(), seed_boundaries.end(), [](const auto& boundary) {
+            return boundary.position.allFinite() && boundary.tangent.allFinite()
+                && boundary.tangent.norm() > 0.0 && std::isfinite(boundary.curvature);
+        }) || !std::all_of(seed_durations.begin(), seed_durations.end(), [&](const double time) {
+            return std::isfinite(time) && time >= params_.min_segment_time;
+        })) {
+        result.error = "MINCO seed contains an invalid geometric boundary or segment time";
         return result;
     }
     Workspace ws;
     ws.n_segments = n;
     ws.n_waypoints = n - 1;
-    ws.head = seed_states.front();
-    ws.tail = seed_states.back();
-    ws.seed_tangents = seed_tangents;
+    ws.head = seed_boundaries.front();
+    ws.tail = seed_boundaries.back();
+    ws.head.tangent.normalize();
+    ws.tail.tangent.normalize();
+    ws.seed_tangents.reserve(seed_boundaries.size());
+    for (const GeometricBoundary& boundary : seed_boundaries) {
+        ws.seed_tangents.push_back(boundary.tangent.normalized());
+    }
     ws.cost_map = &cost_map;
     ws.direction_map = &direction_map;
     ws.terrain_constraints = &terrain_constraints;
@@ -1151,7 +971,7 @@ MincoOptimizer::Result MincoOptimizer::optimize(
 
     const int nw = n - 1;
     for (int i = 0; i < nw; ++i) {
-        ws.waypoints.col(i) = seed_states[static_cast<size_t>(i + 1)].pos;
+        ws.waypoints.col(i) = seed_boundaries[static_cast<size_t>(i + 1)].position;
     }
 
     const int time_offset = DIM * nw;
@@ -1164,6 +984,12 @@ MincoOptimizer::Result MincoOptimizer::optimize(
         vars(time_offset + i) = time_to_virtual(
             seed_durations[static_cast<size_t>(i)], params_.min_segment_time
         );
+    }
+    if (!ws.minco.generate(
+            ws.times, ws.head, ws.tail, ws.waypoints, params_.geometry
+        )) {
+        result.error = "MINCO coefficient system factorization failed for the seed geometry";
+        return result;
     }
 
     LbfgsMinimizer::Options options;

@@ -62,6 +62,7 @@ public:
     struct Result {
         Status status = Status::ITERATION_LIMIT;
         bool has_finite_incumbent = false;
+        // 相对初值取得至少 cost_window_relative_tolerance 的真实目标下降。
         bool made_progress = false;
         double cost = 0.0; // 当前有限 incumbent 的 raw cost
         double initial_grad_inf_norm = 0.0; // raw gradient
