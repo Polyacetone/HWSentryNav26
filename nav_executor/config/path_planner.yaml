@@ -53,6 +53,8 @@
         deviation_weight: 1.0 # 偏离参考路径的时间等效权重
         heading_weight: 0.25 # 航向偏差权重（秒/rad）
         speed_weight: 0.5 # 参考速度偏差的时间等效权重
+        approach_alignment_weight: 4.0 # 助跑区航向横向偏差平方的时间等效权重
+        approach_window_weight: 1.0 # 助跑区速度窗偏差平方的时间等效权重
         max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
 
       motion_primitives:

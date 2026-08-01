@@ -104,6 +104,8 @@ public:
         double deviation_weight = 1.0;
         double heading_weight = 0.25;
         double speed_weight = 0.5;
+        double approach_alignment_weight = 4.0;
+        double approach_window_weight = 1.0;
         int max_expansions = 500000;
     };
 

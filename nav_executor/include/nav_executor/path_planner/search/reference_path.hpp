@@ -10,11 +10,18 @@
 
 namespace nav_executor {
 
+struct StepApproach {
+    Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+    TraversalVelocityWindow velocity_window;
+    double gate = 0.0;
+};
+
 struct ReferencePoint {
     Eigen::Vector2d position = Eigen::Vector2d::Zero();
     double heading = 0.0;
     double speed = 0.0;
     double time_to_goal = 0.0;
+    StepApproach approach;
 };
 
 struct ReferencePath {
@@ -29,6 +36,7 @@ public:
     struct Params {
         double resample_spacing = 0.1;
         double tangent_lookahead = 0.3;
+        double runup_transition_distance = 0.1;
     };
 
     struct Result {

@@ -139,13 +139,58 @@ struct TerrainSpan {
     double s_end = 0.0;
 };
 
+struct ApproachSpan {
+    double s_begin = 0.0;
+    double s_end = 0.0;
+    double gate = 0.0;
+    Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+    TraversalVelocityWindow velocity_window;
+    Eigen::Vector2d heading = Eigen::Vector2d::Zero();
+};
+
 struct GeometryResult {
     bool valid = false;
     double total_length = 0.0;
     double max_abs_curvature = 0.0;
     std::vector<GeometryEdge> edges;
     std::vector<TerrainSpan> terrain_spans;
+    std::vector<ApproachSpan> approach_spans;
 };
+
+bool append_approach_span(
+    GeometryResult& result,
+    const GuideField& guide_field,
+    const ReferencePath& reference_path,
+    const Eigen::Vector2i& cell,
+    const SpatialPose& edge_start,
+    const double curvature,
+    const double edge_length,
+    const double fraction_begin,
+    const double fraction_end,
+    const double path_s_begin
+) {
+    if (fraction_end - fraction_begin <= 1e-12) return true;
+    const GuideFieldCell* guide = guide_field.at_cell(cell);
+    if (!guide || guide->nearest_reference_index >= reference_path.points.size()) {
+        return false;
+    }
+    const StepApproach& approach = reference_path.points[
+        guide->nearest_reference_index
+    ].approach;
+    if (approach.gate <= 0.0) return true;
+    const double middle_fraction = 0.5 * (fraction_begin + fraction_end);
+    const double heading_angle = edge_start.heading
+        + curvature * edge_length * middle_fraction;
+    result.approach_spans.push_back({
+        .s_begin = path_s_begin + edge_length * fraction_begin,
+        .s_end = path_s_begin + edge_length * fraction_end,
+        .gate = approach.gate,
+        .direction = approach.direction,
+        .velocity_window = approach.velocity_window,
+        .heading = Eigen::Vector2d(std::cos(heading_angle), std::sin(heading_angle)),
+    });
+    return true;
+}
 
 bool append_terrain_span(
     GeometryResult& result,
@@ -202,6 +247,7 @@ GeometryResult build_geometry(
     const CostMap& cost_map,
     const DirectionMap& direction_map,
     const GuideField& guide_field,
+    const ReferencePath& reference_path,
     const int occupied_threshold,
     const double detect_dot_threshold,
     const double collision_resolution,
@@ -253,6 +299,10 @@ GeometryResult build_geometry(
                         segment.curvature, substep_length,
                         previous_fraction, crossing.fraction,
                         path_s, detect_dot_threshold
+                    ) || !append_approach_span(
+                        result, guide_field, reference_path, cell, previous,
+                        segment.curvature, substep_length,
+                        previous_fraction, crossing.fraction, path_s
                     )
                     || !grid_cell_traversable(
                         cost_map, crossing.to, occupied_threshold
@@ -269,6 +319,10 @@ GeometryResult build_geometry(
                     result, direction_map, cell, previous,
                     segment.curvature, substep_length,
                     previous_fraction, 1.0, path_s, detect_dot_threshold
+                ) || !append_approach_span(
+                    result, guide_field, reference_path, cell, previous,
+                    segment.curvature, substep_length,
+                    previous_fraction, 1.0, path_s
                 )) {
                 return result;
             }
@@ -357,6 +411,46 @@ bool speed_transition_feasible(
         }
     }
     return true;
+}
+
+double approach_penalty(
+    const GeometryResult& geometry,
+    const double velocity_enter,
+    const double velocity_exit,
+    const double alignment_weight,
+    const double window_weight
+) {
+    if (geometry.approach_spans.empty()
+        || (alignment_weight <= 0.0 && window_weight <= 0.0)) {
+        return 0.0;
+    }
+    const double enter_squared = velocity_enter * velocity_enter;
+    const double exit_squared = velocity_exit * velocity_exit;
+    const auto speed_at = [&](const double arc_length) {
+        return std::sqrt(std::max(
+            enter_squared + (exit_squared - enter_squared)
+                * arc_length / geometry.total_length,
+            0.0
+        ));
+    };
+    double penalty = 0.0;
+    for (const ApproachSpan& span : geometry.approach_spans) {
+        const double length = span.s_end - span.s_begin;
+        const double speed = speed_at(0.5 * (span.s_begin + span.s_end));
+        if (length <= EPS || speed <= EPS) continue;
+        const double alignment = span.heading.x() * span.direction.y()
+            - span.heading.y() * span.direction.x();
+        const double window_violation = std::max({
+            span.velocity_window.min - speed,
+            speed - span.velocity_window.max,
+            0.0,
+        });
+        penalty += span.gate
+            * (alignment_weight * alignment * alignment
+                + window_weight * window_violation * window_violation)
+            * length / speed;
+    }
+    return penalty;
 }
 
 struct SearchNode {
@@ -529,6 +623,8 @@ StateLatticeAstar::Result StateLatticeAstar::search(
         || frame.xy_resolution <= 0.0 || params_.speed_bin_count <= 1
         || params_.guidance_weight < 0.0 || params_.deviation_weight < 0.0
         || params_.heading_weight < 0.0 || params_.speed_weight < 0.0
+        || params_.approach_alignment_weight < 0.0
+        || params_.approach_window_weight < 0.0
         || params_.max_expansions <= 0
         || !cost_map.geometry.same_geometry(direction_map.geometry)) {
         result.error = "corridor state-lattice configuration or inputs are invalid";
@@ -637,6 +733,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             cost_map,
             direction_map,
             guide_field,
+            reference_path,
             occupied_threshold,
             detect_dot_threshold,
             params_.collision_check_resolution,
@@ -701,13 +798,14 @@ StateLatticeAstar::Result StateLatticeAstar::search(
                     cost_map,
                     direction_map,
                     guide_field,
+                    reference_path,
                     occupied_threshold,
                     detect_dot_threshold,
                     params_.collision_check_resolution,
                     result.diagnostics.corridor_rejections
                 );
                 if (geometry.valid) {
-                    double best_duration = std::numeric_limits<double>::infinity();
+                    double best_edge_cost = std::numeric_limits<double>::infinity();
                     double best_exit_velocity = 0.0;
                     for (int speed_bin = 0;
                          speed_bin < params_.speed_bin_count; ++speed_bin) {
@@ -724,15 +822,20 @@ StateLatticeAstar::Result StateLatticeAstar::search(
                         }
                         const double duration = 2.0 * geometry.total_length
                             / (velocity_enter + velocity_exit);
-                        if (duration < best_duration) {
-                            best_duration = duration;
+                        const double edge_cost = duration + approach_penalty(
+                            geometry, velocity_enter, velocity_exit,
+                            params_.approach_alignment_weight,
+                            params_.approach_window_weight
+                        );
+                        if (edge_cost < best_edge_cost) {
+                            best_edge_cost = edge_cost;
                             best_exit_velocity = velocity_exit;
                         }
                     }
-                    if (std::isfinite(best_duration)) {
+                    if (std::isfinite(best_edge_cost)) {
                         terminal = TerminalCandidate {
                             .parent = entry.node,
-                            .total_time = current.g + best_duration,
+                            .total_time = current.g + best_edge_cost,
                             .exit_velocity = best_exit_velocity,
                             .geometry = std::move(geometry),
                         };
@@ -776,9 +879,14 @@ StateLatticeAstar::Result StateLatticeAstar::search(
                 };
                 const double duration = 2.0 * geometry.total_length
                     / (velocity_enter + velocity_exit);
+                const double edge_cost = duration + approach_penalty(
+                    geometry, velocity_enter, velocity_exit,
+                    params_.approach_alignment_weight,
+                    params_.approach_window_weight
+                );
                 enqueue(
                     successor,
-                    current.g + duration,
+                    current.g + edge_cost,
                     current.relaxation_bias,
                     entry.node,
                     static_cast<int>(primitive_index),

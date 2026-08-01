@@ -588,6 +588,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
             "path_planner.spatial_astar.max_expansions"
         )),
     };
+    const double runup_transition_distance = declare_parameter<double>(
+        "path_planner.minco.runup.transition_distance"
+    );
     c.reference_path = {
         .resample_spacing = declare_parameter<double>(
             "path_planner.reference_path.resample_spacing"
@@ -595,6 +598,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .tangent_lookahead = declare_parameter<double>(
             "path_planner.reference_path.tangent_lookahead"
         ),
+        .runup_transition_distance = runup_transition_distance,
     };
     c.guide_field = {
         .corridor_width = declare_parameter<double>(
@@ -613,6 +617,8 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .deviation_weight = declare_parameter<double>("path_planner.state_lattice.deviation_weight"),
         .heading_weight = declare_parameter<double>("path_planner.state_lattice.heading_weight"),
         .speed_weight = declare_parameter<double>("path_planner.state_lattice.speed_weight"),
+        .approach_alignment_weight = declare_parameter<double>("path_planner.state_lattice.approach_alignment_weight"),
+        .approach_window_weight = declare_parameter<double>("path_planner.state_lattice.approach_window_weight"),
         .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.state_lattice.max_expansions")),
     };
     c.minco = {
@@ -663,7 +669,7 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .runup_body_norm_lo = declare_parameter<double>("path_planner.minco.runup.body_norm_lo"),
         .runup_body_norm_hi = declare_parameter<double>("path_planner.minco.runup.body_norm_hi"),
         .runup_saturation_length = declare_parameter<double>("path_planner.minco.runup.saturation_length"),
-        .runup_transition_distance = declare_parameter<double>("path_planner.minco.runup.transition_distance"),
+        .runup_transition_distance = runup_transition_distance,
         .debug_diagnostics = enable_debug_,
     };
 
@@ -732,7 +738,10 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && nonnegative_finite(c.state_lattice.guidance_weight)
         && nonnegative_finite(c.state_lattice.deviation_weight)
         && nonnegative_finite(c.state_lattice.heading_weight)
-        && nonnegative_finite(c.state_lattice.speed_weight),
+        && nonnegative_finite(c.state_lattice.speed_weight)
+        && nonnegative_finite(c.state_lattice.approach_alignment_weight)
+        && nonnegative_finite(c.state_lattice.approach_window_weight)
+        && nonnegative_finite(c.reference_path.runup_transition_distance),
         "spatial/reference/corridor geometry, dynamics, and guidance weights must be finite and valid"
     );
     require_parameter(

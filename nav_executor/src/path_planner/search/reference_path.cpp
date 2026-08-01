@@ -6,6 +6,7 @@
 #include <numbers>
 
 #include <nav_executor/path_planner/search/grid_utils.hpp>
+#include <nav_executor/path_planner/trajectory/runup_gate.hpp>
 
 namespace nav_executor {
 
@@ -100,6 +101,7 @@ ReferencePathBuilder::Result ReferencePathBuilder::build(
     Result result;
     if (route.raw_path.size() < 2 || params_.resample_spacing <= 0.0
         || params_.tangent_lookahead <= 0.0
+        || params_.runup_transition_distance < 0.0
         || !cost_map.geometry.same_geometry(direction_map.geometry)
         || dynamics.velocity_max <= 0.0
         || dynamics.tangential_acceleration_max <= 0.0) {
@@ -286,6 +288,57 @@ ReferencePathBuilder::Result ReferencePathBuilder::build(
                 0.0
             ))
         );
+    }
+
+    const TraversalMode* downstream_mode = nullptr;
+    Eigen::Vector2d downstream_direction = Eigen::Vector2d::Zero();
+    double body_entry_arc = 0.0;
+    for (size_t reverse = samples.size(); reverse > 0; --reverse) {
+        const size_t i = reverse - 1;
+        const auto cell = direction_map.geometry.containing_cell(
+            result.path.points[i].position
+        );
+        if (!cell) {
+            result.error = "reference path leaves the direction map during approach annotation";
+            return result;
+        }
+        if (direction_map.is_terrain_body_cell(*cell)) {
+            Eigen::Vector2d terrain_direction = direction_map.raw_direction_at_cell(*cell);
+            const int8_t direction_sign = passage_direction[cell_index(*cell)];
+            if (terrain_direction.squaredNorm() <= EPS || direction_sign == 0) {
+                result.error = "terrain approach has no recorded passage direction";
+                return result;
+            }
+            terrain_direction.normalize();
+            const bool going_up = direction_sign > 0;
+            downstream_mode = terrain_constraints.selected_mode(
+                direction_map.terrain_label_at_cell(*cell), going_up
+            );
+            if (!downstream_mode) {
+                result.error = "terrain approach references a prohibited traversal mode";
+                return result;
+            }
+            downstream_direction = going_up ? terrain_direction : -terrain_direction;
+            body_entry_arc = samples[i];
+            continue;
+        }
+        if (!downstream_mode) continue;
+        const double distance = std::max(body_entry_arc - samples[i], 0.0);
+        const double gate = runup_distance_gate(
+            distance,
+            downstream_mode->run_up,
+            params_.runup_transition_distance
+        ).first;
+        if (gate <= 0.0) {
+            downstream_mode = nullptr;
+            downstream_direction.setZero();
+            continue;
+        }
+        result.path.points[i].approach = {
+            .direction = downstream_direction,
+            .velocity_window = downstream_mode->velocity_window,
+            .gate = gate,
+        };
     }
 
     result.path.points.back().time_to_goal = 0.0;

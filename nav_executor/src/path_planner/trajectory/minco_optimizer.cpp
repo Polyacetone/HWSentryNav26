@@ -5,6 +5,8 @@
 #include <cmath>
 #include <limits>
 
+#include <nav_executor/path_planner/trajectory/runup_gate.hpp>
+
 namespace nav_executor {
 
 namespace {
@@ -32,16 +34,6 @@ inline std::pair<double, double> smoothstep_gate(
     if (t <= 0.0) return {0.0, 0.0};
     if (t >= 1.0) return {1.0, 0.0};
     return {t * t * (3.0 - 2.0 * t), 6.0 * t * (1.0 - t) / (hi - lo)};
-}
-
-// 在助跑范围外以 C1 过渡衰减。
-inline std::pair<double, double> runup_distance_gate(
-    const double distance, const double radius, const double transition
-) {
-    if (distance <= radius) return {1.0, 0.0};
-    if (transition <= 0.0 || distance >= radius + transition) return {0.0, 0.0};
-    const double x = (radius + transition - distance) / transition;
-    return {x * x * (3.0 - 2.0 * x), -6.0 * x * (1.0 - x) / transition};
 }
 
 // 时标不变的曲率 jet。输入仍是时间导数，但先转换到单段归一化参数 u=t/T；
