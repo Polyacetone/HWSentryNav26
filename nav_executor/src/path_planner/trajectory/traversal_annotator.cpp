@@ -1,4 +1,4 @@
-#include <nav_executor/path_planner/trajectory/step_annotator.hpp>
+#include <nav_executor/path_planner/trajectory/traversal_annotator.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +6,7 @@
 
 #include <rclcpp/logging.hpp>
 
-namespace nav_executor::step_annotator {
+namespace nav_executor::traversal_annotator {
 
 namespace {
 
@@ -30,14 +30,16 @@ const TraversalMode* lookup_step_rule(
 } // anonymous namespace
 
 std::vector<StepPlanSegment> build_step_plan(
-    const StepDetectionParams& params,
+    const TraversalAnnotationParams& annotation,
+    const StepExecutionTimingParams& execution_timing,
+    const TraversalConstraintGateParams& constraint_gate,
     const MincoTrajectory& path,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
     rclcpp::Logger logger
 ) {
     const double sample_spacing = std::min(
-        params.path_sample_resolution, direction_map.geometry.resolution() * 0.5
+        annotation.sample_spacing, direction_map.geometry.resolution() * 0.5
     );
     const double total_length = path.total_arc_length();
     const int sample_intervals = std::max(
@@ -113,7 +115,6 @@ std::vector<StepPlanSegment> build_step_plan(
         const Eigen::Vector2d tangent = sample.dp_dtau;
         if (direction.norm() < ANGLE_EPSILON || tangent.norm() < ANGLE_EPSILON) continue;
         const double alignment = direction.normalized().dot(tangent.normalized());
-        if (std::abs(alignment) <= params.detect_dot_threshold) continue;
         active = ActiveSegment {
             .label = label,
             .direction = alignment > 0.0 ? StepDirection::UP : StepDirection::DOWN,
@@ -129,13 +130,13 @@ std::vector<StepPlanSegment> build_step_plan(
 
     for (StepPlanSegment& segment : plan) {
         segment.prepare_arc_length = std::max(
-            0.0, segment.commit_arc_length - params.profile_prepare_distance
+            0.0, segment.commit_arc_length - execution_timing.profile_prepare_distance
         );
         segment.active_arc_length = std::max(
-            0.0, segment.commit_arc_length - params.chassis_activation_distance
+            0.0, segment.commit_arc_length - execution_timing.chassis_activation_distance
         );
         segment.release_arc_length = std::min(
-            total_length, segment.step_exit_arc_length + params.fsm_release_distance
+            total_length, segment.step_exit_arc_length + execution_timing.fsm_release_distance
         );
     }
 
@@ -192,14 +193,14 @@ std::vector<StepPlanSegment> build_step_plan(
         constraint.exit_arc_length = segment.step_exit_arc_length;
         constraint.gate_start_arc_length = std::max(
             segment.prepare_arc_length,
-            segment.commit_arc_length - params.gate_transition_distance
+            segment.commit_arc_length - constraint_gate.gate_transition_distance
         );
         constraint.gate_end_arc_length = std::min(
             segment.release_arc_length,
-            segment.step_exit_arc_length + params.gate_transition_distance
+            segment.step_exit_arc_length + constraint_gate.gate_transition_distance
         );
     }
     return plan;
 }
 
-} // namespace nav_executor::step_annotator
+} // namespace nav_executor::traversal_annotator

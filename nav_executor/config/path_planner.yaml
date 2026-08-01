@@ -1,38 +1,33 @@
 /**:
   ros__parameters:
     path_planner:
-      traversability:
-        occupied_threshold: 100 # 统一动态占用阈值；格子代价值 >= 该值视为不可通行（0~255）
-        on_step_threshold: 0.1 # 起点、终点和 nudge 候选处的插值方向场模长须低于该值；覆盖整个膨胀场安全区
-
-      nudge:
-        max_distance: 1.0 # 在全局静态障碍地图上搜索空闲格子的最大 BFS 半径（米）
+      endpoint_handling:
+        occupied_cost_threshold: 100 # 统一占用阈值；格子代价值 >= 该值视为不可通行（0~255）
+        direction_norm_max: 0.1 # 起终点和 nudge 候选处允许的最大方向场模长；用于避开方向地形膨胀区
+        nudge_max_distance: 1.0 # 在全局静态地图上搜索可用端点的最大 BFS 半径（米）
+        goal_reached_distance: 0.5 # 机器人到最终可执行目标小于该距离时直接判定到达（米）
 
       dynamic_prediction:
         horizon_seconds: 2.0 # 地形本体动态障碍的逐格 max 预测窗口，0 表示只用当前帧
 
-      planner:
-        goal_reached_distance: 0.5 # 机器人到终点距离小于该值时认为已到达，直接标记 COMPLETE
-        seed_resample_distance: 0.5 # 全局动力学搜索见证的路径点重采样间隔（米），决定 MINCO 分成多少段
-        start_yaw_relaxation:
-          root_bias_seconds: 0.67 # 使用松弛航向根的固定 OPEN 排序偏置（秒）
-          yaw_bias_seconds_per_rad: 0.17 # 松弛根相对实测 yaw 每旋转 1 rad 的排序偏置（秒/rad）
-          max_discarded_velocity: 0.5 # 真实速度投影到候选航向后，允许丢弃的速度分量上限（m/s）
+      directional_terrain:
+        min_alignment_cosine: 0.8 # 穿越方向与地形方向的最小绝对余弦；搜索和最终验收共用的硬约束
+        runup_transition_distance: 0.1 # run_up 边界外的平滑过渡距离，供参考路径和 MINCO 共用（米）
 
-      shaping_dynamics: # 仅供 state-lattice 构造可达搜索见证；不进入 MINCO 几何目标。
-        velocity_max: 3.0 # 动力学见证的线速度上限（m/s）
+      search_dynamics: # 仅供参考路径和 Kino A* 构造可达搜索见证；不进入 MINCO 几何目标
+        velocity_max: 3.0 # 搜索见证的线速度上限（m/s）
         tangential_acceleration_max: 1.5 # 标量速度变化率 |d speed/dt| 上限（m/s²）
         angular_velocity_max: 6.0 # 角速度上限（rad/s）
         angular_acceleration_max: 7.0 # 角加速度上限（rad/s²）
         lateral_acceleration_max: 2.0 # 侧向加速度 |κ|v² 上限（m/s²）
 
-      geometry: # MINCO 与执行速度包络共用的时标不变几何边界。
+      geometry: # MINCO、Kino A* 原语和执行速度包络共用的时标不变几何边界
         curvature_max: 4.0 # 最小转弯半径 0.25 m 对应的最大曲率（1/m）
         curvature_rate_max: 8.0 # 曲率在弧长上的最大变化率（1/m²）
-        tangent_regularization: 1.0e-6 # 单段归一化参数下的几何切向正则尺度（m）
+        tangent_regularization: 1.0e-6 # 单段归一化参数下的几何切向正则尺度（米）
 
-      spatial_astar:
-        obstacle_weight: 1.0 # 归一化障碍软代价乘数；1.0 表示接近占据阈值时边代价约翻倍
+      spatial_a_star:
+        obstacle_weight: 1.0 # 归一化障碍软代价乘数；1.0 表示接近占用阈值时边代价约翻倍
         max_expansions: 1000000 # 二维空间 A* 最大展开数
 
       reference_path:
@@ -42,46 +37,52 @@
       guide_field:
         corridor_width: 2.0 # 参考路径两侧的自由空间测地走廊宽度（米）
 
-      state_lattice:
-        xy_resolution: 0.05 # root-relative canonical lattice 位置分辨率（米）
-        heading_bins: 80 # canonical 航向数量，80 对应 4.5°
+      kino_a_star:
+        lattice:
+          xy_resolution: 0.05 # root-relative canonical lattice 位置分辨率（米）
+          heading_bins: 80 # canonical 航向数量，80 对应 4.5°
+          speed_bin_count: 13 # 离散速度值数量（含 0）；13 对应 0.25 m/s 间隔
+        motion_primitives:
+          curvature_magnitudes: [1.0, 4.0, 0.25, 1.0, 0.0625, 0.25] # 三个长度带各自的两个 nominal 曲率幅值
+          band_lengths: [0.32, 0.63, 1.26] # 与曲率带对应的原语长度（米）
+          straight_length: 1.26 # nominal 直行动作长度（米）
         collision_check_resolution: 0.075 # 空间原语碰撞与地形检查的最大步长（米）
-        goal_connection_max_length: 1.0 # 近目标直线 seed connector 允许的最大长度（米）
-        goal_tolerance: 1.0 # 进入该欧氏距离后尝试连接真实目标位置（米）
-        speed_bin_count: 13 # 离散速度值数量（含 0）；13 对应 0.25 m/s 间隔
+        goal_connection_max_distance: 1.0 # 进入该距离后尝试用直线连接真实目标（米）
         guidance_weight: 1.0 # 非 admissible 参考启发的整体 OPEN 排序强度
         deviation_weight: 1.0 # 偏离参考路径的时间等效权重
         heading_weight: 0.25 # 航向偏差权重（秒/rad）
         speed_weight: 0.5 # 参考速度偏差的时间等效权重
         approach_alignment_weight: 4.0 # 助跑区航向横向偏差平方的时间等效权重
         approach_window_weight: 1.0 # 助跑区速度窗偏差平方的时间等效权重
-        max_expansions: 500000 # 最多展开多少个节点，防止爆内存或搜索时间过长
+        max_expansions: 500000 # 最大节点展开数，防止搜索时间和内存失控
+        start_yaw_relaxation:
+          root_bias_seconds: 0.67 # 使用松弛航向根的固定 OPEN 排序偏置（秒）
+          yaw_bias_seconds_per_rad: 0.17 # 松弛根相对实测 yaw 每旋转 1 rad 的排序偏置（秒/rad）
+          max_discarded_velocity: 0.5 # 实际速度投影到候选航向后允许丢弃的速度分量上限（m/s）
 
-      motion_primitives:
-        curvature_magnitudes: [1.0, 4.0, 0.25, 1.0, 0.0625, 0.25] # 三个长度带各自的两个 nominal 曲率幅值
-        band_lengths: [0.32, 0.63, 1.26] # 与曲率带对应的原语长度（米）
-        straight_length: 1.26 # nominal 直行动作长度（米）
       minco:
+        seed:
+          max_point_spacing: 0.5 # Kino A* 见证转换为 MINCO 边界时的最大点间距（米）
+          max_heading_change: 0.5 # 即使距离较短，航向变化达到该值也保留边界点（rad）
         directed_cosine_min: 0.1 # 曲线切向与种子方向的最小余弦；无速度量纲
         penalty_weights:
           energy: 1.0 # 参数域 min-jerk 正则权重
           time: 16.0 # MINCO 参数区间总长度权重；不进入执行时标
-          obstacle: 1000.0 # 障碍物权重：撞墙的惩罚，越大越不可能穿墙
+          obstacle: 1000.0 # 障碍物权重，越大越不可能穿墙
           curvature: 100.0 # 几何曲率超限惩罚
           curvature_rate: 100.0 # 弧长曲率变化率超限惩罚
-          directed_regularity: 1000.0 # 有向正则性：排除内部零速点、尖点与逆向
-          traversal_alignment: 1600.0 # runup 起点至台阶出口的方向对齐软约束
-          prohibited_traversal: 1000.0 # 往台阶禁止方向（如逆行）走的惩罚
-          runup_curvature: 100.0 # runup 起点至台阶出口的 κ² 正则
+          directed_regularity: 1000.0 # 有向正则性，排除内部零速点、尖点与逆向
+          traversal_alignment: 1600.0 # runup 起点至地形出口的方向对齐软约束
+          prohibited_traversal: 1000.0 # 往地形禁止方向行驶的惩罚
+          runup_curvature: 100.0 # runup 起点至地形出口的 κ² 正则
         terrain_gate:
           norm_lo: 0.1 # 方向场模长低于此值时不施加地形软约束
           norm_hi: 0.9 # 方向场模长高于此值时施加完整软约束
-        samples_per_segment: 16 # 每段 MINCO 轨迹上采多少个点来施加约束和惩罚
+        samples_per_segment: 16 # 每段 MINCO 轨迹的约束和惩罚采样数
         runup:
           body_norm_lo: 0.9 # 助跑源门控下界；非本体膨胀 cap=229/255 小于该值
           body_norm_hi: 0.95 # 助跑源门控上界；仅物理本体附近达到完整强度
-          saturation_length: 0.05 # 往前看台阶暴露量时的饱和弧长（米），暴露量超过此尺度后助跑惩罚不再增加
-          transition_distance: 0.1 # 助跑区边界往外平滑过渡的弧长宽度（米），让助跑效果逐渐消失而非突然截断
+          saturation_length: 0.05 # 前向地形暴露量的饱和弧长（米）
         max_iterations: 2000 # block-scaled Armijo L-BFGS 最大 accepted step 数
         optimizer:
           position_scale: 0.5 # 每个 2D waypoint block 的物理尺度（米）
@@ -91,7 +92,7 @@
           history_size: 8 # 保留的 L-BFGS (s,y) 对数
           gradient_tolerance: 1.0e-5 # max_block ‖D_b g_b‖₂ 绝对一阶最优性阈值
           cost_window_relative_tolerance: 1.0e-5 # accepted incumbent 窗口首尾的累计相对目标改善阈值
-          cost_window_size: 10 # 实际收益判定所覆盖的 accepted step 数
+          cost_window_size: 10 # 实际收益判定覆盖的 accepted step 数
           cost_plateau_gradient_tolerance: 1.0e-4 # cost plateau 还须满足的宽松梯度阈值，否则进入恢复
           scaled_step_tolerance: 1.0e-12 # 归一化 block 步长停滞阈值
           step_control:
@@ -102,41 +103,27 @@
             backtrack_factor: 0.25 # Armijo 拒绝后的步长上限回退因子
             expansion_factor: 2.0 # 高可信边界步的 max-step cap 扩大因子
             max_rejections_per_iteration: 20 # 单次 accepted iteration 内的 Armijo 拒绝上限
-            recovery_after_rejections: 3 # 达到此次数切换到归一化负梯度恢复
+            recovery_after_rejections: 3 # 达到此次数后切换到归一化负梯度恢复
           curvature_cosine_threshold: 1.0e-8 # sy/(||s||·||y||) 超过此值才接受曲率对
           history_update_min_model_ratio: 0.25 # rho 低于此值的 accepted step 不写入历史
         min_segment_time: 0.05 # 每段 MINCO 参数区间下限；种子与优化统一使用
 
-      environment_validation: # 环境验收：路径与代价地图、方向地形的关系
-        samples_per_segment: 20 # 每段空间曲线的碰撞与地形检查采样数下限
-        traversal_angle_tolerance: 0.4 # 台阶方向角允许偏差，只记录软诊断（rad）
+      trajectory_validation:
+        samples_per_segment: 20 # 每段空间曲线的碰撞与方向地形检查采样数下限
+        alignment_warning_angle: 0.4 # 穿越方向偏差超过该角度时记录软诊断，不拒绝轨迹（rad）
+
+      traversal_annotation:
+        sample_spacing: 0.05 # 方向地形段的弧长采样上限；实际不超过地图分辨率的一半（米）
 
       speed_profile:
         discretization:
-          max_spacing: 0.15 # 平坦区域最大弧长节点间隔 (m)
-          step_max_spacing: 0.05 # capability blend 与台阶区域最大节点间隔 (m)
-          curvature_refine_threshold: 0.15 # 区间曲率变化超过该值时递归细分 (1/m)
-          envelope_sample_spacing: 0.025 # 区间内动力学包络的采样间隔 (m)
+          max_spacing: 0.15 # 平坦区域最大弧长节点间隔（米）
+          traversal_max_spacing: 0.05 # capability blend 与方向地形区域最大节点间隔（米）
+          curvature_refine_threshold: 0.15 # 区间曲率变化超过该值时递归细分（1/m）
+          envelope_sample_spacing: 0.025 # 区间内动力学包络的采样间隔（米）
         objective:
-          traversal_window: 20.0 # 台阶平方速度窗松弛的弧长积分权重
+          traversal_window: 20.0 # 方向地形平方速度窗松弛的弧长积分权重
           lateral_acceleration: 18.0 # 侧向加速度超限的弧长积分权重；阈值来自当前 capability
           global_speed_reward: 0.05 # 无更重要目标时提高平方速度的小权重
-          velocity_scale: 2.2 # 平方速度目标的无量纲归一参考速度 (m/s)，保持两类目标权重比例
-        stationary_velocity_threshold: 0.1 # 小于该值的路径切向初速度按静止处理 (m/s)
-
-      step:
-        detection: # 物理边界固定按原始格点 direction magnitude > 0.95 判定
-          detect_dot_threshold: 0.5 # 路径方向与台阶方向点积的阈值：大于此值判定为上台阶，小于负的此值判定为下台阶
-          path_sample_resolution: 0.05 # 台阶标注弧长采样间距上限；实际不超过方向地图分辨率的一半（米）
-        execution:
-          profile_prepare_distance: 2.0 # 从 STEPPING/PREPARING 起点到 commit 点的距离，在这段距离内逐步切换底盘能力配置（米）
-          chassis_activation_distance: 1.0 # 从 STEPPING/ARMED 起点到 commit 点的距离；开始发送可撤销的台阶提示，commit 前仍可抢占（米）
-          fsm_release_distance: 0.3 # 走出物理台阶后，FSM 额外再往前推多远才退出 STEPPING 状态（米）
-        mpc_constraints:
-          gate_transition_distance: 0.3 # 台阶内部 MPC 约束窗两侧的软门控过渡带宽度（米），让约束逐渐生效而非硬开关
-
-      step_mask:
-        path_align_dot_threshold: 0.6 # 路径方向与台阶方向点积 ≥ 此值就认为路径经过了该台阶
-        full_effect_radius: 0.6 # 台阶掩码施加满强度的半径（米）
-        cutoff_radius: 1.0 # 台阶掩码截止半径（米），超过此范围完全不受影响
-        length_num_samples: 100 # 估算路径弧长时的采样点数
+          velocity_scale: 2.2 # 平方速度目标的无量纲归一参考速度（m/s）
+        stationary_velocity_threshold: 0.1 # 小于该值的路径切向初速度按静止处理（m/s）

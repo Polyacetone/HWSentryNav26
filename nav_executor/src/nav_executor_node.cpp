@@ -148,7 +148,7 @@ void NavExecutorNode::control_tick() {
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_WAITING_DIRECTION_MAP);
         return;
     }
-    if (!step_mask_ready_) {
+    if (!route_terrain_mask_ready_) {
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_WAITING_STEP_MASK);
         return;
     }

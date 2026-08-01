@@ -10,27 +10,34 @@
 
 namespace nav_executor {
 
-struct StepDetectionParams {
-    double detect_dot_threshold;
-    double path_sample_resolution;
+struct TraversalAnnotationParams {
+    double sample_spacing;
+};
+
+struct StepExecutionTimingParams {
     double profile_prepare_distance;
     double chassis_activation_distance;
     double fsm_release_distance;
+};
+
+struct TraversalConstraintGateParams {
     double gate_transition_distance; // 约束窗软门控两侧过渡带宽度 (m)
 };
 
-// 台阶几何标注器：规划期基于原始方向地形本体对样条做一次扫描，产出不可变的 StepPlanSegment 列表装入 AnnotatedPath.step_segments。
+// 方向地形标注器：规划期扫描原始地形本体，产出执行层使用的不可变 StepPlanSegment 列表。
 // 无状态纯函数集合，可在规划 worker 线程安全调用。
-namespace step_annotator {
+namespace traversal_annotator {
 
 std::vector<StepPlanSegment> build_step_plan(
-    const StepDetectionParams& params,
+    const TraversalAnnotationParams& annotation,
+    const StepExecutionTimingParams& execution_timing,
+    const TraversalConstraintGateParams& constraint_gate,
     const MincoTrajectory& path,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
     rclcpp::Logger logger
 );
 
-} // namespace step_annotator
+} // namespace traversal_annotator
 
 } // namespace nav_executor

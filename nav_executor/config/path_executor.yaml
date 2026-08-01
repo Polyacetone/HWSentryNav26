@@ -10,6 +10,16 @@
         step_dist_offset: 0.1 # 台阶本体边缘到下位机距离定义的标定偏移 (m)，正值增加报告距离
         command_history_timeout: 0.4 # 超时后按实测运动状态重建 MPC 指令状态 (s)
 
+      traversal_execution:
+        profile_prepare_distance: 2.0 # commit 前开始切换底盘 capability 的距离（米）
+        chassis_activation_distance: 1.0 # commit 前开始发送可撤销地形提示的距离（米）
+        fsm_release_distance: 0.3 # 离开物理地形后继续保持 STEPPING 状态的距离（米）
+
+      route_terrain_mask:
+        min_alignment_cosine: 0.6 # 路径与物理方向地形匹配所需的最小绝对余弦
+        full_effect_radius: 0.6 # 路径附近完整保留方向地形通道的半径（米）
+        cutoff_radius: 1.0 # 方向地形通道保留效果的截止半径（米）
+
       # ═══════════════════════════════════════════════
       #  NoProgressGuard — 无进展检测守卫
       # ═══════════════════════════════════════════════
@@ -80,6 +90,8 @@
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；命中则该 rollout 首帧即被拒绝，本周期改为下发 STOP 命令
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
           lethal_replan_consecutive_threshold: 3 # 连续多少帧拒绝 rollout 后才请求全局重规划，避免短暂抖动造成误打断；命令安全不受该值影响
+        traversal_constraints:
+          gate_transition_distance: 0.3 # 方向地形约束窗两侧的软门控过渡距离（米）
         reference_seed:
           # 冷启动沿已认证全局路径做纯追踪前推，使初始 rollout 落在正确的同伦类中。
           lookahead_time: 0.6 # 前视距离 = 速度 × 该时间 (s)

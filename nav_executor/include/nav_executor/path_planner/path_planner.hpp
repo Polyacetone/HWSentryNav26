@@ -17,12 +17,12 @@
 #include <nav_executor/path_planner/search/guide_field.hpp>
 #include <nav_executor/path_planner/search/reference_path.hpp>
 #include <nav_executor/path_planner/search/spatial_grid_astar.hpp>
-#include <nav_executor/path_planner/search/state_lattice_astar.hpp>
+#include <nav_executor/path_planner/search/kino_a_star.hpp>
 #include <nav_executor/path_planner/trajectory/minco_optimizer.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
 #include <nav_executor/common/environment/obstacle_semantics.hpp>
-#include <nav_executor/path_planner/trajectory/step_annotator.hpp>
-#include <nav_executor/path_planner/search/step_routing_mask.hpp>
+#include <nav_executor/path_planner/trajectory/traversal_annotator.hpp>
+#include <nav_executor/path_planner/search/route_terrain_mask.hpp>
 #include <nav_executor/path_planner/trajectory/speed_profile_optimizer.hpp>
 
 namespace nav_executor {
@@ -82,40 +82,42 @@ struct PlanResult {
 };
 
 struct PlannerConfig {
-    struct StartYawRelaxationParams {
-        double root_bias_seconds;
-        double yaw_bias_seconds_per_rad;
-        double max_discarded_velocity;
-    } start_yaw_relaxation;
+    struct DirectionalTerrainParams {
+        double min_alignment_cosine;
+    } directional_terrain;
+
+    struct MincoSeedParams {
+        double max_point_spacing;
+        double max_heading_change;
+    } minco_seed;
 
     // 环境验收只检查路径与地图的关系。
-    struct EnvironmentValidationParams {
+    struct TrajectoryValidationParams {
         int samples_per_segment;
-        double traversal_angle_tolerance; // 台阶方向角允许偏差（弧度），只记录软诊断
+        double alignment_warning_angle; // 方向地形偏差告警角（弧度），只记录软诊断
     };
 
     // 可行性判定
-    int occupied_threshold;
-    double on_step_threshold;
+    int occupied_cost_threshold;
+    double endpoint_direction_norm_max;
 
     // nudge
-    double nudge_max_distance;
+    double endpoint_nudge_max_distance;
 
     // 近距离短路（robot-to-goal 完成阈值，不是 goal-to-goal 去重阈值）
-    double goal_reached_distance;
-
-    // MINCO 种子构造：全局动力学搜索见证的重采样间隔（米），决定 MINCO 段数
-    double seed_resample_distance;
+    double endpoint_goal_reached_distance;
 
     MotionPrimitiveLibrary::Params motion_primitives;
-    SpatialGridAstar::Params spatial_astar;
+    SpatialGridAstar::Params spatial_a_star;
     ReferencePathBuilder::Params reference_path;
     GuideFieldBuilder::Params guide_field;
-    StateLatticeAstar::Params state_lattice;
+    KinoAStar::Params kino_a_star;
     MincoOptimizer::Params minco;
 
-    StepDetectionParams step_detection;
-    EnvironmentValidationParams environment_validation;
+    TraversalAnnotationParams traversal_annotation;
+    StepExecutionTimingParams step_execution_timing;
+    TraversalConstraintGateParams traversal_constraint_gate;
+    TrajectoryValidationParams trajectory_validation;
     SpeedProfileOptimizer::Params speed_profile;
 
     bool enable_diagnostics;
@@ -126,7 +128,7 @@ class PathPlanner {
 public:
     PathPlanner(
         const PlannerConfig& config,
-        std::shared_ptr<StepRoutingMask> step_routing_mask,
+        std::shared_ptr<RouteTerrainMask> route_terrain_mask,
         rclcpp::Logger logger
     );
     ~PathPlanner();
@@ -156,7 +158,7 @@ private:
 
     PlannerConfig config_;
     MotionPrimitiveLibrary primitive_library_;
-    std::shared_ptr<StepRoutingMask> step_routing_mask_;
+    std::shared_ptr<RouteTerrainMask> route_terrain_mask_;
     rclcpp::Logger logger_;
 
     mutable std::mutex mutex_;

@@ -43,7 +43,7 @@ struct EnvironmentValidationReport {
 // tangent/curvature 是时标不变的几何量；段时长只初始化 MINCO 参数化。
 MincoSeed build_minco_seed(
     const SpeedWitness& witness,
-    const double resample_distance,
+    const PlannerConfig::MincoSeedParams& params,
     const double min_segment_time
 ) {
     MincoSeed seed;
@@ -55,8 +55,6 @@ MincoSeed build_minco_seed(
         || min_segment_time <= 0.0) return seed;
 
     std::vector<size_t> selected {0};
-    const double distance_threshold = std::max(resample_distance, 0.05);
-    constexpr double HEADING_THRESHOLD = 0.5;
     for (size_t i = 1; i + 1 < witness.positions.size(); ++i) {
         const size_t last = selected.back();
         const double distance = (
@@ -69,7 +67,8 @@ MincoSeed build_minco_seed(
             witness.tangents[last].y(), witness.tangents[last].x()
         );
         const double heading_change = std::abs(wrap_angle(heading - last_heading));
-        if (distance >= distance_threshold || heading_change >= HEADING_THRESHOLD) {
+        if (distance >= params.max_point_spacing
+            || heading_change >= params.max_heading_change) {
             selected.push_back(i);
         }
     }
@@ -107,12 +106,12 @@ EnvironmentValidationReport validate_path_environment(
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
     const int occupied_threshold,
-    const double step_alignment_threshold,
-    const PlannerConfig::EnvironmentValidationParams& validation
+    const double min_terrain_alignment_cosine,
+    const PlannerConfig::TrajectoryValidationParams& validation
 ) {
     EnvironmentValidationReport report;
     const double total_arc_length = trajectory.total_arc_length();
-    double worst_traversal_angle = validation.traversal_angle_tolerance;
+    double worst_traversal_angle = validation.alignment_warning_angle;
     double worst_traversal_angle_arc_length = 0.0;
 
     // 弧长是跟随层唯一的进度坐标，环境验收使用同一坐标。采样间距同时覆盖
@@ -164,10 +163,10 @@ EnvironmentValidationReport validate_path_environment(
         const Eigen::Vector2d direction = raw_direction.normalized();
         const Eigen::Vector2d heading(std::cos(sample.theta), std::sin(sample.theta));
         const double alignment = heading.dot(direction);
-        if (std::abs(alignment) <= step_alignment_threshold) {
+        if (std::abs(alignment) < min_terrain_alignment_cosine) {
             report.rejection = "trajectory is not aligned with directional terrain" + at
                 + ": |heading.dot(dir)|=" + std::to_string(std::abs(alignment))
-                + " <= threshold=" + std::to_string(step_alignment_threshold);
+                + " < threshold=" + std::to_string(min_terrain_alignment_cosine);
             return report;
         }
         const bool going_up = alignment >= 0.0;
@@ -184,12 +183,13 @@ EnvironmentValidationReport validate_path_environment(
         }
     }
 
-    if (worst_traversal_angle > validation.traversal_angle_tolerance) {
+    if (worst_traversal_angle > validation.alignment_warning_angle) {
         report.warnings.push_back(
             "stair-direction deviation at s="
             + std::to_string(worst_traversal_angle_arc_length)
             + ": angle=" + std::to_string(worst_traversal_angle)
-            + " rad, tolerance=" + std::to_string(validation.traversal_angle_tolerance)
+            + " rad, warning-angle="
+            + std::to_string(validation.alignment_warning_angle)
             + " rad"
         );
     }
@@ -200,11 +200,11 @@ EnvironmentValidationReport validate_path_environment(
 
 PathPlanner::PathPlanner(
     const PlannerConfig& config,
-    std::shared_ptr<StepRoutingMask> step_routing_mask,
+    std::shared_ptr<RouteTerrainMask> route_terrain_mask,
     rclcpp::Logger logger
 ) : config_(config),
     primitive_library_(config.motion_primitives),
-    step_routing_mask_(std::move(step_routing_mask)),
+    route_terrain_mask_(std::move(route_terrain_mask)),
     logger_(logger) {
     if (!primitive_library_.valid()) {
         RCLCPP_ERROR(
@@ -296,8 +296,8 @@ bool PathPlanner::is_map_point_feasible(
     const auto cost = cost_map.sample_map(map_pt);
     const auto direction = direction_map.sample_map(map_pt);
     if (!cost || !direction) return false;
-    return cost->value < config_.occupied_threshold
-        && direction->value.norm() < config_.on_step_threshold;
+    return cost->value < config_.occupied_cost_threshold
+        && direction->value.norm() < config_.endpoint_direction_norm_max;
 }
 
 std::optional<Eigen::Vector2d> PathPlanner::nudge_point_to_free(
@@ -402,7 +402,8 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     // ── 起点 nudge（只按全局静态障碍检查）──
     {
         const auto nudged = nudge_point_to_free(
-            global_feasibility_cost, *req.direction_map, start_map, config_.nudge_max_distance
+            global_feasibility_cost, *req.direction_map, start_map,
+            config_.endpoint_nudge_max_distance
         );
         if (!nudged) return fail("Cannot nudge start to a free cell");
         start_map = *nudged;
@@ -433,21 +434,23 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         if (!is_map_point_feasible(planning_cost_map, *req.direction_map, goal_map)) return fail("Fixed goal is occupied by a dynamic obstacle");
     } else {
         const auto nudged = nudge_point_to_free(
-            global_feasibility_cost, *req.direction_map, goal_map, config_.nudge_max_distance
+            global_feasibility_cost, *req.direction_map, goal_map,
+            config_.endpoint_nudge_max_distance
         );
         if (!nudged) return fail("Cannot nudge goal to a free cell");
         goal_plan = *nudged;
     }
 
     // ── 近距离短路判断：仅在起终点通过完整安全检查后，按最终可执行目标判定 ──
-    if ((req.current_pos_map - goal_plan).norm() < config_.goal_reached_distance) {
+    if ((req.current_pos_map - goal_plan).norm()
+        < config_.endpoint_goal_reached_distance) {
         result.goal_pos = goal_plan;
         result.kind = fixed
             ? PlanResult::Kind::USE_AS_FIXED_GOAL
             : PlanResult::Kind::COMPLETE_NO_PLAN_NEEDED;
         RCLCPP_DEBUG(
             logger_, "Feasible goal within reached distance (%.2f m): %s",
-            config_.goal_reached_distance,
+            config_.endpoint_goal_reached_distance,
             fixed ? "USE_AS_FIXED_GOAL" : "COMPLETE_NO_PLAN_NEEDED"
         );
         return result;
@@ -460,15 +463,15 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     if (!start_cell || !goal_cell) return fail("planning endpoints are outside the map");
 
     // ── [1] 二维空间 A*：只选择空间拓扑 ──
-    const SpatialGridAstar spatial_astar(config_.spatial_astar);
-    const auto spatial_result = spatial_astar.search(
+    const SpatialGridAstar spatial_a_star(config_.spatial_a_star);
+    const auto spatial_result = spatial_a_star.search(
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints,
         *start_cell,
         *goal_cell,
-        config_.occupied_threshold,
-        config_.step_detection.detect_dot_threshold
+        config_.occupied_cost_threshold,
+        config_.directional_terrain.min_alignment_cosine
     );
     if (!spatial_result.success) {
         RCLCPP_WARN(
@@ -498,12 +501,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         start_map,
         goal_plan,
         std::clamp(std::max(req.current_velocity, 0.0),
-            0.0, config_.state_lattice.dynamics.velocity_max),
+            0.0, config_.kino_a_star.dynamics.velocity_max),
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints,
-        config_.state_lattice.dynamics,
-        config_.occupied_threshold
+        config_.kino_a_star.dynamics,
+        config_.occupied_cost_threshold
     );
     if (!reference_result.success) {
         RCLCPP_WARN(
@@ -525,7 +528,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     // ── [3] 自由空间测地距离场与固定宽度走廊 ──
     const GuideFieldBuilder guide_builder(config_.guide_field);
     const auto guide_result = guide_builder.build(
-        reference_path, planning_cost_map, config_.occupied_threshold
+        reference_path, planning_cost_map, config_.occupied_cost_threshold
     );
     if (!guide_result.success) {
         RCLCPP_WARN(
@@ -538,7 +541,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const GuideField& guide_field = guide_result.field;
     const auto guide_done = std::chrono::steady_clock::now();
 
-    // ── [4] 走廊内 canonical state lattice：修正局部几何并搜索完整动力学状态 ──
+    // ── [4] 走廊内 Kino A*：修正局部几何并搜索完整动力学状态 ──
     const LatticeFrame frame {
         .origin_map = start_map,
         .base_heading = req.current_yaw,
@@ -549,19 +552,19 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     const double clamped_start_speed = std::clamp(
         measured_start_speed,
         0.0,
-        config_.state_lattice.dynamics.velocity_max
+        config_.kino_a_star.dynamics.velocity_max
     );
-    const double speed_bin_width = config_.state_lattice.dynamics.velocity_max
-        / static_cast<double>(config_.state_lattice.speed_bin_count - 1);
+    const double speed_bin_width = config_.kino_a_star.dynamics.velocity_max
+        / static_cast<double>(config_.kino_a_star.speed_bin_count - 1);
     const auto quantize_speed = [&](const double speed) {
         return std::clamp(
             static_cast<int>(std::floor(speed / speed_bin_width + 1e-12)),
             0,
-            config_.state_lattice.speed_bin_count - 1
+            config_.kino_a_star.speed_bin_count - 1
         );
     };
     const int start_speed_bin = quantize_speed(clamped_start_speed);
-    std::vector<StateLatticeAstar::SearchRoot> roots {{
+    std::vector<KinoAStar::SearchRoot> roots {{
         .key = {0, 0, 0, start_speed_bin},
         .relaxation_bias = 0.0,
         .relaxed = false,
@@ -584,19 +587,20 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
             measured_start_velocity - projected_speed * candidate_tangent
         ).norm();
         if (discarded_velocity
-            > config_.start_yaw_relaxation.max_discarded_velocity + 1e-12) {
+            > config_.kino_a_star.start_yaw_relaxation.max_discarded_velocity
+                + 1e-12) {
             continue;
         }
         roots.push_back({
             .key = {0, 0, heading, quantize_speed(projected_speed)},
-            .relaxation_bias = config_.start_yaw_relaxation.root_bias_seconds
-                + config_.start_yaw_relaxation.yaw_bias_seconds_per_rad
+            .relaxation_bias = config_.kino_a_star.start_yaw_relaxation.root_bias_seconds
+                + config_.kino_a_star.start_yaw_relaxation.yaw_bias_seconds_per_rad
                     * std::abs(yaw_offset),
             .relaxed = true,
         });
     }
-    const StateLatticeAstar lattice(config_.state_lattice, primitive_library_);
-    const auto lattice_result = lattice.search(
+    const KinoAStar kino_a_star(config_.kino_a_star, primitive_library_);
+    const auto kino_result = kino_a_star.search(
         frame,
         roots,
         goal_plan,
@@ -605,25 +609,25 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         req.terrain_constraints,
         guide_field,
         reference_path,
-        config_.occupied_threshold,
-        config_.step_detection.detect_dot_threshold
+        config_.occupied_cost_threshold,
+        config_.directional_terrain.min_alignment_cosine
     );
-    if (!lattice_result.success) {
-        const auto& diagnostics = lattice_result.diagnostics;
+    if (!kino_result.success) {
+        const auto& diagnostics = kino_result.diagnostics;
         RCLCPP_WARN(
-            logger_, "Corridor lattice planning failed: error=%s spatial_expansions=%d "
+            logger_, "Corridor Kino A* planning failed: error=%s spatial_expansions=%d "
             "raw_length=%.2f smoothed_length=%.2f corridor_cells=%zu "
-            "lattice_expansions=%d generated=%d open_peak=%zu corridor_rejections=%zu",
-            lattice_result.error.c_str(), spatial_route.expansions,
+            "kino_expansions=%d generated=%d open_peak=%zu corridor_rejections=%zu",
+            kino_result.error.c_str(), spatial_route.expansions,
             reference_path.raw_length, reference_path.smoothed_length,
             guide_field.corridor_cell_count(), diagnostics.expansions,
             diagnostics.generated_states, diagnostics.open_peak,
             diagnostics.corridor_rejections
         );
-        return fail("corridor state-lattice planning failed: " + lattice_result.error);
+        return fail("corridor Kino A* planning failed: " + kino_result.error);
     }
-    const auto lattice_done = std::chrono::steady_clock::now();
-    const SpeedWitness& speed_witness = lattice_result.witness;
+    const auto kino_done = std::chrono::steady_clock::now();
+    const SpeedWitness& speed_witness = kino_result.witness;
     if (config_.enable_diagnostics) {
         result.debug_kino_path = speed_witness.positions;
     }
@@ -631,11 +635,11 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     // ── 种子重采样为 MINCO 边界全状态 + 段时长 ──
     auto minco_seed = build_minco_seed(
         speed_witness,
-        config_.seed_resample_distance,
+        config_.minco_seed,
         config_.minco.min_segment_time
     );
     if (minco_seed.durations.empty()) return fail("MINCO seed construction produced no segments");
-    if (lattice_result.diagnostics.selected_relaxed_root) {
+    if (kino_result.diagnostics.selected_relaxed_root) {
         const Eigen::Vector2d relaxed_tangent = speed_witness.tangents.front().normalized();
         minco_seed.boundaries.front().tangent = relaxed_tangent;
     } else {
@@ -702,9 +706,9 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         planning_cost_map,
         *req.direction_map,
         req.terrain_constraints,
-        config_.occupied_threshold,
-        config_.step_detection.detect_dot_threshold,
-        config_.environment_validation
+        config_.occupied_cost_threshold,
+        config_.directional_terrain.min_alignment_cosine,
+        config_.trajectory_validation
     );
     if (environment_validation.rejection) {
         return fail("environment validation rejected the path: "
@@ -724,8 +728,14 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     path->planning_performance = req.performance;
 
     // 台阶几何标注：基于 base（未掩码）方向场，扫描轴为累计弧长。
-    path->step_segments = step_annotator::build_step_plan(
-        config_.step_detection, path->trajectory, *req.direction_map, req.terrain_constraints, logger_
+    path->step_segments = traversal_annotator::build_step_plan(
+        config_.traversal_annotation,
+        config_.step_execution_timing,
+        config_.traversal_constraint_gate,
+        path->trajectory,
+        *req.direction_map,
+        req.terrain_constraints,
+        logger_
     );
 
     const Eigen::Vector2d current_velocity_map = req.current_velocity * Eigen::Vector2d(
@@ -801,7 +811,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     }
 
     // 台阶掩码层：针对本条轨迹产出。
-    const auto layers = step_routing_mask_->compute(path->trajectory);
+    const auto layers = route_terrain_mask_->compute(path->trajectory);
     path->step_cost_layer = layers.step_cost_layer;
     path->masked_direction_map = layers.masked_direction_map;
 
@@ -816,12 +826,12 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         ).norm();
     }
     const int segment_count = opt.trajectory.segment_count();
-    const auto& search_diagnostics = lattice_result.diagnostics;
+    const auto& search_diagnostics = kino_result.diagnostics;
     RCLCPP_DEBUG(
         logger_, "Plan #%lu [done] total=%.2f ms src=(%.2f,%.2f) dst=(%.2f,%.2f)%s "
         "path=%.2f m/%.2f s segments=%d steps=%zu | "
-        "stages=(spatial=%.2f,reference=%.2f,guide=%.2f,lattice=%.2f,minco=%.2f) ms | "
-        "search=(spatial_exp=%d,lattice_exp=%d,states=%d,corridor_reject=%zu)",
+        "stages=(spatial=%.2f,reference=%.2f,guide=%.2f,kino=%.2f,minco=%.2f) ms | "
+        "search=(spatial_exp=%d,kino_exp=%d,states=%d,corridor_reject=%zu)",
         static_cast<unsigned long>(req.goal.id),
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - plan_start).count(),
         start_map.x(), start_map.y(), goal_plan.x(), goal_plan.y(),
@@ -831,7 +841,7 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
         std::chrono::duration<double, std::milli>(spatial_done - plan_start).count(),
         std::chrono::duration<double, std::milli>(reference_done - spatial_done).count(),
         std::chrono::duration<double, std::milli>(guide_done - reference_done).count(),
-        std::chrono::duration<double, std::milli>(lattice_done - guide_done).count(),
+        std::chrono::duration<double, std::milli>(kino_done - guide_done).count(),
         std::chrono::duration<double, std::milli>(minco_done - minco_start).count(),
         spatial_route.expansions,
         search_diagnostics.expansions,

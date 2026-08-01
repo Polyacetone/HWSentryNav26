@@ -1,4 +1,4 @@
-#include <nav_executor/path_planner/search/state_lattice_astar.hpp>
+#include <nav_executor/path_planner/search/kino_a_star.hpp>
 
 #include <algorithm>
 #include <array>
@@ -202,7 +202,7 @@ bool append_terrain_span(
     const double fraction_begin,
     const double fraction_end,
     const double path_s_begin,
-    const double detect_dot_threshold
+    const double min_terrain_alignment_cosine
 ) {
     if (!direction_map.is_terrain_body_cell(cell)
         || fraction_end - fraction_begin <= 1e-12) {
@@ -226,7 +226,7 @@ bool append_terrain_span(
         const double alignment = Eigen::Vector2d(
             std::cos(heading), std::sin(heading)
         ).dot(direction);
-        if (std::abs(alignment) <= detect_dot_threshold) return false;
+        if (std::abs(alignment) < min_terrain_alignment_cosine) return false;
         const bool sample_going_up = alignment > 0.0;
         if (going_up && *going_up != sample_going_up) return false;
         going_up = sample_going_up;
@@ -249,7 +249,7 @@ GeometryResult build_geometry(
     const GuideField& guide_field,
     const ReferencePath& reference_path,
     const int occupied_threshold,
-    const double detect_dot_threshold,
+    const double min_terrain_alignment_cosine,
     const double collision_resolution,
     size_t& corridor_rejections
 ) {
@@ -298,7 +298,7 @@ GeometryResult build_geometry(
                         result, direction_map, cell, previous,
                         segment.curvature, substep_length,
                         previous_fraction, crossing.fraction,
-                        path_s, detect_dot_threshold
+                        path_s, min_terrain_alignment_cosine
                     ) || !append_approach_span(
                         result, guide_field, reference_path, cell, previous,
                         segment.curvature, substep_length,
@@ -318,7 +318,7 @@ GeometryResult build_geometry(
             if (!append_terrain_span(
                     result, direction_map, cell, previous,
                     segment.curvature, substep_length,
-                    previous_fraction, 1.0, path_s, detect_dot_threshold
+                    previous_fraction, 1.0, path_s, min_terrain_alignment_cosine
                 ) || !append_approach_span(
                     result, guide_field, reference_path, cell, previous,
                     segment.curvature, substep_length,
@@ -565,7 +565,7 @@ const std::vector<MotionPrimitive>& MotionPrimitiveLibrary::for_heading(
     ));
 }
 
-SpatialPose StateLatticeAstar::pose_of(
+SpatialPose KinoAStar::pose_of(
     const LatticeFrame& frame,
     const LatticePoseKey& key
 ) {
@@ -586,21 +586,21 @@ SpatialPose StateLatticeAstar::pose_of(
     };
 }
 
-SpatialPose StateLatticeAstar::pose_of(
+SpatialPose KinoAStar::pose_of(
     const LatticeFrame& frame,
     const LatticeKey& key
 ) {
     return pose_of(frame, LatticePoseKey {key.x, key.y, key.heading});
 }
 
-double StateLatticeAstar::speed_of(const int speed_bin) const {
+double KinoAStar::speed_of(const int speed_bin) const {
     if (params_.speed_bin_count <= 1) return 0.0;
     return params_.dynamics.velocity_max
         * static_cast<double>(speed_bin)
         / static_cast<double>(params_.speed_bin_count - 1);
 }
 
-StateLatticeAstar::Result StateLatticeAstar::search(
+KinoAStar::Result KinoAStar::search(
     const LatticeFrame& frame,
     const std::vector<SearchRoot>& roots,
     const Eigen::Vector2d& goal_map,
@@ -610,7 +610,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     const GuideField& guide_field,
     const ReferencePath& reference_path,
     const int occupied_threshold,
-    const double detect_dot_threshold
+    const double min_terrain_alignment_cosine
 ) const {
     Result result;
     if (!primitive_library_.valid()) {
@@ -627,7 +627,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
         || params_.approach_window_weight < 0.0
         || params_.max_expansions <= 0
         || !cost_map.geometry.same_geometry(direction_map.geometry)) {
-        result.error = "corridor state-lattice configuration or inputs are invalid";
+        result.error = "corridor Kino A* configuration or inputs are invalid";
         return result;
     }
 
@@ -703,7 +703,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
         );
     }
     if (open.empty()) {
-        result.error = "state-lattice has no valid root in the selected spatial corridor";
+        result.error = "Kino A* has no valid root in the selected spatial corridor";
         return result;
     }
 
@@ -735,7 +735,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             guide_field,
             reference_path,
             occupied_threshold,
-            detect_dot_threshold,
+            min_terrain_alignment_cosine,
             params_.collision_check_resolution,
             result.diagnostics.corridor_rejections
         );
@@ -757,7 +757,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
             continue;
         }
         if (result.diagnostics.expansions >= params_.max_expansions) {
-            result.error = "state-lattice expansion limit reached in the selected spatial corridor";
+            result.error = "Kino A* expansion limit reached in the selected spatial corridor";
             break;
         }
         selected.expanded = true;
@@ -766,7 +766,8 @@ StateLatticeAstar::Result StateLatticeAstar::search(
         const double velocity_enter = speed_of(current.key.speed);
         ++result.diagnostics.expansions;
 
-        if ((goal_map - current_pose.position).norm() <= params_.goal_tolerance) {
+        if ((goal_map - current_pose.position).norm()
+            <= params_.goal_connection_max_distance) {
             ++result.diagnostics.terminal_attempts;
             const Eigen::Vector2d displacement = goal_map - current_pose.position;
             const double connection_length = displacement.norm();
@@ -779,19 +780,18 @@ StateLatticeAstar::Result StateLatticeAstar::search(
                 };
                 break;
             }
-            if (connection_length <= params_.goal_connection_max_length) {
-                const double connector_heading = std::atan2(
+            const double connector_heading = std::atan2(
                     displacement.y(), displacement.x()
                 );
-                const SpatialPose connector_start {
+            const SpatialPose connector_start {
                     .position = current_pose.position,
                     .heading = connector_heading,
                 };
-                const SpatialPose endpoint {
+            const SpatialPose endpoint {
                     .position = goal_map,
                     .heading = connector_heading,
                 };
-                GeometryResult geometry = build_geometry(
+            GeometryResult geometry = build_geometry(
                     connector_start,
                     {{0.0, connection_length}},
                     endpoint,
@@ -800,47 +800,46 @@ StateLatticeAstar::Result StateLatticeAstar::search(
                     guide_field,
                     reference_path,
                     occupied_threshold,
-                    detect_dot_threshold,
+                    min_terrain_alignment_cosine,
                     params_.collision_check_resolution,
                     result.diagnostics.corridor_rejections
                 );
-                if (geometry.valid) {
-                    double best_edge_cost = std::numeric_limits<double>::infinity();
-                    double best_exit_velocity = 0.0;
-                    for (int speed_bin = 0;
+            if (geometry.valid) {
+                double best_edge_cost = std::numeric_limits<double>::infinity();
+                double best_exit_velocity = 0.0;
+                for (int speed_bin = 0;
                          speed_bin < params_.speed_bin_count; ++speed_bin) {
-                        const double velocity_exit = speed_of(speed_bin);
-                        if (!speed_transition_feasible(
+                    const double velocity_exit = speed_of(speed_bin);
+                    if (!speed_transition_feasible(
                                 geometry,
                                 velocity_enter,
                                 velocity_exit,
                                 params_.dynamics,
                                 terrain_constraints,
                                 result.diagnostics.terrain_spans_checked
-                            )) {
-                            continue;
-                        }
-                        const double duration = 2.0 * geometry.total_length
-                            / (velocity_enter + velocity_exit);
-                        const double edge_cost = duration + approach_penalty(
+                        )) {
+                        continue;
+                    }
+                    const double duration = 2.0 * geometry.total_length
+                        / (velocity_enter + velocity_exit);
+                    const double edge_cost = duration + approach_penalty(
                             geometry, velocity_enter, velocity_exit,
                             params_.approach_alignment_weight,
                             params_.approach_window_weight
-                        );
-                        if (edge_cost < best_edge_cost) {
-                            best_edge_cost = edge_cost;
-                            best_exit_velocity = velocity_exit;
-                        }
+                    );
+                    if (edge_cost < best_edge_cost) {
+                        best_edge_cost = edge_cost;
+                        best_exit_velocity = velocity_exit;
                     }
-                    if (std::isfinite(best_edge_cost)) {
-                        terminal = TerminalCandidate {
-                            .parent = entry.node,
-                            .total_time = current.g + best_edge_cost,
-                            .exit_velocity = best_exit_velocity,
-                            .geometry = std::move(geometry),
-                        };
-                        break;
-                    }
+                }
+                if (std::isfinite(best_edge_cost)) {
+                    terminal = TerminalCandidate {
+                        .parent = entry.node,
+                        .total_time = current.g + best_edge_cost,
+                        .exit_velocity = best_exit_velocity,
+                        .geometry = std::move(geometry),
+                    };
+                    break;
                 }
             }
         }
@@ -899,7 +898,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     result.diagnostics.geometry_cache_entries = geometry_cache.size();
     if (!terminal) {
         if (result.error.empty()) {
-            result.error = "state-lattice found no kinodynamic path in the selected spatial corridor";
+            result.error = "Kino A* found no kinodynamic path in the selected spatial corridor";
         }
         return result;
     }
@@ -911,7 +910,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
     }
     std::reverse(chain.begin(), chain.end());
     if (chain.empty()) {
-        result.error = "corridor state-lattice produced an empty parent chain";
+        result.error = "corridor Kino A* produced an empty parent chain";
         return result;
     }
     const SearchNode& root = nodes[static_cast<size_t>(chain.front())];
@@ -977,7 +976,7 @@ StateLatticeAstar::Result StateLatticeAstar::search(
         || result.witness.positions.size() != result.witness.tangents.size()
         || result.witness.positions.size() != result.witness.curvatures.size()
         || result.witness.positions.size() != result.witness.durations.size() + 1) {
-        result.error = "corridor state-lattice witness reconstruction failed";
+        result.error = "corridor Kino A* witness reconstruction failed";
         return result;
     }
     result.success = true;

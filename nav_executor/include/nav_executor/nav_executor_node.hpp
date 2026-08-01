@@ -32,7 +32,7 @@
 #include <nav_executor/task_manager/route_monitor.hpp>
 #include <nav_executor/path_planner/path_planner.hpp>
 #include <nav_executor/common/environment/nav_map.hpp>
-#include <nav_executor/path_planner/search/step_routing_mask.hpp>
+#include <nav_executor/path_planner/search/route_terrain_mask.hpp>
 #include <nav_executor/path_executor/mpc/mpc_solver.hpp>
 
 namespace nav_executor {
@@ -64,7 +64,7 @@ private:
 
     // ─── 工具 ───
     bool get_chassis_pose(Eigen::Vector3d& chassis_pose) const;
-    void try_init_step_mask();
+    void try_init_route_terrain_mask();
     void refresh_planner_obstacles();
     nav_msgs::msg::Path path_to_nav_msg(const std::vector<Eigen::Vector2d>& points) const;
     nav_msgs::msg::Path trajectory_to_nav_msg(const MincoTrajectory& trajectory) const;
@@ -124,8 +124,8 @@ private:
     // 只读配置（跨线程共享）
     TraversalConfiguration traversal_configuration_;
     CapabilityProfile bidirectional_profile_;
-    std::shared_ptr<StepRoutingMask> step_routing_mask_;
-    bool step_mask_ready_ = false;
+    std::shared_ptr<RouteTerrainMask> route_terrain_mask_;
+    bool route_terrain_mask_ready_ = false;
 
     // ─── 缓存数据 ───
     CostMap::ConstPtr global_cost_map_;

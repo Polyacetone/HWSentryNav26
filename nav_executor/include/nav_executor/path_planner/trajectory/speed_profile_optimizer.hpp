@@ -22,7 +22,7 @@ public:
     struct Params {
         struct Discretization {
             double max_spacing;
-            double step_max_spacing;
+            double traversal_max_spacing;
             double curvature_refine_threshold;
             double envelope_sample_spacing;
         } discretization;

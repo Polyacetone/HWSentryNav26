@@ -51,7 +51,7 @@ bool extract_passages(
     SpatialRoute& route,
     const DirectionMap& direction_map,
     const TerrainTraversalConstraints& terrain_constraints,
-    const double detect_dot_threshold,
+    const double min_terrain_alignment_cosine,
     std::string& error
 ) {
     size_t cursor = 0;
@@ -82,11 +82,11 @@ bool extract_passages(
         if (!directed_terrain_edge_allowed(
                 direction_map, terrain_constraints,
                 route.raw_path[first - 1], route.raw_path[first],
-                detect_dot_threshold, &entry_going_up
+                min_terrain_alignment_cosine, &entry_going_up
             ) || !directed_terrain_edge_allowed(
                 direction_map, terrain_constraints,
                 route.raw_path[last], route.raw_path[last + 1],
-                detect_dot_threshold, &exit_going_up
+                min_terrain_alignment_cosine, &exit_going_up
             ) || entry_going_up != exit_going_up) {
             error = "spatial path contains an inconsistent terrain passage";
             return false;
@@ -113,7 +113,7 @@ SpatialGridAstar::Result SpatialGridAstar::search(
     const Eigen::Vector2i& start,
     const Eigen::Vector2i& goal,
     const int occupied_threshold,
-    const double detect_dot_threshold
+    const double min_terrain_alignment_cosine
 ) const {
     Result result;
     if (!cost_map.geometry.same_geometry(direction_map.geometry)
@@ -151,7 +151,7 @@ SpatialGridAstar::Result SpatialGridAstar::search(
             std::reverse(result.route.raw_path.begin(), result.route.raw_path.end());
             if (!extract_passages(
                     result.route, direction_map, terrain_constraints,
-                    detect_dot_threshold, result.error
+                    min_terrain_alignment_cosine, result.error
                 )) {
                 return result;
             }
@@ -171,7 +171,7 @@ SpatialGridAstar::Result SpatialGridAstar::search(
                     cost_map, current.cell, next, occupied_threshold
                 ) || !directed_terrain_edge_allowed(
                     direction_map, terrain_constraints,
-                    current.cell, next, detect_dot_threshold
+                    current.cell, next, min_terrain_alignment_cosine
                 )) {
                 continue;
             }

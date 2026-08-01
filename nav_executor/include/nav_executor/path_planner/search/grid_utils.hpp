@@ -38,7 +38,7 @@ struct GridCrossing {
     const TerrainTraversalConstraints& terrain_constraints,
     const Eigen::Vector2i& from,
     const Eigen::Vector2i& to,
-    double detect_dot_threshold,
+    double min_alignment_cosine,
     bool* going_up = nullptr
 );
 

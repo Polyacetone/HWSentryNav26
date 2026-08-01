@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -69,20 +70,38 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         load_blend_params(), get_logger()
     );
 
-    StepRoutingMaskParams step_params;
-    step_params.path_align_dot_threshold = declare_parameter<double>("path_planner.step_mask.path_align_dot_threshold");
-    step_params.full_effect_radius = declare_parameter<double>("path_planner.step_mask.full_effect_radius");
-    step_params.cutoff_radius = declare_parameter<double>("path_planner.step_mask.cutoff_radius");
-    step_params.length_num_samples = static_cast<int>(declare_parameter<int>("path_planner.step_mask.length_num_samples"));
-    step_routing_mask_ = std::make_shared<StepRoutingMask>(step_params);
+    const RouteTerrainMaskParams route_terrain_mask_params {
+        .min_alignment_cosine = declare_parameter<double>(
+            "path_executor.route_terrain_mask.min_alignment_cosine"
+        ),
+        .full_effect_radius = declare_parameter<double>(
+            "path_executor.route_terrain_mask.full_effect_radius"
+        ),
+        .cutoff_radius = declare_parameter<double>(
+            "path_executor.route_terrain_mask.cutoff_radius"
+        ),
+    };
+    require_parameter(
+        std::isfinite(route_terrain_mask_params.min_alignment_cosine)
+            && route_terrain_mask_params.min_alignment_cosine >= 0.0
+            && route_terrain_mask_params.min_alignment_cosine < 1.0
+            && nonnegative_finite(route_terrain_mask_params.full_effect_radius)
+            && positive_finite(route_terrain_mask_params.cutoff_radius)
+            && route_terrain_mask_params.full_effect_radius
+                < route_terrain_mask_params.cutoff_radius,
+        "route terrain mask alignment and radii are invalid"
+    );
+    route_terrain_mask_ = std::make_shared<RouteTerrainMask>(
+        route_terrain_mask_params
+    );
 
     const PlannerConfig planner_config = load_planner_config(
         mpc_params.follow.normal_profile,
         mpc_params.follow.capability_profiles
     );
-    obstacle_occupied_threshold_ = planner_config.occupied_threshold;
+    obstacle_occupied_threshold_ = planner_config.occupied_cost_threshold;
     planner_ = std::make_unique<PathPlanner>(
-        planner_config, step_routing_mask_, get_logger().get_child("planner")
+        planner_config, route_terrain_mask_, get_logger().get_child("planner")
     );
     planner_->start();
 
@@ -181,7 +200,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
             RCLCPP_INFO(get_logger(), "Received global cost map: (%d,%d) res=%.2f",
                 global_cost_map_->geometry.width(), global_cost_map_->geometry.height(),
                 global_cost_map_->geometry.resolution());
-            try_init_step_mask();
+            try_init_route_terrain_mask();
             refresh_planner_obstacles();
             global_cost_map_sub_.reset();
         }
@@ -208,7 +227,7 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
                 img, global_cost_map_->geometry
             );
             RCLCPP_INFO(get_logger(), "Received global direction map");
-            try_init_step_mask();
+            try_init_route_terrain_mask();
             refresh_planner_obstacles();
             global_direction_map_sub_.reset();
         }
@@ -270,14 +289,14 @@ NavExecutorNode::~NavExecutorNode() {
     if (planner_) planner_->stop();
 }
 
-void NavExecutorNode::try_init_step_mask() {
-    if (step_mask_ready_ || !global_cost_map_ || !global_direction_map_) return;
+void NavExecutorNode::try_init_route_terrain_mask() {
+    if (route_terrain_mask_ready_ || !global_cost_map_ || !global_direction_map_) return;
     try {
-        step_routing_mask_->initialize(*global_cost_map_, global_direction_map_);
-        step_mask_ready_ = true;
-        RCLCPP_INFO(get_logger(), "StepRoutingMask initialized");
+        route_terrain_mask_->initialize(*global_cost_map_, global_direction_map_);
+        route_terrain_mask_ready_ = true;
+        RCLCPP_INFO(get_logger(), "RouteTerrainMask initialized");
     } catch (const std::exception& e) {
-        RCLCPP_ERROR(get_logger(), "Failed to initialize StepRoutingMask: %s", e.what());
+        RCLCPP_ERROR(get_logger(), "Failed to initialize RouteTerrainMask: %s", e.what());
     }
 }
 
@@ -528,28 +547,46 @@ PlannerConfig NavExecutorNode::load_planner_config(
     const std::array<CapabilityProfile, 3>& step_profiles
 ) {
     PlannerConfig c;
-    c.occupied_threshold = static_cast<int>(declare_parameter<int>("path_planner.traversability.occupied_threshold"));
-    c.on_step_threshold = declare_parameter<double>("path_planner.traversability.on_step_threshold");
-    c.nudge_max_distance = declare_parameter<double>("path_planner.nudge.max_distance");
-    c.goal_reached_distance = declare_parameter<double>("path_planner.planner.goal_reached_distance");
-    c.seed_resample_distance = declare_parameter<double>("path_planner.planner.seed_resample_distance");
-    c.start_yaw_relaxation = {
+    c.occupied_cost_threshold = static_cast<int>(declare_parameter<int>(
+        "path_planner.endpoint_handling.occupied_cost_threshold"
+    ));
+    c.endpoint_direction_norm_max = declare_parameter<double>(
+        "path_planner.endpoint_handling.direction_norm_max"
+    );
+    c.endpoint_nudge_max_distance = declare_parameter<double>(
+        "path_planner.endpoint_handling.nudge_max_distance"
+    );
+    c.endpoint_goal_reached_distance = declare_parameter<double>(
+        "path_planner.endpoint_handling.goal_reached_distance"
+    );
+    c.minco_seed = {
+        .max_point_spacing = declare_parameter<double>(
+            "path_planner.minco.seed.max_point_spacing"
+        ),
+        .max_heading_change = declare_parameter<double>(
+            "path_planner.minco.seed.max_heading_change"
+        ),
+    };
+    c.directional_terrain.min_alignment_cosine = declare_parameter<double>(
+        "path_planner.directional_terrain.min_alignment_cosine"
+    );
+    const KinoAStar::Params::StartYawRelaxationParams start_yaw_relaxation {
         .root_bias_seconds = declare_parameter<double>(
-            "path_planner.planner.start_yaw_relaxation.root_bias_seconds"
+            "path_planner.kino_a_star.start_yaw_relaxation.root_bias_seconds"
         ),
         .yaw_bias_seconds_per_rad = declare_parameter<double>(
-            "path_planner.planner.start_yaw_relaxation.yaw_bias_seconds_per_rad"
+            "path_planner.kino_a_star.start_yaw_relaxation.yaw_bias_seconds_per_rad"
         ),
         .max_discarded_velocity = declare_parameter<double>(
-            "path_planner.planner.start_yaw_relaxation.max_discarded_velocity"
+            "path_planner.kino_a_star.start_yaw_relaxation.max_discarded_velocity"
         ),
     };
     const ShapingDynamicsLimits shaping_dynamics {
-        .velocity_max = declare_parameter<double>("path_planner.shaping_dynamics.velocity_max"),
-        .tangential_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.tangential_acceleration_max"),
-        .angular_velocity_max = declare_parameter<double>("path_planner.shaping_dynamics.angular_velocity_max"),
-        .angular_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.angular_acceleration_max"),
-        .lateral_acceleration_max = declare_parameter<double>("path_planner.shaping_dynamics.lateral_acceleration_max"),
+        .velocity_max = declare_parameter<double>("path_planner.search_dynamics.velocity_max"),
+        .tangential_acceleration_max = declare_parameter<double>("path_planner.search_dynamics.tangential_acceleration_max"),
+        .angular_velocity_max = declare_parameter<double>("path_planner.search_dynamics.angular_velocity_max"),
+        .angular_acceleration_max = declare_parameter<double>("path_planner.search_dynamics.angular_acceleration_max"),
+        .lateral_acceleration_max = declare_parameter<double>("path_planner.search_dynamics.lateral_acceleration_max"),
     };
     const GeometryLimits geometry_limits {
         .curvature_max = declare_parameter<double>("path_planner.geometry.curvature_max"),
@@ -559,16 +596,16 @@ PlannerConfig NavExecutorNode::load_planner_config(
         ),
     };
     c.motion_primitives.xy_resolution = declare_parameter<double>(
-        "path_planner.state_lattice.xy_resolution"
+        "path_planner.kino_a_star.lattice.xy_resolution"
     );
     c.motion_primitives.heading_bins = static_cast<int>(declare_parameter<int>(
-        "path_planner.state_lattice.heading_bins"
+        "path_planner.kino_a_star.lattice.heading_bins"
     ));
     const std::vector<double> curvature_magnitudes = declare_parameter<std::vector<double>>(
-        "path_planner.motion_primitives.curvature_magnitudes"
+        "path_planner.kino_a_star.motion_primitives.curvature_magnitudes"
     );
     const std::vector<double> band_lengths = declare_parameter<std::vector<double>>(
-        "path_planner.motion_primitives.band_lengths"
+        "path_planner.kino_a_star.motion_primitives.band_lengths"
     );
     require_parameter(
         curvature_magnitudes.size() == c.motion_primitives.curvature_magnitudes.size()
@@ -580,19 +617,19 @@ PlannerConfig NavExecutorNode::load_planner_config(
     );
     std::ranges::copy(band_lengths, c.motion_primitives.band_lengths.begin());
     c.motion_primitives.straight_length = declare_parameter<double>(
-        "path_planner.motion_primitives.straight_length"
+        "path_planner.kino_a_star.motion_primitives.straight_length"
     );
     c.motion_primitives.curvature_max = geometry_limits.curvature_max;
-    c.spatial_astar = {
+    c.spatial_a_star = {
         .obstacle_weight = declare_parameter<double>(
-            "path_planner.spatial_astar.obstacle_weight"
+            "path_planner.spatial_a_star.obstacle_weight"
         ),
         .max_expansions = static_cast<int>(declare_parameter<int>(
-            "path_planner.spatial_astar.max_expansions"
+            "path_planner.spatial_a_star.max_expansions"
         )),
     };
     const double runup_transition_distance = declare_parameter<double>(
-        "path_planner.minco.runup.transition_distance"
+        "path_planner.directional_terrain.runup_transition_distance"
     );
     c.reference_path = {
         .resample_spacing = declare_parameter<double>(
@@ -608,21 +645,21 @@ PlannerConfig NavExecutorNode::load_planner_config(
             "path_planner.guide_field.corridor_width"
         ),
     };
-    c.state_lattice = {
+    c.kino_a_star = {
+        .start_yaw_relaxation = start_yaw_relaxation,
         .dynamics = shaping_dynamics,
         .speed_bin_count = static_cast<int>(declare_parameter<int>(
-            "path_planner.state_lattice.speed_bin_count"
+            "path_planner.kino_a_star.lattice.speed_bin_count"
         )),
-        .collision_check_resolution = declare_parameter<double>("path_planner.state_lattice.collision_check_resolution"),
-        .goal_connection_max_length = declare_parameter<double>("path_planner.state_lattice.goal_connection_max_length"),
-        .goal_tolerance = declare_parameter<double>("path_planner.state_lattice.goal_tolerance"),
-        .guidance_weight = declare_parameter<double>("path_planner.state_lattice.guidance_weight"),
-        .deviation_weight = declare_parameter<double>("path_planner.state_lattice.deviation_weight"),
-        .heading_weight = declare_parameter<double>("path_planner.state_lattice.heading_weight"),
-        .speed_weight = declare_parameter<double>("path_planner.state_lattice.speed_weight"),
-        .approach_alignment_weight = declare_parameter<double>("path_planner.state_lattice.approach_alignment_weight"),
-        .approach_window_weight = declare_parameter<double>("path_planner.state_lattice.approach_window_weight"),
-        .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.state_lattice.max_expansions")),
+        .collision_check_resolution = declare_parameter<double>("path_planner.kino_a_star.collision_check_resolution"),
+        .goal_connection_max_distance = declare_parameter<double>("path_planner.kino_a_star.goal_connection_max_distance"),
+        .guidance_weight = declare_parameter<double>("path_planner.kino_a_star.guidance_weight"),
+        .deviation_weight = declare_parameter<double>("path_planner.kino_a_star.deviation_weight"),
+        .heading_weight = declare_parameter<double>("path_planner.kino_a_star.heading_weight"),
+        .speed_weight = declare_parameter<double>("path_planner.kino_a_star.speed_weight"),
+        .approach_alignment_weight = declare_parameter<double>("path_planner.kino_a_star.approach_alignment_weight"),
+        .approach_window_weight = declare_parameter<double>("path_planner.kino_a_star.approach_window_weight"),
+        .max_expansions = static_cast<int>(declare_parameter<int>("path_planner.kino_a_star.max_expansions")),
     };
     c.minco = {
         .weights = {
@@ -676,22 +713,35 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .debug_diagnostics = enable_debug_,
     };
 
-    c.step_detection = {
-        .detect_dot_threshold = declare_parameter<double>("path_planner.step.detection.detect_dot_threshold"),
-        .path_sample_resolution = declare_parameter<double>("path_planner.step.detection.path_sample_resolution"),
-        .profile_prepare_distance = declare_parameter<double>("path_planner.step.execution.profile_prepare_distance"),
-        .chassis_activation_distance = declare_parameter<double>("path_planner.step.execution.chassis_activation_distance"),
-        .fsm_release_distance = declare_parameter<double>("path_planner.step.execution.fsm_release_distance"),
-        .gate_transition_distance = declare_parameter<double>("path_planner.step.mpc_constraints.gate_transition_distance"),
+    c.traversal_annotation = {
+        .sample_spacing = declare_parameter<double>(
+            "path_planner.traversal_annotation.sample_spacing"
+        ),
     };
-    c.environment_validation = {
-        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.environment_validation.samples_per_segment")),
-        .traversal_angle_tolerance = declare_parameter<double>("path_planner.environment_validation.traversal_angle_tolerance"),
+    c.step_execution_timing = {
+        .profile_prepare_distance = declare_parameter<double>(
+            "path_executor.traversal_execution.profile_prepare_distance"
+        ),
+        .chassis_activation_distance = declare_parameter<double>(
+            "path_executor.traversal_execution.chassis_activation_distance"
+        ),
+        .fsm_release_distance = declare_parameter<double>(
+            "path_executor.traversal_execution.fsm_release_distance"
+        ),
+    };
+    c.traversal_constraint_gate = {
+        .gate_transition_distance = declare_parameter<double>(
+            "mpc.follow.traversal_constraints.gate_transition_distance"
+        ),
+    };
+    c.trajectory_validation = {
+        .samples_per_segment = static_cast<int>(declare_parameter<int>("path_planner.trajectory_validation.samples_per_segment")),
+        .alignment_warning_angle = declare_parameter<double>("path_planner.trajectory_validation.alignment_warning_angle"),
     };
     c.speed_profile = {
         .discretization = {
             .max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.max_spacing"),
-            .step_max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.step_max_spacing"),
+            .traversal_max_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.traversal_max_spacing"),
             .curvature_refine_threshold = declare_parameter<double>("path_planner.speed_profile.discretization.curvature_refine_threshold"),
             .envelope_sample_spacing = declare_parameter<double>("path_planner.speed_profile.discretization.envelope_sample_spacing"),
         },
@@ -708,16 +758,37 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .normal_profile = normal_profile,
         .step_profiles = step_profiles,
     };
-    require_parameter(c.occupied_threshold > 0 && c.occupied_threshold <= 255, "path_planner occupied_threshold must be in (0, 255]");
     require_parameter(
-        c.on_step_threshold > 0.0 && c.on_step_threshold <= 1.0,
-        "path_planner on_step_threshold must be finite and in (0, 1]"
+        c.occupied_cost_threshold > 0 && c.occupied_cost_threshold <= 255,
+        "planner occupied cost threshold must be in (0, 255]"
     );
-    require_parameter(positive_finite(c.seed_resample_distance), "seed_resample_distance must be finite and positive");
     require_parameter(
-        nonnegative_finite(c.start_yaw_relaxation.root_bias_seconds)
-            && nonnegative_finite(c.start_yaw_relaxation.yaw_bias_seconds_per_rad)
-            && nonnegative_finite(c.start_yaw_relaxation.max_discarded_velocity),
+        positive_finite(c.endpoint_direction_norm_max)
+            && c.endpoint_direction_norm_max <= 1.0
+            && nonnegative_finite(c.endpoint_nudge_max_distance)
+            && nonnegative_finite(c.endpoint_goal_reached_distance),
+        "planner endpoint handling parameters are invalid"
+    );
+    require_parameter(
+        positive_finite(c.minco_seed.max_point_spacing)
+            && positive_finite(c.minco_seed.max_heading_change)
+            && c.minco_seed.max_heading_change <= std::numbers::pi,
+        "MINCO seed spacing or heading threshold is invalid"
+    );
+    require_parameter(
+        std::isfinite(c.directional_terrain.min_alignment_cosine)
+            && c.directional_terrain.min_alignment_cosine > 0.0
+            && c.directional_terrain.min_alignment_cosine < 1.0,
+        "directional terrain minimum alignment cosine must be in (0, 1)"
+    );
+    require_parameter(
+        nonnegative_finite(c.kino_a_star.start_yaw_relaxation.root_bias_seconds)
+            && nonnegative_finite(
+                c.kino_a_star.start_yaw_relaxation.yaw_bias_seconds_per_rad
+            )
+            && nonnegative_finite(
+                c.kino_a_star.start_yaw_relaxation.max_discarded_velocity
+            ),
         "start yaw relaxation parameters are invalid"
     );
     require_parameter(
@@ -731,19 +802,18 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(geometry_limits.curvature_rate_max)
         && positive_finite(geometry_limits.tangent_regularization)
         && positive_finite(c.motion_primitives.straight_length)
-        && nonnegative_finite(c.spatial_astar.obstacle_weight)
+        && nonnegative_finite(c.spatial_a_star.obstacle_weight)
         && positive_finite(c.reference_path.resample_spacing)
         && positive_finite(c.reference_path.tangent_lookahead)
         && positive_finite(c.guide_field.corridor_width)
-        && positive_finite(c.state_lattice.collision_check_resolution)
-        && positive_finite(c.state_lattice.goal_connection_max_length)
-        && positive_finite(c.state_lattice.goal_tolerance)
-        && nonnegative_finite(c.state_lattice.guidance_weight)
-        && nonnegative_finite(c.state_lattice.deviation_weight)
-        && nonnegative_finite(c.state_lattice.heading_weight)
-        && nonnegative_finite(c.state_lattice.speed_weight)
-        && nonnegative_finite(c.state_lattice.approach_alignment_weight)
-        && nonnegative_finite(c.state_lattice.approach_window_weight)
+        && positive_finite(c.kino_a_star.collision_check_resolution)
+        && positive_finite(c.kino_a_star.goal_connection_max_distance)
+        && nonnegative_finite(c.kino_a_star.guidance_weight)
+        && nonnegative_finite(c.kino_a_star.deviation_weight)
+        && nonnegative_finite(c.kino_a_star.heading_weight)
+        && nonnegative_finite(c.kino_a_star.speed_weight)
+        && nonnegative_finite(c.kino_a_star.approach_alignment_weight)
+        && nonnegative_finite(c.kino_a_star.approach_window_weight)
         && nonnegative_finite(c.reference_path.runup_transition_distance),
         "spatial/reference/corridor geometry, dynamics, and guidance weights must be finite and valid"
     );
@@ -761,9 +831,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
     );
     require_parameter(
         c.motion_primitives.heading_bins > 0
-        && c.spatial_astar.max_expansions > 0
-        && c.state_lattice.speed_bin_count >= 2
-        && c.state_lattice.max_expansions > 0,
+        && c.spatial_a_star.max_expansions > 0
+        && c.kino_a_star.speed_bin_count >= 2
+        && c.kino_a_star.max_expansions > 0,
         "lattice pose/speed bins and expansion limit must be valid"
     );
     require_parameter(
@@ -859,25 +929,30 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "MINCO terrain_gate thresholds are invalid"
     );
     require_parameter(
-        c.step_detection.detect_dot_threshold > 0.0
-        && c.step_detection.detect_dot_threshold < 1.0
-        && positive_finite(c.step_detection.path_sample_resolution)
-        && nonnegative_finite(c.step_detection.profile_prepare_distance)
-        && nonnegative_finite(c.step_detection.chassis_activation_distance)
-        && nonnegative_finite(c.step_detection.fsm_release_distance)
-        && nonnegative_finite(c.step_detection.gate_transition_distance),
-        "step detection/execution parameters are invalid"
+        positive_finite(c.traversal_annotation.sample_spacing)
+            && nonnegative_finite(c.step_execution_timing.profile_prepare_distance)
+            && nonnegative_finite(c.step_execution_timing.chassis_activation_distance)
+            && c.step_execution_timing.profile_prepare_distance
+                >= c.step_execution_timing.chassis_activation_distance
+            && nonnegative_finite(c.step_execution_timing.fsm_release_distance)
+            && nonnegative_finite(
+                c.traversal_constraint_gate.gate_transition_distance
+            ),
+        "traversal annotation, execution timing, or constraint gate is invalid"
     );
     require_parameter(
-        c.environment_validation.samples_per_segment > 0
-        && nonnegative_finite(c.environment_validation.traversal_angle_tolerance),
+        c.trajectory_validation.samples_per_segment > 0
+        && nonnegative_finite(c.trajectory_validation.alignment_warning_angle)
+        && c.trajectory_validation.alignment_warning_angle
+            <= std::numbers::pi,
         "environment validation parameters are invalid"
     );
     const auto& speed_profile = c.speed_profile;
     require_parameter(
         positive_finite(speed_profile.discretization.max_spacing)
-        && positive_finite(speed_profile.discretization.step_max_spacing)
-        && speed_profile.discretization.step_max_spacing <= speed_profile.discretization.max_spacing
+        && positive_finite(speed_profile.discretization.traversal_max_spacing)
+        && speed_profile.discretization.traversal_max_spacing
+            <= speed_profile.discretization.max_spacing
         && positive_finite(speed_profile.discretization.curvature_refine_threshold)
         && positive_finite(speed_profile.discretization.envelope_sample_spacing)
         && nonnegative_finite(speed_profile.objective.traversal_window)

@@ -218,7 +218,9 @@ std::vector<double> build_nodes(
         for (const StepPlanSegment& segment : segments) {
             if (end >= segment.prepare_arc_length - EPS
                 && begin <= segment.release_arc_length + EPS) {
-                spacing = std::min(spacing, params.discretization.step_max_spacing);
+                spacing = std::min(
+                    spacing, params.discretization.traversal_max_spacing
+                );
             }
         }
         const int pieces = std::max(1, static_cast<int>(std::ceil((end - begin) / spacing)));

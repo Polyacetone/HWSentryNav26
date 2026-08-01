@@ -92,14 +92,19 @@ private:
     double max_heading_residual_ = 0.0;
 };
 
-class StateLatticeAstar {
+class KinoAStar {
 public:
     struct Params {
+        struct StartYawRelaxationParams {
+            double root_bias_seconds = 0.0;
+            double yaw_bias_seconds_per_rad = 0.0;
+            double max_discarded_velocity = 0.0;
+        } start_yaw_relaxation;
+
         ShapingDynamicsLimits dynamics;
         int speed_bin_count = 13;
         double collision_check_resolution = 0.075;
-        double goal_connection_max_length = 1.0;
-        double goal_tolerance = 1.0;
+        double goal_connection_max_distance = 1.0;
         double guidance_weight = 1.0;
         double deviation_weight = 1.0;
         double heading_weight = 0.25;
@@ -139,7 +144,7 @@ public:
         std::string error;
     };
 
-    StateLatticeAstar(
+    KinoAStar(
         Params params,
         const MotionPrimitiveLibrary& primitive_library
     ) : params_(params), primitive_library_(primitive_library) {}
@@ -154,7 +159,7 @@ public:
         const GuideField& guide_field,
         const ReferencePath& reference_path,
         int occupied_threshold,
-        double detect_dot_threshold
+        double min_terrain_alignment_cosine
     ) const;
 
     [[nodiscard]] double speed_of(int speed_bin) const;

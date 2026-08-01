@@ -49,7 +49,7 @@ public:
         const Eigen::Vector2i& start,
         const Eigen::Vector2i& goal,
         int occupied_threshold,
-        double detect_dot_threshold
+        double min_terrain_alignment_cosine
     ) const;
 
 private:
