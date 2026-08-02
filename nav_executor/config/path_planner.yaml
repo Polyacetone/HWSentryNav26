@@ -39,7 +39,7 @@
 
       kino_a_star:
         lattice:
-          xy_resolution: 0.05 # root-relative canonical lattice 位置分辨率（米）
+          xy_resolution: 0.1 # root-relative canonical lattice 位置分辨率（米）
           heading_bins: 80 # canonical 航向数量，80 对应 4.5°
           speed_bin_count: 13 # 离散速度值数量（含 0）；13 对应 0.25 m/s 间隔
         motion_primitives:
@@ -48,7 +48,7 @@
           straight_length: 1.26 # nominal 直行动作长度（米）
         collision_check_resolution: 0.075 # 空间原语碰撞与地形检查的最大步长（米）
         goal_connection_max_distance: 1.0 # 进入该距离后尝试用直线连接真实目标（米）
-        guidance_weight: 1.0 # 非 admissible 参考启发的整体 OPEN 排序强度
+        guidance_weight: 1.1 # 非 admissible 参考启发的整体 OPEN 排序强度
         deviation_weight: 1.0 # 偏离参考路径的时间等效权重
         heading_weight: 0.25 # 航向偏差权重（秒/rad）
         speed_weight: 0.5 # 参考速度偏差的时间等效权重
@@ -56,6 +56,7 @@
         approach_window_weight: 1.0 # 助跑区速度窗偏差平方的时间等效权重
         max_expansions: 500000 # 最大节点展开数，防止搜索时间和内存失控
         start_yaw_relaxation:
+          root_count: 4 # 全圆均匀采样的总根数（包含实测 yaw 主根）；1 表示关闭起点航向松弛
           root_bias_seconds: 0.67 # 使用松弛航向根的固定 OPEN 排序偏置（秒）
           yaw_bias_seconds_per_rad: 0.17 # 松弛根相对实测 yaw 每旋转 1 rad 的排序偏置（秒/rad）
           max_discarded_velocity: 0.5 # 实际速度投影到候选航向后允许丢弃的速度分量上限（m/s）

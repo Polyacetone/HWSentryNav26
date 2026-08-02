@@ -571,6 +571,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "path_planner.directional_terrain.min_alignment_cosine"
     );
     const KinoAStar::Params::StartYawRelaxationParams start_yaw_relaxation {
+        .root_count = static_cast<int>(declare_parameter<int>(
+            "path_planner.kino_a_star.start_yaw_relaxation.root_count"
+        )),
         .root_bias_seconds = declare_parameter<double>(
             "path_planner.kino_a_star.start_yaw_relaxation.root_bias_seconds"
         ),
@@ -783,7 +786,12 @@ PlannerConfig NavExecutorNode::load_planner_config(
         "directional terrain minimum alignment cosine must be in (0, 1)"
     );
     require_parameter(
-        nonnegative_finite(c.kino_a_star.start_yaw_relaxation.root_bias_seconds)
+        c.kino_a_star.start_yaw_relaxation.root_count >= 1
+            && c.kino_a_star.start_yaw_relaxation.root_count
+                <= c.motion_primitives.heading_bins
+            && nonnegative_finite(
+                c.kino_a_star.start_yaw_relaxation.root_bias_seconds
+            )
             && nonnegative_finite(
                 c.kino_a_star.start_yaw_relaxation.yaw_bias_seconds_per_rad
             )

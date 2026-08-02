@@ -571,7 +571,13 @@ PlanResult PathPlanner::plan(const PlanRequest& req) const {
     }};
     const Eigen::Vector2d measured_start_velocity = measured_start_speed
         * Eigen::Vector2d(std::cos(req.current_yaw), std::sin(req.current_yaw));
-    for (int heading = 1; heading < frame.heading_bins; ++heading) {
+    const int root_count = config_.kino_a_star.start_yaw_relaxation.root_count;
+    for (int root_index = 1; root_index < root_count; ++root_index) {
+        const int heading = static_cast<int>(std::llround(
+            static_cast<double>(frame.heading_bins)
+                * static_cast<double>(root_index)
+                / static_cast<double>(root_count)
+        )) % frame.heading_bins;
         const double yaw_offset = wrap_angle(
             2.0 * std::numbers::pi * static_cast<double>(heading)
                 / static_cast<double>(frame.heading_bins)

@@ -96,6 +96,7 @@ class KinoAStar {
 public:
     struct Params {
         struct StartYawRelaxationParams {
+            int root_count = 80;
             double root_bias_seconds = 0.0;
             double yaw_bias_seconds_per_rad = 0.0;
             double max_discarded_velocity = 0.0;
