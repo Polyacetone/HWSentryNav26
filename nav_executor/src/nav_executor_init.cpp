@@ -1086,13 +1086,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .speed_tracking_weight = declare_parameter<double>("mpc.follow.progress.speed_tracking_weight"),
                 .speed_smoothness_weight = declare_parameter<double>("mpc.follow.progress.speed_smoothness_weight"),
             },
-            .terminal_weights = {
-                .position = declare_parameter<double>("mpc.follow.terminal_weights.position"),
-                .heading = declare_parameter<double>("mpc.follow.terminal_weights.heading"),
-                .velocity = declare_parameter<double>("mpc.follow.terminal_weights.velocity"),
-                .angular_velocity = declare_parameter<double>("mpc.follow.terminal_weights.angular_velocity"),
-                .remaining_progress = declare_parameter<double>("mpc.follow.terminal_weights.remaining_progress"),
-            },
             .max_iters = static_cast<int>(declare_parameter<int>("mpc.follow.max_iters"))
         },
         .stop = {
@@ -1201,15 +1194,6 @@ MPCParams NavExecutorNode::load_mpc_params() {
         && nonnegative_finite(tracking.velocity)
         && nonnegative_finite(tracking.angular_velocity),
         "mpc.follow tracking weights are invalid"
-    );
-    const auto& terminal = mpc_params.follow.terminal_weights;
-    require_parameter(
-        nonnegative_finite(terminal.position)
-        && nonnegative_finite(terminal.heading)
-        && nonnegative_finite(terminal.velocity)
-        && nonnegative_finite(terminal.angular_velocity)
-        && nonnegative_finite(terminal.remaining_progress),
-        "mpc.follow terminal weights are invalid"
     );
     const auto& rollout_safety = mpc_params.follow.rollout_safety;
     require_parameter(

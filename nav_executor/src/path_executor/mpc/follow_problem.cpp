@@ -153,32 +153,6 @@ FollowResidualVec follow_residual_impl(
     return residual;
 }
 
-constexpr int FOLLOW_TERMINAL_RESIDUAL_DIM = 5;
-using FollowTerminalResidualVec = Eigen::Matrix<double, FOLLOW_TERMINAL_RESIDUAL_DIM, 1>;
-
-FollowTerminalResidualVec follow_terminal_residual_impl(
-    const StateVec& x,
-    const MincoTrajectory& trajectory,
-    const PathSpeedProfile& speed_profile,
-    const MPCParams& params
-) {
-    const auto& weights = params.follow.terminal_weights;
-    const ReferenceFrame reference = reference_frame(
-        trajectory, speed_profile, x(ix::PATH_PROGRESS)
-    );
-
-    FollowTerminalResidualVec residual = FollowTerminalResidualVec::Zero();
-    residual(0) = weights.position * (x(ix::X) - reference.sample.p.x());
-    residual(1) = weights.position * (x(ix::Y) - reference.sample.p.y());
-    residual(2) = weights.heading * wrap_pi(x(ix::THETA) - reference.sample.theta);
-    residual(3) = weights.velocity
-        * (x(ix::V) * std::cos(wrap_pi(x(ix::THETA) - reference.sample.theta))
-            - x(ix::PATH_SPEED));
-    residual(4) = weights.angular_velocity
-        * (x(ix::W) - reference.sample.kappa * x(ix::PATH_SPEED));
-    return residual;
-}
-
 } // anonymous namespace
 
 template<int Horizon>
@@ -309,27 +283,18 @@ void FollowProblemT<Horizon>::running_cost_derivatives(
 }
 
 template<int Horizon>
-double FollowProblemT<Horizon>::terminal_cost(const StateVec& x) const {
-    return residual_cost(follow_terminal_residual_impl(x, trajectory_, speed_profile_, p_))
-        + p_.follow.terminal_weights.remaining_progress
-            * positive_part(total_length_ - x(ix::PATH_PROGRESS));
+double FollowProblemT<Horizon>::terminal_cost(const StateVec&) const {
+    return 0.0;
 }
 
 template<int Horizon>
 void FollowProblemT<Horizon>::terminal_cost_derivatives(
-    const StateVec& x,
+    const StateVec&,
     StateVec& lfx,
     MatXX& lfxx
 ) const {
-    auto residual_fn = [&](const StateVec& state) {
-        return follow_terminal_residual_impl(state, trajectory_, speed_profile_, p_);
-    };
-    gauss_newton_terminal_derivatives<FOLLOW_TERMINAL_RESIDUAL_DIM>(
-        residual_fn, x, lfx, lfxx
-    );
-    if (x(ix::PATH_PROGRESS) < total_length_) {
-        lfx(ix::PATH_PROGRESS) -= p_.follow.terminal_weights.remaining_progress;
-    }
+    lfx.setZero();
+    lfxx.setZero();
 }
 
 template<int Horizon>

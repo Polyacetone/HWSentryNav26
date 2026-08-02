@@ -67,14 +67,14 @@
           max_heading_change: 0.5 # 即使距离较短，航向变化达到该值也保留边界点（rad）
         directed_cosine_min: 0.1 # 曲线切向与种子方向的最小余弦；无速度量纲
         penalty_weights:
-          energy: 1.0 # 参数域 min-jerk 正则权重
-          time: 16.0 # MINCO 参数区间总长度权重；不进入执行时标
+          energy: 0.8 # 参数域 min-jerk 正则权重
+          time: 12.0 # MINCO 参数区间总长度权重；不进入执行时标
           obstacle: 1000.0 # 障碍物权重，越大越不可能穿墙
           curvature: 100.0 # 几何曲率超限惩罚
           curvature_rate: 100.0 # 弧长曲率变化率超限惩罚
           directed_regularity: 1000.0 # 有向正则性，排除内部零速点、尖点与逆向
-          traversal_velocity_window: 1600.0 # runup 起点至地形出口的 MINCO 内部速度见证窗
-          traversal_alignment: 1600.0 # runup 起点至地形出口的方向对齐软约束
+          traversal_velocity_window: 2000.0 # runup 起点至地形出口的 MINCO 内部速度见证窗
+          traversal_alignment: 2000.0 # runup 起点至地形出口的方向对齐软约束
           prohibited_traversal: 1000.0 # 往地形禁止方向行驶的惩罚
           runup_curvature: 100.0 # runup 起点至地形出口的 κ² 正则
         terrain_gate:

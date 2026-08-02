@@ -63,14 +63,6 @@ struct MPCFollowProgressParams {
     double speed_smoothness_weight;
 };
 
-struct MPCFollowTerminalWeights {
-    double position;
-    double heading;
-    double velocity;
-    double angular_velocity;
-    double remaining_progress;
-};
-
 struct MPCFollowCommandWeights {
     double r_v;
     double r_omega;
@@ -196,7 +188,6 @@ struct MPCFollowParams {
     MPCFollowReferenceSeedParams reference_seed;
     MPCFollowAncillaryFeedbackParams ancillary_feedback;
     MPCFollowProgressParams progress;
-    MPCFollowTerminalWeights terminal_weights;
     int max_iters;
 };
 
