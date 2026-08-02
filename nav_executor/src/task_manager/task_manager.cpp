@@ -17,13 +17,16 @@ bool TaskManager::goals_equivalent(const Goal& a, const Goal& b) const {
 }
 
 TaskUpdateOutput TaskManager::update(const TaskUpdateInput& input) {
-    ingest_goal(input.incoming_goal, input.feedback.preemptible);
-    apply_deferred_goal_preemption(input.feedback.preemptible);
-    ingest_executor_replan_event(input.feedback.executor_replan_event);
-    poll_planner_result(input.feedback.preemptible);
+    apply_navigation_access(input.navigation_access);
+    const bool navigation_available = input.navigation_access == NavigationAccess::AVAILABLE;
+
+    const bool goal_changed = ingest_goal(input.incoming_goal, navigation_available);
+    apply_deferred_goal_preemption(navigation_available);
+    ingest_executor_replan_event(input.feedback.executor_replan_event && !goal_changed);
+    poll_planner_result(navigation_available);
     monitor_route(input.route_monitor);
     ingest_goal_reached(input.feedback.goal_reached, input.feedback.goal_reached_path);
-    maybe_submit_plan(input.feedback.preemptible, input.plan_snapshot, input.stamp);
+    maybe_submit_plan(navigation_available, input.plan_snapshot, input.stamp);
 
     return {
         .command = command_view(),
@@ -31,8 +34,37 @@ TaskUpdateOutput TaskManager::update(const TaskUpdateInput& input) {
     };
 }
 
-void TaskManager::apply_deferred_goal_preemption(const bool preemptible) {
-    if (!preemptible || !current_goal_ || !active_path_) return;
+void TaskManager::apply_navigation_access(const NavigationAccess access) {
+    if (access == NavigationAccess::REVOKED) {
+        // REVOKED 是持续权限。只在进入该生命周期时推进 generation，随后每帧
+        // 重申“无执行产物”不变量，避免高优先级小陀螺期间重复失效。
+        if (navigation_access_ != NavigationAccess::REVOKED && current_goal_) {
+            begin_new_plan_generation();
+            last_replan_reason_ = ReplanReason::HIGH_PRIORITY_SPIN_PREEMPTION;
+            ++replan_count_;
+            RCLCPP_INFO(
+                logger_,
+                "High-priority spin revoked navigation execution; preserving goal #%lu for replanning",
+                static_cast<unsigned long>(current_goal_->id)
+            );
+        }
+        active_path_.reset();
+        hold_goal_.reset();
+        executor_replan_pending_ = false;
+    } else if (navigation_access_ == NavigationAccess::REVOKED
+        && access == NavigationAccess::AVAILABLE && current_goal_) {
+        RCLCPP_INFO(
+            logger_,
+            "Navigation access restored; current goal #%lu is eligible for replanning",
+            static_cast<unsigned long>(current_goal_->id)
+        );
+    }
+
+    navigation_access_ = access;
+}
+
+void TaskManager::apply_deferred_goal_preemption(const bool execution_replaceable) {
+    if (!execution_replaceable || !current_goal_ || !active_path_) return;
     if (active_path_->goal_id == current_goal_->id) return;
 
     active_path_.reset();
@@ -58,11 +90,11 @@ void TaskManager::begin_new_plan_generation() {
 // 新语义目标立即替换已提交任务。当前阶段可抢占时，旧路径同时失去执行权，
 // Executor 在没有候选路径的间隔内减速；新路径就绪后可直接接管，无需等待停稳。
 // COMMITTED 等不可抢占阶段只更新 latest-wins 目标，保留当前路径至阶段释放。
-void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool preemptible) {
-    if (!incoming) return;
+bool TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool execution_replaceable) {
+    if (!incoming) return false;
 
     if (current_goal_ && goals_equivalent(*current_goal_, *incoming)) {
-        return;
+        return false;
     }
 
     // 语义不同的 new goal（latest-wins）。
@@ -71,7 +103,7 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
     current_goal_ = goal;
 
     hold_goal_.reset();       // 新 goal 清空 hold_goal
-    if (preemptible && active_path_) {
+    if (execution_replaceable && active_path_) {
         active_path_.reset();
         RCLCPP_INFO(logger_, "New goal invalidated active path; braking until replacement is ready");
     }
@@ -82,20 +114,41 @@ void TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool pr
     last_replan_reason_ = ReplanReason::NONE;
     planner_last_result_ = PlannerResultState::NONE;
     replan_count_ = 0;
+    executor_replan_pending_ = false;
 
     RCLCPP_INFO(
         logger_, "New goal #%lu (%.2f, %.2f) fixed=%d [%s]",
         static_cast<unsigned long>(goal.id), goal.position_map.x(), goal.position_map.y(),
-        goal.fixed, preemptible ? "preemptible" : "non-preemptible"
+        goal.fixed, execution_replaceable ? "replaceable" : "execution-locked"
     );
+    return true;
 }
 
 // 恢复重规划保留任务语义，但可能改变执行形式。
 void TaskManager::ingest_executor_replan_event(const bool event) {
-    if (!event) return;
+    if (event) executor_replan_pending_ = true;
+    if (!executor_replan_pending_) return;
 
     if (!current_goal_) {
         RCLCPP_DEBUG(logger_, "executor_replan_event swallowed (no goal)");
+        executor_replan_pending_ = false;
+        return;
+    }
+
+    if (navigation_access_ == NavigationAccess::LOCK_CURRENT) {
+        if (event) {
+            RCLCPP_DEBUG(logger_, "executor_replan_event deferred by locked navigation execution");
+        }
+        return;
+    }
+
+    // REVOKED 已经淘汰了进入抢占前的 generation，且冻结期间不会提交新规划。
+    if (navigation_access_ == NavigationAccess::REVOKED) {
+        active_path_.reset();
+        hold_goal_.reset();
+        needs_plan_ = true;
+        executor_replan_pending_ = false;
+        RCLCPP_DEBUG(logger_, "executor_replan_event covered by revoked navigation access");
         return;
     }
 
@@ -105,11 +158,12 @@ void TaskManager::ingest_executor_replan_event(const bool event) {
     begin_new_plan_generation();
     last_replan_reason_ = ReplanReason::EXECUTOR_REPLAN_EVENT;
     ++replan_count_;
+    executor_replan_pending_ = false;
     RCLCPP_INFO(logger_, "executor_replan_event → drop path/hold, replan current goal");
 }
 
 // 只接纳仍匹配已提交目标和当前运动阶段的规划结果。
-void TaskManager::poll_planner_result(const bool preemptible) {
+void TaskManager::poll_planner_result(const bool result_acceptable) {
     auto result = planner_->try_take_result();
     if (!result) return;
 
@@ -128,8 +182,8 @@ void TaskManager::poll_planner_result(const bool preemptible) {
         return;
     }
 
-    if (!preemptible) {
-        RCLCPP_DEBUG(logger_, "Discard plan result: system became non-preemptible");
+    if (!result_acceptable) {
+        RCLCPP_DEBUG(logger_, "Discard plan result: navigation access is not available");
         return;
     }
 
@@ -209,7 +263,7 @@ void TaskManager::poll_planner_result(const bool preemptible) {
 
 // 统一从此处派发规划，事件处理函数只记录意图。
 bool TaskManager::maybe_submit_plan(
-    const bool preemptible,
+    const bool planning_allowed,
     const PlanRequestSnapshot& snapshot,
     const std::chrono::steady_clock::time_point stamp
 ) {
@@ -220,7 +274,7 @@ bool TaskManager::maybe_submit_plan(
 
     // 提交条件（全部满足）：
     if (!current_goal_) return false;
-    if (!preemptible) return false;
+    if (!planning_allowed) return false;
     const bool trigger = needs_plan_ || (!active_path_ && !hold_goal_);
     if (!trigger) return false;
     if (planner_->busy()) return false;
@@ -257,6 +311,7 @@ void TaskManager::monitor_route(const std::optional<RouteMonitorInput>& input) {
 
 void TaskManager::on_route_invalid(const ReplanReason reason) {
     active_path_.reset();
+    executor_replan_pending_ = false;
     begin_new_plan_generation();
     last_replan_reason_ = reason;
     ++replan_count_;

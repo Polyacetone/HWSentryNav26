@@ -11,6 +11,7 @@
 
 #include <nav_executor/common/trajectory/annotated_path.hpp>
 #include <nav_executor/task_manager/route_monitor.hpp>
+#include <nav_executor/common/control_arbitration.hpp>
 #include <nav_executor/path_executor/state/state_machine.hpp>
 #include <nav_executor/path_planner/path_planner.hpp>
 
@@ -68,14 +69,12 @@ struct MotionFeedback {
     bool executor_replan_event = false;
     bool mpc_lethal = false;
     AnnotatedPath::ConstPtr lethal_path;
-    MotionState motion_state = MotionState::IDLE;
-    StepPhase step_phase = StepPhase::NONE;
-    bool preemptible = true;
 };
 
 struct TaskUpdateInput {
     std::optional<Goal> incoming_goal;
     MotionFeedback feedback;
+    NavigationAccess navigation_access = NavigationAccess::AVAILABLE;
     PlanRequestSnapshot plan_snapshot;
     std::optional<RouteMonitorInput> route_monitor;
     std::chrono::steady_clock::time_point stamp;
@@ -114,12 +113,13 @@ private:
     [[nodiscard]] bool goals_equivalent(const Goal& a, const Goal& b) const;
     [[nodiscard]] TaskCommandView command_view() const;
 
-    void ingest_goal(const std::optional<Goal>& incoming, bool preemptible);
-    void apply_deferred_goal_preemption(bool preemptible);
+    bool ingest_goal(const std::optional<Goal>& incoming, bool execution_replaceable);
+    void apply_navigation_access(NavigationAccess access);
+    void apply_deferred_goal_preemption(bool execution_replaceable);
     void ingest_executor_replan_event(bool event);
     void ingest_goal_reached(bool goal_reached, const AnnotatedPath::ConstPtr& reached_path);
-    void poll_planner_result(bool preemptible);
-    bool maybe_submit_plan(bool preemptible, const PlanRequestSnapshot& snapshot, std::chrono::steady_clock::time_point stamp);
+    void poll_planner_result(bool result_acceptable);
+    bool maybe_submit_plan(bool planning_allowed, const PlanRequestSnapshot& snapshot, std::chrono::steady_clock::time_point stamp);
     void monitor_route(const std::optional<RouteMonitorInput>& input);
     void on_route_invalid(ReplanReason reason);
     void begin_new_plan_generation();
@@ -134,6 +134,8 @@ private:
 
     bool needs_plan_ = false;
     uint64_t plan_generation_ = 0;
+    NavigationAccess navigation_access_ = NavigationAccess::AVAILABLE;
+    bool executor_replan_pending_ = false;
 
     // 失败冷却元数据
     bool in_cooldown_ = false;

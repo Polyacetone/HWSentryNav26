@@ -30,6 +30,12 @@ uint8_t chassis_control_state_value(const uint8_t leg_mode, const uint8_t comp_s
     return static_cast<uint8_t>(nav_executor::classify_chassis_control_state(leg_mode, comp_stage));
 }
 
+bool navigation_planning_suspended(const nav_executor::MotionState motion_state) {
+    return motion_state == nav_executor::MotionState::HAZARD_RECOVERY
+        || motion_state == nav_executor::MotionState::STUCK_REVERSE
+        || motion_state == nav_executor::MotionState::DEAD;
+}
+
 } // anonymous namespace
 
 namespace nav_executor {
@@ -197,7 +203,7 @@ void NavExecutorNode::control_tick() {
 
     // TaskManager 必须使用本周期 route 位置判断 commit，而不能只依赖上一周期 FSM。
     // 这样规划结果恰好在跨过 commit 弧长的控制周期到达时，也不会获得路径执行权。
-    previous_motion_feedback_.motion_state = executor_->motion_state();
+    const MotionState current_motion_state = executor_->motion_state();
     const bool route_tracked = active_path_before_update && route_estimate
         && route_estimate->path == active_path_before_update
         && route_estimate->status == RouteTrackingStatus::TRACKED;
@@ -206,8 +212,16 @@ void NavExecutorNode::control_tick() {
         route_tracked ? route_estimate->arc_length : 0.0,
         route_tracked
     );
-    previous_motion_feedback_.step_phase = step_preview.phase;
-    previous_motion_feedback_.preemptible = step_preview.preemptible;
+    const ControlOwner owner_before_task = arbitrate_control({
+        .navigation_ready = route_tracked || task_->hold_goal().has_value(),
+        .spin_requested = spin_state_ != SpinState::STOP,
+        .spin_high_priority = spin_high_priority_,
+    });
+    const NavigationAccess navigation_access = arbitrate_navigation_access(
+        owner_before_task,
+        step_preview.phase == StepPhase::COMMITTED,
+        navigation_planning_suspended(current_motion_state)
+    );
 
     FollowerObstacleView follower_obstacles = build_follower_obstacle_view(
         obstacle_layers,
@@ -231,6 +245,7 @@ void NavExecutorNode::control_tick() {
     TaskUpdateInput task_input;
     task_input.incoming_goal = pending_goal_;
     task_input.feedback = previous_motion_feedback_;
+    task_input.navigation_access = navigation_access;
     task_input.stamp = stamp;
     pending_goal_.reset();
 
@@ -244,15 +259,14 @@ void NavExecutorNode::control_tick() {
         task_input.plan_snapshot.performance = performance;
     }
 
-    const MotionState previous_state = previous_motion_feedback_.motion_state;
     const bool pending_mpc_lethal = previous_motion_feedback_.mpc_lethal
         && previous_motion_feedback_.lethal_path == active_path_before_update;
     const bool route_monitoring_state = pending_mpc_lethal
-        || (previous_motion_feedback_.preemptible
-            && (previous_state == MotionState::FOLLOW
-                || previous_state == MotionState::PREPARE_SPIN
-                || previous_state == MotionState::IDLE
-                || previous_state == MotionState::STEPPING));
+        || (navigation_access == NavigationAccess::AVAILABLE
+            && (current_motion_state == MotionState::FOLLOW
+                || current_motion_state == MotionState::PREPARE_SPIN
+                || current_motion_state == MotionState::IDLE
+                || current_motion_state == MotionState::STEPPING));
     if (active_path_before_update && route_estimate && route_monitoring_state) {
         RouteMonitorInput rm;
         rm.active_path = active_path_before_update;
@@ -300,8 +314,14 @@ void NavExecutorNode::control_tick() {
     ExecutorInput ein;
     ein.intent.active_path = task_output.command.active_path;
     ein.intent.hold_goal = task_output.command.hold_goal;
-    ein.intent.spin_requested = (spin_state_ != SpinState::STOP);
-    ein.intent.spin_high_priority = spin_high_priority_;
+    const bool updated_route_tracked = task_output.command.active_path && route_estimate
+        && route_estimate->path == task_output.command.active_path
+        && route_estimate->status == RouteTrackingStatus::TRACKED;
+    ein.intent.requested_owner = arbitrate_control({
+        .navigation_ready = updated_route_tracked || task_output.command.hold_goal.has_value(),
+        .spin_requested = spin_state_ != SpinState::STOP,
+        .spin_high_priority = spin_high_priority_,
+    });
     ein.intent.spin_fast = (spin_state_ == SpinState::SPIN_FAST);
     ein.route = route_estimate;
     ein.observation.chassis_pose_map = chassis_pose_map;
@@ -319,8 +339,6 @@ void NavExecutorNode::control_tick() {
     previous_motion_feedback_.executor_replan_event = out.executor_replan_event;
     previous_motion_feedback_.mpc_lethal = out.mpc_lethal;
     previous_motion_feedback_.lethal_path = out.mpc_lethal ? task_output.command.active_path : nullptr;
-    previous_motion_feedback_.motion_state = out.motion_state;
-    previous_motion_feedback_.step_phase = out.step_phase;
 
     if (out.motion_state == MotionState::IDLE) {
         out.mode = idle_chassis_mode_override_;

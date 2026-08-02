@@ -7,6 +7,8 @@
 #include <Eigen/Core>
 #include <rclcpp/logger.hpp>
 
+#include <nav_executor/common/control_arbitration.hpp>
+
 namespace nav_executor {
 
 // ═══════════════════════════ 参数 ═══════════════════════════
@@ -55,7 +57,7 @@ struct FsmParams {
 };
 
 // ═══════════════════════════ 运动状态 ═══════════════════════
-// 暴露给任务层的 motion_state。可抢占性判定在 PathExecutor::preemptible() 中统一处理。
+// 暴露给任务层的 motion_state；任务执行权限由无状态控制仲裁器单独决定。
 
 // STEPPING 父状态内部的有序子状态。同一台阶段只允许沿
 // PREPARING → ARMED → COMMITTED 前进；相邻台阶段会开启新的子状态生命周期。
@@ -115,9 +117,8 @@ struct FsmInput {
     std::optional<size_t> step_segment_index;
     bool resumed_from_stopped = false;
 
-    // 外部请求
-    bool spin_requested = false;
-    bool spin_high_priority = false;
+    // 无状态仲裁器给出的正常控制目标；安全恢复和物理交接可暂缓其生效。
+    ControlOwner requested_owner = ControlOwner::IDLE;
 
     // stuck-like 检测信号（follow/stepping 无进度 + 卡住）
     bool no_progress_detected = false;
@@ -185,7 +186,7 @@ private:
     FsmOutput finish_recovery_chain(const FsmInput& in);
     [[nodiscard]] bool should_start_resume_hazard_recovery(const FsmInput& in) const;
 
-    [[nodiscard]] bool spin_authorized(const FsmInput& in) const;
+    [[nodiscard]] bool spin_control_requested(const FsmInput& in) const;
     [[nodiscard]] bool prepare_spin_ready(const FsmInput& in) const;
 
     FsmParams params_;

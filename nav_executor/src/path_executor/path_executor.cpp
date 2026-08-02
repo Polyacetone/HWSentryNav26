@@ -38,7 +38,6 @@ StepExecutionPreview PathExecutor::preview_step_execution(
     if (!path || !route_tracked) {
         return {
             .phase = latched_phase,
-            .preemptible = preemptible(),
         };
     }
 
@@ -57,12 +56,8 @@ StepExecutionPreview PathExecutor::preview_step_execution(
         effective_phase = latched_phase;
     }
 
-    const bool can_preempt = state == MotionState::STEPPING
-        ? effective_phase != StepPhase::COMMITTED
-        : preemptible() && effective_phase != StepPhase::COMMITTED;
     return {
         .phase = effective_phase,
-        .preemptible = can_preempt,
     };
 }
 
@@ -305,9 +300,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     fsm_input.command_blocked = command_blocked;
     fsm_input.command_state_tracked =
         mpc_command_history_ == MpcCommandHistory::TRACKED;
-    fsm_input.spin_requested = input.intent.spin_requested;
-    fsm_input.spin_high_priority = input.intent.spin_high_priority;
-    last_spin_high_priority_ = input.intent.spin_high_priority;
+    fsm_input.requested_owner = input.intent.requested_owner;
     fsm_input.no_progress_detected = no_progress_detected;
 
     const bool is_hazard_now = !command_blocked

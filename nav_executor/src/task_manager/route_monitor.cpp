@@ -21,6 +21,7 @@ const char* replan_reason_str(const ReplanReason reason) {
         case ReplanReason::EXECUTOR_REPLAN_EVENT: return "EXECUTOR_REPLAN_EVENT";
         case ReplanReason::PERFORMANCE_DEGRADED: return "PERFORMANCE_DEGRADED";
         case ReplanReason::PERFORMANCE_RECOVERED: return "PERFORMANCE_RECOVERED";
+        case ReplanReason::HIGH_PRIORITY_SPIN_PREEMPTION: return "HIGH_PRIORITY_SPIN_PREEMPTION";
     }
     return "NONE";
 }

@@ -39,6 +39,7 @@ enum class ReplanReason : uint8_t {
     EXECUTOR_REPLAN_EVENT = 7,
     PERFORMANCE_DEGRADED = 8,
     PERFORMANCE_RECOVERED = 9,
+    HIGH_PRIORITY_SPIN_PREEMPTION = 10,
 };
 
 const char* replan_reason_str(ReplanReason reason);

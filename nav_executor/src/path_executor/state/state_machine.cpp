@@ -108,9 +108,8 @@ void StateMachine::synchronize_step_phase(
     step_phase_ = observed_phase;
 }
 
-bool StateMachine::spin_authorized(const FsmInput& in) const {
-    return in.spin_requested
-        && (in.spin_high_priority || (!in.route_tracked && !in.has_hold_goal));
+bool StateMachine::spin_control_requested(const FsmInput& in) const {
+    return is_spin_owner(in.requested_owner);
 }
 
 bool StateMachine::prepare_spin_ready(const FsmInput& in) const {
@@ -127,7 +126,7 @@ FsmOutput StateMachine::route_to_normal_state(const FsmInput& in) {
 }
 
 FsmOutput StateMachine::route_to_requested_state(const FsmInput& in) {
-    return spin_authorized(in)
+    return spin_control_requested(in)
         ? transition_to(MotionState::PREPARE_SPIN)
         : route_to_normal_state(in);
 }
@@ -182,8 +181,8 @@ FsmOutput StateMachine::on_idle(const FsmInput& in) {
         RCLCPP_WARN(logger_, "FSM -> HAZARD_RECOVERY (is hazard)");
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
-    if (in.spin_requested && in.spin_high_priority) {
-        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (high-priority spin requested)");
+    if (spin_control_requested(in)) {
+        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (spin owns normal control)");
         return transition_to(MotionState::PREPARE_SPIN);
     }
     if (in.route_tracked) {
@@ -193,10 +192,6 @@ FsmOutput StateMachine::on_idle(const FsmInput& in) {
     if (in.has_hold_goal) {
         RCLCPP_INFO(logger_, "FSM -> FIXED (has hold goal)");
         return transition_to(MotionState::FIXED);
-    }
-    if (in.spin_requested) {
-        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (spin requested)");
-        return transition_to(MotionState::PREPARE_SPIN);
     }
     return { .state = MotionState::IDLE };
 }
@@ -217,8 +212,8 @@ FsmOutput StateMachine::on_fixed(const FsmInput& in) {
         RCLCPP_WARN(logger_, "FSM -> STUCK_REVERSE (is stuck)");
         return transition_to(MotionState::STUCK_REVERSE);
     }
-    if (in.spin_requested && in.spin_high_priority) {
-        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (high-priority spin requested)");
+    if (spin_control_requested(in)) {
+        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (spin owns normal control)");
         return transition_to(MotionState::PREPARE_SPIN);
     }
     if (in.route_tracked) {
@@ -260,8 +255,8 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
         return transition_to(MotionState::STUCK_REVERSE);
     }
 
-    if (in.spin_requested && in.spin_high_priority) {
-        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (high-priority spin requested)");
+    if (spin_control_requested(in)) {
+        RCLCPP_INFO(logger_, "FSM -> PREPARE_SPIN (spin owns normal control)");
         return transition_to(MotionState::PREPARE_SPIN);
     }
 
@@ -330,9 +325,9 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
 
     // commit 前保持与 FOLLOW 一致的外部打断能力。
     if (is_step_phase_precommit(step_phase_)) {
-        if (in.spin_requested && in.spin_high_priority) {
+        if (spin_control_requested(in)) {
             RCLCPP_INFO(
-                logger_, "FSM -> PREPARE_SPIN (spin requested during STEPPING/%s)",
+                logger_, "FSM -> PREPARE_SPIN (spin owns control during STEPPING/%s)",
                 step_phase_str(step_phase_)
             );
             FsmOutput out = transition_to(MotionState::PREPARE_SPIN);
@@ -371,8 +366,8 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
         return { .state = MotionState::STEPPING };
     }
 
-    RCLCPP_INFO(logger_, "FSM -> FOLLOW (step completed)");
-    return transition_to(MotionState::FOLLOW);
+    RCLCPP_INFO(logger_, "STEPPING completed; routing to current control owner");
+    return route_to_requested_state(in);
 }
 
 // ═══════════════════════════ SPIN ═══════════════════════════
@@ -384,9 +379,7 @@ FsmOutput StateMachine::on_spin(const FsmInput& in) {
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
 
-    const bool keep_spinning = in.spin_requested && (in.spin_high_priority || (!in.route_tracked && !in.has_hold_goal));
-
-    if (!keep_spinning) {
+    if (!spin_control_requested(in)) {
         RCLCPP_INFO(logger_, "FSM leaving SPIN for NORMAL control");
         return route_to_normal_state(in);
     }
@@ -402,7 +395,7 @@ FsmOutput StateMachine::on_prepare_spin(const FsmInput& in) {
         RCLCPP_WARN(logger_, "PREPARE_SPIN cancelled by hazard; entering HAZARD_RECOVERY");
         return transition_to(MotionState::HAZARD_RECOVERY);
     }
-    if (!spin_authorized(in)) {
+    if (!spin_control_requested(in)) {
         RCLCPP_INFO(logger_, "PREPARE_SPIN cancelled; returning to NORMAL target");
         return route_to_normal_state(in);
     }

@@ -17,6 +17,7 @@
 #include <nav_executor/common/environment/nav_map.hpp>
 #include <nav_executor/common/environment/obstacle_semantics.hpp>
 #include <nav_executor/path_executor/mpc/mpc_solver.hpp>
+#include <nav_executor/common/control_arbitration.hpp>
 
 namespace nav_executor {
 
@@ -39,8 +40,7 @@ enum class CommandStatus : uint8_t {
 struct MotionIntent {
     AnnotatedPath::ConstPtr active_path;
     std::optional<Eigen::Vector2d> hold_goal;
-    bool spin_requested = false;
-    bool spin_high_priority = false;
+    ControlOwner requested_owner = ControlOwner::IDLE;
     bool spin_fast = false;
 };
 
@@ -91,7 +91,6 @@ struct ExecutorOutput {
 
 struct StepExecutionPreview {
     StepPhase phase = StepPhase::NONE;
-    bool preemptible = true;
 };
 
 // 运动控制编排：持有 FSM / MPC / 台阶运行时 / stuck 检测与恢复链，消费顶层每周期传入的 active_path 与 hold_goal。
@@ -116,23 +115,6 @@ public:
         double path_progress,
         bool route_tracked
     ) const;
-
-    [[nodiscard]] bool preemptible() const {
-        const MotionState s = control_fsm_->state();
-        switch (s) {
-            case MotionState::SPIN:
-                return !last_spin_high_priority_;
-            case MotionState::STEPPING:
-                return is_step_phase_precommit(control_fsm_->step_phase());
-            case MotionState::FOLLOW:
-            case MotionState::IDLE:
-            case MotionState::PREPARE_SPIN:
-            case MotionState::FIXED:
-                return true;
-            default:
-                return false;
-        }
-    }
 
 private:
     ExecutorOutput execute_idle();
@@ -171,7 +153,6 @@ private:
     AnnotatedPath::ConstPtr bound_path_;
     uint64_t bound_path_epoch_ = 0;
 
-    bool last_spin_high_priority_ = false;
     MotionState last_motion_state_ = MotionState::IDLE;
     enum class MpcCommandHistory : uint8_t { TRACKED, NEEDS_REANCHOR };
     Eigen::Vector2d mpc_command_state_ = Eigen::Vector2d::Zero();
