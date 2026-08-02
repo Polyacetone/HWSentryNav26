@@ -44,10 +44,16 @@ struct MotionIntent {
     bool spin_fast = false;
 };
 
+struct ChassisStateSample {
+    ChassisMotionState state;
+    uint64_t sequence = 0;
+};
+
 struct MotionObservation {
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();
     ChassisMotionState chassis_state;
-    uint64_t chassis_state_sequence = 0;
+    std::vector<ChassisStateSample> pending_chassis_state_samples;
+    bool chassis_state_history_discontinuous = false;
     uint8_t chassis_leg_mode = 4;
     uint8_t comp_stage = 4;
     std::chrono::steady_clock::time_point stamp;
@@ -107,6 +113,7 @@ public:
     );
 
     ExecutorOutput update(const ExecutorInput& input);
+    void notify_chassis_state_unavailable();
 
     [[nodiscard]] MotionState motion_state() const { return control_fsm_->state(); }
     [[nodiscard]] StepPhase step_phase() const { return control_fsm_->step_phase(); }

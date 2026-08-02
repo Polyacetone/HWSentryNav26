@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace {
 
@@ -55,18 +56,42 @@ void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStat
         chassis_state_valid_ = false;
         return;
     }
-    chassis_state_.velocity = msg->velocity;
-    chassis_state_.omega = msg->omega;
-    chassis_state_.leg_h = msg->leg_h;
-    chassis_state_.leg_psi = msg->leg_psi;
+    const auto receive_stamp = std::chrono::steady_clock::now();
+    if (last_chassis_status_time_ != std::chrono::steady_clock::time_point{}
+        && receive_stamp - last_chassis_status_time_ >= chassis_status_timeout_) {
+        chassis_state_history_discontinuous_ = true;
+    }
+
+    ChassisMotionState received_state;
+    received_state.velocity = msg->velocity;
+    received_state.omega = msg->omega;
+    received_state.leg_h = msg->leg_h;
+    received_state.leg_psi = msg->leg_psi;
+    chassis_state_ = received_state;
     chassis_leg_mode_ = msg->leg_mode;
     rfr_pwr_limit_ = static_cast<double>(msg->rfr_pwr_limit);
     remaining_energy_supercap_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_supercap)
         + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_supercap_filtered_;
     remaining_energy_buffercap_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_buffercap)
         + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_buffercap_filtered_;
+
+    if (pending_chassis_state_samples_.size() >= chassis_state_queue_capacity_) {
+        pending_chassis_state_samples_.pop_front();
+        chassis_state_history_discontinuous_ = true;
+        ++chassis_state_queue_overflow_count_;
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 1000,
+            "Chassis state queue overflowed (%zu slots, %lu total); dropping oldest sample",
+            chassis_state_queue_capacity_,
+            static_cast<unsigned long>(chassis_state_queue_overflow_count_)
+        );
+    }
+    pending_chassis_state_samples_.push_back(ChassisStateSample {
+        .state = received_state,
+        .sequence = chassis_state_sequence_,
+    });
     chassis_state_valid_ = true;
-    last_chassis_status_time_ = std::chrono::steady_clock::now();
+    last_chassis_status_time_ = receive_stamp;
 }
 
 void NavExecutorNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -162,13 +187,19 @@ void NavExecutorNode::control_tick() {
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_INVALID_CHASSIS_STATE);
         return;
     }
-    // 不要求每周期都有新序列号：底盘状态与控制 tick 同为 20Hz 时，相位对齐/抖动
-    // 会导致交替跳过、有效控制率减半。这里只做断流检测（状态流死亡则停发指令），
-    // 状态短期重复由 PathExecutor 的 observer 去重逻辑处理。
-    if (control_stamp - last_chassis_status_time_ > chassis_status_timeout_) {
+    // 控制 tick 与状态流解耦：没有新样本时沿用最新状态，有多个新样本时由
+    // PathExecutor 按 FIFO 顺序推进 observer。这里只负责断流 fail-safe。
+    if (control_stamp - last_chassis_status_time_ >= chassis_status_timeout_) {
+        if (!chassis_state_stale_) {
+            executor_->notify_chassis_state_unavailable();
+            pending_chassis_state_samples_.clear();
+            chassis_state_history_discontinuous_ = true;
+            chassis_state_stale_ = true;
+        }
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_NO_NEW_CHASSIS_STATE);
         return;
     }
+    chassis_state_stale_ = false;
 
     Eigen::Vector3d chassis_pose_map;
     if (!get_chassis_pose(chassis_pose_map)) {
@@ -326,7 +357,12 @@ void NavExecutorNode::control_tick() {
     ein.route = route_estimate;
     ein.observation.chassis_pose_map = chassis_pose_map;
     ein.observation.chassis_state = chassis_state_;
-    ein.observation.chassis_state_sequence = chassis_state_sequence_;
+    ein.observation.pending_chassis_state_samples.assign(
+        pending_chassis_state_samples_.begin(), pending_chassis_state_samples_.end()
+    );
+    pending_chassis_state_samples_.clear();
+    ein.observation.chassis_state_history_discontinuous =
+        std::exchange(chassis_state_history_discontinuous_, false);
     ein.observation.chassis_leg_mode = chassis_leg_mode_;
     ein.observation.comp_stage = comp_stage_;
     ein.observation.stamp = stamp;

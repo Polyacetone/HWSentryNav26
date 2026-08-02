@@ -303,6 +303,7 @@ enum class ObserverResetReason : uint8_t {
     COMMAND_RESYNCHRONIZED = 8,
     CONTROL_UNAVAILABLE = 9,
     CONTROL_OUTPUT_INVALID = 10,
+    MEASUREMENT_HISTORY_DISCONTINUITY = 11,
 };
 
 struct ObserverDiagnostics {

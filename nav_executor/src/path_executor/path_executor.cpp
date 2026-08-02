@@ -65,21 +65,24 @@ StepExecutionPreview PathExecutor::preview_step_execution(
 
 void PathExecutor::sync_mpc_context(const ExecutorInput& input, const bool allow_observer_update) {
     mpc_controller_->set_command_state(mpc_command_state_, mpc_command_rate_);
+    if (input.observation.chassis_state_history_discontinuous) {
+        reset_mpc_observer(ObserverResetReason::MEASUREMENT_HISTORY_DISCONTINUITY);
+    }
     if (!allow_observer_update) {
         return;
     }
 
-    const uint64_t sequence = input.observation.chassis_state_sequence;
-    if (sequence == 0) {
-        mpc_controller_->update_observer(input.observation.chassis_state, sequence);
-        return;
+    for (const ChassisStateSample& sample : input.observation.pending_chassis_state_samples) {
+        if (last_observer_state_sequence_ && sample.sequence <= *last_observer_state_sequence_) {
+            continue;
+        }
+        if (last_observer_state_sequence_
+            && sample.sequence != *last_observer_state_sequence_ + 1) {
+            reset_mpc_observer(ObserverResetReason::MEASUREMENT_HISTORY_DISCONTINUITY);
+        }
+        mpc_controller_->update_observer(sample.state, sample.sequence);
+        last_observer_state_sequence_ = sample.sequence;
     }
-    if (last_observer_state_sequence_ && sequence == *last_observer_state_sequence_) return;
-    if (last_observer_state_sequence_ && sequence != *last_observer_state_sequence_ + 1) {
-        reset_mpc_observer(ObserverResetReason::STATE_SEQUENCE_GAP);
-    }
-    mpc_controller_->update_observer(input.observation.chassis_state, sequence);
-    last_observer_state_sequence_ = sequence;
 }
 
 void PathExecutor::reset_mpc_observer(const ObserverResetReason reason) {
@@ -100,6 +103,14 @@ void PathExecutor::invalidate_mpc_command_history(const ObserverResetReason reas
     mpc_command_history_ = MpcCommandHistory::NEEDS_REANCHOR;
     mpc_controller_->reset_warm_start();
     reset_mpc_observer(reason);
+}
+
+void PathExecutor::notify_chassis_state_unavailable() {
+    // 即使 command history 已经处于 NEEDS_REANCHOR，也必须清掉 observer；
+    // stale 期间的旧测量不能作为恢复后的连续观测历史。
+    mpc_command_history_ = MpcCommandHistory::NEEDS_REANCHOR;
+    mpc_controller_->reset_warm_start();
+    reset_mpc_observer(ObserverResetReason::CONTROL_UNAVAILABLE);
 }
 
 bool PathExecutor::state_uses_mpc(const MotionState state) {

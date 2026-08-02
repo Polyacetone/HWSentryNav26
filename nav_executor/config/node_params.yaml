@@ -3,7 +3,8 @@
     node:
       remaining_energy_filter_alpha: 0.5 # 对 remaining_energy_supercap 和 remaining_energy_buffercap 进行低通滤波的指数衰减系数 [0,1]
       path_publish_sample_resolution: 0.05 # 发布路径 global_path 和 minco_trajectory 的采样间距 (m)
-      chassis_status_timeout_seconds: 0.15 # 底盘状态流断流判定超时 (s)；超过该时长未收到新 ChassisStatus 则停止发令。需大于状态周期（20Hz → 50ms）
+      chassis_status_timeout_seconds: 0.15 # 底盘状态流断流判定超时 (s)；达到该时长未收到新 ChassisStatus 则停止发令
+      chassis_state_queue_capacity: 3 # timer 尚未消费的底盘状态 FIFO 容量；溢出时丢弃最老样本并重置 observer 连续历史
 
       topics:
         goal_sub: "/decision/nav_goal"

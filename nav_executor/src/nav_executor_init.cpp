@@ -173,10 +173,16 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
 
     remaining_energy_filter_alpha_ = declare_parameter<double>("node.remaining_energy_filter_alpha");
     const double chassis_status_timeout_seconds = declare_parameter<double>("node.chassis_status_timeout_seconds");
-    require_parameter(
-        positive_finite(chassis_status_timeout_seconds),
-        "chassis_status_timeout_seconds must be finite and positive"
+    const int64_t chassis_state_queue_capacity = declare_parameter<int64_t>(
+        "node.chassis_state_queue_capacity"
     );
+    require_parameter(
+        positive_finite(chassis_status_timeout_seconds)
+            && chassis_state_queue_capacity > 0
+            && chassis_state_queue_capacity <= 1024,
+        "chassis status timeout must be positive and queue capacity must be in [1, 1024]"
+    );
+    chassis_state_queue_capacity_ = static_cast<size_t>(chassis_state_queue_capacity);
     chassis_status_timeout_ = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(chassis_status_timeout_seconds)
     );

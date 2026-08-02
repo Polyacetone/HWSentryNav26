@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -139,6 +140,11 @@ private:
 
     ChassisMotionState chassis_state_{};
     uint64_t chassis_state_sequence_ = 0;
+    std::deque<ChassisStateSample> pending_chassis_state_samples_;
+    size_t chassis_state_queue_capacity_ = 8;
+    bool chassis_state_history_discontinuous_ = false;
+    bool chassis_state_stale_ = false;
+    uint64_t chassis_state_queue_overflow_count_ = 0;
     // 底盘状态流 liveness：最后一次有效 ChassisStatus 的接收时刻。
     // 控制 tick 不要求每周期都有新序列号（20Hz 状态与 20Hz 控制同频时会因相位抖动
     // 导致控制率减半），只要求状态流没有断流；断流则停止发令（fail-safe）。
