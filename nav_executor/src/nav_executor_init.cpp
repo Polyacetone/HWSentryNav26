@@ -458,9 +458,7 @@ FsmParams NavExecutorNode::load_fsm_params() {
     FsmParams fsm;
     fsm.prepare_spin = {
         .command_velocity_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.command_velocity_max"),
-        .command_omega_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.command_omega_max"),
         .measured_velocity_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.measured_velocity_max"),
-        .measured_omega_max = declare_parameter<double>("path_executor.state_machine.prepare_spin.measured_omega_max"),
     };
     fsm.recovery = {
         .hazard_cost_threshold = declare_parameter<double>("path_executor.recovery.hazard.cost_threshold"),
@@ -491,10 +489,8 @@ FsmParams NavExecutorNode::load_fsm_params() {
     };
     require_parameter(
         positive_finite(fsm.prepare_spin.command_velocity_max)
-        && positive_finite(fsm.prepare_spin.command_omega_max)
-        && positive_finite(fsm.prepare_spin.measured_velocity_max)
-        && positive_finite(fsm.prepare_spin.measured_omega_max),
-        "PREPARE_SPIN command and measured thresholds must be finite and positive"
+        && positive_finite(fsm.prepare_spin.measured_velocity_max),
+        "PREPARE_SPIN command and measured velocity thresholds must be finite and positive"
     );
     return fsm;
 }

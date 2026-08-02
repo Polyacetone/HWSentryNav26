@@ -22,7 +22,7 @@
       # ═══════════════════════════════════════════════
       route_monitor:
         proj_guard:
-          cost_max: 240.0 # 投影连线最大障碍物代价 > 该值则取消 follow (0~255)
+          cost_max: 250.0 # 投影连线最大障碍物代价 > 该值则取消 follow (0~255)
           cost_samples: 20 # 连线代价估计采样数
         step_block: # 有预测序列时台阶样本取 step_segments 的弧长区间；退化模式按原始格点 direction magnitude > 0.95 的物理本体判定
           enable: true # 是否启用"台阶被动态障碍物堵住"检测并触发全局重规划

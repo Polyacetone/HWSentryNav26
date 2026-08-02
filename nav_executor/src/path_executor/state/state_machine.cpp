@@ -117,9 +117,7 @@ bool StateMachine::prepare_spin_ready(const FsmInput& in) const {
     const PrepareSpinParams& limits = params_.prepare_spin;
     return !in.command_blocked && in.command_state_tracked
         && std::abs(in.command_velocity) < limits.command_velocity_max
-        && std::abs(in.command_omega) < limits.command_omega_max
-        && std::abs(in.measured_velocity) < limits.measured_velocity_max
-        && std::abs(in.measured_omega) < limits.measured_omega_max;
+        && std::abs(in.measured_velocity) < limits.measured_velocity_max;
 }
 
 FsmOutput StateMachine::route_to_normal_state(const FsmInput& in) {
@@ -273,8 +271,11 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
     }
 
     if (in.reach_goal) {
-        RCLCPP_INFO(logger_, "FSM -> IDLE (goal reached)");
-        FsmOutput out = transition_to(MotionState::IDLE);
+        // TaskManager consumes this event on the next control cycle. Keep FOLLOW
+        // for this cycle so the current MPC command remains continuous until the
+        // updated path/hold intent can route directly to the next control state.
+        RCLCPP_INFO(logger_, "FSM -> IDLE (goal reached, deferring state transition to next cycle)");
+        FsmOutput out{ .state = MotionState::FOLLOW };
         out.goal_reached = true;
         return out;
     }

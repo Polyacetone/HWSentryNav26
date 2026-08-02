@@ -14,9 +14,7 @@ namespace nav_executor {
 // 下位机 SPIN 控制器接管前的安全互锁门槛。
 struct PrepareSpinParams {
     double command_velocity_max;
-    double command_omega_max;
     double measured_velocity_max;
-    double measured_omega_max;
 };
 
 // 危险恢复参数
@@ -135,9 +133,7 @@ struct FsmInput {
 
     Eigen::Vector2d chassis_pos_map = Eigen::Vector2d::Zero();
     double command_velocity = 0.0;
-    double command_omega = 0.0;
     double measured_velocity = 0.0;
-    double measured_omega = 0.0;
     std::chrono::steady_clock::time_point stamp;
 };
 

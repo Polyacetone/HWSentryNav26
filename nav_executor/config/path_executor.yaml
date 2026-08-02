@@ -37,10 +37,8 @@
       # ═══════════════════════════════════════════════
       state_machine:
         prepare_spin:
-          command_velocity_max: 0.3 # MPC command state 的线速度门槛 (m/s)
-          command_omega_max: 0.8 # MPC command state 的角速度门槛 (rad/s)
-          measured_velocity_max: 0.3 # 底盘实测线速度门槛 (m/s)
-          measured_omega_max: 0.8 # 底盘实测角速度门槛 (rad/s)
+          command_velocity_max: 0.5 # MPC command state 的线速度门槛 (m/s)
+          measured_velocity_max: 0.8 # 底盘实测线速度门槛 (m/s)
 
       # ═══════════════════════════════════════════════
       #  Recovery — 恢复行为

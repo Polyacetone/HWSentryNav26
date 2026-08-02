@@ -332,9 +332,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         );
     fsm_input.chassis_pos_map = input.observation.chassis_pose_map.head<2>();
     fsm_input.command_velocity = mpc_command_state_.x();
-    fsm_input.command_omega = mpc_command_state_.y();
     fsm_input.measured_velocity = input.observation.chassis_state.velocity;
-    fsm_input.measured_omega = input.observation.chassis_state.omega;
     fsm_input.stamp = input.observation.stamp;
 
     const FsmOutput fsm_output = control_fsm_->update(fsm_input);
