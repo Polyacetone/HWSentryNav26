@@ -643,6 +643,9 @@ PlannerConfig NavExecutorNode::load_planner_config(
         .corridor_width = declare_parameter<double>(
             "path_planner.guide_field.corridor_width"
         ),
+        .start_bulb_radius = declare_parameter<double>(
+            "path_planner.guide_field.start_bulb_radius"
+        ),
     };
     c.kino_a_star = {
         .start_yaw_relaxation = start_yaw_relaxation,
@@ -811,6 +814,8 @@ PlannerConfig NavExecutorNode::load_planner_config(
         && positive_finite(c.reference_path.resample_spacing)
         && positive_finite(c.reference_path.tangent_lookahead)
         && positive_finite(c.guide_field.corridor_width)
+        && positive_finite(c.guide_field.start_bulb_radius)
+        && c.guide_field.start_bulb_radius >= c.guide_field.corridor_width
         && positive_finite(c.kino_a_star.collision_check_resolution)
         && positive_finite(c.kino_a_star.goal_connection_max_distance)
         && nonnegative_finite(c.kino_a_star.guidance_weight)

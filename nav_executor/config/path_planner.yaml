@@ -35,7 +35,8 @@
         tangent_lookahead: 0.30 # 平坦区域参考切向的前后差分距离（米）
 
       guide_field:
-        corridor_width: 2.0 # 参考路径两侧的自由空间测地走廊宽度（米）
+        corridor_width: 1.5 # 参考路径两侧的自由空间测地走廊宽度（米）
+        start_bulb_radius: 2.5 # 起点自由空间测地膨胀半径，容纳航向松弛后的掉头与助跑（米）
 
       kino_a_star:
         lattice:

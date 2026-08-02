@@ -32,7 +32,6 @@ private:
 
     std::optional<GridGeometry> geometry_;
     std::vector<GuideFieldCell> cells_;
-    double corridor_width_ = 0.0;
     size_t corridor_cell_count_ = 0;
 };
 
@@ -40,6 +39,7 @@ class GuideFieldBuilder {
 public:
     struct Params {
         double corridor_width = 2.0;
+        double start_bulb_radius = 2.3;
     };
 
     struct Result {

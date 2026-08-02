@@ -35,9 +35,7 @@ size_t GuideField::index(const Eigen::Vector2i& cell) const {
 const GuideFieldCell* GuideField::at_cell(const Eigen::Vector2i& cell) const {
     if (!geometry_ || !geometry_->contains_cell(cell)) return nullptr;
     const GuideFieldCell& value = cells_[index(cell)];
-    return std::isfinite(value.distance_to_reference)
-        && static_cast<double>(value.distance_to_reference) <= corridor_width_ + 1e-6
-        ? &value : nullptr;
+    return std::isfinite(value.distance_to_reference) ? &value : nullptr;
 }
 
 const GuideFieldCell* GuideField::at_map(const Eigen::Vector2d& point_map) const {
@@ -60,14 +58,17 @@ GuideFieldBuilder::Result GuideFieldBuilder::build(
     const int occupied_threshold
 ) const {
     Result result;
-    if (reference_path.points.size() < 2 || params_.corridor_width <= 0.0
+    if (reference_path.points.size() < 2
+        || !std::isfinite(params_.corridor_width)
+        || !std::isfinite(params_.start_bulb_radius)
+        || params_.corridor_width <= 0.0
+        || params_.start_bulb_radius < params_.corridor_width
         || occupied_threshold <= 0) {
         result.error = "guide field configuration or reference path is invalid";
         return result;
     }
     GuideField& field = result.field;
     field.geometry_ = cost_map.geometry;
-    field.corridor_width_ = params_.corridor_width;
     field.cells_.resize(
         static_cast<size_t>(cost_map.geometry.width())
             * static_cast<size_t>(cost_map.geometry.height())
@@ -142,11 +143,56 @@ GuideFieldBuilder::Result GuideFieldBuilder::build(
             open.push({candidate, next});
         }
     }
+
+    // The start needs room for yaw-relaxed roots to move away from the spatial
+    // route, turn around, and build speed before rejoining the reference tube.
+    std::vector<float> start_distances(
+        field.cells_.size(), std::numeric_limits<float>::infinity()
+    );
+    std::priority_queue<OpenEntry, std::vector<OpenEntry>, std::greater<>> bulb_open;
+    const auto start_cell = cost_map.geometry.containing_cell(
+        reference_path.points.front().position
+    );
+    if (start_cell
+        && grid_cell_traversable(cost_map, *start_cell, occupied_threshold)) {
+        start_distances[field.index(*start_cell)] = 0.0F;
+        bulb_open.push({0.0, *start_cell});
+    }
+    while (!bulb_open.empty()) {
+        const OpenEntry current = bulb_open.top();
+        bulb_open.pop();
+        const size_t current_index = field.index(current.cell);
+        if (current.distance
+                > static_cast<double>(start_distances[current_index]) + 1e-6
+            || current.distance > params_.start_bulb_radius + 1e-9) {
+            continue;
+        }
+        GuideFieldCell& guide = field.cells_[current_index];
+        if (current.distance
+            < static_cast<double>(guide.distance_to_reference) - 1e-6) {
+            guide.distance_to_reference = static_cast<float>(current.distance);
+            guide.nearest_reference_index = 0;
+        }
+        for (const Eigen::Vector2i& delta : NEIGHBORS) {
+            const Eigen::Vector2i next = current.cell + delta;
+            if (!grid_cell_traversable(cost_map, next, occupied_threshold)
+                || !grid_edge_avoids_corner_cutting(
+                    cost_map, current.cell, next, occupied_threshold
+                )) {
+                continue;
+            }
+            const double candidate = current.distance
+                + delta.cast<double>().norm() * cost_map.geometry.resolution();
+            if (candidate > params_.start_bulb_radius + 1e-9) continue;
+            float& next_distance = start_distances[field.index(next)];
+            if (candidate + 1e-6 >= static_cast<double>(next_distance)) continue;
+            next_distance = static_cast<float>(candidate);
+            bulb_open.push({candidate, next});
+        }
+    }
     field.corridor_cell_count_ = static_cast<size_t>(std::ranges::count_if(
-        field.cells_, [&](const GuideFieldCell& cell) {
-            return std::isfinite(cell.distance_to_reference)
-                && static_cast<double>(cell.distance_to_reference)
-                    <= params_.corridor_width + 1e-6;
+        field.cells_, [](const GuideFieldCell& cell) {
+            return std::isfinite(cell.distance_to_reference);
         }
     ));
     result.success = field.corridor_cell_count_ > 0;
