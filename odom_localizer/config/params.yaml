@@ -23,7 +23,7 @@
         default: [0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0] # 未收到颜色信息时的兜底 map->odom
 
     map:
-      cloud_filename: "test.pcd" # 先验地图点云文件名；留空则只发布初始位姿
+      cloud_filename: "RMUC2026.pcd" # 先验地图点云文件名；留空则只发布初始位姿
       downsample_resolution: 0.05 # 地图点云降采样体素大小；设为 0 表示不降采样
       covariance_neighbors: 20 # 地图点云法向/协方差估计邻居数
 

@@ -135,7 +135,6 @@ private:
     bool needs_plan_ = false;
     uint64_t plan_generation_ = 0;
     NavigationAccess navigation_access_ = NavigationAccess::AVAILABLE;
-    bool executor_replan_pending_ = false;
 
     // 失败冷却元数据
     bool in_cooldown_ = false;

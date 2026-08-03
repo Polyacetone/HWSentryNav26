@@ -33,8 +33,8 @@ StepExecutionPreview PathExecutor::preview_step_execution(
     const MotionState state = control_fsm_->state();
     const StepPhase latched_phase = control_fsm_->step_phase();
 
-    // 投影无效时不能把“未观测到阶段”解释成 release。保留 FSM 已锁存策略，
-    // 由 RouteMonitor 在可抢占阶段决定是否清除 active_path。
+    // 投影无效时不能把“未观测到阶段”解释成 release。保留 FSM 已锁存策略；
+    // RouteMonitor 会独立判断它是否已构成路径硬失效并清除 active_path。
     if (!path || !route_tracked) {
         return {
             .phase = latched_phase,

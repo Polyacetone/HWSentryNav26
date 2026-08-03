@@ -127,6 +127,6 @@
         objective:
           traversal_window: 20.0 # 方向地形平方速度窗松弛的弧长积分权重
           lateral_acceleration: 18.0 # 侧向加速度超限的弧长积分权重；阈值来自当前 capability
-          global_speed_reward: 0.05 # 无更重要目标时提高平方速度的小权重
+          global_speed_reward: 0.03 # 无更重要目标时提高平方速度的小权重
           velocity_scale: 2.2 # 平方速度目标的无量纲归一参考速度（m/s）
         stationary_velocity_threshold: 0.1 # 小于该值的路径切向初速度按静止处理（m/s）

@@ -24,22 +24,22 @@
             velocity: { min: 0.0, max: 2.2 }
             angular_velocity: { min: -6.0, max: 6.0 }
           command_dynamics:
-            velocity_rate_max: 1.8
-            angular_velocity_rate_max: 7.0
+            velocity_rate_max: 2.0
+            angular_velocity_rate_max: 7.2
             lateral_acceleration_max: 2.0
         high:
           command_envelope:
             velocity: { min: 0.0, max: 2.8 }
             angular_velocity: { min: -6.0, max: 6.0 }
           command_dynamics:
-            velocity_rate_max: 1.8
-            angular_velocity_rate_max: 7.0
+            velocity_rate_max: 2.0
+            angular_velocity_rate_max: 7.2
             lateral_acceleration_max: 2.0
         bidirectional:
           command_envelope:
             velocity: { min: -1.2, max: 1.2 }
             angular_velocity: { min: -6.0, max: 6.0 }
           command_dynamics:
-            velocity_rate_max: 1.8
-            angular_velocity_rate_max: 7.0
+            velocity_rate_max: 2.0
+            angular_velocity_rate_max: 7.2
             lateral_acceleration_max: 2.0

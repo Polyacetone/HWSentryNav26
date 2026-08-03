@@ -50,7 +50,6 @@ void TaskManager::apply_navigation_access(const NavigationAccess access) {
         }
         active_path_.reset();
         hold_goal_.reset();
-        executor_replan_pending_ = false;
     } else if (navigation_access_ == NavigationAccess::REVOKED
         && access == NavigationAccess::AVAILABLE && current_goal_) {
         RCLCPP_INFO(
@@ -114,7 +113,6 @@ bool TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool ex
     last_replan_reason_ = ReplanReason::NONE;
     planner_last_result_ = PlannerResultState::NONE;
     replan_count_ = 0;
-    executor_replan_pending_ = false;
 
     RCLCPP_INFO(
         logger_, "New goal #%lu (%.2f, %.2f) fixed=%d [%s]",
@@ -126,19 +124,10 @@ bool TaskManager::ingest_goal(const std::optional<Goal>& incoming, const bool ex
 
 // 恢复重规划保留任务语义，但可能改变执行形式。
 void TaskManager::ingest_executor_replan_event(const bool event) {
-    if (event) executor_replan_pending_ = true;
-    if (!executor_replan_pending_) return;
+    if (!event) return;
 
     if (!current_goal_) {
         RCLCPP_DEBUG(logger_, "executor_replan_event swallowed (no goal)");
-        executor_replan_pending_ = false;
-        return;
-    }
-
-    if (navigation_access_ == NavigationAccess::LOCK_CURRENT) {
-        if (event) {
-            RCLCPP_DEBUG(logger_, "executor_replan_event deferred by locked navigation execution");
-        }
         return;
     }
 
@@ -147,18 +136,17 @@ void TaskManager::ingest_executor_replan_event(const bool event) {
         active_path_.reset();
         hold_goal_.reset();
         needs_plan_ = true;
-        executor_replan_pending_ = false;
         RCLCPP_DEBUG(logger_, "executor_replan_event covered by revoked navigation access");
         return;
     }
 
-    // 当前执行形式已不可信 → 清掉 path/hold，回到 planner 重新决定 FOLLOW 还是 FIXED。
+    // 恢复链已经中断了原执行生命周期，因此该事件高于旧路径留下的
+    // LOCK_CURRENT。当前执行形式已不可信，必须从恢复后的位置重新规划。
     active_path_.reset();
     hold_goal_.reset();
     begin_new_plan_generation();
     last_replan_reason_ = ReplanReason::EXECUTOR_REPLAN_EVENT;
     ++replan_count_;
-    executor_replan_pending_ = false;
     RCLCPP_INFO(logger_, "executor_replan_event → drop path/hold, replan current goal");
 }
 
@@ -311,7 +299,6 @@ void TaskManager::monitor_route(const std::optional<RouteMonitorInput>& input) {
 
 void TaskManager::on_route_invalid(const ReplanReason reason) {
     active_path_.reset();
-    executor_replan_pending_ = false;
     begin_new_plan_generation();
     last_replan_reason_ = reason;
     ++replan_count_;

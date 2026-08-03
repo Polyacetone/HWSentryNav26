@@ -56,7 +56,8 @@ bool SafetyMonitor::compute_is_hazard(
         direction_map,
         pos
     );
-    if (!sample) return false;
+    // 与规划和路径保护保持一致：地图外/未知区域按致命障碍处理，而不是默认为安全。
+    if (!sample) return true;
 
     return (sample->cost >= p.hazard_cost_threshold) ||
         (sample->step_norm >= p.hazard_step_norm_threshold);

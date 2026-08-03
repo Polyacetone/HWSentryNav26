@@ -132,12 +132,16 @@ FsmOutput StateMachine::route_to_requested_state(const FsmInput& in) {
 }
 
 FsmOutput StateMachine::finish_recovery_chain(const FsmInput& in) {
-    FsmOutput out = route_to_requested_state(in);
     if (replan_after_recovery_) {
         replan_after_recovery_ = false;
+        // Recovery invalidates the execution that led to it. Do not resume the
+        // old path for one cycle while TaskManager consumes the one-shot event.
+        FsmOutput out = transition_to(MotionState::IDLE);
         out.executor_replan_event = true;
+        RCLCPP_INFO(logger_, "Recovery completed; holding IDLE until current path is replanned");
+        return out;
     }
-    return out;
+    return route_to_requested_state(in);
 }
 
 bool StateMachine::should_start_resume_hazard_recovery(const FsmInput& in) const {
@@ -261,6 +265,11 @@ FsmOutput StateMachine::on_follow(const FsmInput& in) {
     }
 
     if (!in.route_tracked) {
+        if (!in.has_active_path && in.is_hazard_now) {
+            replan_after_recovery_ = false;
+            RCLCPP_WARN(logger_, "FOLLOW path invalidated in hazard; entering HAZARD_RECOVERY");
+            return transition_to(MotionState::HAZARD_RECOVERY);
+        }
         RCLCPP_INFO(logger_, "FSM routing after path loss");
         return route_to_requested_state(in);
     }
@@ -301,13 +310,24 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
         return out;
     }
 
-    // PREPARING/ARMED 中 active_path 一旦被任务层清除，旧台阶计划立即失去执行权。
-    if (is_step_phase_precommit(step_phase_) && !in.has_active_path) {
-        RCLCPP_INFO(
-            logger_, "FSM routing after STEPPING/%s path cancellation",
-            step_phase_str(step_phase_)
-        );
-        FsmOutput out = route_to_requested_state(in);
+    // 路径硬失效高于台阶生命周期锁。COMMITTED 只阻止普通抢占，不能继续保护
+    // 已无法跟踪的路径；当前位置危险时先完成恢复，再由任务层重规划。
+    if (!in.has_active_path) {
+        FsmOutput out;
+        if (in.is_hazard_now) {
+            replan_after_recovery_ = false;
+            RCLCPP_WARN(
+                logger_, "STEPPING/%s path invalidated in hazard; entering HAZARD_RECOVERY",
+                step_phase_str(step_phase_)
+            );
+            out = transition_to(MotionState::HAZARD_RECOVERY);
+        } else {
+            RCLCPP_INFO(
+                logger_, "FSM routing after STEPPING/%s path cancellation",
+                step_phase_str(step_phase_)
+            );
+            out = route_to_requested_state(in);
+        }
         out.step_cancelled = true;
         return out;
     }
@@ -347,17 +367,8 @@ FsmOutput StateMachine::on_stepping(const FsmInput& in) {
         }
     }
 
-    if (!in.has_active_path) {
-        // 仅 release 后的本周期抢占或已在 precommit 产生的硬失效允许走到这里。
-        // 无论来源如何，都不能回 FOLLOW 后在无路径条件下产生空命令。
-        RCLCPP_WARN(logger_, "STEPPING/COMMITTED active path removed; routing to current request");
-        FsmOutput out = route_to_requested_state(in);
-        out.step_cancelled = true;
-        return out;
-    }
-
-    // 短暂投影丢失不等于路径被清除或台阶段 release。COMMITTED 必须保持当前
-    // 台阶提示；precommit 则等待 RouteMonitor 的路径失效决策。
+    // RouteMonitor 会把 LOST 作为硬失效并在同周期清除 active_path，因此这里只
+    // 处理尚未被任务层确认失效的瞬时无投影输入。
     if (!in.route_tracked) {
         return { .state = MotionState::STEPPING };
     }

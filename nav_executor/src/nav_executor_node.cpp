@@ -248,9 +248,16 @@ void NavExecutorNode::control_tick() {
         .spin_requested = spin_state_ != SpinState::STOP,
         .spin_high_priority = spin_high_priority_,
     });
+    // Geometry can still classify the old path as COMMITTED after a recovery
+    // has aborted its step lifecycle. Only an execution that is currently
+    // following that lifecycle may protect the path from replacement.
+    const bool step_path_replacement_locked =
+        (current_motion_state == MotionState::FOLLOW
+            || current_motion_state == MotionState::STEPPING)
+        && step_preview.phase == StepPhase::COMMITTED;
     const NavigationAccess navigation_access = arbitrate_navigation_access(
         owner_before_task,
-        step_preview.phase == StepPhase::COMMITTED,
+        step_path_replacement_locked,
         navigation_planning_suspended(current_motion_state)
     );
 
@@ -292,7 +299,10 @@ void NavExecutorNode::control_tick() {
 
     const bool pending_mpc_lethal = previous_motion_feedback_.mpc_lethal
         && previous_motion_feedback_.lethal_path == active_path_before_update;
-    const bool route_monitoring_state = pending_mpc_lethal
+    const bool route_tracking_invalid = active_path_before_update && route_estimate
+        && (route_estimate->path != active_path_before_update
+            || route_estimate->status != RouteTrackingStatus::TRACKED);
+    const bool route_monitoring_state = pending_mpc_lethal || route_tracking_invalid
         || (navigation_access == NavigationAccess::AVAILABLE
             && (current_motion_state == MotionState::FOLLOW
                 || current_motion_state == MotionState::PREPARE_SPIN
