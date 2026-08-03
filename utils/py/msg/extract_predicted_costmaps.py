@@ -12,11 +12,12 @@ class PredictedCostmapExtractor(Node):
             self.listener_callback,
             1
         )
-        self.publisher = self.create_publisher(OccupancyGrid, '/predicted_costmap', 10)
+        self.publisher0 = self.create_publisher(OccupancyGrid, '/predicted_costmap_0', 10)
+        self.publisher19 = self.create_publisher(OccupancyGrid, '/predicted_costmap_19', 10)
 
     def listener_callback(self, msg):
-        occupancy_grid = msg.maps[0]
-        self.publisher.publish(occupancy_grid)
+        self.publisher0.publish(msg.maps[0])
+        self.publisher19.publish(msg.maps[19])
 
 def main(args=None):
     rclpy.init(args=args)

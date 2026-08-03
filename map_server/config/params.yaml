@@ -14,12 +14,12 @@
         direction_non_body_magnitude_cap: 0.9 # 非原始方向地形本体格的模长上限；uint8 向下量化为 229/255，本体固定为 1
       robot_status_sub_topic: "/serial_bridge/robot_status" # 机器人状态订阅话题，用于获取机器人颜色以选择对应的全局导航地图
       robot_color_wait_timeout: 1.0 # 等待获取机器人颜色信息的超时时间，单位秒
-      blue_nav_map_filename: "RMUC2026.msgpack" # 全局导航地图路径（蓝方）
-      red_nav_map_filename: "RMUC2026.msgpack" # 全局导航地图路径（红方）
-      default_nav_map_filename: "RMUC2026.msgpack" # 获取机器人颜色超时后使用此全局导航地图
+      blue_nav_map_filename: "RMUC202605.msgpack" # 全局导航地图路径（蓝方）
+      red_nav_map_filename: "RMUC202605.msgpack" # 全局导航地图路径（红方）
+      default_nav_map_filename: "RMUC202605.msgpack" # 获取机器人颜色超时后使用此全局导航地图
       direction_map_pub_topic: "/map_server/global_direction_map" # 全局台阶方向地图发布话题名称
       cost_map_pub_topic: "/map_server/global_cost_map" # 全局代价地图发布话题名称
-      cloud_filename: "RMUC2026.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
+      cloud_filename: "RMUC202608af.pcd" # 全局点云路径（为空则不加载，启用仅基于局部点云的粗略避障）
       downsample_voxel_size: 0.05 # 全局点云下采样体素大小，单位m
       pub_freq: 1.0 # 全局地图发布频率，单位Hz
 
@@ -31,12 +31,12 @@
       bypass_dynamic_obstacle: false # 是否绕过动态障碍物检测（开启后发布全空的局部代价地图，用于调试）
       cloud_sub_topic: "/small_glim/registered_cloud" # 局部点云订阅话题名称，用于动态障碍物分析
       local_cost_maps_pub_topic: "/map_server/local_cost_maps" # 局部代价地图序列发布话题（maps[0]=当前帧，maps[1..N]=预测帧）
-      cloud_accumulate_frames: 5 # 局部点云累积帧数
+      cloud_accumulate_frames: 6 # 局部点云累积帧数
       roi_xy_radius_min: 0.4 # 局部点云ROI的xy平面半径最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
-      roi_xy_radius_max: 6.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
+      roi_xy_radius_max: 8.0 # 局部点云ROI的xy平面半径最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_max: 0.2 # 局部点云ROI的z轴最大值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
       roi_z_min: -0.55 # 局部点云ROI的z轴最小值（姿态基于imu_world系（z轴竖直），平移基于pitch_link系），单位m
-      downsample_voxel_size: 0.03 # 局部点云下采样体素大小，单位m
+      downsample_voxel_size: 0.02 # 局部点云下采样体素大小，单位m
       with_global_cloud: # 有全局点云时通过比较局部点云与全局点云的最近邻距离来判断动态障碍物
         enable_prediction: true # 有全局点云时是否启用目标跟踪预测
         distance_threshold: 0.2 # 如果局部地图点与全局地图点的最近邻距离大于此阈值，认为是动态障碍物，单位m。有全局点云时使用
@@ -47,14 +47,14 @@
         direction_filter_threshold: 0.1 # 台阶方向场归一化模长过滤阈值 [0,1]（0.0=关闭），当无全局点云时在create_obstacle_mask中检查每个动态点对应的方向场模长（ch1, 0-255），超过此阈值则视为台阶等已知静态结构予以滤除
       sor_num_neighbors: 12 # 统计离群点过滤使用的K近邻数量
       sor_std_mul: 2.0 # SOR保留阈值=均值+sor_std_mul*标准差
-      min_projected_point_density_per_m2: 1200.0 # 动态点投影密度阈值（点/m²），按地图分辨率换算为每格最小点数
+      min_projected_point_density_per_m2: 800.0 # 动态点投影密度阈值（点/m²），按地图分辨率换算为每格最小点数
       min_obstacle_cluster_area_m2: 0.0075 # 障碍物连通域最小物理面积（m²，0=关闭），滤除噪声散点
       object_tracker: # 基于目标的动态障碍物跟踪与预测参数
         morph_close_radius_m: 0.10 # 跟踪检测前形态学闭运算半径（m，0=关闭），只影响跟踪，不修改当前障碍图
         min_tracking_component_area_m2: 0.0075 # 进入目标跟踪的最小连通域面积（m²），不负责从代价图删除小障碍
         local_grid_extent_m: 2.0 # 目标局部栅格的最小物理边长（m），内部向上取整为以质心为中心的奇数边长
         max_association_dist: 0.3 # 匈牙利匹配最大关联距离（m），超过则视为新目标
-        process_noise_std: 4.0 # KF 过程噪声（加速度标准差，m/s²），越大越信任量测，越小越信任模型
+        process_noise_std: 3.0 # KF 过程噪声（加速度标准差，m/s²），越大越信任量测，越小越信任模型
         measurement_noise_std: 0.08 # KF 测量噪声标准差（m），对应质心观测精度
         max_lost_frames: 3 # 连续未匹配帧数上限，超过则删除航迹
         min_hits_to_confirm: 3 # 航迹连续匹配此次数后才进入运动预测；未确认障碍仍会静态保底写入未来代价图
