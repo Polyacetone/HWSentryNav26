@@ -82,7 +82,7 @@
         progress:
           # 进度上下界由控制硬约束 0 ≤ ṡ ≤ 剩余弧长/Δt 保证，无需越界残差。
           progress_reward: 0.2 # 每米路径推进线性奖励，防止零速局部最优
-          speed_tracking_weight: 1.2 # 路径速度偏离规划期全局速度剖面的残差权重
+          speed_tracking_weight: 1.6 # 路径速度偏离规划期全局速度剖面的残差权重
           speed_smoothness_weight: 1.5 # 相邻路径速度变化残差权重
         rollout_safety:
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；命中则该 rollout 首帧即被拒绝，本周期改为下发 STOP 命令
@@ -96,7 +96,7 @@
           lookahead_distance_min: 0.3 # 前视距离下界 (m)，低速时保证有效的回正几何
           lookahead_distance_max: 1.5 # 前视距离上界 (m)，高速时限制切弯幅度
         ancillary_feedback:
-          enable: true # 是否启用辅助反馈环；在 MPC 预测模型与实际运动状态存在偏差时，使用实测状态修正 MPC 指令
+          enable: false # 是否启用辅助反馈环；在 MPC 预测模型与实际运动状态存在偏差时，使用实测状态修正 MPC 指令
           velocity_error_gain: 0.05 # 实测−名义速度误差到指令变化率修正的增益 (1/s)
           command_error_gain: 6.0 # 实际发送−名义速度指令误差的回正增益 (1/s)
           velocity_error_reanchor_threshold: 0.22 # 超出已验证误差管时重锚到实测状态 (m/s)
@@ -126,8 +126,8 @@
           direction: 3.0 # 台阶内部穿越方向对齐软目标
           angular_velocity_command: 0.2 # 台阶内部角速度指令趋零
           angular_velocity_predicted: 0.8 # 台阶内部预测车身角速度趋零
-          velocity_command_smoothness: 0.2 # 台阶内部线速度指令增量平滑
-          velocity_predicted_smoothness: 1.6 # 台阶内部预测车身速度增量平滑
+          velocity_command_smoothness: 0.6 # 台阶内部线速度指令增量平滑
+          velocity_predicted_smoothness: 1.8 # 台阶内部预测车身速度增量平滑
         environment_weights:
           obstacle: 8.0 # 避障权重（全局+局部融合代价）
 

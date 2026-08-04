@@ -44,16 +44,9 @@ struct MotionIntent {
     bool spin_fast = false;
 };
 
-struct ChassisStateSample {
-    ChassisMotionState state;
-    uint64_t sequence = 0;
-};
-
 struct MotionObservation {
     Eigen::Vector3d chassis_pose_map = Eigen::Vector3d::Zero();
     ChassisMotionState chassis_state;
-    std::vector<ChassisStateSample> pending_chassis_state_samples;
-    bool chassis_state_history_discontinuous = false;
     uint8_t chassis_leg_mode = 4;
     uint8_t comp_stage = 4;
     std::chrono::steady_clock::time_point stamp;
@@ -113,6 +106,13 @@ public:
     );
 
     ExecutorOutput update(const ExecutorInput& input);
+    void ingest_chassis_state(
+        const ChassisMotionState& chassis_state,
+        uint64_t state_sequence,
+        uint8_t leg_mode,
+        uint8_t comp_stage,
+        bool history_discontinuous
+    );
     void notify_chassis_state_unavailable();
 
     [[nodiscard]] MotionState motion_state() const { return control_fsm_->state(); }
@@ -132,7 +132,6 @@ private:
     ExecutorOutput execute_stuck_reverse();
     ExecutorOutput execute_fixed(const ExecutorInput& input);
 
-    void sync_mpc_context(const ExecutorInput& input, bool allow_observer_update);
     void reset_mpc_observer(
         ObserverResetReason reason = ObserverResetReason::EXPLICIT_REQUEST
     );
@@ -174,7 +173,6 @@ private:
 
     bool mpc_lethal_pending_ = false;
     ChassisControlState last_cycle_chassis_control_state_ = ChassisControlState::STOPPED;
-    bool last_cycle_chassis_controllable_ = false;
 };
 
 } // namespace nav_executor

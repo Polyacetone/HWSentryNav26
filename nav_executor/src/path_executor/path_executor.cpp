@@ -63,26 +63,37 @@ StepExecutionPreview PathExecutor::preview_step_execution(
 
 // ═══════════════════════ 辅助 ════════════════════════════════
 
-void PathExecutor::sync_mpc_context(const ExecutorInput& input, const bool allow_observer_update) {
+void PathExecutor::ingest_chassis_state(
+    const ChassisMotionState& chassis_state,
+    const uint64_t state_sequence,
+    const uint8_t leg_mode,
+    const uint8_t comp_stage,
+    const bool history_discontinuous
+) {
     mpc_controller_->set_command_state(mpc_command_state_, mpc_command_rate_);
-    if (input.observation.chassis_state_history_discontinuous) {
+    if (history_discontinuous) {
         reset_mpc_observer(ObserverResetReason::MEASUREMENT_HISTORY_DISCONTINUITY);
     }
-    if (!allow_observer_update) {
+
+    const bool observer_update_allowed = classify_chassis_control_state(
+        leg_mode, comp_stage
+    ) == ChassisControlState::NORMAL
+        && mpc_command_history_ == MpcCommandHistory::TRACKED
+        && has_last_command_output_;
+    if (!observer_update_allowed) {
+        reset_mpc_observer(ObserverResetReason::CONTROL_UNAVAILABLE);
         return;
     }
 
-    for (const ChassisStateSample& sample : input.observation.pending_chassis_state_samples) {
-        if (last_observer_state_sequence_ && sample.sequence <= *last_observer_state_sequence_) {
-            continue;
-        }
-        if (last_observer_state_sequence_
-            && sample.sequence != *last_observer_state_sequence_ + 1) {
-            reset_mpc_observer(ObserverResetReason::MEASUREMENT_HISTORY_DISCONTINUITY);
-        }
-        mpc_controller_->update_observer(sample.state, sample.sequence);
-        last_observer_state_sequence_ = sample.sequence;
+    if (last_observer_state_sequence_ && state_sequence <= *last_observer_state_sequence_) {
+        return;
     }
+    if (last_observer_state_sequence_
+        && state_sequence != *last_observer_state_sequence_ + 1) {
+        reset_mpc_observer(ObserverResetReason::STATE_SEQUENCE_GAP);
+    }
+    mpc_controller_->update_observer(chassis_state, state_sequence);
+    last_observer_state_sequence_ = state_sequence;
 }
 
 void PathExecutor::reset_mpc_observer(const ObserverResetReason reason) {
@@ -195,9 +206,7 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
     const bool command_blocked = chassis_control_state == ChassisControlState::BLOCKED;
     const bool chassis_controllable = chassis_control_state == ChassisControlState::NORMAL;
     const bool resumed_from_stopped = chassis_controllable && last_cycle_chassis_control_state_ == ChassisControlState::STOPPED;
-    const bool entered_controllable = chassis_controllable && !last_cycle_chassis_controllable_;
     last_cycle_chassis_control_state_ = chassis_control_state;
-    last_cycle_chassis_controllable_ = chassis_controllable;
 
     // 全局中断优先：底盘 Dead 直接外部拦截，不进入 FSM。
     if (chassis_dead) {
@@ -218,20 +227,11 @@ ExecutorOutput PathExecutor::update(const ExecutorInput& input) {
         return out;
     }
 
-    if (entered_controllable) {
-        RCLCPP_DEBUG(logger_, "Chassis entered mature control state: resetting Luenberger observer");
-        reset_mpc_observer(ObserverResetReason::EXPLICIT_REQUEST);
-    }
     if (command_blocked) {
         invalidate_mpc_command_history(ObserverResetReason::CONTROL_UNAVAILABLE);
     }
 
     const MotionState prev_state = last_motion_state_;
-    const bool observer_update_allowed = chassis_controllable
-        && mpc_command_history_ == MpcCommandHistory::TRACKED
-        && has_last_command_output_
-        && last_command_output_.mode == chassis_mode::NORMAL;
-    sync_mpc_context(input, observer_update_allowed);
 
     const bool has_active_path = static_cast<bool>(input.intent.active_path);
     const bool has_path = has_active_path && input.route

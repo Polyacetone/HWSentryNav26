@@ -173,16 +173,10 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
 
     remaining_energy_filter_alpha_ = declare_parameter<double>("node.remaining_energy_filter_alpha");
     const double chassis_status_timeout_seconds = declare_parameter<double>("node.chassis_status_timeout_seconds");
-    const int64_t chassis_state_queue_capacity = declare_parameter<int64_t>(
-        "node.chassis_state_queue_capacity"
-    );
     require_parameter(
-        positive_finite(chassis_status_timeout_seconds)
-            && chassis_state_queue_capacity > 0
-            && chassis_state_queue_capacity <= 1024,
-        "chassis status timeout must be positive and queue capacity must be in [1, 1024]"
+        positive_finite(chassis_status_timeout_seconds),
+        "chassis status timeout must be finite and positive"
     );
-    chassis_state_queue_capacity_ = static_cast<size_t>(chassis_state_queue_capacity);
     chassis_status_timeout_ = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(chassis_status_timeout_seconds)
     );
@@ -254,6 +248,8 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
         }
     );
 
+    // ChassisStatus 是权威 20 Hz 控制时钟。QoS depth=1 有意丢弃过期积压，
+    // 每个实际送达的最新状态只触发一次控制计算。
     chassis_status_sub_ = create_subscription<interfaces::msg::ChassisStatus>(
         declare_parameter<std::string>("node.topics.chassis_status_sub"), 1,
         [this](const interfaces::msg::ChassisStatus::SharedPtr msg) { chassis_status_callback(msg); }
@@ -288,7 +284,10 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
 
     global_path_pub_ = create_publisher<nav_msgs::msg::Path>(declare_parameter<std::string>("node.topics.global_path_pub"), 1);
     chassis_cmd_pub_ = create_publisher<interfaces::msg::ChassisCmd>(declare_parameter<std::string>("node.topics.chassis_cmd_pub"), 1);
-    control_timer_ = create_wall_timer(std::chrono::duration<double>(MPC_DT), [this]() { control_tick(); });
+    chassis_status_watchdog_timer_ = create_wall_timer(
+        std::chrono::duration<double>(MPC_DT),
+        [this]() { chassis_status_watchdog_tick(); }
+    );
 }
 
 NavExecutorNode::~NavExecutorNode() {

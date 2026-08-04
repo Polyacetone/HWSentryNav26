@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -62,6 +61,7 @@ private:
     void local_cost_maps_callback(const interfaces::msg::CostMaps::SharedPtr msg);
     void spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg);
     void control_tick();
+    void chassis_status_watchdog_tick();
 
     // ─── 工具 ───
     bool get_chassis_pose(Eigen::Vector3d& chassis_pose) const;
@@ -98,7 +98,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr debug_mpc_path_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr debug_minco_trajectory_pub_;
     rclcpp::Publisher<interfaces::msg::NavExecutorDiag>::SharedPtr debug_diag_pub_;
-    rclcpp::TimerBase::SharedPtr control_timer_;
+    rclcpp::TimerBase::SharedPtr chassis_status_watchdog_timer_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 
@@ -140,14 +140,9 @@ private:
 
     ChassisMotionState chassis_state_{};
     uint64_t chassis_state_sequence_ = 0;
-    std::deque<ChassisStateSample> pending_chassis_state_samples_;
-    size_t chassis_state_queue_capacity_ = 8;
     bool chassis_state_history_discontinuous_ = false;
     bool chassis_state_stale_ = false;
-    uint64_t chassis_state_queue_overflow_count_ = 0;
-    // 底盘状态流 liveness：最后一次有效 ChassisStatus 的接收时刻。
-    // 控制 tick 不要求每周期都有新序列号（20Hz 状态与 20Hz 控制同频时会因相位抖动
-    // 导致控制率减半），只要求状态流没有断流；断流则停止发令（fail-safe）。
+    // 底盘状态到达直接驱动控制；独立 watchdog 只负责断流 fail-safe。
     std::chrono::steady_clock::time_point last_chassis_status_time_{};
     std::chrono::steady_clock::duration chassis_status_timeout_{std::chrono::milliseconds(100)};
     bool chassis_state_valid_ = false;

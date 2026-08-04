@@ -2,11 +2,36 @@
 #include <nav_executor/path_executor/mpc/mpc_utils.hpp>
 #include <nav_executor/path_executor/mpc/lpv_model.hpp>
 
+#include <cmath>
+
 namespace nav_executor {
 
 // ── Solver 辅助模板 ──
 
 namespace {
+
+double reconstruct_hidden_state(
+    const ChassisMotionState& chassis_state,
+    const Eigen::Vector2d& command,
+    const LPVKinematicModelParams& params
+) {
+    const LPVDiscreteModel model = build_lpv_discrete_model(
+        params, schedule_rho_from_state(chassis_state, params)
+    );
+    const LPVNonlinearEval nonlinear = evaluate_lpv_nonlinear(
+        chassis_state.velocity, chassis_state.omega, model
+    );
+    constexpr double MIN_COUPLING = 1e-3;
+    if (std::abs(model.ad10) < MIN_COUPLING) return 0.0;
+
+    const double hidden_state = (
+        chassis_state.velocity
+        - model.ad11 * chassis_state.velocity
+        - model.bd1 * command.x()
+        - model.gd1 * nonlinear.nl
+    ) / model.ad10;
+    return std::isfinite(hidden_state) ? hidden_state : 0.0;
+}
 
 CapabilityProfile tightened_nominal_capability(
     const CapabilityProfile& capability,
@@ -377,7 +402,12 @@ StateVec MPCSolver::make_initial_state(
     x0(ix::X) = pose.x();
     x0(ix::Y) = pose.y();
     x0(ix::THETA) = pose.z();
-    x0(ix::XH) = observer_.validated() ? observer_.hidden_state_estimate() : 0.0;
+    // initialized 表示 hidden state 已与当前测量代数对齐；validated 只用于决定
+    // ancillary feedback 是否可启用。Observer 不可用时也重构自洽初态，避免把
+    // 当前实测速度与冻结或无物理依据的 xh=0 拼接进同一 rollout。
+    x0(ix::XH) = observer_.initialized()
+        ? observer_.hidden_state_estimate()
+        : reconstruct_hidden_state(chassis_state, current_command, params_.kinematic_model);
     x0(ix::V) = chassis_state.velocity;
     x0(ix::W) = chassis_state.omega;
     x0(ix::V_CMD) = current_command.x();

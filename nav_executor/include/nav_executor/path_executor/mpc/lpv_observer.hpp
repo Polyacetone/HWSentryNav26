@@ -20,6 +20,7 @@ public:
     void reset(ObserverResetReason reason);
 
     [[nodiscard]] bool validated() const { return validated_; }
+    [[nodiscard]] bool initialized() const { return initialized_; }
     [[nodiscard]] double hidden_state_estimate() const { return x_h_hat_; }
     [[nodiscard]] const ObserverDiagnostics& diagnostics() const { return diagnostics_; }
 

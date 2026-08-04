@@ -75,23 +75,18 @@ void NavExecutorNode::chassis_status_callback(const interfaces::msg::ChassisStat
     remaining_energy_buffercap_filtered_ = remaining_energy_filter_alpha_ * static_cast<double>(msg->remaining_energy_buffercap)
         + (1.0 - remaining_energy_filter_alpha_) * remaining_energy_buffercap_filtered_;
 
-    if (pending_chassis_state_samples_.size() >= chassis_state_queue_capacity_) {
-        pending_chassis_state_samples_.pop_front();
-        chassis_state_history_discontinuous_ = true;
-        ++chassis_state_queue_overflow_count_;
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 1000,
-            "Chassis state queue overflowed (%zu slots, %lu total); dropping oldest sample",
-            chassis_state_queue_capacity_,
-            static_cast<unsigned long>(chassis_state_queue_overflow_count_)
-        );
-    }
-    pending_chassis_state_samples_.push_back(ChassisStateSample {
-        .state = received_state,
-        .sequence = chassis_state_sequence_,
-    });
     chassis_state_valid_ = true;
+    chassis_state_stale_ = false;
     last_chassis_status_time_ = receive_stamp;
+
+    executor_->ingest_chassis_state(
+        received_state,
+        chassis_state_sequence_,
+        chassis_leg_mode_,
+        comp_stage_,
+        std::exchange(chassis_state_history_discontinuous_, false)
+    );
+    control_tick();
 }
 
 void NavExecutorNode::spin_cmd_callback(const interfaces::msg::SpinCmd::SharedPtr msg) {
@@ -153,7 +148,7 @@ void NavExecutorNode::local_cost_maps_callback(const interfaces::msg::CostMaps::
     refresh_planner_obstacles();
 }
 
-// ROS 回调只写缓存；任务/运动状态转移在 control_tick 中完成。
+// 每个有效底盘状态驱动一次完整控制周期，避免两个独立 20 Hz 时钟发生相位混叠。
 
 void NavExecutorNode::control_tick() {
     const auto control_stamp = std::chrono::steady_clock::now();
@@ -187,20 +182,6 @@ void NavExecutorNode::control_tick() {
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_INVALID_CHASSIS_STATE);
         return;
     }
-    // 控制 tick 与状态流解耦：没有新样本时沿用最新状态，有多个新样本时由
-    // PathExecutor 按 FIFO 顺序推进 observer。这里只负责断流 fail-safe。
-    if (control_stamp - last_chassis_status_time_ >= chassis_status_timeout_) {
-        if (!chassis_state_stale_) {
-            executor_->notify_chassis_state_unavailable();
-            pending_chassis_state_samples_.clear();
-            chassis_state_history_discontinuous_ = true;
-            chassis_state_stale_ = true;
-        }
-        publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_NO_NEW_CHASSIS_STATE);
-        return;
-    }
-    chassis_state_stale_ = false;
-
     Eigen::Vector3d chassis_pose_map;
     if (!get_chassis_pose(chassis_pose_map)) {
         publish_gate(interfaces::msg::NavExecutorDiag::CYCLE_CHASSIS_POSE_UNAVAILABLE);
@@ -367,12 +348,6 @@ void NavExecutorNode::control_tick() {
     ein.route = route_estimate;
     ein.observation.chassis_pose_map = chassis_pose_map;
     ein.observation.chassis_state = chassis_state_;
-    ein.observation.pending_chassis_state_samples.assign(
-        pending_chassis_state_samples_.begin(), pending_chassis_state_samples_.end()
-    );
-    pending_chassis_state_samples_.clear();
-    ein.observation.chassis_state_history_discontinuous =
-        std::exchange(chassis_state_history_discontinuous_, false);
     ein.observation.chassis_leg_mode = chassis_leg_mode_;
     ein.observation.comp_stage = comp_stage_;
     ein.observation.stamp = stamp;
@@ -425,6 +400,30 @@ void NavExecutorNode::control_tick() {
         }
         debug_final_cost_map_pub_->publish(grid_msg);
     }
+}
+
+void NavExecutorNode::chassis_status_watchdog_tick() {
+    if (!chassis_state_valid_
+        || last_chassis_status_time_ == std::chrono::steady_clock::time_point{}
+        || chassis_state_stale_) {
+        return;
+    }
+
+    const auto watchdog_stamp = std::chrono::steady_clock::now();
+    if (watchdog_stamp - last_chassis_status_time_ < chassis_status_timeout_) return;
+
+    chassis_state_stale_ = true;
+    chassis_state_history_discontinuous_ = true;
+    executor_->notify_chassis_state_unavailable();
+    ++control_cycle_;
+    publish_diagnostics(
+        interfaces::msg::NavExecutorDiag::CYCLE_NO_NEW_CHASSIS_STATE,
+        now(),
+        task_->diagnostics(watchdog_stamp),
+        std::nullopt,
+        nullptr,
+        task_->active_path()
+    );
 }
 
 // ═══════════════════════ 工具 ════════════════════════════════
