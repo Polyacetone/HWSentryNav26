@@ -21,7 +21,6 @@ struct StepBlockReplanParams {
     bool enable;
     double lookahead_distance;
     double sample_resolution;
-    double predicted_obstacle_ratio_threshold;
 };
 
 struct PerformanceReplanParams { double lookahead_distance; };

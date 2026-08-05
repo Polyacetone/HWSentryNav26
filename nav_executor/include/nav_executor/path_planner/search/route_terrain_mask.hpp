@@ -36,6 +36,10 @@ public:
     [[nodiscard]] Layers compute(const std::optional<MincoTrajectory>& global_path) const;
 
     [[nodiscard]] DirectionMap::ConstPtr base_direction_map() const { return base_direction_map_; }
+    // 未经路径擦除的连续地形影响层：raw direction magnitude 映射到 [0, 255]。
+    [[nodiscard]] CostMap::ConstPtr base_terrain_cost_layer() const {
+        return base_terrain_cost_layer_;
+    }
 
 private:
     struct KernelCell {
@@ -50,7 +54,7 @@ private:
     RouteTerrainMaskParams params_;
 
     DirectionMap::ConstPtr base_direction_map_;
-    std::vector<uint8_t> base_terrain_cost_data_;
+    CostMap::ConstPtr base_terrain_cost_layer_;
 
     std::vector<KernelCell> kernel_;
 };

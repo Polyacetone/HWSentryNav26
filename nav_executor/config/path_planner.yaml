@@ -8,7 +8,7 @@
         goal_reached_distance: 0.5 # 机器人到最终可执行目标小于该距离时直接判定到达（米）
 
       dynamic_prediction:
-        horizon_seconds: 2.0 # 地形本体动态障碍的逐格 max 预测窗口，0 表示只用当前帧
+        horizon_seconds: 2.0 # 地形加权动态障碍的逐格 max 预测窗口，0 表示只用当前帧
 
       directional_terrain:
         min_alignment_cosine: 0.8 # 穿越方向与地形方向的最小绝对余弦；搜索和最终验收共用的硬约束
@@ -86,17 +86,17 @@
           body_norm_lo: 0.9 # 助跑源门控下界；非本体膨胀 cap=229/255 小于该值
           body_norm_hi: 0.95 # 助跑源门控上界；仅物理本体附近达到完整强度
           saturation_length: 0.05 # 前向地形暴露量的饱和弧长（米）
-        max_iterations: 2000 # block-scaled Armijo L-BFGS 最大 accepted step 数
+        max_iterations: 3000 # block-scaled Armijo L-BFGS 最大 accepted step 数
         optimizer:
           position_scale: 0.5 # 每个 2D waypoint block 的物理尺度（米）
           physical_time_scale: 0.1 # 每个 time block 的目标物理尺度（秒）
           max_virtual_time_scale: 20.0 # softplus Jacobian 很小时 virtual-time scale 的上限
           max_function_evaluations: 4000 # 含初始评估及所有 rejected trial
           history_size: 8 # 保留的 L-BFGS (s,y) 对数
-          gradient_tolerance: 1.0e-5 # max_block ‖D_b g_b‖₂ 绝对一阶最优性阈值
-          cost_window_relative_tolerance: 1.0e-5 # accepted incumbent 窗口首尾的累计相对目标改善阈值
+          gradient_tolerance: 3.0e-6 # max_block ‖D_b g_b‖₂ 绝对一阶最优性阈值
+          cost_window_relative_tolerance: 3.0e-6 # accepted incumbent 窗口首尾的累计相对目标改善阈值
           cost_window_size: 10 # 实际收益判定覆盖的 accepted step 数
-          cost_plateau_gradient_tolerance: 1.0e-4 # cost plateau 还须满足的宽松梯度阈值，否则进入恢复
+          cost_plateau_gradient_tolerance: 3.0e-5 # cost plateau 还须满足的宽松梯度阈值，否则进入恢复
           scaled_step_tolerance: 1.0e-12 # 归一化 block 步长停滞阈值
           step_control:
             initial_step_cap: 0.5 # Armijo 首次试探的最大归一化 block 步长

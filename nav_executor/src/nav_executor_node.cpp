@@ -194,6 +194,7 @@ void NavExecutorNode::control_tick() {
         .global_static = global_cost_map_,
         .dynamic_current = current_cost_map_,
         .dynamic_predictions = prediction_maps_,
+        .base_terrain_cost = route_terrain_mask_->base_terrain_cost_layer(),
         .base_direction = global_direction_map_,
     };
     const PerformanceState performance {
@@ -244,6 +245,7 @@ void NavExecutorNode::control_tick() {
 
     FollowerObstacleView follower_obstacles = build_follower_obstacle_view(
         obstacle_layers,
+        planner_obstacles_.terrain_dynamic_timeline,
         active_path_before_update ? active_path_before_update->step_cost_layer : nullptr,
         active_path_before_update ? active_path_before_update->masked_direction_map : nullptr,
         prediction_dt_, obstacle_occupied_threshold_
@@ -316,6 +318,7 @@ void NavExecutorNode::control_tick() {
 
     follower_obstacles = build_follower_obstacle_view(
         obstacle_layers,
+        planner_obstacles_.terrain_dynamic_timeline,
         task_output.command.active_path ? task_output.command.active_path->step_cost_layer : nullptr,
         task_output.command.active_path ? task_output.command.active_path->masked_direction_map : nullptr,
         prediction_dt_, obstacle_occupied_threshold_

@@ -16,10 +16,10 @@
             mid_leg: { chassis_mode: 7, capability: medium, velocity_target: { min: 1.6, max: 2.4 }, requires_high_perf: false, run_up: 0.2 }
         step_l2:
           up: [high_leg_l2]
-          down: [high_leg_down]
+          down: [disabled]
           modes:
             high_leg_l2: { chassis_mode: 4, capability: low, velocity_target: { min: 1.4, max: 1.8 }, requires_high_perf: false, run_up: 0.5 }
-            high_leg_down: { chassis_mode: 8, capability: medium, velocity_target: { min: 0.8, max: 1.0 }, requires_high_perf: false, run_up: 0.5 }
+            high_leg_down: { chassis_mode: 8, capability: medium, velocity_target: { min: 0.8, max: 1.0 }, requires_high_perf: false, run_up: 0.8 }
             jump_down: { chassis_mode: 9, capability: medium, velocity_target: { min: 1.6, max: 2.0 }, requires_high_perf: true, run_up: 1.0 }
         fly_slope:
           up: [disabled]

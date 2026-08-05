@@ -18,13 +18,16 @@ void RouteTerrainMask::initialize(const CostMap& cost_map, DirectionMap::ConstPt
 
     base_direction_map_ = std::move(direction_map);
 
-    base_terrain_cost_data_.resize(base_direction_map_->data.size());
+    std::vector<uint8_t> base_terrain_cost_data(base_direction_map_->data.size());
     for (size_t idx = 0; idx < base_direction_map_->data.size(); ++idx) {
         const double mag = base_direction_map_->data[idx].norm();
-        base_terrain_cost_data_[idx] = static_cast<uint8_t>(
+        base_terrain_cost_data[idx] = static_cast<uint8_t>(
             std::clamp(mag * 255.0, 0.0, 255.0)
         );
     }
+    base_terrain_cost_layer_ = std::make_shared<const CostMap>(
+        base_direction_map_->geometry, std::move(base_terrain_cost_data)
+    );
 
     build_kernel(base_direction_map_->geometry.resolution());
 }
@@ -32,7 +35,7 @@ void RouteTerrainMask::initialize(const CostMap& cost_map, DirectionMap::ConstPt
 RouteTerrainMask::Layers RouteTerrainMask::compute(const std::optional<MincoTrajectory>& global_path) const {
     if (!base_direction_map_) return {};
 
-    std::vector<double> max_alpha(base_terrain_cost_data_.size(), 0.0);
+    std::vector<double> max_alpha(base_terrain_cost_layer_->data.size(), 0.0);
 
     if (global_path && !kernel_.empty()) {
         const auto& trajectory = *global_path;
@@ -72,10 +75,10 @@ RouteTerrainMask::Layers RouteTerrainMask::compute(const std::optional<MincoTraj
     }
 
     // 路径附近降低方向地形代价，使本路线选择的穿越通道保持可通行。
-    std::vector<uint8_t> step_cost_data = base_terrain_cost_data_;
+    std::vector<uint8_t> step_cost_data = base_terrain_cost_layer_->data;
     for (size_t idx = 0; idx < step_cost_data.size(); ++idx) {
         const double a = std::clamp(max_alpha[idx], 0.0, 1.0);
-        const double base = static_cast<double>(base_terrain_cost_data_[idx]);
+        const double base = static_cast<double>(base_terrain_cost_layer_->data[idx]);
         const double v = base * (1.0 - a);
         step_cost_data[idx] = static_cast<uint8_t>(std::clamp(std::lround(v), 0l, 255l));
     }

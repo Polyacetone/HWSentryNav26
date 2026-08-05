@@ -14,6 +14,20 @@ void require_same_geometry(const CostMap& map, const GridGeometry& geometry) {
     }
 }
 
+CostMap::ConstPtr apply_terrain_influence(
+    const CostMap& dynamic_cost,
+    const CostMap& terrain_cost
+) {
+    require_same_geometry(dynamic_cost, terrain_cost.geometry);
+    std::vector<uint8_t> weighted(dynamic_cost.data.size(), 0);
+    for (size_t index = 0; index < weighted.size(); ++index) {
+        const unsigned int product = static_cast<unsigned int>(dynamic_cost.data[index])
+            * static_cast<unsigned int>(terrain_cost.data[index]);
+        weighted[index] = static_cast<uint8_t>((product + 127U) / 255U);
+    }
+    return std::make_shared<const CostMap>(terrain_cost.geometry, std::move(weighted));
+}
+
 } // anonymous namespace
 
 PlannerObstacleView build_planner_obstacle_view(
@@ -23,46 +37,40 @@ PlannerObstacleView build_planner_obstacle_view(
 ) {
     PlannerObstacleView view;
     view.global_static = layers.global_static;
-    if (!layers.global_static || !layers.base_direction) return view;
-    if (!layers.global_static->geometry.same_geometry(layers.base_direction->geometry)) {
-        throw std::invalid_argument("Global cost and direction map geometry mismatch");
-    }
+    if (!layers.global_static || !layers.base_terrain_cost) return view;
+    require_same_geometry(*layers.base_terrain_cost, layers.global_static->geometry);
 
-    std::vector<CostMap::ConstPtr> frames;
-    if (layers.dynamic_current) frames.push_back(layers.dynamic_current);
-
-    if (prediction_horizon_seconds > 0.0 && prediction_dt > 0.0) {
-        const size_t prediction_count = std::min(
-            layers.dynamic_predictions.size(),
-            static_cast<size_t>(std::floor(prediction_horizon_seconds / prediction_dt))
-        );
-        frames.insert(
-            frames.end(), layers.dynamic_predictions.begin(),
-            layers.dynamic_predictions.begin() + static_cast<std::ptrdiff_t>(prediction_count)
-        );
-    }
-
-    if (frames.empty()) {
+    if (!layers.dynamic_current) {
         view.hard_cost = layers.global_static;
         return view;
     }
 
     const GridGeometry& geometry = layers.global_static->geometry;
-    for (const CostMap::ConstPtr& frame : frames) {
-        if (!frame) throw std::invalid_argument("Null dynamic obstacle prediction frame");
-        require_same_geometry(*frame, geometry);
+    view.terrain_dynamic_timeline.reserve(layers.dynamic_predictions.size() + 1);
+    view.terrain_dynamic_timeline.push_back(apply_terrain_influence(
+        *layers.dynamic_current, *layers.base_terrain_cost
+    ));
+    for (const CostMap::ConstPtr& prediction : layers.dynamic_predictions) {
+        if (!prediction) throw std::invalid_argument("Null dynamic obstacle prediction frame");
+        view.terrain_dynamic_timeline.push_back(apply_terrain_influence(
+            *prediction, *layers.base_terrain_cost
+        ));
     }
 
+    size_t planning_frame_count = 1;
+    if (prediction_horizon_seconds > 0.0 && prediction_dt > 0.0) {
+        planning_frame_count += std::min(
+            layers.dynamic_predictions.size(),
+            static_cast<size_t>(std::floor(prediction_horizon_seconds / prediction_dt))
+        );
+    }
     std::vector<uint8_t> terrain_dynamic(layers.global_static->data.size(), 0);
-    for (int y = 0; y < geometry.height(); ++y) {
-        for (int x = 0; x < geometry.width(); ++x) {
-            const Eigen::Vector2i cell {x, y};
-            if (!layers.base_direction->is_terrain_body_cell(cell)) continue;
-            const size_t index = static_cast<size_t>(y) * static_cast<size_t>(geometry.width())
-                + static_cast<size_t>(x);
-            for (const CostMap::ConstPtr& frame : frames) {
-                terrain_dynamic[index] = std::max(terrain_dynamic[index], frame->data[index]);
-            }
+    for (size_t index = 0; index < terrain_dynamic.size(); ++index) {
+        for (size_t frame = 0; frame < planning_frame_count; ++frame) {
+            terrain_dynamic[index] = std::max(
+                terrain_dynamic[index],
+                view.terrain_dynamic_timeline[frame]->data[index]
+            );
         }
     }
 
@@ -73,6 +81,7 @@ PlannerObstacleView build_planner_obstacle_view(
 
 FollowerObstacleView build_follower_obstacle_view(
     const ObstacleLayers& layers,
+    const std::vector<CostMap::ConstPtr>& terrain_dynamic_timeline,
     const CostMap::ConstPtr& step_cost_layer,
     const DirectionMap::ConstPtr& route_direction,
     const double prediction_dt,
@@ -84,11 +93,7 @@ FollowerObstacleView build_follower_obstacle_view(
     view.prediction_dt = prediction_dt;
     view.occupied_threshold = occupied_threshold;
 
-    if (layers.dynamic_current) view.dynamic_timeline.push_back(layers.dynamic_current);
-    view.dynamic_timeline.insert(
-        view.dynamic_timeline.end(),
-        layers.dynamic_predictions.begin(), layers.dynamic_predictions.end()
-    );
+    view.terrain_dynamic_timeline = terrain_dynamic_timeline;
     if (!layers.global_static) return view;
 
     view.hard_route_cost = step_cost_layer

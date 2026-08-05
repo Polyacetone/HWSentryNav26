@@ -157,14 +157,11 @@ NavExecutorNode::NavExecutorNode(const rclcpp::NodeOptions& options) : Node("nav
     step_block_params_ = {
         .enable = declare_parameter<bool>("task_manager.route_monitor.step_block.enable"),
         .lookahead_distance = declare_parameter<double>("task_manager.route_monitor.step_block.lookahead_distance"),
-        .sample_resolution = declare_parameter<double>("task_manager.route_monitor.step_block.sample_resolution"),
-        .predicted_obstacle_ratio_threshold = declare_parameter<double>("task_manager.route_monitor.step_block.predicted_obstacle_ratio_threshold")
+        .sample_resolution = declare_parameter<double>("task_manager.route_monitor.step_block.sample_resolution")
     };
     require_parameter(
         nonnegative_finite(step_block_params_.lookahead_distance)
-        && positive_finite(step_block_params_.sample_resolution)
-        && step_block_params_.predicted_obstacle_ratio_threshold >= 0.0
-        && step_block_params_.predicted_obstacle_ratio_threshold <= 1.0,
+        && positive_finite(step_block_params_.sample_resolution),
         "route_monitor step_block parameters are invalid"
     );
     performance_replan_params_ = {
@@ -312,6 +309,7 @@ void NavExecutorNode::refresh_planner_obstacles() {
                 .global_static = global_cost_map_,
                 .dynamic_current = current_cost_map_,
                 .dynamic_predictions = prediction_maps_,
+                .base_terrain_cost = route_terrain_mask_->base_terrain_cost_layer(),
                 .base_direction = global_direction_map_,
             },
             prediction_dt_, dynamic_prediction_horizon_seconds_
