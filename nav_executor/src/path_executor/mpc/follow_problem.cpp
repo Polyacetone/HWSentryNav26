@@ -10,7 +10,7 @@ namespace nav_executor {
 namespace {
 
 constexpr double COST_EPS = 1e-9;
-constexpr int FOLLOW_RESIDUAL_DIM = 21;
+constexpr int FOLLOW_RESIDUAL_DIM = 23;
 using FollowResidualVec = Eigen::Matrix<double, FOLLOW_RESIDUAL_DIM, 1>;
 
 CostMap::CostSample sample_cost_or_lethal(
@@ -134,19 +134,28 @@ FollowResidualVec follow_residual_impl(
             const Eigen::Vector2d& direction = step->dir_map;
             const double cross = std::cos(theta) * direction.y()
                 - std::sin(theta) * direction.x();
-            residual(15) = traversal_weights.direction * gate * std::abs(cross);
+            // 最小二乘会自行平方残差；保留 cross 的符号，使中心差分在完全对齐处
+            // 仍能得到正确的方向雅可比和 Gauss-Newton 曲率。
+            residual(15) = traversal_weights.direction * gate * cross;
 
-            // 台阶最低冲刺速度只在台阶约束窗内生效；普通 FOLLOW 允许零速。
+            // 约束真实路径方向速度而非车身纵向速度，避免通过偏航降低路径投影速度、
+            // 同时维持较高纵向速度来分别满足路径跟踪与地形速度窗。
             const auto& target = step->velocity_window;
-            const double velocity_error = v_actual < target.min
-                ? target.min - v_actual
-                : (v_actual > target.max ? v_actual - target.max : 0.0);
+            const double velocity_error = projected_velocity < target.min
+                ? target.min - projected_velocity
+                : (projected_velocity > target.max
+                    ? projected_velocity - target.max : 0.0);
             residual(16) = traversal_weights.velocity * gate * velocity_error;
             residual(17) = traversal_weights.angular_velocity_command * gate * omega_cmd;
             residual(18) = traversal_weights.angular_velocity_predicted * gate * omega_actual;
             residual(19) = traversal_weights.velocity_command_smoothness * gate * dv_cmd;
+            const StateVec next_state = mpc_dynamics(x, u, model);
             residual(20) = traversal_weights.velocity_predicted_smoothness * gate
-                * (mpc_dynamics(x, u, model)(ix::V) - v_actual);
+                * (next_state(ix::V) - v_actual);
+            residual(21) = traversal_weights.angular_velocity_command_smoothness
+                * gate * domega_cmd;
+            residual(22) = traversal_weights.angular_velocity_predicted_smoothness
+                * gate * (next_state(ix::W) - omega_actual);
         }
     }
 

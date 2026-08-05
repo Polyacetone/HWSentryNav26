@@ -1065,6 +1065,8 @@ MPCParams NavExecutorNode::load_mpc_params() {
                 .angular_velocity_predicted = declare_parameter<double>("mpc.follow.traversal_target_weights.angular_velocity_predicted"),
                 .velocity_command_smoothness = declare_parameter<double>("mpc.follow.traversal_target_weights.velocity_command_smoothness"),
                 .velocity_predicted_smoothness = declare_parameter<double>("mpc.follow.traversal_target_weights.velocity_predicted_smoothness"),
+                .angular_velocity_command_smoothness = declare_parameter<double>("mpc.follow.traversal_target_weights.angular_velocity_command_smoothness"),
+                .angular_velocity_predicted_smoothness = declare_parameter<double>("mpc.follow.traversal_target_weights.angular_velocity_predicted_smoothness"),
             },
             .environment_weights = {
                 .obstacle = declare_parameter<double>("mpc.follow.environment_weights.obstacle")

@@ -79,6 +79,8 @@ struct MPCTraversalTargetWeights {
     double angular_velocity_predicted;
     double velocity_command_smoothness;
     double velocity_predicted_smoothness;
+    double angular_velocity_command_smoothness;
+    double angular_velocity_predicted_smoothness;
 };
 
 struct MPCFollowEnvironmentWeights {

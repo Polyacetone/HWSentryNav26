@@ -77,7 +77,7 @@
           traversal_velocity_window: 2000.0 # runup 起点至地形出口的 MINCO 内部速度见证窗
           traversal_alignment: 2000.0 # runup 起点至地形出口的方向对齐软约束
           prohibited_traversal: 1000.0 # 往地形禁止方向行驶的惩罚
-          runup_curvature: 100.0 # runup 起点至地形出口的 κ² 正则
+          runup_curvature: 200.0 # runup 起点至地形出口的 κ² 正则
         terrain_gate:
           norm_lo: 0.1 # 方向场模长低于此值时不施加地形软约束
           norm_hi: 0.9 # 方向场模长高于此值时施加完整软约束

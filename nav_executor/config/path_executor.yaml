@@ -11,8 +11,8 @@
         command_history_timeout: 0.4 # 超时后按实测运动状态重建 MPC 指令状态 (s)
 
       traversal_execution:
-        profile_prepare_distance: 2.0 # commit 前开始切换底盘 capability 的距离（米）
-        chassis_activation_distance: 1.0 # commit 前开始发送可撤销地形提示的距离（米）
+        profile_prepare_distance: 2.5 # commit 前开始切换底盘 capability 的距离（米）
+        chassis_activation_distance: 1.5 # commit 前开始发送可撤销地形提示的距离（米）
         fsm_release_distance: 0.3 # 离开物理地形后继续保持 STEPPING 状态的距离（米）
 
       route_terrain_mask:
@@ -55,7 +55,7 @@
           radius_min: 0.5 # 搜索半径下界 (m)
           radius_max: 1.5 # 搜索半径上界 (m)
           radius_samples: 5 # 半径采样数
-          angle_samples: 36 # 角度采样数
+          angle_samples: 72 # 角度采样数
           path_integral_resolution: 0.05 # 路径积分采样精度 (m)
           path_integral_cost_weight: 1.0 # 路径积分中障碍代价权重
           path_integral_step_weight: 1.0 # 路径积分中台阶方向场权重
@@ -81,9 +81,9 @@
         max_iters: 20 # FDDP 求解器最大迭代次数
         progress:
           # 进度上下界由控制硬约束 0 ≤ ṡ ≤ 剩余弧长/Δt 保证，无需越界残差。
-          progress_reward: 0.2 # 每米路径推进线性奖励，防止零速局部最优
-          speed_tracking_weight: 1.6 # 路径速度偏离规划期全局速度剖面的残差权重
-          speed_smoothness_weight: 1.5 # 相邻路径速度变化残差权重
+          progress_reward: 0.1 # 每米路径推进线性奖励，防止零速局部最优
+          speed_tracking_weight: 0.8 # 路径速度偏离规划期全局速度剖面的残差权重
+          speed_smoothness_weight: 0.8 # 相邻路径速度变化残差权重
         rollout_safety:
           enable_lethal_obstacle_check: true # 对 follow rollout 做致命障碍物穿越检测；命中则该 rollout 首帧即被拒绝，本周期改为下发 STOP 命令
           lethal_obstacle_threshold: 250.0 # rollout 插值代价值 >= 该阈值视为致命障碍物
@@ -110,8 +110,8 @@
           contour: 2.0 # 有向路径法向误差残差权重
           lag: 1.2 # 有向路径切向误差残差权重，阻止路径进度空跑
           heading: 1.2 # 独立航向状态误差权重
-          velocity: 0.6 # 有向投影速度 v·cos(θ−θ_path) 相对 ṡ 的参考权重
-          angular_velocity: 0.6 # 几何曲率映射后的角速度参考权重 κ·ṡ
+          velocity: 0.8 # 有向投影速度 v·cos(θ−θ_path) 相对 ṡ 的参考权重
+          angular_velocity: 0.1 # 几何曲率映射后的角速度参考权重 κ·ṡ
         command_weights:
           r_v: 0.01 # 线速度正则
           r_omega: 0.01 # 角速度正则
@@ -122,12 +122,14 @@
         command_dynamics_weights:
           lateral_acceleration: 18.0 # 横向加速度指令（|v_cmd*omega_cmd|）超限惩罚
         traversal_target_weights:
-          velocity: 3.0 # v_actual 对共享台阶速度窗口的软目标
-          direction: 3.0 # 台阶内部穿越方向对齐软目标
-          angular_velocity_command: 0.2 # 台阶内部角速度指令趋零
-          angular_velocity_predicted: 0.8 # 台阶内部预测车身角速度趋零
+          velocity: 2.4 # v_actual 对共享台阶速度窗口的软目标
+          direction: 1.6 # 台阶内部穿越方向对齐软目标
+          angular_velocity_command: 0.6 # 台阶内部角速度指令趋零
+          angular_velocity_predicted: 1.2 # 台阶内部预测车身角速度趋零
           velocity_command_smoothness: 0.6 # 台阶内部线速度指令增量平滑
-          velocity_predicted_smoothness: 1.8 # 台阶内部预测车身速度增量平滑
+          velocity_predicted_smoothness: 1.2 # 台阶内部预测车身速度增量平滑
+          angular_velocity_command_smoothness: 0.6 # 台阶内部角速度指令增量平滑
+          angular_velocity_predicted_smoothness: 1.2 # 台阶内部预测车身角速度增量平滑
         environment_weights:
           obstacle: 8.0 # 避障权重（全局+局部融合代价）
 
