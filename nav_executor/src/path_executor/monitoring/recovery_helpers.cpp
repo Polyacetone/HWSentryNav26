@@ -112,12 +112,6 @@ std::optional<Eigen::Vector2d> find_goal(
     return best_pt;
 }
 
-Eigen::Vector2d rotate_vector(const Eigen::Vector2d& v, const double angle) {
-    const double c = std::cos(angle);
-    const double s = std::sin(angle);
-    return Eigen::Vector2d(c * v.x() - s * v.y(), s * v.x() + c * v.y());
-}
-
 std::optional<double> max_cost_along_segment(
     const CostMap& cost_map,
     const Eigen::Vector2d& a_map,

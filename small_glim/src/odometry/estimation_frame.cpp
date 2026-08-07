@@ -32,7 +32,6 @@ void EstimationFrame::set_T_world_frame(FrameType frame_type, const Eigen::Isome
         default: {
             logger::fatal("estimation_frame", "frame_type must be either of LIDAR or IMU");
             std::exit(EXIT_FAILURE);
-            break;
         }
         case FrameType::LIDAR: {
             T_world_lidar = T;

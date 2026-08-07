@@ -48,8 +48,6 @@ std::optional<Eigen::Vector2d> find_goal(
     const DirectionMap* base_dir_map = nullptr
 );
 
-Eigen::Vector2d rotate_vector(const Eigen::Vector2d& v, double angle);
-
 std::optional<double> max_cost_along_segment(
     const CostMap& cost_map,
     const Eigen::Vector2d& a_map,

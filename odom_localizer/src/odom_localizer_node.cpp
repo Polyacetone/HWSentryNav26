@@ -647,7 +647,7 @@ std::optional<OdomLocalizerNode::PreparedSource> OdomLocalizerNode::prepare_sour
         return std::nullopt;
     }
 
-    PointCloud::Ptr downsampled = source.cloud;
+    PointCloud::Ptr downsampled;
     if (source_.downsample_resolution > 0.0) {
         downsampled = voxelgrid_sampling_omp(*source.cloud, source_.downsample_resolution, general_.num_threads);
     } else {

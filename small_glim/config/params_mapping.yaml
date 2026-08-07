@@ -15,8 +15,8 @@
       imu_refine_max_iterations: 5
 
       # Keyframe selection (relative to last keyframe)
-      keyframe_trans_thresh: 1.0
-      keyframe_rot_thresh: 2.0
+      keyframe_trans_thresh: 0.1 # meters
+      keyframe_rot_thresh: 5.0 # degrees
 
       # Incremental map integration
       downsample_every_n_keyframes: 1000

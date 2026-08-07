@@ -1,5 +1,4 @@
 #include <Eigen/Dense>
-#include <array>
 #include <cmath>
 #include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -128,62 +127,6 @@ private:
 };
 
 MapServerNode::MapServerNode(const rclcpp::NodeOptions& options): Node("map_server", options) {
-    constexpr std::array RENAMED_PARAMETERS {
-        std::pair {
-            "map_inflation.decay_alpha",
-            "global_map.inflation.decay_rate_per_m"
-        },
-        std::pair {
-            "map_inflation.robot_radius_m",
-            "global_map.inflation.full_cost_radius_m"
-        },
-        std::pair {
-            "map_inflation.full_cost_radius_m",
-            "global_map.inflation.full_cost_radius_m"
-        },
-        std::pair {
-            "map_inflation.cutoff_radius_m",
-            "global_map.inflation.cutoff_radius_m"
-        },
-        std::pair {
-            "map_inflation.decay_rate_per_m",
-            "global_map.inflation.decay_rate_per_m"
-        },
-        std::pair {
-            "map_inflation.direction_non_body_magnitude_cap",
-            "global_map.inflation.direction_non_body_magnitude_cap"
-        },
-        std::pair {
-            "local_map.cell_obstacle_point_threshold",
-            "local_map.min_projected_point_density_per_m2"
-        },
-        std::pair {
-            "local_map.min_obstacle_cluster_cells",
-            "local_map.min_obstacle_cluster_area_m2"
-        },
-        std::pair {
-            "local_map.object_tracker.morph_close_kernel_size",
-            "local_map.object_tracker.morph_close_radius_m"
-        },
-        std::pair {
-            "local_map.object_tracker.min_blob_area",
-            "local_map.object_tracker.min_tracking_component_area_m2"
-        },
-        std::pair {
-            "local_map.object_tracker.local_grid_size",
-            "local_map.object_tracker.local_grid_extent_m"
-        },
-    };
-    const auto& parameter_overrides = get_node_parameters_interface()->get_parameter_overrides();
-    for (const auto& [old_name, new_name] : RENAMED_PARAMETERS) {
-        if (parameter_overrides.contains(old_name)) {
-            throw std::invalid_argument(
-                "parameter '" + std::string(old_name) + "' was replaced by metric parameter '"
-                + std::string(new_name) + "'; update the parameter file"
-            );
-        }
-    }
-
     // 参数加载
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
