@@ -9,12 +9,14 @@
 
 namespace nav_executor {
 
-// 固定几何上的唯一运动时标。能力边界与 MPC Follow 共用 CapabilityProfile，
-// 以 z(s)=v(s)² 为决策变量在优化问题内施加硬约束：
+// 固定几何上的 nominal 运动时标。能力边界与 MPC Follow 共用 CapabilityProfile，
+// 以 z(s)=v(s)² 为决策变量塑造参考速度：
 //   角速度      |κ|·√z ≤ ω_max
 //   切向加速度  |dz/ds|/2 ≤ a_t_max
 //   角加速度    |κ'·z + κ·(dz/ds)/2| ≤ α_max
 // 侧向加速度 |κ|·z ≤ a_lat_max 和台阶速度窗与 MPC 一致，均为软约束。
+// 实测初速仅作为 nominal 初速的上界；若不能衔接局部包络或终点零速，profile
+// 自动采用反向可达初速。真实状态与 nominal profile 的偏差由 MPC 软跟踪消化。
 // 发布只检查 profile 的有限性和弧长/时间参数化契约；动力学包络用于塑形，不能
 // 因其离散近似误差把已经得到的优化解再次拒绝。
 class SpeedProfileOptimizer {

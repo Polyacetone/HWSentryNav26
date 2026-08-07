@@ -314,7 +314,7 @@ std::vector<NodeLimit> build_limits(
 std::optional<std::vector<double>> reachable_seed(
     const std::vector<double>& nodes,
     const std::vector<NodeLimit>& limits,
-    const double initial_speed_squared,
+    const double candidate_initial_speed_squared,
     std::string& error
 ) {
     if (nodes.size() < 2 || nodes.size() != limits.size()) {
@@ -322,7 +322,7 @@ std::optional<std::vector<double>> reachable_seed(
         return std::nullopt;
     }
     std::vector<double> speed_squared(nodes.size(), 0.0);
-    speed_squared[0] = initial_speed_squared;
+    speed_squared[0] = candidate_initial_speed_squared;
     for (size_t i = 0; i + 1 < nodes.size(); ++i) {
         const double distance = nodes[i + 1] - nodes[i];
         if (!std::isfinite(distance) || distance <= 0.0
@@ -345,11 +345,6 @@ std::optional<std::vector<double>> reachable_seed(
             speed_squared[i + 1] + 2.0 * limits[i].acceleration * distance
         );
     }
-    if (speed_squared.front() + EPS < initial_speed_squared) {
-        error = "initial speed cannot reach the terminal or local speed envelope";
-        return std::nullopt;
-    }
-    speed_squared.front() = initial_speed_squared;
     return speed_squared;
 }
 
@@ -491,7 +486,6 @@ ChainProblem build_chain_problem(
 bool validate_profile_contract(
     const MincoTrajectory& geometry,
     const PathSpeedProfile& profile,
-    const double initial_velocity,
     std::string& error
 ) {
     if (profile.empty() || !std::isfinite(profile.total_time())
@@ -505,8 +499,6 @@ bool validate_profile_contract(
         * std::numeric_limits<double>::epsilon();
     const double length_tolerance = numerical_tolerance
         * std::max(total_length, 1.0);
-    const double velocity_tolerance = numerical_tolerance
-        * std::max(initial_velocity, 1.0);
     if (std::abs(states.front().arc_length) > length_tolerance
         || std::abs(states.back().arc_length - total_length) > length_tolerance) {
         error = "speed profile does not cover the complete trajectory arc length";
@@ -514,11 +506,6 @@ bool validate_profile_contract(
     }
     if (std::abs(states.front().time) > numerical_tolerance) {
         error = "speed profile does not start at zero time";
-        return false;
-    }
-    if (std::abs(states.front().velocity - initial_velocity) > velocity_tolerance
-        || std::abs(states.back().velocity) > velocity_tolerance) {
-        error = "speed profile violates an endpoint velocity constraint";
         return false;
     }
     for (size_t i = 0; i < states.size(); ++i) {
@@ -586,29 +573,30 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
     const double projected_initial_velocity = std::max(
         0.0, current_velocity_map.dot(tangent)
     );
-    const double initial_velocity = projected_initial_velocity
+    const double measured_initial_velocity = projected_initial_velocity
             <= params_.stationary_velocity_threshold
         ? 0.0
         : projected_initial_velocity;
-    const double initial_speed_squared = initial_velocity * initial_velocity;
-    // 起点是不可修改的当前事实；局部包络从下一空间位置开始约束。
+    const double measured_initial_speed_squared = measured_initial_velocity
+        * measured_initial_velocity;
+    // 实测初速允许暂时位于 nominal 包络外；先保留为前向种子的候选值，再由
+    // 终点零速和沿途局部包络反向裁成可达的 nominal 初速。
     limits.front().speed_squared_upper = std::max(
-        limits.front().speed_squared_upper, initial_speed_squared
+        limits.front().speed_squared_upper, measured_initial_speed_squared
     );
 
     std::string seed_error;
     const auto seed_squared = reachable_seed(
-        nodes, limits, initial_speed_squared, seed_error
+        nodes, limits, measured_initial_speed_squared, seed_error
     );
     if (!seed_squared) {
         result.error = seed_error;
         return result;
     }
     const PathSpeedProfile seed_profile = make_profile(nodes, *seed_squared);
+    const double nominal_initial_speed_squared = seed_squared->front();
     std::string contract_error;
-    if (!validate_profile_contract(
-            geometry, seed_profile, initial_velocity, contract_error
-        )) {
+    if (!validate_profile_contract(geometry, seed_profile, contract_error)) {
         result.error = "reachable solution violates the profile contract: "
             + contract_error;
         return result;
@@ -631,7 +619,8 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
             Diagnostics::Selection::CLOSED_FORM_NO_SOFT_CONSTRAINT;
     } else {
         const ChainProblem problem = build_chain_problem(
-            params_, nodes, limits, windows, lateral_constraints, initial_speed_squared
+            params_, nodes, limits, windows, lateral_constraints,
+            nominal_initial_speed_squared
         );
         const PiecewiseQuadraticChainSolver::Result optimized_result =
             PiecewiseQuadraticChainSolver::solve(problem);
@@ -667,12 +656,10 @@ SpeedProfileOptimizer::Result SpeedProfileOptimizer::optimize(
             }
         );
         // 端点是精确边界条件，不把链求解器的浮点残差发布为非零起停速度。
-        optimized_squared.front() = initial_speed_squared;
+        optimized_squared.front() = nominal_initial_speed_squared;
         optimized_squared.back() = 0.0;
         PathSpeedProfile optimized = make_profile(nodes, optimized_squared);
-        if (!validate_profile_contract(
-                geometry, optimized, initial_velocity, contract_error
-            )) {
+        if (!validate_profile_contract(geometry, optimized, contract_error)) {
             result.error = "optimized solution violates the profile contract: "
                 + contract_error;
             return result;

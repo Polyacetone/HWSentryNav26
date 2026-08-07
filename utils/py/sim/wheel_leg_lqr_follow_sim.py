@@ -154,6 +154,7 @@ class SimConfig:
     TOPIC_GLOBAL_DIRECTION_MAP: str = "/map_server/global_direction_map"
 
     # --- 接触判定（cost map / direction map）---
+    ENABLE_COLLISION_SIM: bool = False  # 是否模拟障碍物和台阶碰撞；关闭后车辆可直接穿过
     ROBOT_INSCRIBED_RADIUS_M: float = 0.30  # 机器人内切圆半径（前/后接触探针基准）
     COLLISION_LOOKAHEAD_M: float = 0.05  # 接触探针额外外扩（m），吸收单拍检测延迟
     COLLISION_RESTITUTION: float = 0.3  # 回弹系数：回弹速度 = -e × 入射速度
@@ -187,12 +188,12 @@ class SimConfig:
 
     # 障碍物种类列表（每项为 ObstacleSpec 实例，可自由增删）
     OBSTACLE_SPECS: tuple = (
-        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
-        ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
-        ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
-        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
-        ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
-        ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
+        # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.0,  max_accel=1.2, circle_radius=2.5),
+        # ObstacleSpec(motion_type="circle",  speed_type="constant",    max_speed=1.5,  max_accel=1.8, circle_radius=2.2),
+        # ObstacleSpec(motion_type="circle",  speed_type="oscillating", max_speed=2.0,  max_accel=1.5, circle_radius=1.8, oscillate_freq=0.20),
+        # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.0,  max_accel=1.5, line_length=6.0),
+        # ObstacleSpec(motion_type="line",    speed_type="constant",    max_speed=1.5,  max_accel=1.2, line_length=3.0),
+        # ObstacleSpec(motion_type="line",    speed_type="oscillating", max_speed=2.0,  max_accel=2.0, line_length=5.0,   oscillate_freq=0.30),
     )
 
     # --- Frame 约定 ---
@@ -1415,11 +1416,12 @@ class WheelLegLqrFollowSimNode(Node):
             u_disturb=u_disturb,
         )
 
-        # 接触求解（作用于 plant 状态，必须在 step_lqr 之后）
-        self._resolve_contact(x_before, y_before)
+        if self.cfg.ENABLE_COLLISION_SIM:
+            # 接触求解（作用于 plant 状态，必须在 step_lqr 之后）
+            self._resolve_contact(x_before, y_before)
 
-        # 机体中心陷入实心障碍时的脱困平移（初始位姿非法 / 被动态障碍包住）
-        self._escape_if_embedded()
+            # 机体中心陷入实心障碍时的脱困平移（初始位姿非法 / 被动态障碍包住）
+            self._escape_if_embedded()
 
         # spin drift (小陀螺模式位置缓慢漂移)
         if spin_mode and float(self.cfg.SPIN_DRIFT_SPEED_MPS) > 0.0:
