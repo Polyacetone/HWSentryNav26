@@ -365,11 +365,7 @@ class ChassisCmdPublisher(Node):
         msg = ChassisCmd()
         msg.velocity = float(velocity)
         msg.omega = float(omega)
-        msg.theta = float(self._theta_out)
-        msg.step_up_ahead = False
-        msg.step_down_ahead = False
-        msg.slow_spin = False
-        msg.fast_spin = False
+        msg.mode = 0
         self._publisher.publish(msg)
 
     def _timer_callback(self):

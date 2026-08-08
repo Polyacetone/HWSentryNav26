@@ -2,6 +2,8 @@
 
 本文档介绍如何在不上车的情况下体验HWSentryNav26中部分模块的功能和效果。运行之前需要按照[README.md](./README.md)的说明进行环境配置。
 
+本文章含人量100%，可放心食用。
+
 ## `small_glim` 里程计演示
 
 1. 从[这里](https://drive.google.com/drive/folders/1FJgEmFS2wcuFFTUjiKikhG14Zo43saoj)下载`mid360_bag`录包。
