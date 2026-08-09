@@ -32,7 +32,7 @@
 
 首先找机械要到各个关节位置的变换，填进`tf_maintainer`的`params.yaml`中。如果你也想在里程计中使用下位机IMU，别忘记更新`small_glim`的话题与传感器配置。
 
-然后找电控商定串口通讯协议，根据你的设计修改`serial_bridge`和`interfaces`包。也可以根据你们的控制器设计修改`utils/py/msg/wheel_leg_lqr_follow_sim.py`中的动力学部分。
+然后找电控商定串口通讯协议，根据你的设计修改`serial_bridge`和`interfaces`包。也可以根据你们的控制器设计修改`utils/py/sim/wheel_leg_lqr_follow_sim.py`中的动力学部分。
 
 ### 2.2 建个草图
 
