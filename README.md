@@ -101,7 +101,7 @@ sudo make install
 
 本项目的构建依赖其中自定义消息`interfaces`包和共用工具库`common_libs`。
 
-推荐将HWSentryCommon26和HWSentryNav26放在同一工作空间下构建，例如：
+推荐将`HWSentryCommon26`和`HWSentryNav26`放在同一工作空间下构建，例如：
 
 ```bash
 mkdir ~/hwsentry_ws && cd ~/hwsentry_ws
@@ -113,19 +113,3 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 ## 可选依赖
 
 `utils/py`下有一些Python脚本，可能需要以下Python库。推荐使用uv安装：`uv pip install numpy matplotlib scipy open3d pillow opencv-python msgpack pyyaml numba mcap mcap-ros2-support cadquery`。
-
-# 提示
-
-## 开发提示
-
-- 项目在Debug和Release模式下使用不同的编译选项。Debug模式下启用了`-fsanitize=address,undefined`以帮助检测内存错误和未定义行为，但是非常影响性能。正常开发和测试时建议使用Release模式，遇到问题时再切换到Debug模式进行排查。构建模式可以在`compile.sh`中修改。
-
-- 在Debug模式下使用LSAN时，可能会误报`rcl_node_init`函数的内存泄漏。这是由于ROS2的节点初始化过程中分配了一些全局资源，LSAN无法正确识别这些资源的生命周期。建议将`leak:rcl_node_init`加入LSAN的忽略文件（默认存放在工作空间下的`lsan.supp`），以避免误报。
-
-## 部署提示
-
-- Ubuntu系统下建议关闭NTP服务以避免系统时间跳变导致的里程计和TF异常：`sudo timedatectl set-ntp false`。
-
-- 如果运行时遇到报错`Could not load library dlopen error: /lib/x86_64-linux-gnu/libpcl_io.so.1.14: undefined symbol: libusb_set_option, at ./src/shared_library.c:99`，这是海康驱动干的。直接删除`/opt/MVS/lib/64/libusb-1.0.so.0`和`/opt/MVS/lib/32/libusb-1.0.so.0`即可。
-
-- 可以关闭网卡节能模式以避免网络不稳定导致远程调车卡顿。`sudo nano /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf`，将`wifi.powersave`的值改为2即可。
